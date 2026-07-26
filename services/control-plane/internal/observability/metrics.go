@@ -232,7 +232,8 @@ func (r *Registry) ObserveBackground(kind string, started time.Time, err error) 
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	switch kind {
 	case "docker", "kubernetes", "target-failover", "resource-lifecycle",
-		"worker-release-auto-rollback", "retention", "outbox":
+		"worker-release-auto-rollback", "retention", "billing-import-scheduler",
+		"billing-shared-allocation-scheduler", "outbox":
 	default:
 		kind = "other"
 	}
@@ -502,6 +503,9 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	executions, err := groupedCounts(ctx, r.db, "agent_executions", "status", "target_kind")
 	if err != nil {
 		return fmt.Errorf("collect execution metrics: %w", err)
+	}
+	if err := r.writeExecutionQueueMetrics(ctx, output, now); err != nil {
+		return err
 	}
 	workers, err := groupedCounts(ctx, r.db, "worker_instances", "status", "target_kind")
 	if err != nil {

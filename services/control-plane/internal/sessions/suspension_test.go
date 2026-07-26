@@ -77,6 +77,23 @@ func TestConcurrentExecutionQuotaRejectsSecondActiveExecution(t *testing.T) {
 	}
 }
 
+func TestExecutionQuotaLookupFailureFailsClosed(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	if err := fixture.db.Migrator().DropTable(&persistence.TenantQuota{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fixture.service.RequireExecutionQuotaAvailable(
+		context.Background(),
+		fixture.db,
+		fixture.tenantID,
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "execution_quota_check_failed" {
+		t.Fatalf("expected execution_quota_check_failed, got %v", err)
+	}
+}
+
 func TestSessionProviderCredentialBindingValidatesProviderAndAvailability(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()

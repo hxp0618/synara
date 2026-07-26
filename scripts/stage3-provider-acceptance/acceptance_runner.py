@@ -3025,6 +3025,7 @@ class LocalDriver:
             return {
                 "build": "skipped",
                 "binary": str(self.binary_path),
+                "binarySha256": hashlib.sha256(self.binary_path.read_bytes()).hexdigest(),
                 "resourceOwner": self.resource_owner,
             }
 
@@ -3059,6 +3060,7 @@ class LocalDriver:
             "build": "completed",
             "durationMs": elapsed_ms(started),
             "binary": str(self.binary_path),
+            "binarySha256": hashlib.sha256(self.binary_path.read_bytes()).hexdigest(),
             "log": str(build_log),
             "resourceOwner": self.resource_owner,
         }
@@ -5031,6 +5033,7 @@ class SSHDriver(ManagedWorkerDriver):
                 )
             self.service_name = expected_service
             service = self._require_service_active(expected_service)
+            activation = self._ssh_target_activation_state(target_id)
             runtime_identity = {
                 "runtime": (
                     "authorized-external-host"
@@ -5042,12 +5045,17 @@ class SSHDriver(ManagedWorkerDriver):
             }
             return {
                 **target,
+                "status": activation["targetStatus"],
                 "driverEvidence": {
                     **runtime_identity,
                     **({"machineName": self.machine_name, "machineAddress": self.machine_ip} if self.owns_machine else {}),
                     "hostKeyAlgorithm": self.host_key.split()[0],
                     "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
                     "hostKeyMismatch": negative_evidence,
+                    "readyBoundary": {
+                        "creationStatus": target.get("status"),
+                        **activation,
+                    },
                     "service": service,
                     "binarySha256": installed.get("binarySha256"),
                     "credentialSource": (
@@ -5062,6 +5070,88 @@ class SSHDriver(ManagedWorkerDriver):
             }
         finally:
             self._discard_local_private_key()
+
+    def _ssh_target_activation_state(self, target_id: str) -> Mapping[str, Any]:
+        database_path = self.state_dir / "metadata.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                target_state = connection.execute(
+                    """
+                    SELECT status, ssh_operation_generation, ssh_operation_kind, ssh_operation_started_at
+                    FROM execution_targets
+                    WHERE id = ? AND kind = 'ssh'
+                    """,
+                    (target_id,),
+                ).fetchone()
+                worker_state = connection.execute(
+                    """
+                    SELECT id, incarnation, instance_uid, ssh_bootstrap_generation,
+                           status, administrative_status, compatibility_status, current_manifest_id,
+                           CASE WHEN last_heartbeat_at > registered_at THEN 1 ELSE 0 END
+                    FROM worker_instances
+                    WHERE execution_target_id = ?
+                    ORDER BY registered_at DESC, id
+                    LIMIT 1
+                    """,
+                    (target_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.ssh_ready_boundary_query_failed",
+                f"SSH Target readiness could not be read from the isolated metadata store: {error}",
+            ) from None
+
+        if (
+            target_state is None
+            or target_state[0] != "active"
+            or int(target_state[1]) <= 0
+            or target_state[2] is not None
+            or target_state[3] is not None
+            or worker_state is None
+            or worker_state[3] is None
+            or int(worker_state[3]) != int(target_state[1])
+            or worker_state[4] != "online"
+            or worker_state[5] != "active"
+            or worker_state[6] != "compatible"
+            or worker_state[7] is None
+            or int(worker_state[8]) != 1
+        ):
+            raise AcceptanceError(
+                "runner.ssh_ready_boundary_incomplete",
+                "SSH Target became usable without the exact persisted Worker readiness boundary.",
+                {
+                    "targetStatus": target_state[0] if target_state is not None else None,
+                    "operationGeneration": int(target_state[1]) if target_state is not None else None,
+                    "operationActive": target_state is not None and target_state[2] is not None,
+                    "workerBootstrapGeneration": (
+                        int(worker_state[3])
+                        if worker_state is not None and worker_state[3] is not None
+                        else None
+                    ),
+                    "workerStatus": worker_state[4] if worker_state is not None else None,
+                    "workerAdministrativeStatus": worker_state[5] if worker_state is not None else None,
+                    "compatibilityStatus": worker_state[6] if worker_state is not None else None,
+                    "manifestPersisted": worker_state is not None and worker_state[7] is not None,
+                    "postRegistrationHeartbeat": worker_state is not None and int(worker_state[8]) == 1,
+                },
+            )
+        return {
+            "targetStatus": target_state[0],
+            "operationGeneration": int(target_state[1]),
+            "operationActive": False,
+            "workerId": str(worker_state[0]),
+            "workerIncarnation": int(worker_state[1]),
+            "workerInstanceUid": str(worker_state[2]),
+            "workerBootstrapGeneration": int(worker_state[3]),
+            "workerStatus": worker_state[4],
+            "workerAdministrativeStatus": worker_state[5],
+            "compatibilityStatus": worker_state[6],
+            "manifestId": str(worker_state[7]),
+            "postRegistrationHeartbeat": True,
+        }
 
     def replace_worker(
         self,
@@ -5163,6 +5253,7 @@ class SSHDriver(ManagedWorkerDriver):
         revoke_required = bool(self.target_id and self.tenant_id)
         revoke_succeeded = not revoke_required
         managed_cleanup_verified = not bool(self.target_id)
+        authority_revocation: Mapping[str, Any] | None = None
 
         def collect(operation: str, action: Callable[[], Any]) -> Any:
             try:
@@ -5195,6 +5286,10 @@ class SSHDriver(ManagedWorkerDriver):
                 errors.append("revoke managed SSH Target: API returned an invalid result")
             elif isinstance(result, dict):
                 revoke_succeeded = True
+                authority_revocation = collect(
+                    "verify revoked SSH Worker authority",
+                    lambda: self._revoked_worker_authority_state(self.target_id or ""),
+                )
         elif revoke_required:
             errors.append("revoke managed SSH Target: Control Plane was unavailable")
         if self.machine_created and self.target_id and revoke_succeeded:
@@ -5272,6 +5367,7 @@ class SSHDriver(ManagedWorkerDriver):
                 and self.options.ssh_external_identity_file.is_file()
             ),
             "productRevokeRequested": bool(self.target_id and self.tenant_id),
+            "workerAuthorityRevocation": authority_revocation,
             "machineLifecycleCompleted": (
                 not self.external_runtime_created
                 if self.external_host
@@ -5280,6 +5376,100 @@ class SSHDriver(ManagedWorkerDriver):
             "localKeyMaterialRemoved": not self.credentials_dir.exists(),
             "stateRemoved": self._temporary_state and not self.state_dir.exists(),
             "broadCleanupUsed": False,
+        }
+
+    def _revoked_worker_authority_state(self, target_id: str) -> Mapping[str, Any]:
+        database_path = self.state_dir / "metadata.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                worker_counts = connection.execute(
+                    """
+                    SELECT COUNT(*),
+                           SUM(CASE WHEN administrative_status = 'revoked' THEN 1 ELSE 0 END),
+                           SUM(
+                             CASE
+                               WHEN administrative_status IN ('active', 'draining')
+                                AND status != 'terminated'
+                               THEN 1 ELSE 0
+                             END
+                           )
+                    FROM worker_instances
+                    WHERE execution_target_id = ?
+                    """,
+                    (target_id,),
+                ).fetchone()
+                lease_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM worker_leases AS lease
+                    JOIN worker_instances AS worker ON worker.id = lease.worker_id
+                    WHERE worker.execution_target_id = ?
+                    """,
+                    (target_id,),
+                ).fetchone()
+                cleanup_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM workspace_cleanup_commands AS cleanup
+                    JOIN worker_instances AS worker ON worker.id = cleanup.delivery_worker_id
+                    WHERE worker.execution_target_id = ?
+                      AND cleanup.status IN ('leased', 'running')
+                    """,
+                    (target_id,),
+                ).fetchone()
+                target_state = connection.execute(
+                    """
+                    SELECT status, ssh_operation_kind
+                    FROM execution_targets
+                    WHERE id = ? AND kind = 'ssh'
+                    """,
+                    (target_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.ssh_authority_revocation_query_failed",
+                f"SSH Worker authority revocation could not be read from the isolated metadata store: {error}",
+            ) from None
+
+        total_workers = int(worker_counts[0]) if worker_counts is not None else 0
+        revoked_workers = int(worker_counts[1] or 0) if worker_counts is not None else 0
+        live_authorities = int(worker_counts[2] or 0) if worker_counts is not None else 0
+        execution_leases = int(lease_count[0]) if lease_count is not None else -1
+        cleanup_leases = int(cleanup_count[0]) if cleanup_count is not None else -1
+        if (
+            total_workers <= 0
+            or revoked_workers <= 0
+            or live_authorities != 0
+            or execution_leases != 0
+            or cleanup_leases != 0
+            or target_state is None
+            or target_state[0] != "disabled"
+            or target_state[1] is not None
+        ):
+            raise AcceptanceError(
+                "runner.ssh_authority_revocation_incomplete",
+                "SSH Target revoke did not withdraw all persisted Worker authority.",
+                {
+                    "totalWorkers": total_workers,
+                    "revokedWorkers": revoked_workers,
+                    "liveWorkerAuthorities": live_authorities,
+                    "executionLeases": execution_leases,
+                    "workspaceCleanupLeases": cleanup_leases,
+                    "targetStatus": target_state[0] if target_state is not None else None,
+                    "operationActive": target_state is not None and target_state[1] is not None,
+                },
+            )
+        return {
+            "totalWorkers": total_workers,
+            "revokedWorkers": revoked_workers,
+            "liveWorkerAuthorities": live_authorities,
+            "executionLeases": execution_leases,
+            "workspaceCleanupLeases": cleanup_leases,
+            "targetStatus": target_state[0],
+            "operationActive": False,
         }
 
     def _control_plane_environment(self) -> dict[str, str]:

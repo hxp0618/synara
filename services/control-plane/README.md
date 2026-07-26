@@ -92,15 +92,26 @@ Cloud cost accounting is defined in `docs/contracts/cloud-cost-accounting-v1.md`
 - `billing_provider_tariffs` is a shared global provider catalog. Rows are append-only and immutable after insert.
 - `GET /v1/tenants/{tenantID}/billing/tariffs` requires the caller's active tenant plus `billing.manage`.
   `POST` additionally requires that exact Tenant to match the platform-owned
-  `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`; non-Personal deployments fail closed when it is unset. Personal
-  deployments bind the catalog to their bootstrapped Tenant automatically.
+  `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`; the same configured Tenant owns shared-Target coverage sealing and
+  allocation sweeps. Non-Personal deployments fail closed when it is unset. Personal deployments bind these platform
+  billing operations to their bootstrapped Tenant automatically.
 - Provider/region/currency mutations are serialized both by the service and by a PostgreSQL transaction advisory
   lock inside the overlap trigger. SQLite enforces the same insert-time non-overlap boundary.
 - Actual invoice imports and reconciliation remain tenant-owned through
   `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}` and
   `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`.
-- Shared-target allocation and unavailable per-period request deltas remain fail-closed; the control plane does not
-  invent cloud cost history that the Worker facts do not provide.
+- Runtime import is disabled by default with `SYNARA_BILLING_BLOB_SOURCE=disabled`. Set it to `s3`, `gcs`, or `azure`,
+  configure the corresponding bucket/container and `SYNARA_BILLING_IMPORT_MAPPINGS_JSON`, and pin every mapping to an
+  immutable `objectVersion`. The cloud SDK default credential chain is authoritative; production Kubernetes should use
+  Pod Workload Identity and must not place long-lived cloud keys in the mapping or ConfigMap. Custom S3 endpoints and
+  plain HTTP require separate explicit opt-ins and exist for controlled S3-compatible environments such as local MinIO.
+- Shared-target allocation requires an operator-sealed Claim/Release coverage cutover and an explicit closed-period
+  sweep. Exact sweep replay is idempotent, partial Worker failures return `retry-required`, and unavailable history
+  remains fail-closed; the control plane does not invent cloud cost history that the Worker facts do not provide.
+- `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON` enables leader-scoped unattended retries for explicit static
+  periods. Each strict mapping freezes Target/provider/currency/RFC3339 period bounds plus `settlementDelay` and
+  `scheduleInterval`; it does not infer calendar periods. The separate scheduler lease is transaction-fenced, and a
+  restart or leader handoff replays durable allocation identities safely.
 
 ## Production authentication
 
@@ -299,3 +310,17 @@ SSH `install` refuses any pre-existing target service, unit, install, workspace,
 uploads an artifact. Use `upgrade` only for an already managed target and `revoke` for product-owned service/binary
 cleanup; operator-owned external hosts must add their own explicit ownership boundary and must never be treated as
 disposable infrastructure.
+
+Install/upgrade keep the SSH Target offline until the exact generated Worker instance and operation generation have
+registered, completed a fresh post-registration heartbeat, negotiated the required protocol/capabilities, and
+persisted the expected current Manifest. Protected-cgroup Targets must also match the current signed containment
+policy. Offline SSH bootstrap permits registration and heartbeat only for the current install/upgrade generation and
+expected instance UUID; Execution and Workspace-cleanup claims remain fail-closed. Target activation rechecks the
+exact Worker while both rows are locked in one transaction, so a readiness timeout or race leaves the Target offline
+for operator recovery. An active Target permits restart recovery only for the same logical Worker, instance UUID, and
+persisted bootstrap generation; it rotates incarnation/token and cannot create a new active SSH identity.
+
+SSH revoke atomically writes the offline revoke fence and withdraws Worker/token/Execution/cleanup authority in one
+local transaction before decrypting configuration or contacting the host. KMS and remote failures cannot restore old
+authority; retry reuses the committed generation to finish remote cleanup. Migrations `000071`–`000073` persist and
+enforce this operation/bootstrap authority, including PostgreSQL trigger checks for UID/generation-only updates.

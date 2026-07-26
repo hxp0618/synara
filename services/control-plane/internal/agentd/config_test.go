@@ -346,6 +346,28 @@ func TestLoadConfigRequiresKubernetesInstanceUID(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRequiresSSHBootstrapGeneration(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv("SYNARA_EXECUTION_TARGET_KIND", "ssh")
+	t.Setenv("SYNARA_AGENTD_INSTANCE_UID", uuid.NewString())
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SSH_BOOTSTRAP_GENERATION") {
+		t.Fatalf("missing SSH bootstrap generation was accepted: %v", err)
+	}
+	t.Setenv("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION", "0")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("invalid SSH bootstrap generation was accepted: %v", err)
+	}
+	t.Setenv("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION", "17")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHBootstrapGeneration == nil || *cfg.SSHBootstrapGeneration != 17 {
+		t.Fatalf("SSH bootstrap generation = %#v", cfg.SSHBootstrapGeneration)
+	}
+}
+
 func TestLoadConfigDerivesWorkerModeFromAssignment(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -536,6 +558,7 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_DRAIN_TIMEOUT", "SYNARA_AGENTD_HEARTBEAT_INTERVAL",
 		"SYNARA_AGENTD_IMAGE_DIGEST", "SYNARA_AGENTD_INSTANCE_ID",
 		"SYNARA_AGENTD_INSTANCE_UID",
+		"SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION",
 		"SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "SYNARA_AGENTD_NAMESPACE",
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",

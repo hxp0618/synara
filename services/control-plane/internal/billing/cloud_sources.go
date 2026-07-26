@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -83,7 +85,85 @@ func (s *S3ReadOnlyBlobSource) Open(
 		}
 		return nil, BlobObjectMetadata{}, err
 	}
-	return response.Body, BlobObjectMetadata{SizeBytes: *head.ContentLength}, nil
+	resolvedVersion := strings.TrimSpace(aws.ToString(head.VersionId))
+	if resolvedVersion != "" && resolvedVersion != version {
+		_ = response.Body.Close()
+		return nil, BlobObjectMetadata{}, fmt.Errorf("billing s3 object version changed: got %q, want %q", resolvedVersion, version)
+	}
+	return response.Body, BlobObjectMetadata{
+		SizeBytes: *head.ContentLength, Version: version, ETag: strings.Trim(aws.ToString(head.ETag), `"`),
+		LastModified: aws.ToTime(head.LastModified).UTC(),
+	}, nil
+}
+
+func (s *S3ReadOnlyBlobSource) ResolveManifestObject(
+	ctx context.Context,
+	rawKey string,
+) (ResolvedBlobObject, error) {
+	if s == nil || s.client == nil {
+		return ResolvedBlobObject{}, errors.New("billing s3 blob source is nil")
+	}
+	key, err := s.manifestRelativeObjectKey(rawKey)
+	if err != nil {
+		return ResolvedBlobObject{}, err
+	}
+	resolvedKey, err := resolveBlobObjectKey(s.prefix, key)
+	if err != nil {
+		return ResolvedBlobObject{}, err
+	}
+	head, err := s.client.HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(resolvedKey),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return ResolvedBlobObject{}, os.ErrNotExist
+		}
+		return ResolvedBlobObject{}, err
+	}
+	version := strings.TrimSpace(aws.ToString(head.VersionId))
+	if version == "" || strings.EqualFold(version, "null") {
+		return ResolvedBlobObject{}, fmt.Errorf("billing s3 manifest object %q has no immutable version id", rawKey)
+	}
+	if head.ContentLength == nil || *head.ContentLength < 0 || head.LastModified == nil || strings.TrimSpace(aws.ToString(head.ETag)) == "" {
+		return ResolvedBlobObject{}, fmt.Errorf("billing s3 manifest object %q immutable metadata is incomplete", rawKey)
+	}
+	return ResolvedBlobObject{
+		Ref: BlobObjectRef{Key: key, Version: version},
+		Metadata: BlobObjectMetadata{
+			SizeBytes: *head.ContentLength, Version: version, ETag: strings.Trim(aws.ToString(head.ETag), `"`),
+			LastModified: aws.ToTime(head.LastModified).UTC(),
+		},
+	}, nil
+}
+
+func (s *S3ReadOnlyBlobSource) manifestRelativeObjectKey(rawKey string) (string, error) {
+	trimmed := strings.TrimSpace(rawKey)
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" {
+		if parsed.Scheme != "s3" || parsed.Host != s.bucket || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return "", fmt.Errorf("billing s3 manifest object %q must belong to bucket %q", rawKey, s.bucket)
+		}
+		trimmed = strings.TrimPrefix(parsed.EscapedPath(), "/")
+		decoded, decodeErr := url.PathUnescape(trimmed)
+		if decodeErr != nil {
+			return "", fmt.Errorf("billing s3 manifest object %q has an invalid path", rawKey)
+		}
+		trimmed = decoded
+	}
+	key, err := normalizeBlobRelativeKey(trimmed)
+	if err != nil {
+		return "", err
+	}
+	prefix, err := normalizeBlobPrefix(s.prefix)
+	if err != nil {
+		return "", err
+	}
+	if prefix != "" && strings.HasPrefix(key, prefix+"/") {
+		key = strings.TrimPrefix(key, prefix+"/")
+	}
+	if key == "" || key == "." || key == ".." || strings.HasPrefix(key, "../") {
+		return "", errors.New("billing s3 manifest object must stay within the configured prefix")
+	}
+	return path.Clean(key), nil
 }
 
 func isS3NotFound(err error) bool {
@@ -163,7 +243,7 @@ func (s *GCSReadOnlyBlobSource) Open(
 		}
 		return nil, BlobObjectMetadata{}, err
 	}
-	return reader, BlobObjectMetadata{SizeBytes: attrs.Size}, nil
+	return reader, BlobObjectMetadata{SizeBytes: attrs.Size, Version: version}, nil
 }
 
 func (s *GCSReadOnlyBlobSource) Close() error {
@@ -269,7 +349,7 @@ func (s *AzureReadOnlyBlobSource) Open(
 		}
 		return nil, BlobObjectMetadata{}, err
 	}
-	return reader, BlobObjectMetadata{SizeBytes: *properties.ContentLength}, nil
+	return reader, BlobObjectMetadata{SizeBytes: *properties.ContentLength, Version: version}, nil
 }
 
 type realAzureContainerClient struct {

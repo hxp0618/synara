@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -64,6 +66,45 @@ func TestS3ReadOnlyBlobSourceFailsClosedWhenSizeMetadataIsMissing(t *testing.T) 
 	}, "billing-bucket", "")
 	if _, _, err := source.Open(context.Background(), BlobObjectRef{Key: "cur.csv", Version: "ver-3"}); err == nil {
 		t.Fatal("expected missing size metadata to fail closed")
+	}
+}
+
+func TestS3ReadOnlyBlobSourceResolvesManifestPathToImmutableVersion(t *testing.T) {
+	version := "chunk-version-1"
+	etag := `"etag-1"`
+	size := int64(42)
+	modified := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	client := &fakeS3ReadAPI{headOutput: &awss3.HeadObjectOutput{
+		VersionId: &version, ETag: &etag, ContentLength: &size, LastModified: &modified,
+	}}
+	source := newS3ReadOnlyBlobSource(client, "billing-bucket", "exports/tenant-a")
+
+	ref, err := source.ResolveManifestObject(
+		context.Background(),
+		"s3://billing-bucket/exports/tenant-a/data/chunk-00001.csv.gz",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Ref.Key != "data/chunk-00001.csv.gz" || ref.Ref.Version != version {
+		t.Fatalf("resolved ref = %#v", ref)
+	}
+	if client.headInput == nil || aws.ToString(client.headInput.Key) != "exports/tenant-a/data/chunk-00001.csv.gz" {
+		t.Fatalf("unexpected HeadObject input: %#v", client.headInput)
+	}
+	if client.headInput.VersionId != nil {
+		t.Fatalf("manifest resolution must capture latest with an unversioned HEAD, got %#v", client.headInput.VersionId)
+	}
+}
+
+func TestS3ReadOnlyBlobSourceRejectsManifestObjectWithoutVersioning(t *testing.T) {
+	contentLength := int64(1)
+	source := newS3ReadOnlyBlobSource(&fakeS3ReadAPI{
+		headOutput: &awss3.HeadObjectOutput{ContentLength: &contentLength},
+	}, "billing-bucket", "")
+	if _, err := source.ResolveManifestObject(context.Background(), "data/chunk.csv.gz"); err == nil ||
+		!strings.Contains(err.Error(), "no immutable version id") {
+		t.Fatalf("error = %v, want missing immutable version rejection", err)
 	}
 }
 
@@ -169,9 +210,9 @@ type fakeSmithyAPIError struct {
 	code string
 }
 
-func (e fakeSmithyAPIError) Error() string              { return e.code }
-func (e fakeSmithyAPIError) ErrorCode() string          { return e.code }
-func (e fakeSmithyAPIError) ErrorMessage() string       { return e.code }
+func (e fakeSmithyAPIError) Error() string                 { return e.code }
+func (e fakeSmithyAPIError) ErrorCode() string             { return e.code }
+func (e fakeSmithyAPIError) ErrorMessage() string          { return e.code }
 func (e fakeSmithyAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
 
 type fakeGCSBucketClient struct {

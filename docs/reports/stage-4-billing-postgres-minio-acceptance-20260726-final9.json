@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "synara.billing-postgres-minio-acceptance.v1",
+  "runID": "20260725183918-69022-5168",
+  "startedAt": "2026-07-25T18:39:18Z",
+  "finishedAt": "2026-07-25T18:39:25Z",
+  "status": "passed",
+  "exitCode": 0,
+  "phase": "test-complete",
+  "failure": null,
+  "test": {
+    "name": "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+    "status": "passed",
+    "exitCode": 0
+  },
+  "checks": {
+    "detailProduced": true,
+    "detailValidJSON": true,
+    "detailWithin65536Bytes": true,
+    "detailContainsNoCredentials": true,
+    "detailAssertionsAllowlistedBooleans": true,
+    "integrationAssertions": {
+      "estimateTariffSegmentsPersisted": true,
+      "exactObjectVersionRead": true,
+      "invoiceImported": true,
+      "postgresMigrationsApplied": true,
+      "reconciliationPersisted": true,
+      "restartReplayIdempotent": true,
+      "scheduledAuditIdempotent": true
+    }
+  },
+  "detail": {
+    "bytes": 735,
+    "sha256": "5573897319165c96e80237859fde097d35ba22e2eac39dd435367394d74b6f66"
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true
+  },
+  "runtime": {
+    "metadataStore": "disposable-postgresql",
+    "objectStore": "disposable-versioned-minio-s3-compatible",
+    "exactObjectVersionPinned": true,
+    "cloudWorkloadIdentityVerified": false
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17-alpine",
+      "id": "sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f",
+      "version": "17.10"
+    },
+    "minio": {
+      "reference": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+      "id": "sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d"
+    },
+    "mc": {
+      "reference": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+      "id": "sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71"
+    },
+    "testRuntime": {
+      "reference": "golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669",
+      "id": "sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86",
+      "architecture": "arm64"
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "disposableRuntimeRemoved": true,
+    "credentialsPersistedAfterCleanup": false,
+    "objectContentsPersistedAfterCleanup": false
+  }
+}

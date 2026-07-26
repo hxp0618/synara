@@ -185,30 +185,34 @@ printf '%s\n' '{"type":"result","output":{"summary":"credential received"}}'
 
 func TestRunnerProcessTreeOptionsRemainLegacyWhenProtectedIdentityIsAbsent(t *testing.T) {
 	runner := &Runner{cgroupV2Root: "/sys/fs/cgroup/synara"}
-	options := runner.processTreeOptions()
+	options := runner.processTreeOptions(uuid.New(), 1)
 	if options.CgroupV2Root != "/sys/fs/cgroup/synara" {
 		t.Fatalf("cgroup root = %q", options.CgroupV2Root)
 	}
 	if options.ProtectedProviderIdentity != nil {
 		t.Fatalf("unexpected protected provider identity: %#v", options.ProtectedProviderIdentity)
 	}
-	if options.ContainmentFence.Generation != 0 || options.ContainmentFence.WorkerIncarnation != uuid.Nil {
+	if options.ContainmentFence.ExecutionID != uuid.Nil || options.ContainmentFence.Generation != 0 ||
+		options.ContainmentFence.WorkerIncarnation != uuid.Nil {
 		t.Fatalf("unexpected legacy containment fence: %#v", options.ContainmentFence)
 	}
 }
 
 func TestRunnerProcessTreeOptionsIncludeProtectedIdentityAndFence(t *testing.T) {
 	instanceUID := uuid.New()
+	supervisorInstance := uuid.New()
+	executionID := uuid.New()
 	runner := &Runner{
 		cgroupV2Root: "/sys/fs/cgroup/synara",
 		cgroupV2ProviderIdentity: &ProtectedCgroupIdentity{
 			UID: 1234,
 			GID: 2345,
 		},
-		instanceUID: instanceUID,
+		instanceUID:        instanceUID,
+		supervisorInstance: supervisorInstance,
 	}
-	first := runner.processTreeOptions()
-	second := runner.processTreeOptions()
+	first := runner.processTreeOptions(executionID, 7)
+	second := runner.processTreeOptions(executionID, 7)
 
 	if first.ProtectedProviderIdentity == nil || second.ProtectedProviderIdentity == nil {
 		t.Fatal("protected provider identity was omitted")
@@ -225,8 +229,14 @@ func TestRunnerProcessTreeOptionsIncludeProtectedIdentityAndFence(t *testing.T) 
 		second.ContainmentFence.WorkerIncarnation != instanceUID {
 		t.Fatalf("unexpected worker incarnation fence: %#v %#v", first.ContainmentFence, second.ContainmentFence)
 	}
-	if first.ContainmentFence.Generation != 1 || second.ContainmentFence.Generation != 2 {
-		t.Fatalf("unexpected containment generations: %#v %#v", first.ContainmentFence, second.ContainmentFence)
+	if first.ContainmentFence.ExecutionID != executionID || second.ContainmentFence.ExecutionID != executionID ||
+		first.ContainmentFence.Generation != 7 || second.ContainmentFence.Generation != 7 {
+		t.Fatalf("unexpected execution containment fence: %#v %#v", first.ContainmentFence, second.ContainmentFence)
+	}
+	if first.SupervisorInstance != supervisorInstance || second.SupervisorInstance != supervisorInstance ||
+		first.RuntimeInstance == uuid.Nil || second.RuntimeInstance == uuid.Nil ||
+		first.RuntimeInstance == second.RuntimeInstance {
+		t.Fatalf("unexpected process incarnation fencing: %#v %#v", first, second)
 	}
 }
 

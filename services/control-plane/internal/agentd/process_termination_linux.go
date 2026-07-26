@@ -77,6 +77,10 @@ func newProcessTree(command *exec.Cmd, options ...processTreeOptions) (*processT
 			opts.CgroupV2Root,
 			*opts.ProtectedProviderIdentity,
 			opts.ContainmentFence,
+			opts.SupervisorInstance,
+			opts.RuntimeInstance,
+			opts.ProtectedRootLease,
+			opts.ProtectedDiagnostic,
 		)
 		if err != nil {
 			return nil, err
@@ -153,6 +157,10 @@ func newProtectedLinuxCgroup(
 	rootPath string,
 	providerIdentity ProtectedCgroupIdentity,
 	fence ProtectedCgroupFence,
+	supervisorInstance uuid.UUID,
+	runtimeInstance uuid.UUID,
+	rootLease *ProtectedCgroupRootLease,
+	diagnostic bool,
 ) (*protectedLinuxCgroup, error) {
 	supervisorIdentity := currentProtectedCgroupSupervisorIdentity()
 	if err := validateProtectedCgroupIdentityBoundary(supervisorIdentity, providerIdentity); err != nil {
@@ -163,6 +171,10 @@ func newProtectedLinuxCgroup(
 		SupervisorIdentity: supervisorIdentity,
 		ProviderIdentity:   providerIdentity,
 		Fence:              fence,
+		SupervisorInstance: supervisorInstance,
+		RuntimeInstance:    runtimeInstance,
+		RootLease:          rootLease,
+		Diagnostic:         diagnostic,
 	})
 	if err != nil {
 		return nil, err

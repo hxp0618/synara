@@ -29,6 +29,44 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestOrderKubernetesExecutionsForServiceUsesTenantEqualShare(t *testing.T) {
+	base := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	tenantA := uuid.MustParse("00000000-0000-0000-0000-00000000000a")
+	tenantB := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
+	a1 := kubernetesExecution{
+		ID:       uuid.MustParse("10000000-0000-0000-0000-000000000001"),
+		TenantID: tenantA, Status: "queued", QueuedAt: base,
+	}
+	b1 := kubernetesExecution{
+		ID:       uuid.MustParse("20000000-0000-0000-0000-000000000001"),
+		TenantID: tenantB, Status: "queued", QueuedAt: base.Add(time.Minute),
+	}
+	b2 := kubernetesExecution{
+		ID:       uuid.MustParse("20000000-0000-0000-0000-000000000002"),
+		TenantID: tenantB, Status: "recovering", QueuedAt: base.Add(2 * time.Minute),
+	}
+	active := []kubernetesExecution{
+		{ID: uuid.New(), TenantID: tenantA, Status: "leased"},
+		{ID: uuid.New(), TenantID: tenantA, Status: "waiting-for-approval"},
+	}
+	items := append(append([]kubernetesExecution{}, active...), a1, b2, b1)
+
+	ordered, err := orderKubernetesExecutionsForService(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != len(items) || ordered[0].ID != active[0].ID || ordered[1].ID != active[1].ID ||
+		ordered[2].ID != b1.ID || ordered[3].ID != b2.ID || ordered[4].ID != a1.ID {
+		t.Fatalf("active-aware Kubernetes fair queue = %#v", ordered)
+	}
+
+	invalid := append([]kubernetesExecution{}, items...)
+	invalid = append(invalid, kubernetesExecution{ID: uuid.New(), TenantID: tenantA, Status: "completed"})
+	if _, err := orderKubernetesExecutionsForService(invalid); err == nil {
+		t.Fatal("Kubernetes fair queue accepted an unexpected execution status")
+	}
+}
+
 func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	client := newFakeKubernetesClient()
@@ -759,6 +797,75 @@ func TestKubernetesReconcilerReservesReadyWarmWorkerBeforeColdFallback(t *testin
 	}
 }
 
+func TestKubernetesReconcilerIgnoresTerminatedWarmWorkerWithReusedPodName(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["maxActivePods"] = 2
+	fixture.updateConfiguration(t, configuration)
+	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	warmPod.Phase = "Running"
+	client.pods[warmPod.Name] = warmPod
+	current := fixture.registerWarmWorker(t, pool, warmPod, "online", "active", nil, nil)
+	terminatedAt := time.Now().UTC()
+	old := current
+	old.ID = uuid.New()
+	old.InstanceUID = uuid.NewString()
+	old.AuthTokenHash = []byte("terminated-warm-worker-hash")
+	old.Status = "terminated"
+	old.TerminatedAt = &terminatedAt
+	if err := fixture.db.Create(&old).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := fixture.reconciler.loadKubernetesWarmWorkerStates(context.Background(), fixture.targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].WorkerID != current.ID || states[0].InstanceUID != warmPod.UID {
+		t.Fatalf("loaded warm Worker states = %#v, want only the current Pod UID", states)
+	}
+	for _, executionID := range fixture.executionIDs {
+		fixture.assignExecutionToPool(t, executionID, pool, "queued")
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := findExecutionPod(client, fixture.executionIDs[0]); found {
+		t.Fatalf("current warm Worker was hidden by a terminated same-name identity: %#v", client.pods)
+	}
+	if _, found := findExecutionPod(client, fixture.executionIDs[1]); !found {
+		t.Fatalf("second execution did not receive the expected cold fallback: %#v", client.pods)
+	}
+}
+
+func TestKubernetesWarmWorkerStateLookupUsesPodNameAndUID(t *testing.T) {
+	podName := "reused-warm-pod"
+	oldUID := uuid.NewString()
+	currentUID := uuid.NewString()
+	old := kubernetesWarmWorkerState{WorkerID: uuid.New(), PodName: podName, InstanceUID: oldUID}
+	current := kubernetesWarmWorkerState{WorkerID: uuid.New(), PodName: podName, InstanceUID: currentUID}
+	states := map[kubernetesWarmWorkerIdentity]kubernetesWarmWorkerState{
+		kubernetesWarmWorkerIdentityKey(old.PodName, old.InstanceUID):         old,
+		kubernetesWarmWorkerIdentityKey(current.PodName, current.InstanceUID): current,
+	}
+
+	matched, found := kubernetesWarmWorkerStateForPod(states, kubernetesPod{Name: podName, UID: currentUID})
+	if !found || matched.WorkerID != current.WorkerID {
+		t.Fatalf("composite warm Worker lookup = (%#v, %t), want current UID", matched, found)
+	}
+}
+
 func TestKubernetesReconcilerFallsBackToColdPodWhenWarmPodIsUnregistered(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	configuration := kubernetesTestConfiguration("")
@@ -817,6 +924,590 @@ func TestKubernetesReconcilerFallsBackToColdPodWhenWarmWorkerIsOffline(t *testin
 	}
 	if len(client.deletedPods) != 1 || client.deletedPods[0] != warmPod.Name {
 		t.Fatalf("offline warm Pod was not recycled exactly once: deleted=%#v active=%#v", client.deletedPods, client.pods)
+	}
+}
+
+func TestKubernetesReconcilerRetainsIncompatibleWarmWorkerWithoutReportingReadyCapacity(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["maxActivePods"] = 2
+	fixture.updateConfiguration(t, configuration)
+	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	warmPod.Phase = "Running"
+	client.pods[warmPod.Name] = warmPod
+	worker := fixture.registerWarmWorker(t, pool, warmPod, "online", "active", nil, nil)
+	if err := fixture.db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("compatibility_status", "incompatible").Error; err != nil {
+		t.Fatal(err)
+	}
+	fixture.assignExecutionToPool(t, fixture.executionIDs[0], pool, "queued")
+	var observations []ManagedKubernetesWarmCapacityObservation
+	fixture.reconciler.config.PublishWarmCapacity = func(_ context.Context, observation ManagedKubernetesWarmCapacityObservation) error {
+		observations = append(observations, observation)
+		return nil
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := client.pods[warmPod.Name]; !found {
+		t.Fatalf("incompatible warm Pod was deleted: deleted=%#v active=%#v", client.deletedPods, client.pods)
+	}
+	if _, found := findExecutionPod(client, fixture.executionIDs[0]); !found {
+		t.Fatalf("queued execution did not receive a cold fallback: %#v", client.pods)
+	}
+	if len(observations) != 1 || observations[0].ReadyIdleUnits != 0 {
+		t.Fatalf("incompatible warm capacity observations = %#v, want readyIdleUnits=0", observations)
+	}
+	createdPods := client.kindCount("Pod")
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := client.pods[warmPod.Name]; !found || len(client.deletedPods) != 0 || client.kindCount("Pod") != createdPods {
+		t.Fatalf("incompatible warm Pod churned on a later pass: deleted=%#v active=%#v created=%d->%d", client.deletedPods, client.pods, createdPods, client.kindCount("Pod"))
+	}
+}
+
+func TestKubernetesReconcilerEvictsNotReadyWarmWorkerForColdDemandAtTargetCap(t *testing.T) {
+	tests := []struct {
+		name       string
+		assignWarm bool
+	}{
+		{name: "matching warm pool demand", assignWarm: true},
+		{name: "general cold demand"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newKubernetesReconcileFixture(t, "")
+			pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+			if err := fixture.db.Model(&persistence.AgentExecution{}).
+				Where("execution_target_id = ?", fixture.targetID).
+				Update("status", "completed").Error; err != nil {
+				t.Fatal(err)
+			}
+			client := newFakeKubernetesClient()
+			fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+			if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			warmPod := onlyFakePod(t, client)
+			warmPod.Phase = "Running"
+			client.pods[warmPod.Name] = warmPod
+			worker := fixture.registerWarmWorker(t, pool, warmPod, "online", "active", nil, nil)
+			if err := fixture.db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+				Update("compatibility_status", "incompatible").Error; err != nil {
+				t.Fatal(err)
+			}
+			if test.assignWarm {
+				fixture.assignExecutionToPool(t, fixture.executionIDs[0], pool, "queued")
+			} else if err := fixture.db.Model(&persistence.AgentExecution{}).
+				Where("id = ?", fixture.executionIDs[0]).Update("status", "queued").Error; err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.deletedPods) != 1 || client.deletedPods[0] != warmPod.Name || len(client.pods) != 0 {
+				t.Fatalf("first pass did not evict only the not-ready warm Pod: deleted=%#v active=%#v", client.deletedPods, client.pods)
+			}
+			if client.kindCount("Pod") != 1 {
+				t.Fatalf("first pass recreated a Pod before deletion released quota: created=%d", client.kindCount("Pod"))
+			}
+
+			if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			executionPod, found := findExecutionPod(client, fixture.executionIDs[0])
+			if !found || executionPod.Labels[kubernetesWorkerModeLabel] != kubernetesWorkerModeExecutionPinned {
+				t.Fatalf("second pass did not create the cold execution Pod: %#v", client.pods)
+			}
+			createdPods := client.kindCount("Pod")
+			if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.deletedPods) != 1 || client.kindCount("Pod") != createdPods || len(client.pods) != 1 {
+				t.Fatalf("later pass rebuilt warm capacity or repeated deletion: deleted=%#v active=%#v created=%d->%d", client.deletedPods, client.pods, createdPods, client.kindCount("Pod"))
+			}
+		})
+	}
+}
+
+func TestKubernetesReconcilerRecyclesWarmWorkerWithStaleHeartbeat(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	warmPod.Phase = "Running"
+	client.pods[warmPod.Name] = warmPod
+	worker := fixture.registerWarmWorker(t, pool, warmPod, "online", "active", nil, nil)
+	staleHeartbeat := time.Now().UTC().Add(-fixture.reconciler.config.WorkerHeartbeatTimeout - time.Second)
+	if err := fixture.db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("last_heartbeat_at", staleHeartbeat).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deletedPods) != 1 || client.deletedPods[0] != warmPod.Name || len(client.pods) != 0 {
+		t.Fatalf("stale warm Pod was not recycled exactly once: deleted=%#v active=%#v", client.deletedPods, client.pods)
+	}
+}
+
+func TestKubernetesReconcilerTreatsExpiredWarmWorkerLeaseRowAsBusy(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	warmPod.Phase = "Running"
+	client.pods[warmPod.Name] = warmPod
+	worker := fixture.registerWarmWorker(t, pool, warmPod, "offline", "active", nil, nil)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", fixture.executionIDs[0]).
+		Updates(map[string]any{
+			"status": "leased", "worker_id": worker.ID, "generation": 1, "finished_at": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := fixture.db.Create(&persistence.WorkerLease{
+		ExecutionID: fixture.executionIDs[0], TenantID: fixture.tenantID,
+		WorkerID: worker.ID, WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID,
+		Generation: 1, LeaseTokenHash: []byte("expired-warm-worker-lease"),
+		AcquiredAt: now.Add(-3 * time.Minute), HeartbeatAt: now.Add(-2 * time.Minute), ExpiresAt: now.Add(-time.Minute),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := fixture.reconciler.loadKubernetesWarmWorkerStates(context.Background(), fixture.targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || !states[0].HasLease {
+		t.Fatalf("expired lease row did not keep the warm Worker busy: %#v", states)
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deletedPods) != 0 {
+		t.Fatalf("busy warm Worker with an expired lease row was deleted: %#v", client.deletedPods)
+	}
+	if _, found := client.pods[warmPod.Name]; !found {
+		t.Fatalf("busy warm Pod was not retained: %#v", client.pods)
+	}
+}
+
+func TestKubernetesWarmPodDeletionRechecksRegistrationAndLeaseAtDeleteBoundary(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	warmPod.Phase = "Running"
+	client.pods[warmPod.Name] = warmPod
+	states, err := fixture.reconciler.loadKubernetesWarmWorkerStates(context.Background(), fixture.targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("pre-delete snapshot unexpectedly included a registered Worker: %#v", states)
+	}
+
+	worker := fixture.registerWarmWorker(t, pool, warmPod, "online", "active", nil, nil)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", fixture.executionIDs[0]).
+		Updates(map[string]any{
+			"status": "leased", "worker_id": worker.ID, "generation": 1, "finished_at": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	fixture.createWarmWorkerLease(t, worker, fixture.executionIDs[0])
+
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+		context.Background(),
+		client,
+		fixture.targetID,
+		"synara-test",
+		warmPod,
+		"registration-claim-race-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted || retainedWorker == nil || retainedWorker.ID != worker.ID {
+		t.Fatalf("delete boundary result = deleted=%t retained=%#v, want the newly registered leased Worker", deleted, retainedWorker)
+	}
+	if len(client.deletedPods) != 0 {
+		t.Fatalf("leased Pod was deleted after a state=nil snapshot: %#v", client.deletedPods)
+	}
+	if _, found := client.pods[warmPod.Name]; !found {
+		t.Fatalf("leased Pod disappeared after delete-boundary recheck: %#v", client.pods)
+	}
+	var stored persistence.WorkerInstance
+	if err := fixture.db.Where("id = ?", worker.ID).Take(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "online" || stored.DrainingAt != nil {
+		t.Fatalf("leased Worker was drained during delete-boundary recheck: %#v", stored)
+	}
+	var fenceCount int64
+	if err := fixture.db.Model(&persistence.KubernetesPodDeletionFence{}).
+		Where("execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?", fixture.targetID, "synara-test", warmPod.Name, warmPod.UID).
+		Count(&fenceCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fenceCount != 0 {
+		t.Fatalf("leased Worker deletion wrote %d durable fences", fenceCount)
+	}
+}
+
+func TestKubernetesPodDeletionRetainsWorkerWithActiveWorkspaceCleanupLease(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	pod := kubernetesPod{
+		Name: "cleanup-busy-" + uuid.NewString(), UID: uuid.NewString(), Phase: "Running",
+		Labels: map[string]string{kubernetesTargetLabel: fixture.targetID.String()},
+	}
+	client.pods[pod.Name] = pod
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	worker := persistence.WorkerInstance{
+		ID: uuid.New(), Incarnation: 1, InstanceUID: pod.UID,
+		ExecutionTargetID: fixture.targetID, TargetKind: "kubernetes", WorkerMode: kubernetesWorkerModeGeneralPool,
+		RegistrationTrustMode: kubernetesPodBoundRegistrationTrust,
+		ClusterID:             kubernetesLocalClusterID,
+		Namespace:             "synara-test",
+		PodName:               pod.Name,
+		Version:               "cleanup-busy-worker",
+		ProtocolVersion:       kubernetesWorkerProtocolVersion,
+		Capabilities:          map[string]any{},
+		LeaseSupported:        true,
+		FencingSupported:      true,
+		AuthTokenHash:         []byte("cleanup-busy-worker-hash"),
+		Status:                "online",
+		AdministrativeStatus:  "active",
+		CompatibilityStatus:   "unknown",
+		RegisteredAt:          now,
+		LastHeartbeatAt:       now,
+	}
+	if err := fixture.db.Create(&worker).Error; err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := uuid.New()
+	materializationID := uuid.New()
+	incarnationID := uuid.New()
+	reason := "cleanup-busy-test"
+	workspace := persistence.RemoteWorkspace{
+		ID: workspaceID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+		ProjectID: fixture.projectID, SessionID: fixture.sessionID, ExecutionTargetID: fixture.targetID,
+		WorkspaceMode: "clone", State: "cleanup-pending", DefaultBranch: "main", CreatedAt: now, UpdatedAt: now,
+	}
+	materialization := persistence.WorkspaceMaterialization{
+		ID: materializationID, TenantID: fixture.tenantID, WorkspaceID: workspaceID,
+		OrganizationID: fixture.organizationID, ProjectID: fixture.projectID, SessionID: fixture.sessionID,
+		ExecutionTargetID: fixture.targetID, TargetKind: "kubernetes", StorageScope: "target", LayoutVersion: 3,
+		IncarnationID: incarnationID, State: "cleanup-pending", CleanupReason: &reason,
+		CleanupRequestedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	command := persistence.WorkspaceCleanupCommand{
+		ID: uuid.New(), TenantID: fixture.tenantID, MaterializationID: materializationID,
+		MaterializationIncarnationID: incarnationID, WorkspaceID: workspaceID,
+		ExecutionTargetID: fixture.targetID, TargetKind: "kubernetes", StorageScope: "target", LayoutVersion: 3,
+		Reason: reason, Status: "pending", DeliveryAvailableAt: now, RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&workspace).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&materialization).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.RemoteWorkspace{}).Where("id = ?", workspace.ID).
+			Update("current_materialization_id", materialization.ID).Error; err != nil {
+			return err
+		}
+		return tx.Create(&command).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := now.Add(-time.Minute)
+	if err := fixture.db.Model(&persistence.WorkspaceCleanupCommand{}).Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status": "leased", "lease_token_hash": []byte("cleanup-busy-lease"),
+			"dispatch_generation": 1, "delivery_worker_id": worker.ID,
+			"delivery_worker_incarnation": worker.Incarnation, "delivery_attempts": 1,
+			"leased_at": now.Add(-2 * time.Minute), "lease_expires_at": expiresAt, "updated_at": now,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+		context.Background(), client, fixture.targetID, "synara-test", pod, "cleanup-busy-delete-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted || retainedWorker == nil || retainedWorker.ID != worker.ID {
+		t.Fatalf("cleanup-busy deletion = deleted=%t retained=%#v", deleted, retainedWorker)
+	}
+	if len(client.deletedPods) != 0 {
+		t.Fatalf("cleanup-busy Pod was deleted: %#v", client.deletedPods)
+	}
+	var fenceCount int64
+	if err := fixture.db.Model(&persistence.KubernetesPodDeletionFence{}).
+		Where("execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?", fixture.targetID, "synara-test", pod.Name, pod.UID).
+		Count(&fenceCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fenceCount != 0 {
+		t.Fatalf("cleanup-busy deletion wrote %d fences", fenceCount)
+	}
+}
+
+func TestKubernetesWarmPodDeletionFenceSurvivesUnknownDeleteAndRetriesIdempotently(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 1, placement.PoolStatusActive)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPod := onlyFakePod(t, client)
+	firstRequestedAt := time.Date(2026, 7, 26, 1, 2, 3, 0, time.UTC)
+	fixture.reconciler.now = func() time.Time { return firstRequestedAt }
+	client.deletePodErr = errors.New("delete outcome unknown")
+
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+		context.Background(), client, fixture.targetID, "synara-test", warmPod, "unknown-delete-outcome",
+	)
+	if err == nil || deleted || retainedWorker != nil {
+		t.Fatalf("unknown DELETE result = deleted=%t retained=%#v err=%v", deleted, retainedWorker, err)
+	}
+	if _, found := client.pods[warmPod.Name]; !found {
+		t.Fatalf("failed fake DELETE removed the Pod: %#v", client.pods)
+	}
+	var firstFence persistence.KubernetesPodDeletionFence
+	if err := fixture.db.Where(
+		"execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?",
+		fixture.targetID, "synara-test", warmPod.Name, warmPod.UID,
+	).Take(&firstFence).Error; err != nil {
+		t.Fatal(err)
+	}
+	if firstFence.Reason != "unknown-delete-outcome" || !firstFence.RequestedAt.Equal(firstRequestedAt) {
+		t.Fatalf("first durable deletion fence = %#v", firstFence)
+	}
+
+	client.deletePodErr = nil
+	fixture.reconciler.now = func() time.Time { return firstRequestedAt.Add(time.Minute) }
+	deleted, retainedWorker, err = fixture.reconciler.deleteObservedWarmPod(
+		context.Background(), client, fixture.targetID, "synara-test", warmPod, "retry-delete",
+	)
+	if err != nil || !deleted || retainedWorker != nil {
+		t.Fatalf("retry DELETE result = deleted=%t retained=%#v err=%v", deleted, retainedWorker, err)
+	}
+	var fences []persistence.KubernetesPodDeletionFence
+	if err := fixture.db.Where(
+		"execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?",
+		fixture.targetID, "synara-test", warmPod.Name, warmPod.UID,
+	).Find(&fences).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(fences) != 1 || fences[0].Reason != firstFence.Reason || !fences[0].RequestedAt.Equal(firstFence.RequestedAt) {
+		t.Fatalf("retry changed or duplicated the durable deletion fence: %#v", fences)
+	}
+}
+
+func TestKubernetesPodDeleteUIDConflictIsBenignAndRetainsOldUIDFence(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	podName := "same-name-replacement"
+	observed := kubernetesPod{Name: podName, UID: uuid.NewString(), Phase: "Running"}
+	replacement := observed
+	replacement.UID = uuid.NewString()
+	client.pods[podName] = replacement
+
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedPodSafely(
+		context.Background(),
+		client,
+		fixture.targetID,
+		"synara-test",
+		observed,
+		"stale-observation",
+	)
+	if err != nil || deleted || retainedWorker != nil {
+		t.Fatalf("stale UID delete result = deleted=%t retained=%#v err=%v", deleted, retainedWorker, err)
+	}
+	if current := client.pods[podName]; current.UID != replacement.UID {
+		t.Fatalf("same-name replacement was changed by stale deletion: %#v", current)
+	}
+	var oldFenceCount int64
+	if err := fixture.db.Model(&persistence.KubernetesPodDeletionFence{}).
+		Where(
+			"execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?",
+			fixture.targetID,
+			"synara-test",
+			podName,
+			observed.UID,
+		).
+		Count(&oldFenceCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if oldFenceCount != 1 {
+		t.Fatalf("stale observed UID durable fences = %d, want 1", oldFenceCount)
+	}
+	var replacementFenceCount int64
+	if err := fixture.db.Model(&persistence.KubernetesPodDeletionFence{}).
+		Where(
+			"execution_target_id = ? AND namespace = ? AND pod_name = ? AND pod_uid = ?",
+			fixture.targetID,
+			"synara-test",
+			podName,
+			replacement.UID,
+		).
+		Count(&replacementFenceCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if replacementFenceCount != 0 {
+		t.Fatalf("replacement UID was incorrectly fenced %d times", replacementFenceCount)
+	}
+}
+
+func TestKubernetesWarmWorkerReadinessAndRecyclePredicates(t *testing.T) {
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	timeout := 90 * time.Second
+	poolID := uuid.New()
+	poolVersion := int64(1)
+	capacityClass := placement.CapacityClassInteractive
+	manifestID := uuid.New()
+	pod := kubernetesPod{Name: "warm-ready", UID: uuid.NewString(), Phase: "Running"}
+	plan := kubernetesWarmPodPlan{Pool: kubernetesWarmPool{
+		ID: poolID, Version: poolVersion, CapacityClass: capacityClass,
+	}}
+	ready := kubernetesWarmWorkerState{
+		PodName: pod.Name, InstanceUID: pod.UID,
+		WorkerPoolID: &poolID, WorkerPoolVersion: &poolVersion, CapacityClass: &capacityClass,
+		WorkerReleaseStatus: "unmanaged", RegistrationTrustMode: kubernetesPodBoundRegistrationTrust,
+		ProtocolVersion: kubernetesWorkerProtocolVersion, CurrentManifestID: &manifestID,
+		CompatibilityStatus: "compatible", LeaseSupported: true, FencingSupported: true,
+		Status: "online", AdministrativeStatus: "active", LastHeartbeatAt: now.Add(-timeout),
+	}
+	revisionID := uuid.New()
+	channel := "promoted"
+	tests := []struct {
+		name    string
+		mutate  func(*kubernetesWarmWorkerState, *kubernetesPod, *kubernetesWarmPodPlan)
+		ready   bool
+		recycle bool
+	}{
+		{name: "heartbeat at cutoff is fresh", ready: true},
+		{name: "exact Pod UID required", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.InstanceUID = uuid.NewString()
+		}},
+		{name: "Pending Pod retained", mutate: func(_ *kubernetesWarmWorkerState, pod *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			pod.Phase = "Pending"
+		}},
+		{name: "active lease retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.HasLease = true
+		}},
+		{name: "offline recycled", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.Status = "offline"
+		}, recycle: true},
+		{name: "draining recycled", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.Status = "draining"
+		}, recycle: true},
+		{name: "administratively revoked retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.AdministrativeStatus = "revoked"
+		}},
+		{name: "wrong protocol retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.ProtocolVersion++
+		}},
+		{name: "missing manifest retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.CurrentManifestID = nil
+		}},
+		{name: "unknown compatibility retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.CompatibilityStatus = "unknown"
+		}},
+		{name: "incompatible retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.CompatibilityStatus = "incompatible"
+		}},
+		{name: "missing lease support retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.LeaseSupported = false
+		}},
+		{name: "missing fencing support retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.FencingSupported = false
+		}},
+		{name: "wrong trust retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.RegistrationTrustMode = "shared-token"
+		}},
+		{name: "heartbeat before cutoff recycled", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.LastHeartbeatAt = now.Add(-timeout - time.Nanosecond)
+		}, recycle: true},
+		{name: "unsynchronized unmanaged release retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, _ *kubernetesWarmPodPlan) {
+			state.WorkerReleaseStatus = "active"
+		}},
+		{name: "active managed release ready", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, plan *kubernetesWarmPodPlan) {
+			state.WorkerReleaseRevisionID, state.WorkerReleaseChannel, state.WorkerReleaseStatus = &revisionID, &channel, "active"
+			plan.Release.RevisionID, plan.Release.Channel = &revisionID, &channel
+		}, ready: true},
+		{name: "managed release status lag retained", mutate: func(state *kubernetesWarmWorkerState, _ *kubernetesPod, plan *kubernetesWarmPodPlan) {
+			state.WorkerReleaseRevisionID, state.WorkerReleaseChannel = &revisionID, &channel
+			plan.Release.RevisionID, plan.Release.Channel = &revisionID, &channel
+		}, ready: false},
+		{name: "terminal Pod recycled", mutate: func(_ *kubernetesWarmWorkerState, pod *kubernetesPod, _ *kubernetesWarmPodPlan) { pod.Phase = "Failed" }, recycle: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stateCopy, podCopy, planCopy := ready, pod, plan
+			if test.mutate != nil {
+				test.mutate(&stateCopy, &podCopy, &planCopy)
+			}
+			if got := kubernetesWarmWorkerStateReadyIdle(stateCopy, podCopy, planCopy, now, timeout); got != test.ready {
+				t.Fatalf("ready = %t, want %t", got, test.ready)
+			}
+			if got := kubernetesWarmWorkerStateShouldRecycle(stateCopy, podCopy, now, timeout); got != test.recycle {
+				t.Fatalf("recycle = %t, want %t", got, test.recycle)
+			}
+		})
 	}
 }
 
@@ -1211,8 +1902,8 @@ func TestKubernetesClientDeletePodUsesExactUIDPrecondition(t *testing.T) {
 	defer server.Close()
 
 	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-	if err := client.DeletePod(context.Background(), "synara-test", "worker", uuid.NewString()); err == nil {
-		t.Fatal("same-name replacement Pod was deleted with a stale UID")
+	if err := client.DeletePod(context.Background(), "synara-test", "worker", uuid.NewString()); !errors.Is(err, errKubernetesPodUIDPreconditionFailed) {
+		t.Fatalf("stale Pod UID delete error = %v, want UID precondition failure", err)
 	}
 	if deleted {
 		t.Fatal("Kubernetes API accepted deletion with a stale UID")
@@ -1366,8 +2057,9 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 		}
 	}
 	reconciler := NewKubernetesReconciler(targetService, KubernetesReconcilerConfig{
-		PublicControlPlaneURL: "http://control-plane.test:3780",
-		WorkerLeaseTTL:        6 * time.Second,
+		PublicControlPlaneURL:  "http://control-plane.test:3780",
+		WorkerLeaseTTL:         6 * time.Second,
+		WorkerHeartbeatTimeout: 90 * time.Second,
 	}, slog.Default())
 	return kubernetesReconcileFixture{
 		db: store.DB(), reconciler: reconciler, tenantID: domain.TenantID, organizationID: domain.OrganizationID,
@@ -1528,17 +2220,29 @@ func (f kubernetesReconcileFixture) registerWarmWorker(
 		namespace = "synara-test"
 	}
 	now := time.Now().UTC()
+	manifestID := uuid.New()
+	if err := f.db.Create(&persistence.WorkerManifest{
+		ID: manifestID, ManifestHash: strings.ReplaceAll(manifestID.String(), "-", "") + strings.Repeat("0", 32),
+		WorkerBuildVersion: "warm-worker", WorkerProtocolMinimum: kubernetesWorkerProtocolVersion,
+		WorkerProtocolMaximum: kubernetesWorkerProtocolVersion, RuntimeEventMinimum: 2, RuntimeEventMaximum: 2,
+		OperatingSystem: "linux", Architecture: "amd64", FeatureFlags: map[string]any{}, CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	worker := persistence.WorkerInstance{
 		ID: uuid.New(), Incarnation: 1, InstanceUID: pod.UID, ExecutionTargetID: f.targetID,
 		TargetKind: "kubernetes", WorkerMode: kubernetesWorkerModeWarmPool,
 		WorkerPoolID: &pool.ID, WorkerPoolVersion: &pool.Version, CapacityClass: &pool.CapacityClass,
-		RegistrationTrustMode:   "kubernetes-pod-bound-v1",
+		RegistrationTrustMode:   kubernetesPodBoundRegistrationTrust,
 		ClusterID:               clusterID,
 		Namespace:               namespace,
 		PodName:                 pod.Name,
 		Version:                 "warm-worker",
-		ProtocolVersion:         2,
+		ProtocolVersion:         kubernetesWorkerProtocolVersion,
 		Capabilities:            map[string]any{},
+		CurrentManifestID:       &manifestID,
+		CompatibilityStatus:     "compatible",
+		CompatibilityCheckedAt:  &now,
 		WorkerReleaseRevisionID: releaseRevisionID,
 		WorkerReleaseChannel:    releaseChannel,
 		LeaseSupported:          true,
@@ -1546,6 +2250,7 @@ func (f kubernetesReconcileFixture) registerWarmWorker(
 		AuthTokenHash:           []byte("warm-worker-hash"),
 		Status:                  status,
 		AdministrativeStatus:    administrativeStatus,
+		WorkerReleaseStatus:     "unmanaged",
 		RegisteredAt:            now,
 		LastHeartbeatAt:         now,
 	}
@@ -1615,7 +2320,9 @@ type fakeKubernetesClient struct {
 	applied        []map[string]any
 	pods           map[string]kubernetesPod
 	deletedPods    []string
+	podApplyErr    error
 	listPodUIDsErr error
+	deletePodErr   error
 }
 
 func newFakeKubernetesClient() *fakeKubernetesClient {
@@ -1623,6 +2330,9 @@ func newFakeKubernetesClient() *fakeKubernetesClient {
 }
 
 func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[string]any) error {
+	if object["kind"] == "Pod" && c.podApplyErr != nil {
+		return c.podApplyErr
+	}
 	c.applied = append(c.applied, object)
 	if object["kind"] == "Pod" {
 		metadata := object["metadata"].(map[string]any)
@@ -1635,7 +2345,8 @@ func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[str
 			}
 		}
 		c.pods[name] = kubernetesPod{
-			Name: name, UID: uuid.NewString(), Phase: "Pending", Labels: labels, Annotations: annotations,
+			Name: name, UID: uuid.NewString(), Phase: "Pending", CreatedAt: time.Now().UTC(),
+			Labels: labels, Annotations: annotations,
 		}
 	}
 	return nil
@@ -1663,9 +2374,12 @@ func (c *fakeKubernetesClient) ListPodUIDs(_ context.Context, _ string) ([]strin
 }
 
 func (c *fakeKubernetesClient) DeletePod(_ context.Context, _ string, name, uid string) error {
+	if c.deletePodErr != nil {
+		return c.deletePodErr
+	}
 	pod, found := c.pods[name]
 	if found && pod.UID != uid {
-		return fmt.Errorf("Pod UID precondition failed: current=%s requested=%s", pod.UID, uid)
+		return fmt.Errorf("%w: current=%s requested=%s", errKubernetesPodUIDPreconditionFailed, pod.UID, uid)
 	}
 	c.deletedPods = append(c.deletedPods, name)
 	delete(c.pods, name)
@@ -1833,5 +2547,175 @@ func TestKubernetesPodCompletedSuccessfullyRequiresExactAgentdTermination(t *tes
 				t.Fatalf("completed successfully = %v, want %v", got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestClassifyKubernetesExecutionPodFailureUsesStableLowCardinalityClasses(t *testing.T) {
+	tests := []struct {
+		name       string
+		pod        kubernetesPod
+		wantClass  string
+		wantReason string
+	}{
+		{
+			name: "unschedulable",
+			pod: kubernetesPod{Phase: "Pending", Conditions: []kubernetesPodCondition{{
+				Type: "PodScheduled", Status: "False", Reason: "Unschedulable",
+			}}},
+			wantClass: KubernetesPodFailureUnschedulable, wantReason: "unschedulable",
+		},
+		{
+			name: "image-pull-backoff",
+			pod: kubernetesPod{Phase: "Pending", Containers: []kubernetesContainerStatus{{
+				Name: "agentd", WaitingReason: "ImagePullBackOff",
+			}}},
+			wantClass: KubernetesPodFailureImagePull, wantReason: "image-pull-backoff",
+		},
+		{
+			name: "container-config",
+			pod: kubernetesPod{Phase: "Pending", Containers: []kubernetesContainerStatus{{
+				Name: "agentd", WaitingReason: "CreateContainerConfigError",
+			}}},
+			wantClass: KubernetesPodFailureContainerStart, wantReason: "create-container-config-error",
+		},
+		{
+			name:      "evicted",
+			pod:       kubernetesPod{Phase: "Failed", Reason: "Evicted"},
+			wantClass: KubernetesPodFailureEvicted, wantReason: "evicted",
+		},
+		{
+			name: "oom-current-state",
+			pod: kubernetesPod{Phase: "Failed", Containers: []kubernetesContainerStatus{{
+				Name: "agentd", Terminated: true, TerminatedReason: "OOMKilled", ExitCode: 137,
+			}}},
+			wantClass: KubernetesPodFailureOOMKilled, wantReason: "oom-killed",
+		},
+		{
+			name: "oom-last-state",
+			pod: kubernetesPod{Phase: "Running", Containers: []kubernetesContainerStatus{{
+				Name: "agentd", LastTerminatedReason: "OOMKilled",
+			}}},
+			wantClass: KubernetesPodFailureOOMKilled, wantReason: "oom-killed",
+		},
+		{
+			name:      "generic-failed",
+			pod:       kubernetesPod{Phase: "Failed", Reason: "TenantControlledRawMessage"},
+			wantClass: KubernetesPodFailureGeneric, wantReason: "phase-failed",
+		},
+		{name: "healthy-running", pod: kubernetesPod{Phase: "Running"}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			failureClass, reason := classifyKubernetesExecutionPodFailure(testCase.pod)
+			if failureClass != testCase.wantClass || reason != testCase.wantReason {
+				t.Fatalf("classification = %q/%q, want %q/%q", failureClass, reason, testCase.wantClass, testCase.wantReason)
+			}
+		})
+	}
+}
+
+func TestKubernetesClientParsesPodFailureEvidence(t *testing.T) {
+	targetID := uuid.New()
+	podUID := uuid.NewString()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(writer, `{
+			"metadata":{"continue":""},
+			"items":[{
+				"metadata":{"name":"failed-worker","uid":%q,"labels":{"synara.io/execution-target-id":%q}},
+				"status":{
+					"phase":"Failed","reason":"Evicted",
+					"conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable"}],
+					"containerStatuses":[{
+						"name":"agentd",
+						"state":{"terminated":{"exitCode":137,"reason":"OOMKilled"}},
+						"lastState":{"terminated":{"reason":"OOMKilled"}}
+					}]
+				}
+			}]
+		}`, podUID, targetID.String())
+	}))
+	defer server.Close()
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	pods, err := client.ListPods(context.Background(), "synara-test", targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods) != 1 || pods[0].Reason != "Evicted" || len(pods[0].Conditions) != 1 ||
+		len(pods[0].Containers) != 1 || pods[0].Containers[0].TerminatedReason != "OOMKilled" ||
+		pods[0].Containers[0].LastTerminatedReason != "OOMKilled" {
+		t.Fatalf("parsed Kubernetes Pod evidence = %#v", pods)
+	}
+	if failureClass, reason := classifyKubernetesExecutionPodFailure(pods[0]); failureClass != KubernetesPodFailureEvicted || reason != "evicted" {
+		t.Fatalf("parsed failure classification = %q/%q", failureClass, reason)
+	}
+}
+
+func TestKubernetesReconcilerReportsPodApplyFailureBeforeUIDAssignment(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	client.podApplyErr = &kubernetesAPIStatusError{StatusCode: http.StatusTooManyRequests, Detail: "rate limited"}
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	var observations []KubernetesExecutionPodObservation
+	fixture.reconciler.config.ObserveExecutionPod = func(_ context.Context, observation KubernetesExecutionPodObservation) error {
+		observations = append(observations, observation)
+		return nil
+	}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "A Kubernetes Worker Pod could not be applied") {
+		t.Fatalf("reconcile apply failure = %v", err)
+	}
+	if len(observations) != 1 {
+		t.Fatalf("apply observations = %#v", observations)
+	}
+	observation := observations[0]
+	if observation.TenantID != fixture.tenantID || observation.ExecutionTargetID != fixture.targetID ||
+		observation.ExecutionID != fixture.executionIDs[0] || observation.Generation != 1 ||
+		observation.PodUID != "" || observation.Phase != "ApplyFailed" ||
+		observation.FailureClass != KubernetesPodFailureApplyFailed ||
+		observation.FailureReasonCode != "api-status-429" {
+		t.Fatalf("apply failure observation = %#v", observation)
+	}
+}
+
+func TestKubernetesReconcilerReportsFailedPodBeforeSafeDeletion(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod, found := findExecutionPod(client, fixture.executionIDs[0])
+	if !found {
+		t.Fatalf("initial Execution Pod was not created: %#v", client.pods)
+	}
+	pod.Phase = "Failed"
+	pod.Reason = "Evicted"
+	client.pods[pod.Name] = pod
+	var executionObservations []KubernetesExecutionPodObservation
+	var workerObservations []KubernetesWorkerPodObservation
+	fixture.reconciler.config.ObserveExecutionPod = func(_ context.Context, observation KubernetesExecutionPodObservation) error {
+		executionObservations = append(executionObservations, observation)
+		return nil
+	}
+	fixture.reconciler.config.ObserveWorkerPod = func(_ context.Context, observation KubernetesWorkerPodObservation) error {
+		workerObservations = append(workerObservations, observation)
+		return nil
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(executionObservations) != 1 ||
+		executionObservations[0].FailureClass != KubernetesPodFailureEvicted ||
+		executionObservations[0].FailureReasonCode != "evicted" {
+		t.Fatalf("failed Execution Pod observations = %#v", executionObservations)
+	}
+	if len(workerObservations) < 2 || workerObservations[0].Phase != "Failed" ||
+		workerObservations[0].Reason != "terminal-observation:evicted" ||
+		!strings.HasPrefix(workerObservations[1].Reason, "delete-requested:") {
+		t.Fatalf("failed Worker Pod observations = %#v", workerObservations)
+	}
+	if len(client.deletedPods) != 1 || client.deletedPods[0] != pod.Name {
+		t.Fatalf("failed Pod deletion = %#v", client.deletedPods)
 	}
 }

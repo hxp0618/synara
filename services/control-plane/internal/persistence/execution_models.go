@@ -10,6 +10,7 @@ type WorkerInstance struct {
 	ID                      uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
 	Incarnation             int64          `gorm:"column:incarnation;default:1"`
 	InstanceUID             string         `gorm:"column:instance_uid"`
+	SSHBootstrapGeneration  *int64         `gorm:"column:ssh_bootstrap_generation"`
 	ExecutionTargetID       uuid.UUID      `gorm:"column:execution_target_id;type:uuid"`
 	TargetKind              string         `gorm:"column:target_kind"`
 	WorkerMode              string         `gorm:"column:worker_mode;not null;default:general-pool"`
@@ -63,49 +64,69 @@ type WorkerIdentityTombstone struct {
 
 func (WorkerIdentityTombstone) TableName() string { return "worker_identity_tombstones" }
 
+type KubernetesPodDeletionFence struct {
+	ExecutionTargetID uuid.UUID `gorm:"column:execution_target_id;type:uuid;primaryKey;index:idx_kubernetes_pod_deletion_fences_requested,priority:1"`
+	Namespace         string    `gorm:"column:namespace;primaryKey"`
+	PodName           string    `gorm:"column:pod_name;primaryKey"`
+	PodUID            string    `gorm:"column:pod_uid;type:uuid;primaryKey"`
+	RequestedAt       time.Time `gorm:"column:requested_at;not null;index:idx_kubernetes_pod_deletion_fences_requested,priority:2,sort:desc"`
+	Reason            string    `gorm:"column:reason;not null"`
+}
+
+func (KubernetesPodDeletionFence) TableName() string {
+	return "kubernetes_pod_deletion_fences"
+}
+
 type AgentExecution struct {
-	ID                                uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID                          uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	SessionID                         uuid.UUID  `gorm:"column:session_id;type:uuid"`
-	TurnID                            uuid.UUID  `gorm:"column:turn_id;type:uuid"`
-	Attempt                           int        `gorm:"column:attempt"`
-	Status                            string     `gorm:"column:status"`
-	ExecutionTargetID                 uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
-	TargetKind                        string     `gorm:"column:target_kind"`
-	WorkerPoolID                      *uuid.UUID `gorm:"column:worker_pool_id;type:uuid"`
-	WorkerPoolVersion                 *int64     `gorm:"column:worker_pool_version"`
-	CapacityClass                     *string    `gorm:"column:capacity_class"`
-	PlacementPolicyVersion            *int64     `gorm:"column:placement_policy_version"`
-	TargetGroupID                     *uuid.UUID `gorm:"column:target_group_id;type:uuid"`
-	TargetGroupVersion                *int64     `gorm:"column:target_group_version"`
-	TargetGroupMemberVersion          *int64     `gorm:"column:target_group_member_version"`
-	SelectedRegion                    *string    `gorm:"column:selected_region"`
-	SelectedClusterID                 *string    `gorm:"column:selected_cluster_id"`
-	RoutingReason                     *string    `gorm:"column:routing_reason"`
-	PredecessorExecutionID            *uuid.UUID `gorm:"column:predecessor_execution_id;type:uuid"`
-	WarmPoolModeSnapshot              string     `gorm:"column:warm_pool_mode_snapshot;default:disabled"`
-	Provider                          *string    `gorm:"column:provider"`
-	WorkerID                          *uuid.UUID `gorm:"column:worker_id;type:uuid"`
-	WorkerManifestID                  *uuid.UUID `gorm:"column:worker_manifest_id;type:uuid"`
-	WorkerReleaseRevisionID           *uuid.UUID `gorm:"column:worker_release_revision_id;type:uuid"`
-	WorkerReleaseChannel              *string    `gorm:"column:worker_release_channel"`
-	ProviderCredentialIDSnapshot      *uuid.UUID `gorm:"column:provider_credential_id_snapshot;type:uuid"`
-	ProviderCredentialVersionSnapshot *int       `gorm:"column:provider_credential_version_snapshot"`
-	ProviderResumeStrategySnapshot    string     `gorm:"column:provider_resume_strategy_snapshot;default:authoritative-history"`
-	ProviderCursorBindingVersion      *int       `gorm:"column:provider_cursor_binding_version"`
-	ProviderCursorBindingDigest       []byte     `gorm:"column:provider_cursor_binding_digest"`
-	ProviderRuntimeBindingID          *uuid.UUID `gorm:"column:provider_runtime_binding_id;type:uuid"`
-	RemoteWorkspaceID                 *uuid.UUID `gorm:"column:remote_workspace_id;type:uuid"`
-	WorkspaceMaterializationID        *uuid.UUID `gorm:"column:workspace_materialization_id;type:uuid"`
-	RestoreCheckpointID               *uuid.UUID `gorm:"column:restore_checkpoint_id;type:uuid"`
-	NextRecoveryReason                *string    `gorm:"column:next_recovery_reason"`
-	Generation                        int64      `gorm:"column:generation"`
-	RequestedBy                       uuid.UUID  `gorm:"column:requested_by;type:uuid"`
-	QueuedAt                          time.Time  `gorm:"column:queued_at"`
-	StartedAt                         *time.Time `gorm:"column:started_at"`
-	FinishedAt                        *time.Time `gorm:"column:finished_at"`
-	FailureCode                       *string    `gorm:"column:failure_code"`
-	FailureMessage                    *string    `gorm:"column:failure_message"`
+	ID                                  uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                            uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	SessionID                           uuid.UUID  `gorm:"column:session_id;type:uuid"`
+	TurnID                              uuid.UUID  `gorm:"column:turn_id;type:uuid"`
+	Attempt                             int        `gorm:"column:attempt"`
+	Status                              string     `gorm:"column:status"`
+	ExecutionTargetID                   uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	TargetKind                          string     `gorm:"column:target_kind"`
+	WorkerPoolID                        *uuid.UUID `gorm:"column:worker_pool_id;type:uuid"`
+	WorkerPoolVersion                   *int64     `gorm:"column:worker_pool_version"`
+	CapacityClass                       *string    `gorm:"column:capacity_class"`
+	PlacementPolicyVersion              *int64     `gorm:"column:placement_policy_version"`
+	PlacementRegion                     string     `gorm:"column:placement_region;not null;default:''"`
+	PlacementClusterID                  string     `gorm:"column:placement_cluster_id;not null;default:''"`
+	TenantSchedulingPolicyVersion       int64      `gorm:"column:tenant_scheduling_policy_version;not null;default:0"`
+	TenantSchedulingPolicyDigest        string     `gorm:"column:tenant_scheduling_policy_digest;not null;default:48646d468c45b8a2257c2080fce3ef0697f7ec181ca7e085eb49a194a92a90b2"`
+	OrganizationSchedulingPolicyVersion int64      `gorm:"column:organization_scheduling_policy_version;not null;default:0"`
+	OrganizationSchedulingPolicyDigest  string     `gorm:"column:organization_scheduling_policy_digest;not null;default:48646d468c45b8a2257c2080fce3ef0697f7ec181ca7e085eb49a194a92a90b2"`
+	TargetGroupID                       *uuid.UUID `gorm:"column:target_group_id;type:uuid"`
+	TargetGroupVersion                  *int64     `gorm:"column:target_group_version"`
+	TargetGroupMemberVersion            *int64     `gorm:"column:target_group_member_version"`
+	SelectedRegion                      *string    `gorm:"column:selected_region"`
+	SelectedClusterID                   *string    `gorm:"column:selected_cluster_id"`
+	RoutingReason                       *string    `gorm:"column:routing_reason"`
+	SchedulingDecisionID                *uuid.UUID `gorm:"column:scheduling_decision_id;type:uuid"`
+	PredecessorExecutionID              *uuid.UUID `gorm:"column:predecessor_execution_id;type:uuid"`
+	WarmPoolModeSnapshot                string     `gorm:"column:warm_pool_mode_snapshot;default:disabled"`
+	Provider                            *string    `gorm:"column:provider"`
+	WorkerID                            *uuid.UUID `gorm:"column:worker_id;type:uuid"`
+	WorkerManifestID                    *uuid.UUID `gorm:"column:worker_manifest_id;type:uuid"`
+	WorkerReleaseRevisionID             *uuid.UUID `gorm:"column:worker_release_revision_id;type:uuid"`
+	WorkerReleaseChannel                *string    `gorm:"column:worker_release_channel"`
+	ProviderCredentialIDSnapshot        *uuid.UUID `gorm:"column:provider_credential_id_snapshot;type:uuid"`
+	ProviderCredentialVersionSnapshot   *int       `gorm:"column:provider_credential_version_snapshot"`
+	ProviderResumeStrategySnapshot      string     `gorm:"column:provider_resume_strategy_snapshot;default:authoritative-history"`
+	ProviderCursorBindingVersion        *int       `gorm:"column:provider_cursor_binding_version"`
+	ProviderCursorBindingDigest         []byte     `gorm:"column:provider_cursor_binding_digest"`
+	ProviderRuntimeBindingID            *uuid.UUID `gorm:"column:provider_runtime_binding_id;type:uuid"`
+	RemoteWorkspaceID                   *uuid.UUID `gorm:"column:remote_workspace_id;type:uuid"`
+	WorkspaceMaterializationID          *uuid.UUID `gorm:"column:workspace_materialization_id;type:uuid"`
+	RestoreCheckpointID                 *uuid.UUID `gorm:"column:restore_checkpoint_id;type:uuid"`
+	NextRecoveryReason                  *string    `gorm:"column:next_recovery_reason"`
+	Generation                          int64      `gorm:"column:generation"`
+	RequestedBy                         uuid.UUID  `gorm:"column:requested_by;type:uuid"`
+	QueuedAt                            time.Time  `gorm:"column:queued_at"`
+	StartedAt                           *time.Time `gorm:"column:started_at"`
+	FinishedAt                          *time.Time `gorm:"column:finished_at"`
+	FailureCode                         *string    `gorm:"column:failure_code"`
+	FailureMessage                      *string    `gorm:"column:failure_message"`
 }
 
 func (AgentExecution) TableName() string { return "agent_executions" }
@@ -225,6 +246,10 @@ type ExecutionTarget struct {
 	Status                 string         `gorm:"column:status"`
 	ConfigurationEncrypted []byte         `gorm:"column:configuration_encrypted"`
 	Capabilities           map[string]any `gorm:"column:capabilities;serializer:json"`
+	SSHOperationGeneration int64          `gorm:"column:ssh_operation_generation;not null;default:0"`
+	SSHOperationKind       *string        `gorm:"column:ssh_operation_kind"`
+	SSHOperationStartedAt  *time.Time     `gorm:"column:ssh_operation_started_at"`
+	SSHExpectedInstanceUID *uuid.UUID     `gorm:"column:ssh_expected_instance_uid;type:uuid"`
 	CreatedAt              time.Time      `gorm:"column:created_at"`
 	UpdatedAt              time.Time      `gorm:"column:updated_at"`
 }

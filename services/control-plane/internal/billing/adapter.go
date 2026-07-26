@@ -21,6 +21,28 @@ type ImportedActualInvoice struct {
 	BillingPeriodEndAt   time.Time
 	CurrencyCode         string
 	Lines                []ImportedActualInvoiceLine
+	SourceProvenance     *InvoiceSourceProvenance
+}
+
+type InvoiceSourceProvenance struct {
+	Format                         ExportObjectFormat    `json:"format"`
+	BundleChecksum                 string                `json:"bundleChecksum"`
+	Manifest                       InvoiceSourceObject   `json:"manifest"`
+	Chunks                         []InvoiceSourceObject `json:"chunks"`
+	CompressedBytes                int64                 `json:"compressedBytes"`
+	DecompressedBytes              int64                 `json:"decompressedBytes"`
+	RowCount                       int                   `json:"rowCount"`
+	FilteredAdjustmentCount        int                   `json:"filteredAdjustmentCount"`
+	FilteredAdjustmentAmountMicros int64                 `json:"filteredAdjustmentAmountMicros"`
+}
+
+type InvoiceSourceObject struct {
+	Key          string    `json:"key"`
+	Version      string    `json:"version"`
+	ETag         string    `json:"etag"`
+	LastModified time.Time `json:"lastModified"`
+	SizeBytes    int64     `json:"sizeBytes"`
+	SHA256       string    `json:"sha256"`
 }
 
 type ImportedActualInvoiceLine struct {
@@ -71,6 +93,11 @@ func fixtureKey(tenantID uuid.UUID, provider, externalImportID string) string {
 
 func cloneImportedInvoice(invoice ImportedActualInvoice) ImportedActualInvoice {
 	cloned := invoice
+	if invoice.SourceProvenance != nil {
+		provenance := *invoice.SourceProvenance
+		provenance.Chunks = append([]InvoiceSourceObject(nil), invoice.SourceProvenance.Chunks...)
+		cloned.SourceProvenance = &provenance
+	}
 	if len(invoice.Lines) == 0 {
 		cloned.Lines = nil
 		return cloned

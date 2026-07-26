@@ -63,7 +63,7 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 	pool := persistence.WorkerPool{
 		ID: uuid.New(), TenantID: &domain.TenantID, ExecutionTargetID: targetID,
 		Name: "warm", Mode: "warm", CapacityClass: "interactive",
-		ClusterID: "cluster-a", Region: "cn-east-1", Namespace: "default",
+		ClusterID: "kubernetes", Region: "cn-east-1", Namespace: "default",
 		DesiredIdleUnits: 1, MaxActiveUnits: 2, SchedulingTemplate: map[string]any{},
 		Status: "active", Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
@@ -81,7 +81,7 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 		ID: uuid.New(), Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: targetID,
 		TargetKind: "kubernetes", WorkerMode: "warm-pool", RegistrationTrustMode: "kubernetes-pod-bound-v1",
 		WorkerPoolID: &pool.ID, WorkerPoolVersion: &pool.Version, CapacityClass: &pool.CapacityClass,
-		ClusterID: "cluster-a", Namespace: "default", PodName: "warm-0",
+		ClusterID: "kubernetes", Namespace: "default", PodName: "warm-0",
 		Version: "test", ProtocolVersion: 2, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte("hash"),
 		Status: "online", AdministrativeStatus: "active", RegisteredAt: now, LastHeartbeatAt: now,

@@ -59,6 +59,8 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 
 	assertCount(t, fixture, &persistence.AgentTurn{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.AgentExecution{}, "session_id = ?", 1, fixture.sessionID)
+	assertCount(t, fixture, &persistence.ExecutionSchedulingDecision{}, "tenant_id = ?", 1, fixture.tenantID)
+	assertCount(t, fixture, &persistence.ExecutionSchedulingCandidate{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.WorkspaceMaterialization{}, "session_id = ?", 1, fixture.sessionID)
@@ -71,8 +73,16 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	}
 	if execution.Provider == nil || *execution.Provider != "codex" ||
 		execution.ProviderRuntimeBindingID == nil || execution.RemoteWorkspaceID == nil ||
-		execution.WorkspaceMaterializationID == nil {
+		execution.WorkspaceMaterializationID == nil || execution.SchedulingDecisionID == nil {
 		t.Fatalf("Turn Execution omitted Stage 3 runtime resources: %#v", execution)
+	}
+	var decision persistence.ExecutionSchedulingDecision
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
+	if decision.ID != *execution.SchedulingDecisionID || decision.EvidenceCompleteness != "selected-only" {
+		t.Fatalf("Turn Execution scheduling decision = %#v", decision)
 	}
 	var workspace persistence.RemoteWorkspace
 	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
@@ -105,6 +115,19 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	}
 	if event.Payload["runtimeMode"] != "approval-required" || event.Payload["interactionMode"] != "plan" {
 		t.Fatalf("Turn modes were not captured in the authoritative Event: %#v", event.Payload)
+	}
+	if event.Payload["schedulingDecisionId"] != decision.ID.String() ||
+		event.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 {
+		t.Fatalf("Turn Event omitted scheduling decision identity: %#v", event.Payload)
+	}
+	var dispatch persistence.OutboxMessage
+	if err := fixture.db.Where("tenant_id = ? AND topic = ? AND message_key = ?",
+		fixture.tenantID, "execution.queued", execution.ID.String()).Take(&dispatch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if dispatch.Payload["schedulingDecisionId"] != decision.ID.String() ||
+		dispatch.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 {
+		t.Fatalf("Execution dispatch omitted scheduling decision identity: %#v", dispatch.Payload)
 	}
 	sourceProposedPlan, ok := event.Payload["sourceProposedPlan"].(map[string]any)
 	if !ok || sourceProposedPlan["threadId"] != "source-session" || sourceProposedPlan["planId"] != "source-plan" {

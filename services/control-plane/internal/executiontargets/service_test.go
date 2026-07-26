@@ -51,6 +51,9 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if created.Status != "offline" {
+		t.Fatalf("new SSH target status = %q, want offline", created.Status)
+	}
 	encoded, err := json.Marshal(created)
 	if err != nil {
 		t.Fatal(err)

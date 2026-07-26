@@ -23,6 +23,12 @@ Re-registration rotates the Worker credential and advances `incarnation`. Heartb
 command pulls, and Artifact authorization are accepted only for that current tuple. A request authenticated before
 replacement is rejected with `worker_incarnation_fenced` and cannot mutate the replacement Worker or its Leases.
 
+A Pod-bound Kubernetes Worker must use canonical `clusterId = kubernetes` and cannot register after the live Pod has a
+deletion timestamp. Once the Reconciler durably fences the exact target/namespace/Pod-name/Pod-UID tuple for deletion,
+registration, authentication, Heartbeat, Claim, and reactivation of that UID fail with
+`kubernetes_pod_deletion_fenced`; agentd must terminate instead of retrying indefinitely. The fence is exact-UID scoped,
+so a Kubernetes replacement that reuses the Pod name with a new UID can register as a new physical incarnation.
+
 ## Required Workspace layout v3
 
 Every newly allocated managed Workspace materialization uses layout v3. Its Claim workload carries all of:

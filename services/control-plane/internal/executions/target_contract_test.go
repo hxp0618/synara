@@ -12,6 +12,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
+	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -35,7 +36,7 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	}
 	sshTarget := persistence.ExecutionTarget{
 		ID: uuid.New(), TenantID: &domain.TenantID, OrganizationID: &domain.OrganizationID,
-		Kind: "ssh", Name: "ssh-test", Status: "active", ConfigurationEncrypted: []byte{},
+		Kind: "docker", Name: "docker-test", Status: "active", ConfigurationEncrypted: []byte{},
 		Capabilities: map[string]any{},
 	}
 	if err := store.DB().Create(&sshTarget).Error; err != nil {
@@ -44,7 +45,7 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	targetService := executiontargets.NewService(store.DB(), config, nil)
 	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
 	input := RegisterWorkerInput{
-		ExecutionTargetID: sshTarget.ID, TargetKind: "ssh", ClusterID: "local",
+		ExecutionTargetID: sshTarget.ID, TargetKind: "docker", ClusterID: "local",
 		InstanceUID: uuid.NewString(),
 		Namespace:   "default", PodName: "agentd-test", Version: "test", ProtocolVersion: WorkerProtocolVersion,
 	}
@@ -125,7 +126,7 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := service.Claim(ctx, worker, ClaimExecutionInput{
-		ExecutionTargetID: sshTarget.ID, TargetKind: "ssh",
+		ExecutionTargetID: sshTarget.ID, TargetKind: "docker",
 	}, "claim-draining"); err == nil {
 		t.Fatal("draining Worker was allowed to claim")
 	}
@@ -192,10 +193,20 @@ func TestRegisterRejectsUntrustedProcessContainmentProofByDefault(t *testing.T) 
 	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
 	capabilities := workerManifestTestCapabilities()
 	addWorkerManifestTestContainmentEvidence(capabilities)
+	instanceUID := uuid.New()
+	const bootstrapGeneration int64 = 1
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Updates(map[string]any{
+			"status": "offline", "ssh_operation_generation": bootstrapGeneration,
+			"ssh_operation_kind": "install", "ssh_operation_started_at": time.Now().UTC(),
+			"ssh_expected_instance_uid": instanceUID,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
 	_, err = service.Register(ctx, RegisterWorkerInput{
 		ExecutionTargetID: target.ID, TargetKind: "ssh",
-		InstanceUID: uuid.NewString(),
-		ClusterID:   "default-trust", Namespace: "default", PodName: "worker-default-trust",
+		InstanceUID: instanceUID.String(), SSHBootstrapGeneration: func() *int64 { value := bootstrapGeneration; return &value }(),
+		ClusterID: "default-trust", Namespace: "default", PodName: "worker-default-trust",
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion,
 		Capabilities: capabilities, LeaseSupported: true, FencingSupported: true,
 	})
@@ -203,4 +214,181 @@ func TestRegisterRejectsUntrustedProcessContainmentProofByDefault(t *testing.T) 
 	if !errors.As(err, &apiError) || apiError.Status != 409 || apiError.Code != "worker_containment_untrusted" {
 		t.Fatalf("containment trust problem = %#v", err)
 	}
+}
+
+func TestSSHBootstrapAuthorityFencesRegistrationAndHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	config, _ := platform.Defaults(platform.ProfilePersonal)
+	store, err := database.OpenMetadataStore(ctx, config, "", filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	domain, err := bootstrap.Ensure(ctx, store.DB(), platform.ProfilePersonal, "ssh-bootstrap-authority-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := persistence.ExecutionTarget{
+		ID: uuid.New(), TenantID: &domain.TenantID, OrganizationID: &domain.OrganizationID,
+		Kind: "ssh", Name: "ssh-bootstrap-authority", Status: "offline", ConfigurationEncrypted: []byte{},
+		Capabilities: workerManifestTestTargetCapabilities(),
+	}
+	if err := store.DB().Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	targetService := executiontargets.NewService(store.DB(), config, nil)
+	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
+	expectedInstanceUID := uuid.New()
+	wrongInstanceUID := uuid.New()
+	const generation int64 = 9
+	input := RegisterWorkerInput{
+		ExecutionTargetID: target.ID, TargetKind: "ssh", InstanceUID: expectedInstanceUID.String(),
+		SSHBootstrapGeneration: func() *int64 { value := generation; return &value }(),
+		ClusterID:              "ssh", Namespace: "default", PodName: "ssh-" + target.ID.String(), Version: "worker-test",
+		ProtocolVersion: WorkerProtocolVersion, Capabilities: workerManifestTestCapabilities(),
+		LeaseSupported: true, FencingSupported: true,
+	}
+	assertBootstrapRejected := func(label string, err error) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "ssh_bootstrap_authority_invalid" {
+			t.Fatalf("%s problem = %#v (%v)", label, apiError, err)
+		}
+	}
+	assertActiveRestartRejected := func(label string, err error) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "ssh_active_reregistration_invalid" {
+			t.Fatalf("%s problem = %#v (%v)", label, apiError, err)
+		}
+	}
+
+	_, err = service.Register(ctx, input)
+	assertBootstrapRejected("offline without operation", err)
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Updates(map[string]any{
+			"ssh_operation_generation": generation, "ssh_operation_kind": "revoke",
+			"ssh_operation_started_at": time.Now().UTC(), "ssh_expected_instance_uid": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Register(ctx, input)
+	assertBootstrapRejected("revoke window", err)
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Updates(map[string]any{
+			"ssh_operation_kind": "install", "ssh_expected_instance_uid": expectedInstanceUID,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	wrongGenerationInput := input
+	wrongGenerationInput.SSHBootstrapGeneration = func() *int64 { value := generation - 1; return &value }()
+	_, err = service.Register(ctx, wrongGenerationInput)
+	assertBootstrapRejected("old generation", err)
+	wrongInstanceInput := input
+	wrongInstanceInput.InstanceUID = wrongInstanceUID.String()
+	_, err = service.Register(ctx, wrongInstanceInput)
+	assertBootstrapRejected("wrong instance", err)
+
+	registered, err := service.Register(ctx, input)
+	if err != nil {
+		t.Fatalf("correct install bootstrap registration: %v", err)
+	}
+	worker, err := service.Authenticate(ctx, registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Heartbeat(ctx, worker, HeartbeatInput{
+		ProtocolVersion: WorkerProtocolVersion, SSHBootstrapGeneration: input.SSHBootstrapGeneration,
+	}); err != nil {
+		t.Fatalf("correct install bootstrap heartbeat: %v", err)
+	}
+	wrongHeartbeatGeneration := generation - 1
+	_, err = service.Heartbeat(ctx, worker, HeartbeatInput{
+		ProtocolVersion: WorkerProtocolVersion, SSHBootstrapGeneration: &wrongHeartbeatGeneration,
+	})
+	assertBootstrapRejected("old-generation heartbeat", err)
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Updates(map[string]any{
+			"status": "active", "ssh_operation_kind": nil,
+			"ssh_operation_started_at": nil, "ssh_expected_instance_uid": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := service.Register(ctx, input)
+	if err != nil {
+		t.Fatalf("active SSH Worker restart registration: %v", err)
+	}
+	restartedWorker, err := service.Authenticate(ctx, restarted.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restartedWorker.ID != worker.ID || restartedWorker.Incarnation != worker.Incarnation+1 {
+		t.Fatalf("active SSH restart did not rotate the current incarnation: %#v", restartedWorker)
+	}
+	if _, err := service.Authenticate(ctx, registered.Token); err == nil {
+		t.Fatal("active SSH restart did not revoke the previous bearer token")
+	}
+	_, err = service.Register(ctx, wrongInstanceInput)
+	assertActiveRestartRejected("active wrong instance", err)
+	_, err = service.Register(ctx, wrongGenerationInput)
+	assertActiveRestartRejected("active wrong generation", err)
+	newLogicalIdentity := input
+	newLogicalIdentity.PodName = "new-logical-identity"
+	_, err = service.Register(ctx, newLogicalIdentity)
+	assertActiveRestartRejected("active new logical identity", err)
+
+	if err := store.DB().Model(&persistence.WorkerInstance{}).Where("id = ?", restartedWorker.ID).
+		Update("ssh_bootstrap_generation", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyInput := input
+	legacyInput.SSHBootstrapGeneration = nil
+	legacyRestarted, err := service.Register(ctx, legacyInput)
+	if err != nil {
+		t.Fatalf("legacy active SSH restart registration: %v", err)
+	}
+	legacyWorker, err := service.Authenticate(ctx, legacyRestarted.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyWorker.SSHBootstrapGeneration != nil {
+		t.Fatalf("legacy SSH restart unexpectedly invented bootstrap authority: %#v", legacyWorker.SSHBootstrapGeneration)
+	}
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Updates(map[string]any{
+			"status": "offline", "ssh_operation_kind": nil,
+			"ssh_operation_started_at": nil, "ssh_expected_instance_uid": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Heartbeat(ctx, legacyWorker, HeartbeatInput{
+		ProtocolVersion: WorkerProtocolVersion,
+	})
+	assertBootstrapRejected("offline without operation heartbeat", err)
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Update("status", "active").Error; err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
+	if _, err := service.RevokeWorker(
+		ctx, principal, domain.TenantID, legacyWorker.ID,
+		RevokeWorkerInput{ExpectedIncarnation: legacyWorker.Incarnation, Reason: "active SSH restart revoked"},
+		"active-ssh-restart-revoke", "active-ssh-restart-revoke", "127.0.0.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Register(ctx, legacyInput)
+	var revokedProblem *problem.Error
+	if !errors.As(err, &revokedProblem) || revokedProblem.Code != "worker_identity_revoked" {
+		t.Fatalf("revoked active SSH Worker restart problem = %#v (%v)", revokedProblem, err)
+	}
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+		Update("status", "disabled").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Register(ctx, input)
+	assertBootstrapRejected("disabled registration", err)
 }

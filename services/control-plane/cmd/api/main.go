@@ -175,7 +175,7 @@ func main() {
 	sshProvisioner := executiontargets.NewSSHProvisioner(executionTargetService, executiontargets.SSHProvisioningConfig{
 		AgentdBinaryPath: cfg.AgentdBinaryPath, RegistrationToken: cfg.WorkerRegistrationToken,
 		PublicControlPlaneURL: cfg.PublicControlPlaneURL, WorkerLeaseTTL: cfg.WorkerLeaseTTL,
-		Timeout: cfg.SSHProvisionTimeout,
+		WorkerHeartbeatTimeout: cfg.WorkerHeartbeatTimeout, Timeout: cfg.SSHProvisionTimeout,
 	})
 	dockerReconciler := executiontargets.NewDockerPoolReconciler(executionTargetService, executiontargets.DockerPoolReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
@@ -214,6 +214,7 @@ func main() {
 		executions.WithProviderCredentialAccessTTL(cfg.ProviderCredentialAccessTTL),
 		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
 	)
+	sshProvisioner.SetWorkerAuthorityRevoker(executionService.RevokeExecutionTargetWorkersInTransaction)
 	billingAdapter, billingImports, billingCloser, err := billing.NewAdapterFromRuntime(ctx, cfg.Billing)
 	if err != nil {
 		logger.Error("failed to configure billing adapter", "error", err)
@@ -226,34 +227,48 @@ func main() {
 			}
 		}()
 	}
-	tariffOperatorTenantID := cfg.Billing.TariffOperatorTenantID
-	if tariffOperatorTenantID == uuid.Nil && bootstrapped.Personal {
-		tariffOperatorTenantID = bootstrapped.TenantID
+	billingOperatorTenantID := cfg.Billing.TariffOperatorTenantID
+	if billingOperatorTenantID == uuid.Nil && bootstrapped.Personal {
+		billingOperatorTenantID = bootstrapped.TenantID
+	}
+	if len(cfg.Billing.SharedAllocations) > 0 && billingOperatorTenantID == uuid.Nil {
+		logger.Error("shared billing allocation scheduler requires a configured platform billing operator Tenant")
+		os.Exit(1)
 	}
 	billingService := billing.NewService(
 		db,
 		billingAdapter,
 		billing.WithConfiguredImports(billingImports),
-		billing.WithTariffOperatorTenant(tariffOperatorTenantID),
+		billing.WithConfiguredSharedAllocations(cfg.Billing.SharedAllocations),
+		billing.WithPlatformBillingOperatorTenant(billingOperatorTenantID),
 		billing.WithBuiltInEstimateSweeper(),
 	)
 	resourceLifecycleController := lifecyclepolicy.NewController(
 		executionService, cfg.ResourceLifecycleSweepInterval, logger, metrics,
 	)
 	tenancyService := tenancy.NewService(db, executionService)
+	managedKubernetesObservationTTL := minDuration(
+		time.Hour,
+		maxDuration(30*time.Second, 3*cfg.KubernetesReconcileInterval),
+	)
 	managedKubernetesRoutingPublisher := executiontargets.NewManagedKubernetesRoutingPublisher(
 		executionTargetService,
 		executiontargets.ManagedKubernetesRoutingPublisherConfig{
 			PublisherIdentity: "managed-kubernetes-routing-publisher:" + reconcilerLeadershipConfig.HolderID,
-			ObservationTTL: minDuration(
-				time.Hour,
-				maxDuration(30*time.Second, 3*cfg.KubernetesReconcileInterval),
-			),
+			ObservationTTL:    managedKubernetesObservationTTL,
+		},
+	)
+	managedKubernetesWarmCapacityPublisher := executiontargets.NewManagedKubernetesWarmCapacityPublisher(
+		executionTargetService,
+		executiontargets.ManagedKubernetesWarmCapacityPublisherConfig{
+			PublisherIdentity: "managed-kubernetes-warm-capacity-publisher:" + reconcilerLeadershipConfig.HolderID,
+			ObservationTTL:    managedKubernetesObservationTTL,
 		},
 	)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{
 		PublicControlPlaneURL: cfg.PublicControlPlaneURL,
-		WorkerLeaseTTL:        cfg.WorkerLeaseTTL, Interval: cfg.KubernetesReconcileInterval,
+		WorkerLeaseTTL:        cfg.WorkerLeaseTTL, WorkerHeartbeatTimeout: cfg.WorkerHeartbeatTimeout,
+		Interval:                           cfg.KubernetesReconcileInterval,
 		RecoverExpired:                     executionService.RecoverExpired,
 		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
 		FinalizeResourceSuspend: func(ctx context.Context, observation executiontargets.KubernetesPodTerminalObservation) (bool, error) {
@@ -264,9 +279,12 @@ func main() {
 				PodUID: observation.PodUID, Phase: observation.Phase, ObservedAt: observation.ObservedAt,
 			})
 		},
-		ObserveWorkerPod:     executionService.ObserveKubernetesWorkerPod,
-		PublishRoutingHealth: managedKubernetesRoutingPublisher.PublishReconcile,
-		Observer:             metrics, ResolveImagePull: resolveImagePull,
+		ObserveWorkerPod:           executionService.ObserveKubernetesWorkerPod,
+		ObserveExecutionPod:        executionService.ObserveKubernetesExecutionPod,
+		PodPendingFailureThreshold: cfg.KubernetesPodPendingFailureThreshold,
+		PublishRoutingHealth:       managedKubernetesRoutingPublisher.PublishReconcile,
+		PublishWarmCapacity:        managedKubernetesWarmCapacityPublisher.PublishReconcile,
+		Observer:                   metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	workerReleaseAutoRollback := workerreleases.NewAutoRollbackController(
 		workerreleases.NewService(db),
@@ -386,6 +404,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var billingSharedAllocationLeaderRunner *reconcilerleadership.Runner
+	if cycleInterval := billingSharedAllocationScheduleInterval(cfg.Billing); cycleInterval > 0 {
+		billingSharedAllocationLeaderRunner, err = reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+			LeaseName:         "synara:billing-shared-allocation-scheduler",
+			CycleInterval:     cycleInterval,
+			AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+			RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+			AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+			Logger:            logger,
+		})
+		if err != nil {
+			logger.Error("failed to configure shared billing allocation leadership runner", "error", err)
+			os.Exit(1)
+		}
+	}
 	var localAgentd *agentd.LocalSupervisor
 	if len(cfg.LocalAgentdRunnerCommand) > 0 {
 		localTarget, _, resolveErr := executionTargetService.ResolveWorkerTarget(
@@ -482,6 +515,34 @@ func main() {
 						"estimateWorkers", summary.EstimateWorkers,
 						"estimateRows", summary.EstimateSweeps,
 						"estimateWorkerFailures", summary.EstimateWorkerFailures,
+						"skipped", summary.Skipped,
+						"failed", summary.Failed,
+						"error", err,
+					)
+					return err
+				})
+			})
+		})
+	}
+	if billingSharedAllocationLeaderRunner != nil {
+		startBackground(func() {
+			billingSharedAllocationLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+				return observeLeadershipBackground(metrics, "billing-shared-allocation-scheduler", func() error {
+					summary, err := billingService.RunSharedAllocationSchedulerOnce(run.Context)
+					log := logger.Debug
+					if err != nil {
+						log = logger.Warn
+					}
+					log(
+						"shared billing allocation scheduler cycle completed",
+						"checked", summary.Checked,
+						"attempted", summary.Attempted,
+						"completed", summary.Completed,
+						"workers", summary.Workers,
+						"allocationRuns", summary.AllocationRuns,
+						"allocationSlices", summary.AllocationSlices,
+						"failedWorkers", summary.FailedWorkers,
+						"notSettled", summary.NotSettled,
 						"skipped", summary.Skipped,
 						"failed", summary.Failed,
 						"error", err,
@@ -672,6 +733,10 @@ func minDuration(left, right time.Duration) time.Duration {
 
 func billingImportScheduleInterval(config billing.RuntimeConfig) time.Duration {
 	return config.MinimumScheduleInterval()
+}
+
+func billingSharedAllocationScheduleInterval(config billing.RuntimeConfig) time.Duration {
+	return config.MinimumSharedAllocationScheduleInterval()
 }
 
 func observeLeadershipBackground(observer interface {

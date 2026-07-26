@@ -146,6 +146,13 @@ func TestSQLiteMetadataStoreRejectsAmbiguousLegacyActiveExecutions(t *testing.T)
 	if err := store.DB().Exec(`DROP INDEX uq_agent_executions_session_active`).Error; err != nil {
 		t.Fatal(err)
 	}
+	// This fixture intentionally injects an orphaned pre-authority snapshot to
+	// exercise the legacy active-Execution migration guard. Current writes are
+	// correctly rejected by the Scheduling Policy insert trigger, so remove it
+	// only for this synthetic legacy setup; the migration below reinstalls it.
+	if err := store.DB().Exec(`DROP TRIGGER trg_agent_executions_scheduling_policy_snapshot_insert`).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	tenantID := uuid.New()
 	sessionID := uuid.New()

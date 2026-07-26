@@ -19,7 +19,6 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
-	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
 type primaryOperationRequest struct {
@@ -248,6 +247,9 @@ func (s *Service) requestPrimaryOperation(
 				return &target
 			}(),
 			routeRequest,
+			sessions.ExecutionLaunchPolicyScope{
+				TenantID: tenantID, OrganizationID: session.OrganizationID, Provider: session.Provider,
+			},
 			session.WarmPoolMode,
 			func(
 				ctx context.Context,
@@ -297,18 +299,6 @@ func (s *Service) requestPrimaryOperation(
 			RestoreCheckpointID: resources.RestoreCheckpointID, WarmPoolModeSnapshot: session.WarmPoolMode,
 			RequestedBy: principal.UserID, QueuedAt: now,
 		}
-		placement.ApplySelection(&execution, launchTargetPlan.PlacementSelection)
-		if launchTargetPlan.RoutingSelection != nil {
-			routing.ApplyExecutionSelection(&execution, *launchTargetPlan.RoutingSelection)
-		}
-		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, target.ID, execution.ID)
-		if err != nil {
-			return QueuedSessionOperation{}, err
-		}
-		if releaseSelection != nil {
-			execution.WorkerReleaseRevisionID = &releaseSelection.RevisionID
-			execution.WorkerReleaseChannel = &releaseSelection.Channel
-		}
 		commandID := uuid.New()
 		payload := make(map[string]any, len(request.Payload)+1)
 		for key, value := range request.Payload {
@@ -324,9 +314,12 @@ func (s *Service) requestPrimaryOperation(
 		if err := tx.WithContext(ctx).Create(&turn).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(409, "turn_create_rejected", "The operation Turn could not be created.", err)
 		}
-		if err := tx.WithContext(ctx).Create(&execution).Error; err != nil {
-			return QueuedSessionOperation{}, problem.Wrap(409, "execution_create_rejected", "The operation Execution could not be created.", err)
+		scheduled, err := sessions.CreateScheduledExecution(ctx, tx, execution, launchTargetPlan, now)
+		if err != nil {
+			return QueuedSessionOperation{}, err
 		}
+		execution = scheduled.Execution
+		decision := scheduled.Decision
 		if err := tx.WithContext(ctx).Create(&command).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(409, "control_command_conflict", "The primary Control command conflicts with another operation.", err)
 		}
@@ -336,20 +329,30 @@ func (s *Service) requestPrimaryOperation(
 				"turnId": turn.ID, "executionId": execution.ID, "status": "queued",
 				"turnKind": request.TurnKind, "controlCommandId": command.ID,
 				"executionTargetId": target.ID, "targetKind": target.Kind,
-				"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":       execution.WorkerReleaseChannel,
-				"workerPoolId":               execution.WorkerPoolID,
-				"workerPoolVersion":          execution.WorkerPoolVersion,
-				"capacityClass":              execution.CapacityClass,
-				"placementPolicyVersion":     execution.PlacementPolicyVersion,
-				"targetGroupId":              execution.TargetGroupID,
-				"targetGroupVersion":         execution.TargetGroupVersion,
-				"targetGroupMemberVersion":   execution.TargetGroupMemberVersion,
-				"selectedRegion":             execution.SelectedRegion,
-				"selectedClusterId":          execution.SelectedClusterID,
-				"routingReason":              execution.RoutingReason,
-				"workspaceMaterializationId": resources.MaterializationID,
-				"runtimeMode":                turn.RuntimeMode, "interactionMode": turn.InteractionMode,
+				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":                execution.WorkerReleaseChannel,
+				"workerPoolId":                        execution.WorkerPoolID,
+				"workerPoolVersion":                   execution.WorkerPoolVersion,
+				"capacityClass":                       execution.CapacityClass,
+				"placementPolicyVersion":              execution.PlacementPolicyVersion,
+				"placementRegion":                     execution.PlacementRegion,
+				"placementClusterId":                  execution.PlacementClusterID,
+				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+				"targetGroupId":                       execution.TargetGroupID,
+				"targetGroupVersion":                  execution.TargetGroupVersion,
+				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+				"selectedRegion":                      execution.SelectedRegion,
+				"selectedClusterId":                   execution.SelectedClusterID,
+				"routingReason":                       execution.RoutingReason,
+				"schedulingDecisionId":                decision.ID,
+				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+				"workspaceMaterializationId":          resources.MaterializationID,
+				"runtimeMode":                         turn.RuntimeMode, "interactionMode": turn.InteractionMode,
 				"operation": request.Payload,
 			},
 		})
@@ -362,19 +365,29 @@ func (s *Service) requestPrimaryOperation(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "turnKind": request.TurnKind, "controlCommandId": command.ID,
 				"executionTargetId": target.ID, "targetKind": target.Kind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId":  execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":     execution.WorkerReleaseChannel,
-				"workerPoolId":             execution.WorkerPoolID,
-				"workerPoolVersion":        execution.WorkerPoolVersion,
-				"capacityClass":            execution.CapacityClass,
-				"placementPolicyVersion":   execution.PlacementPolicyVersion,
-				"targetGroupId":            execution.TargetGroupID,
-				"targetGroupVersion":       execution.TargetGroupVersion,
-				"targetGroupMemberVersion": execution.TargetGroupMemberVersion,
-				"selectedRegion":           execution.SelectedRegion,
-				"selectedClusterId":        execution.SelectedClusterID,
-				"routingReason":            execution.RoutingReason,
-				"provider":                 provider, "providerRuntimeBindingId": resources.BindingID,
+				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":                execution.WorkerReleaseChannel,
+				"workerPoolId":                        execution.WorkerPoolID,
+				"workerPoolVersion":                   execution.WorkerPoolVersion,
+				"capacityClass":                       execution.CapacityClass,
+				"placementPolicyVersion":              execution.PlacementPolicyVersion,
+				"placementRegion":                     execution.PlacementRegion,
+				"placementClusterId":                  execution.PlacementClusterID,
+				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+				"targetGroupId":                       execution.TargetGroupID,
+				"targetGroupVersion":                  execution.TargetGroupVersion,
+				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+				"selectedRegion":                      execution.SelectedRegion,
+				"selectedClusterId":                   execution.SelectedClusterID,
+				"routingReason":                       execution.RoutingReason,
+				"schedulingDecisionId":                decision.ID,
+				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+				"provider":                            provider, "providerRuntimeBindingId": resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,

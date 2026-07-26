@@ -12,6 +12,28 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
+func TestNormalizeKubernetesWorkerPodObservationPreservesSpecificTerminalCause(t *testing.T) {
+	base := executiontargets.KubernetesWorkerPodObservation{
+		ExecutionTargetID: uuid.New(), Namespace: "default", PodName: "worker",
+		PodUID: uuid.NewString(), Phase: "Failed", ObservedAt: time.Now().UTC(),
+	}
+	for _, testCase := range []struct {
+		reason string
+		want   string
+	}{
+		{reason: "terminal-observation:evicted", want: "kubernetes-pod-evicted"},
+		{reason: "terminal-observation:oom-killed", want: "kubernetes-pod-oom-killed"},
+		{reason: "terminal-observation:pod-failed", want: "kubernetes-pod-failed"},
+	} {
+		observation := base
+		observation.Reason = testCase.reason
+		_, terminalReason, draining, err := normalizeKubernetesWorkerPodObservation(observation)
+		if err != nil || draining || terminalReason != testCase.want {
+			t.Fatalf("normalize %q = reason %q draining=%v err=%v", testCase.reason, terminalReason, draining, err)
+		}
+	}
+}
+
 func TestObserveKubernetesWorkerPodDrainsDeleteRequestAndTerminalizesKubeletPhase(t *testing.T) {
 	db, service, fixture := setupSQLiteRecoveryService(t)
 	ctx := context.Background()

@@ -71,6 +71,9 @@ are not completion proofs. Kubernetes registration for this mode is Pod-bound th
 TokenReview plus a live Pod ownership lookup, and the attempt freezes Worker incarnation, namespace, Pod name and UID.
 Quiesce/checkpoint recording and Suspend completion are idempotent; ambiguous or missing proof leaves the old
 Generation fenced for Lease recovery rather than classifying it as suspended.
+Any later Kubernetes Pod cleanup also records a durable exact-UID deletion fence before calling the Kubernetes API.
+That lifecycle fence prevents the deleted incarnation from registering or receiving work, but it is not a terminal
+proof: DELETE acceptance, a deletion timestamp, or the fence itself cannot complete a Suspend attempt.
 A user-requested, Provider-acknowledged Turn interrupt is also distinct: it releases
 the Lease and moves the current Turn and Execution to the terminal `interrupted` state while leaving the Session
 active for a later Turn.

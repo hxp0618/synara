@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "synara.billing-postgres-minio-acceptance.v3",
+  "acceptanceGeneration": "final17",
+  "runID": "20260725212737-92980-27367",
+  "startedAt": "2026-07-25T21:27:37Z",
+  "finishedAt": "2026-07-25T21:27:48Z",
+  "status": "passed",
+  "exitCode": 0,
+  "phase": "test-complete",
+  "failure": null,
+  "test": {
+    "cases": [
+      "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+      "TestBillingCUR2ManifestVersionedS3Acceptance",
+      "TestPostgresConcurrentInitialInvoiceImportsSerializeByIdentity"
+    ],
+    "status": "passed",
+    "exitCode": 0
+  },
+  "checks": {
+    "detailProduced": true,
+    "detailValidJSON": true,
+    "detailWithin65536Bytes": true,
+    "detailContainsNoCredentials": true,
+    "detailAssertionsAllowlistedBooleans": true,
+    "testBinaryUnchangedDuringRun": true,
+    "billingSourceFilesUnchangedDuringRun": true,
+    "requiredTestCasesPassedWithoutSkip": true,
+    "billingSourceFilesBoundToEvidence": true,
+    "integrationAssertions": {
+      "estimateTariffSegmentsPersisted": true,
+      "exactObjectVersionRead": true,
+      "invoiceImported": true,
+      "postgresMigrationsApplied": true,
+      "reconciliationPersisted": true,
+      "restartReplayIdempotent": true,
+      "scheduledAuditIdempotent": true
+    }
+  },
+  "detail": {
+    "bytes": 735,
+    "sha256": "dbddb1763710d813e8445143dfca965bd83ee9e558b2c58f6efb27a38263e9c8"
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true,
+    "hostGoVersion": "go version go1.26.5 darwin/arm64",
+    "acceptanceScriptSHA256": "c76483e65a5b0408a5850e83c8140ab02611156002e08541da3d173a682a1f22",
+    "runtimeTestSourceSHA256": "29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69",
+    "concurrentImportTestSourceSHA256": "fc547c4026403f608be59cdb26e0141dbff1bc5d2ed2442941be39fc257e5d06",
+    "cur2ManifestTestSourceSHA256": "83dec98f253f2d2947a9ef2503bbc671448a8156a02a146b0a782b675623c54f",
+    "billingServiceSourceSHA256": "9e75b8d1d5f28c69ff1faa9b6e5808fc814bf022f9771f0a83f28bca9dc6e5af",
+    "blobParsersSourceSHA256": "7fb8a901387731947d65225584c6eeb61037d40fa8512d92907affcee3000b19",
+    "blobSourceSHA256": "acd221346b685496426ca15cc68b8a20f390e0994ff0e80a27fed41baf22cde8",
+    "cloudSourcesSourceSHA256": "fef9ac7350b79151c28bcc364ecbcb3f42e54d66a9471b91a8a5949a1fa344fc",
+    "testBinarySHA256": "d1fa92fe4663fdf1c9acbce0fa5ade46f2032b22579b2b132088e24b4fee5353"
+  },
+  "runtime": {
+    "metadataStore": "disposable-postgresql",
+    "objectStore": "disposable-versioned-minio-s3-compatible",
+    "exactObjectVersionPinned": true,
+    "cur2NativeManifestVersionedS3Verified": true,
+    "cloudWorkloadIdentityVerified": false
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17-alpine",
+      "id": "sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f",
+      "version": "17.10"
+    },
+    "minio": {
+      "reference": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+      "id": "sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d"
+    },
+    "mc": {
+      "reference": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+      "id": "sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71"
+    },
+    "testRuntime": {
+      "reference": "golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669",
+      "id": "sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86",
+      "architecture": "arm64"
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "disposableRuntimeRemoved": true,
+    "credentialsPersistedAfterCleanup": false,
+    "objectContentsPersistedAfterCleanup": false
+  }
+}

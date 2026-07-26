@@ -114,7 +114,14 @@ func normalizeKubernetesWorkerPodObservation(
 	case phase == "Succeeded":
 		return observedAt, "kubernetes-pod-succeeded", false, nil
 	case phase == "Failed":
-		return observedAt, "kubernetes-pod-failed", false, nil
+		terminalReason := "kubernetes-pod-failed"
+		switch strings.TrimPrefix(reason, "terminal-observation:") {
+		case executiontargets.KubernetesPodFailureEvicted:
+			terminalReason = "kubernetes-pod-evicted"
+		case executiontargets.KubernetesPodFailureOOMKilled:
+			terminalReason = "kubernetes-pod-oom-killed"
+		}
+		return observedAt, terminalReason, false, nil
 	case strings.HasPrefix(reason, "confirmed-missing:"):
 		return observedAt, "kubernetes-pod-confirmed-missing", false, nil
 	case strings.HasPrefix(reason, "delete-requested:"):

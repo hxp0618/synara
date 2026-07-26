@@ -2,7 +2,6 @@ package sessions
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	sharedrecoverybundle "github.com/synara-ai/synara/services/control-plane/internal/recoverybundle"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
 
@@ -525,16 +525,28 @@ func loadFailoverReplicationAuthority(
 	}
 	var payload failoverBundleAuthorityPayload
 	if sourceBundle != nil {
-		decoded, err := decodeFailoverBundleAuthorityPayload(sourceBundle.Payload)
-		if err != nil {
+		err := sharedrecoverybundle.DecodeAndValidate(*sourceBundle, &payload)
+		switch {
+		case errors.Is(err, sharedrecoverybundle.ErrIntegrityFailed):
+			return sourceDRRoutingAuthority{}, problem.New(
+				409,
+				"target_failover_bundle_integrity_failed",
+				"The source Recovery Bundle payload hash does not match its immutable envelope.",
+			)
+		case errors.Is(err, sharedrecoverybundle.ErrEnvelopeMismatch):
+			return sourceDRRoutingAuthority{}, problem.New(
+				409,
+				"target_failover_bundle_envelope_mismatch",
+				"The source Recovery Bundle payload does not match its immutable execution envelope.",
+			)
+		case err != nil:
 			return sourceDRRoutingAuthority{}, problem.Wrap(
-				500,
+				409,
 				"target_failover_bundle_authority_invalid",
-				"The source Recovery Bundle could not be decoded for DR authority validation.",
+				"The source Recovery Bundle could not be validated for DR authority.",
 				err,
 			)
 		}
-		payload = decoded
 		if authority.SourceRegion == "" {
 			authority.SourceRegion = valueOrEmpty(payload.Execution.SelectedRegion)
 		}
@@ -1130,18 +1142,6 @@ func combineArtifactAuthorityExpectation(
 		merged.ExecutionID = &executionID
 	}
 	return merged, nil
-}
-
-func decodeFailoverBundleAuthorityPayload(payload map[string]any) (failoverBundleAuthorityPayload, error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return failoverBundleAuthorityPayload{}, err
-	}
-	var decoded failoverBundleAuthorityPayload
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return failoverBundleAuthorityPayload{}, err
-	}
-	return decoded, nil
 }
 
 func valueOrEmpty(value *string) string {

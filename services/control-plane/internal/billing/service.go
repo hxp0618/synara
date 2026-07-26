@@ -90,8 +90,9 @@ type ImportActualInvoiceRequest struct {
 }
 
 type ImportActualInvoiceResult struct {
-	Import persistence.BillingActualInvoiceImport
-	Lines  []persistence.BillingActualInvoiceLine
+	Import           persistence.BillingActualInvoiceImport
+	Lines            []persistence.BillingActualInvoiceLine
+	SourceProvenance *InvoiceSourceProvenance
 }
 
 type ReconciledActualInvoiceLine struct {
@@ -117,16 +118,21 @@ type reconciliationMutation struct {
 }
 
 type Service struct {
-	db                     *gorm.DB
-	adapter                Adapter
-	authorizer             *authorization.Authorizer
-	auditRecorder          func(context.Context, *gorm.DB, audit.Entry) error
-	tariffOperatorTenantID uuid.UUID
-	configuredImports      map[string]ConfiguredImport
-	estimateSweeper        EstimateSweeper
-	schedulerMu            sync.Mutex
-	schedulerState         map[schedulerStateKey]scheduledImportState
-	now                    func() time.Time
+	db                              *gorm.DB
+	adapter                         Adapter
+	authorizer                      *authorization.Authorizer
+	auditRecorder                   func(context.Context, *gorm.DB, audit.Entry) error
+	platformBillingOperatorTenantID uuid.UUID
+	configuredImports               map[string]ConfiguredImport
+	configuredSharedAllocations     map[string]ConfiguredSharedAllocation
+	estimateSweeper                 EstimateSweeper
+	sharedAllocationMu              sync.Mutex
+	schedulerMu                     sync.Mutex
+	schedulerState                  map[schedulerStateKey]scheduledImportState
+	sharedSchedulerMu               sync.Mutex
+	sharedSchedulerRunMu            sync.Mutex
+	sharedSchedulerState            map[sharedSchedulerStateKey]scheduledSharedAllocationState
+	now                             func() time.Time
 }
 
 type ServiceOption func(*Service)
@@ -140,6 +146,18 @@ func WithConfiguredImports(imports []ConfiguredImport) ServiceOption {
 		for _, configuredImport := range imports {
 			configuredImport.ExecutionTargetIDs = append([]uuid.UUID(nil), configuredImport.ExecutionTargetIDs...)
 			service.configuredImports[configuredImportKey(configuredImport.TenantID, configuredImport.Provider, configuredImport.ExternalImportID)] = configuredImport
+		}
+	}
+}
+
+func WithConfiguredSharedAllocations(allocations []ConfiguredSharedAllocation) ServiceOption {
+	return func(service *Service) {
+		if service == nil {
+			return
+		}
+		service.configuredSharedAllocations = make(map[string]ConfiguredSharedAllocation, len(allocations))
+		for _, configuredAllocation := range allocations {
+			service.configuredSharedAllocations[configuredSharedAllocationKey(configuredAllocation)] = configuredAllocation
 		}
 	}
 }
@@ -171,26 +189,34 @@ func WithAuditRecorder(recorder func(context.Context, *gorm.DB, audit.Entry) err
 	}
 }
 
-// WithTariffOperatorTenant binds the shared provider-rate catalog to one
-// explicitly configured platform-operator Tenant. A zero UUID disables the
-// authenticated mutation surface while leaving internal/bootstrap tariff
-// creation available.
-func WithTariffOperatorTenant(tenantID uuid.UUID) ServiceOption {
+// WithPlatformBillingOperatorTenant binds platform-global billing mutations,
+// including the provider-rate catalog and shared-Target ledger coverage, to
+// one explicitly configured operator Tenant. A zero UUID disables those
+// authenticated mutation surfaces while leaving internal accounting methods
+// available.
+func WithPlatformBillingOperatorTenant(tenantID uuid.UUID) ServiceOption {
 	return func(service *Service) {
 		if service == nil {
 			return
 		}
-		service.tariffOperatorTenantID = tenantID
+		service.platformBillingOperatorTenantID = tenantID
 	}
+}
+
+// WithTariffOperatorTenant is retained as a compatibility alias for runtime
+// configuration and callers that predate shared-Target billing management.
+func WithTariffOperatorTenant(tenantID uuid.UUID) ServiceOption {
+	return WithPlatformBillingOperatorTenant(tenantID)
 }
 
 func NewService(db *gorm.DB, adapter Adapter, options ...ServiceOption) *Service {
 	service := &Service{
-		db:             db,
-		adapter:        adapter,
-		authorizer:     authorization.NewAuthorizer(db),
-		auditRecorder:  audit.Record,
-		schedulerState: make(map[schedulerStateKey]scheduledImportState),
+		db:                   db,
+		adapter:              adapter,
+		authorizer:           authorization.NewAuthorizer(db),
+		auditRecorder:        audit.Record,
+		schedulerState:       make(map[schedulerStateKey]scheduledImportState),
+		sharedSchedulerState: make(map[sharedSchedulerStateKey]scheduledSharedAllocationState),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -441,6 +467,20 @@ func (s *Service) importActualInvoiceTx(
 		ImportedAt:           now,
 		CreatedAt:            now,
 	}
+	if err := acquireBillingInvoiceImportIdentityLock(
+		ctx,
+		tx,
+		model.TenantID,
+		model.Provider,
+		model.ExternalImportID,
+	); err != nil {
+		return importedInvoiceMutation{}, problem.Wrap(
+			500,
+			"billing_invoice_import_coordination_failed",
+			"The billing invoice import could not be coordinated.",
+			err,
+		)
+	}
 
 	var existing persistence.BillingActualInvoiceImport
 	existingErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -455,7 +495,9 @@ func (s *Service) importActualInvoiceTx(
 		if lineErr != nil {
 			return importedInvoiceMutation{}, lineErr
 		}
-		return importedInvoiceMutation{Result: ImportActualInvoiceResult{Import: existing, Lines: lines}}, nil
+		return importedInvoiceMutation{Result: ImportActualInvoiceResult{
+			Import: existing, Lines: lines, SourceProvenance: cloneInvoiceSourceProvenance(normalizedInvoice.SourceProvenance),
+		}}, nil
 	case !errors.Is(existingErr, gorm.ErrRecordNotFound):
 		return importedInvoiceMutation{}, problem.Wrap(500, "billing_invoice_import_load_failed", "The billing invoice import could not be loaded.", existingErr)
 	}
@@ -489,9 +531,32 @@ func (s *Service) importActualInvoiceTx(
 		}
 	}
 	return importedInvoiceMutation{
-		Result:  ImportActualInvoiceResult{Import: model, Lines: lines},
+		Result: ImportActualInvoiceResult{
+			Import: model, Lines: lines, SourceProvenance: cloneInvoiceSourceProvenance(normalizedInvoice.SourceProvenance),
+		},
 		Created: true,
 	}, nil
+}
+
+func acquireBillingInvoiceImportIdentityLock(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+	provider string,
+	externalImportID string,
+) error {
+	if tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	lockKey := strings.Join([]string{
+		"synara:billing-actual-invoice-import",
+		tenantID.String(),
+		provider,
+		externalImportID,
+	}, "\x1f")
+	return tx.WithContext(ctx).
+		Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", lockKey).
+		Error
 }
 
 func (s *Service) ReconcileActualInvoiceImport(
@@ -1220,6 +1285,14 @@ func normalizeImportedInvoice(
 	if err != nil {
 		return ImportedActualInvoice{}, "", err
 	}
+	if imported.SourceProvenance != nil {
+		checksum := strings.ToLower(strings.TrimSpace(imported.SourceProvenance.BundleChecksum))
+		decoded, decodeErr := hex.DecodeString(checksum)
+		if decodeErr != nil || len(decoded) != sha256.Size || imported.SourceProvenance.FilteredAdjustmentCount < 0 {
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_source_provenance", "Billing source provenance is invalid.")
+		}
+		imported.SourceProvenance.BundleChecksum = checksum
+	}
 
 	lines := make([]ImportedActualInvoiceLine, 0, len(imported.Lines))
 	resourceKeys := make(map[string]struct{}, len(imported.Lines))
@@ -1287,6 +1360,7 @@ func normalizeImportedInvoice(
 		BillingPeriodEndAt:   periodEnd,
 		CurrencyCode:         currency,
 		Lines:                lines,
+		SourceProvenance:     cloneInvoiceSourceProvenance(imported.SourceProvenance),
 	}
 	return normalized, checksumImportedInvoice(request.Provider, normalized), nil
 }
@@ -1298,6 +1372,11 @@ func checksumImportedInvoice(provider string, imported ImportedActualInvoice) st
 	writeChecksumPart(hasher, imported.BillingPeriodStartAt.UTC().Format(time.RFC3339Nano))
 	writeChecksumPart(hasher, imported.BillingPeriodEndAt.UTC().Format(time.RFC3339Nano))
 	writeChecksumPart(hasher, imported.CurrencyCode)
+	if imported.SourceProvenance != nil {
+		writeChecksumPart(hasher, imported.SourceProvenance.BundleChecksum)
+		writeChecksumPart(hasher, fmt.Sprintf("%d", imported.SourceProvenance.FilteredAdjustmentCount))
+		writeChecksumPart(hasher, fmt.Sprintf("%d", imported.SourceProvenance.FilteredAdjustmentAmountMicros))
+	}
 	for _, line := range imported.Lines {
 		writeChecksumPart(hasher, line.ExternalLineID)
 		writeChecksumPart(hasher, line.ChargeKind)
@@ -1308,6 +1387,15 @@ func checksumImportedInvoice(provider string, imported ImportedActualInvoice) st
 		writeChecksumPart(hasher, fmt.Sprintf("%d", line.AmountMicros))
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func cloneInvoiceSourceProvenance(source *InvoiceSourceProvenance) *InvoiceSourceProvenance {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.Chunks = append([]InvoiceSourceObject(nil), source.Chunks...)
+	return &cloned
 }
 
 func writeChecksumPart(hasher interface{ Write([]byte) (int, error) }, value string) {

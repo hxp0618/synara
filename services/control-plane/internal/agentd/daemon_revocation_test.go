@@ -89,6 +89,45 @@ func TestDaemonStopsAfterWorkerIdentityRevokedDuringHeartbeat(t *testing.T) {
 	}
 }
 
+func TestDaemonStopsAfterKubernetesPodDeletionFencedDuringHeartbeat(t *testing.T) {
+	var heartbeatCalls atomic.Int64
+	var claimCalls atomic.Int64
+	targetID := uuid.New()
+	workerID := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/workers/register":
+			writeRevocationRegisteredWorker(t, response, workerID, targetID)
+		case "/v1/workers/heartbeat":
+			heartbeatCalls.Add(1)
+			writeWorkerRevocationProblem(response, http.StatusConflict, "kubernetes_pod_deletion_fenced")
+		case "/v1/workers/executions/claim":
+			claimCalls.Add(1)
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(executions.ClaimResult{})
+		default:
+			http.Error(response, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := NewDaemon(
+		revocationDaemonConfig(t, server.URL, targetID, time.Millisecond),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	).Run(ctx)
+	if !isWorkerRevocationError(err) {
+		t.Fatalf("Daemon.Run() error = %T %v, want terminal Pod deletion fence", err, err)
+	}
+	if got := heartbeatCalls.Load(); got != 1 {
+		t.Fatalf("deletion-fenced Worker made %d Heartbeat requests, want 1", got)
+	}
+	if got := claimCalls.Load(); got > 2 {
+		t.Fatalf("Pod deletion fence allowed %d extra Claim requests", got)
+	}
+}
+
 func revocationDaemonConfig(
 	t *testing.T,
 	serverURL string,

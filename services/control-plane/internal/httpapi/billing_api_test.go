@@ -7,11 +7,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +124,129 @@ func TestBillingTariffCreateFailsClosedWithoutConfiguredOperatorTenant(t *testin
 		fixture.request(t, http.MethodPost, path, fixture.ownerToken, map[string]any{}),
 		http.StatusServiceUnavailable,
 		"billing_tariff_management_unavailable",
+	)
+}
+
+func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe(t *testing.T) {
+	fixture := newBillingHTTPFixture(t)
+	periodStart := time.Date(2020, time.July, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := periodStart.Add(time.Hour)
+	target := persistence.ExecutionTarget{
+		ID: uuid.New(), Kind: "kubernetes", Name: "billing-shared-http", Status: "active",
+		Capabilities: map[string]any{}, CreatedAt: periodStart.Add(-time.Hour), UpdatedAt: periodStart.Add(-time.Hour),
+	}
+	if err := fixture.db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	coveragePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+		target.ID.String() + "/ledger-coverage"
+	coverageBody := map[string]any{
+		"completeFromAt":              periodStart.Add(-time.Minute),
+		"minimumWriterVersion":        "stage4-http-v1",
+		"deploymentAttestationSHA256": strings.Repeat("a", 64),
+	}
+
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodGet, coveragePath, fixture.ownerToken, nil),
+		http.StatusNotFound,
+		"billing_shared_ledger_coverage_not_found",
+	)
+	var sealed billing.SharedTargetLedgerCoverage
+	if recorder := fixture.request(t, http.MethodPost, coveragePath, fixture.ownerToken, coverageBody); recorder.Code != http.StatusCreated {
+		t.Fatalf("shared coverage seal status = %d, body = %s", recorder.Code, recorder.Body.String())
+	} else if err := json.Unmarshal(recorder.Body.Bytes(), &sealed); err != nil {
+		t.Fatal(err)
+	}
+	if sealed.ExecutionTargetID != target.ID || sealed.MinimumWriterVersion != "stage4-http-v1" || sealed.SealedBy == uuid.Nil {
+		t.Fatalf("unexpected sealed shared coverage: %#v", sealed)
+	}
+	if recorder := fixture.request(t, http.MethodPost, coveragePath, fixture.billingAdminToken, coverageBody); recorder.Code != http.StatusOK {
+		t.Fatalf("shared coverage exact replay status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var loaded billing.SharedTargetLedgerCoverage
+	if recorder := fixture.request(t, http.MethodGet, coveragePath, fixture.billingAdminToken, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("shared coverage get status = %d, body = %s", recorder.Code, recorder.Body.String())
+	} else if err := json.Unmarshal(recorder.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ID != sealed.ID || loaded.SealedBy != sealed.SealedBy {
+		t.Fatalf("shared coverage replay changed authority: sealed=%#v loaded=%#v", sealed, loaded)
+	}
+
+	conflictingBody := maps.Clone(coverageBody)
+	conflictingBody["minimumWriterVersion"] = "stage4-http-v2"
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, coveragePath, fixture.ownerToken, conflictingBody),
+		http.StatusConflict,
+		"billing_shared_ledger_coverage_conflict",
+	)
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, coveragePath, fixture.securityAdminToken, coverageBody),
+		http.StatusForbidden,
+		"tenant_forbidden",
+	)
+	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/billing/shared-targets/" +
+		target.ID.String() + "/ledger-coverage"
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodGet, otherTenantPath, fixture.crossTenantToken, nil),
+		http.StatusForbidden,
+		"billing_shared_operator_forbidden",
+	)
+
+	sweepPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+		target.ID.String() + "/allocations:sweep"
+	sweepBody := map[string]any{
+		"provider": "aws", "currencyCode": "usd",
+		"billingPeriodStartAt": periodStart, "billingPeriodEndAt": periodEnd,
+	}
+	var empty billing.SharedUsageAllocationSweepResult
+	if recorder := fixture.request(t, http.MethodPost, sweepPath, fixture.ownerToken, sweepBody); recorder.Code != http.StatusOK {
+		t.Fatalf("empty shared allocation sweep status = %d, body = %s", recorder.Code, recorder.Body.String())
+	} else if err := json.Unmarshal(recorder.Body.Bytes(), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.Status != "completed" || empty.WorkerCount != 0 || empty.FailedWorkerCount != 0 {
+		t.Fatalf("unexpected empty shared allocation sweep: %#v", empty)
+	}
+
+	var replayedSweep billing.SharedUsageAllocationSweepResult
+	if recorder := fixture.request(t, http.MethodPost, sweepPath, fixture.billingAdminToken, sweepBody); recorder.Code != http.StatusOK {
+		t.Fatalf("replayed empty shared allocation sweep status = %d, body = %s", recorder.Code, recorder.Body.String())
+	} else if err := json.Unmarshal(recorder.Body.Bytes(), &replayedSweep); err != nil {
+		t.Fatal(err)
+	}
+	if replayedSweep.Status != "completed" || replayedSweep.WorkerCount != 0 || replayedSweep.FailedWorkerCount != 0 {
+		t.Fatalf("unexpected replayed empty shared allocation sweep: %#v", replayedSweep)
+	}
+
+	actions := fixture.auditActions(t)
+	wantActions := []string{
+		"billing.shared_cost_allocation_sweep_requested",
+		"billing.shared_cost_allocation_sweep_requested",
+		"billing.shared_target_ledger_coverage_sealed",
+	}
+	if !slices.Equal(actions, wantActions) {
+		t.Fatalf("unexpected shared billing audit actions: got=%v want=%v", actions, wantActions)
+	}
+}
+
+func TestBillingSharedTargetManagementFailsClosedWithoutConfiguredOperatorTenant(t *testing.T) {
+	fixture := newBillingHTTPFixtureWithOptions(t, billing.WithTariffOperatorTenant(uuid.Nil))
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+		uuid.NewString() + "/ledger-coverage"
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, path, fixture.ownerToken, map[string]any{
+			"completeFromAt":              time.Date(2020, time.July, 1, 0, 0, 0, 0, time.UTC),
+			"minimumWriterVersion":        "stage4-http-v1",
+			"deploymentAttestationSHA256": strings.Repeat("a", 64),
+		}),
+		http.StatusServiceUnavailable,
+		"billing_shared_management_unavailable",
 	)
 }
 
@@ -493,7 +619,7 @@ func newBillingHTTPFixtureWithOptions(t *testing.T, options ...billing.ServiceOp
 				ObjectKey:        "billing/aws/2026-07.csv",
 			},
 		}),
-		billing.WithTariffOperatorTenant(domain.TenantID),
+		billing.WithPlatformBillingOperatorTenant(domain.TenantID),
 	)
 	for _, option := range options {
 		if option != nil {

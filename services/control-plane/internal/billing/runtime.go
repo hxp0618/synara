@@ -27,6 +27,7 @@ type RuntimeConfig struct {
 	TariffOperatorTenantID uuid.UUID
 	Source                 SourceConfig
 	Imports                []ConfiguredImport
+	SharedAllocations      []ConfiguredSharedAllocation
 }
 
 type SourceConfig struct {
@@ -62,6 +63,20 @@ type ConfiguredImport struct {
 	EstimateAfterImport bool
 }
 
+// ConfiguredSharedAllocation freezes one explicit closed accounting period.
+// The runtime deliberately does not infer calendar windows: operators advance
+// mappings only after their own ingestion/settlement authority says a period
+// is ready to be retried unattended.
+type ConfiguredSharedAllocation struct {
+	ExecutionTargetID    uuid.UUID
+	Provider             string
+	CurrencyCode         string
+	BillingPeriodStartAt time.Time
+	BillingPeriodEndAt   time.Time
+	SettlementDelay      time.Duration
+	ScheduleInterval     time.Duration
+}
+
 func (config RuntimeConfig) Normalize() (RuntimeConfig, error) {
 	normalizedSource, err := config.Source.Normalize()
 	if err != nil {
@@ -72,6 +87,7 @@ func (config RuntimeConfig) Normalize() (RuntimeConfig, error) {
 		TariffOperatorTenantID: config.TariffOperatorTenantID,
 		Source:                 normalizedSource,
 		Imports:                make([]ConfiguredImport, 0, len(config.Imports)),
+		SharedAllocations:      make([]ConfiguredSharedAllocation, 0, len(config.SharedAllocations)),
 	}
 	if normalized.MaxObjectBytes < 0 {
 		return RuntimeConfig{}, errors.New("billing max object bytes must not be negative")
@@ -123,6 +139,41 @@ func (config RuntimeConfig) Normalize() (RuntimeConfig, error) {
 			return strings.Compare(left.ExternalImportID, right.ExternalImportID)
 		}
 	})
+	sharedKeys := make(map[string]struct{}, len(config.SharedAllocations))
+	for _, rawAllocation := range config.SharedAllocations {
+		normalizedAllocation, normalizeErr := rawAllocation.Normalize()
+		if normalizeErr != nil {
+			return RuntimeConfig{}, normalizeErr
+		}
+		key := configuredSharedAllocationKey(normalizedAllocation)
+		if _, exists := sharedKeys[key]; exists {
+			return RuntimeConfig{}, fmt.Errorf(
+				"billing shared allocation mapping for Target %s %s/%s %s..%s is duplicated",
+				normalizedAllocation.ExecutionTargetID,
+				normalizedAllocation.Provider,
+				normalizedAllocation.CurrencyCode,
+				normalizedAllocation.BillingPeriodStartAt.Format(time.RFC3339Nano),
+				normalizedAllocation.BillingPeriodEndAt.Format(time.RFC3339Nano),
+			)
+		}
+		sharedKeys[key] = struct{}{}
+		for _, existing := range normalized.SharedAllocations {
+			if existing.ExecutionTargetID == normalizedAllocation.ExecutionTargetID &&
+				existing.Provider == normalizedAllocation.Provider &&
+				existing.CurrencyCode == normalizedAllocation.CurrencyCode &&
+				existing.BillingPeriodStartAt.Before(normalizedAllocation.BillingPeriodEndAt) &&
+				existing.BillingPeriodEndAt.After(normalizedAllocation.BillingPeriodStartAt) {
+				return RuntimeConfig{}, fmt.Errorf(
+					"billing shared allocation mappings for Target %s %s/%s have overlapping periods",
+					normalizedAllocation.ExecutionTargetID,
+					normalizedAllocation.Provider,
+					normalizedAllocation.CurrencyCode,
+				)
+			}
+		}
+		normalized.SharedAllocations = append(normalized.SharedAllocations, normalizedAllocation)
+	}
+	slices.SortFunc(normalized.SharedAllocations, compareConfiguredSharedAllocations)
 	if normalized.Source.Kind == SourceKindDisabled {
 		if len(normalized.Imports) > 0 {
 			return RuntimeConfig{}, errors.New("billing import mappings require a configured billing blob source")
@@ -147,6 +198,23 @@ func (config RuntimeConfig) MinimumScheduleInterval() time.Duration {
 
 func (config RuntimeConfig) HasScheduledImports() bool {
 	return config.MinimumScheduleInterval() > 0
+}
+
+func (config RuntimeConfig) MinimumSharedAllocationScheduleInterval() time.Duration {
+	var minimum time.Duration
+	for _, configuredAllocation := range config.SharedAllocations {
+		if configuredAllocation.ScheduleInterval <= 0 {
+			continue
+		}
+		if minimum == 0 || configuredAllocation.ScheduleInterval < minimum {
+			minimum = configuredAllocation.ScheduleInterval
+		}
+	}
+	return minimum
+}
+
+func (config RuntimeConfig) HasScheduledSharedAllocations() bool {
+	return config.MinimumSharedAllocationScheduleInterval() > 0
 }
 
 func (config RuntimeConfig) RequiresEstimateSweeper() bool {
@@ -268,6 +336,18 @@ func (configuredImport ConfiguredImport) Normalize() (ConfiguredImport, error) {
 	if err := validateExportObjectFormat(normalized.Format); err != nil {
 		return ConfiguredImport{}, err
 	}
+	expectedProvider, ok := exportObjectFormatProvider(normalized.Format)
+	if !ok {
+		return ConfiguredImport{}, fmt.Errorf("unsupported billing export object format %q", normalized.Format)
+	}
+	if normalized.Provider != expectedProvider {
+		return ConfiguredImport{}, fmt.Errorf(
+			"billing import mapping format %s requires provider %s, not %s",
+			normalized.Format,
+			expectedProvider,
+			normalized.Provider,
+		)
+	}
 	normalized.ObjectKey, err = normalizeBlobRelativeKey(normalized.ObjectKey)
 	if err != nil {
 		return ConfiguredImport{}, fmt.Errorf("billing import mapping for tenant %s %s/%s has an invalid object key: %w",
@@ -312,6 +392,93 @@ func (configuredImport ConfiguredImport) Normalize() (ConfiguredImport, error) {
 			normalized.TenantID, normalized.Provider, normalized.ExternalImportID)
 	}
 	return normalized, nil
+}
+
+func (configuredAllocation ConfiguredSharedAllocation) Normalize() (ConfiguredSharedAllocation, error) {
+	normalized := configuredAllocation
+	if normalized.ExecutionTargetID == uuid.Nil {
+		return ConfiguredSharedAllocation{}, errors.New("billing shared allocation mapping execution Target id is required")
+	}
+	provider, err := normalizeProvider(normalized.Provider)
+	if err != nil {
+		return ConfiguredSharedAllocation{}, err
+	}
+	normalized.Provider = provider
+	currency, err := normalizeCurrency(normalized.CurrencyCode)
+	if err != nil {
+		return ConfiguredSharedAllocation{}, err
+	}
+	normalized.CurrencyCode = currency
+	periodStart, periodEnd, err := normalizeClosedPeriod(
+		normalized.BillingPeriodStartAt,
+		normalized.BillingPeriodEndAt,
+	)
+	if err != nil {
+		return ConfiguredSharedAllocation{}, err
+	}
+	if periodEnd.Sub(periodStart) > 366*24*time.Hour {
+		return ConfiguredSharedAllocation{}, errors.New("billing shared allocation mapping period must not exceed 366 days")
+	}
+	normalized.BillingPeriodStartAt = periodStart
+	normalized.BillingPeriodEndAt = periodEnd
+	if normalized.SettlementDelay < time.Minute || normalized.SettlementDelay > 90*24*time.Hour {
+		return ConfiguredSharedAllocation{}, errors.New(
+			"billing shared allocation mapping settlement delay must be between 1m and 2160h",
+		)
+	}
+	if normalized.ScheduleInterval < time.Minute {
+		return ConfiguredSharedAllocation{}, errors.New(
+			"billing shared allocation mapping schedule interval must be at least 1m",
+		)
+	}
+	return normalized, nil
+}
+
+func configuredSharedAllocationKey(configuredAllocation ConfiguredSharedAllocation) string {
+	return strings.Join([]string{
+		configuredAllocation.ExecutionTargetID.String(),
+		configuredAllocation.Provider,
+		configuredAllocation.CurrencyCode,
+		configuredAllocation.BillingPeriodStartAt.UTC().Format(time.RFC3339Nano),
+		configuredAllocation.BillingPeriodEndAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+}
+
+func compareConfiguredSharedAllocations(left, right ConfiguredSharedAllocation) int {
+	switch {
+	case left.ExecutionTargetID != right.ExecutionTargetID:
+		return strings.Compare(left.ExecutionTargetID.String(), right.ExecutionTargetID.String())
+	case left.Provider != right.Provider:
+		return strings.Compare(left.Provider, right.Provider)
+	case left.CurrencyCode != right.CurrencyCode:
+		return strings.Compare(left.CurrencyCode, right.CurrencyCode)
+	case !left.BillingPeriodStartAt.Equal(right.BillingPeriodStartAt):
+		if left.BillingPeriodStartAt.Before(right.BillingPeriodStartAt) {
+			return -1
+		}
+		return 1
+	default:
+		if left.BillingPeriodEndAt.Before(right.BillingPeriodEndAt) {
+			return -1
+		}
+		if left.BillingPeriodEndAt.After(right.BillingPeriodEndAt) {
+			return 1
+		}
+		return 0
+	}
+}
+
+func exportObjectFormatProvider(format ExportObjectFormat) (string, bool) {
+	switch format {
+	case ExportObjectFormatAWSCURCSV, ExportObjectFormatAWSCUR2Manifest:
+		return "aws", true
+	case ExportObjectFormatGCPBillingJSON:
+		return "gcp", true
+	case ExportObjectFormatAzureCostCSV, ExportObjectFormatAzureCostJSON:
+		return "azure", true
+	default:
+		return "", false
+	}
 }
 
 func OpenBlobSource(ctx context.Context, config SourceConfig) (BlobSource, error) {

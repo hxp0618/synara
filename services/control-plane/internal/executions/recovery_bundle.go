@@ -2,9 +2,6 @@ package executions
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -13,6 +10,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	sharedrecoverybundle "github.com/synara-ai/synara/services/control-plane/internal/recoverybundle"
 )
 
 type recoveryBundlePayload struct {
@@ -53,26 +51,33 @@ func (s *Service) createRecoveryBundle(
 	}
 
 	executionSnapshot := RecoveryExecutionSnapshot{
-		ExecutionTargetID:          execution.ExecutionTargetID,
-		TargetKind:                 execution.TargetKind,
-		TargetGroupID:              execution.TargetGroupID,
-		TargetGroupVersion:         execution.TargetGroupVersion,
-		TargetGroupMemberVersion:   execution.TargetGroupMemberVersion,
-		SelectedRegion:             execution.SelectedRegion,
-		SelectedClusterID:          execution.SelectedClusterID,
-		RoutingReason:              execution.RoutingReason,
-		PredecessorExecutionID:     execution.PredecessorExecutionID,
-		WorkerManifestID:           execution.WorkerManifestID,
-		WorkerReleaseRevisionID:    execution.WorkerReleaseRevisionID,
-		WorkerReleaseChannel:       execution.WorkerReleaseChannel,
-		Provider:                   execution.Provider,
-		ProviderRuntimeBindingID:   execution.ProviderRuntimeBindingID,
-		ProviderCredentialID:       execution.ProviderCredentialIDSnapshot,
-		ProviderCredentialVersion:  execution.ProviderCredentialVersionSnapshot,
-		ProviderResumeStrategy:     execution.ProviderResumeStrategySnapshot,
-		RemoteWorkspaceID:          execution.RemoteWorkspaceID,
-		WorkspaceMaterializationID: execution.WorkspaceMaterializationID,
-		RestoreCheckpointID:        execution.RestoreCheckpointID,
+		ExecutionTargetID:                   execution.ExecutionTargetID,
+		TargetKind:                          execution.TargetKind,
+		PlacementRegion:                     execution.PlacementRegion,
+		PlacementClusterID:                  execution.PlacementClusterID,
+		TenantSchedulingPolicyVersion:       execution.TenantSchedulingPolicyVersion,
+		TenantSchedulingPolicyDigest:        execution.TenantSchedulingPolicyDigest,
+		OrganizationSchedulingPolicyVersion: execution.OrganizationSchedulingPolicyVersion,
+		OrganizationSchedulingPolicyDigest:  execution.OrganizationSchedulingPolicyDigest,
+		TargetGroupID:                       execution.TargetGroupID,
+		TargetGroupVersion:                  execution.TargetGroupVersion,
+		TargetGroupMemberVersion:            execution.TargetGroupMemberVersion,
+		SelectedRegion:                      execution.SelectedRegion,
+		SelectedClusterID:                   execution.SelectedClusterID,
+		RoutingReason:                       execution.RoutingReason,
+		SchedulingDecisionID:                execution.SchedulingDecisionID,
+		PredecessorExecutionID:              execution.PredecessorExecutionID,
+		WorkerManifestID:                    execution.WorkerManifestID,
+		WorkerReleaseRevisionID:             execution.WorkerReleaseRevisionID,
+		WorkerReleaseChannel:                execution.WorkerReleaseChannel,
+		Provider:                            execution.Provider,
+		ProviderRuntimeBindingID:            execution.ProviderRuntimeBindingID,
+		ProviderCredentialID:                execution.ProviderCredentialIDSnapshot,
+		ProviderCredentialVersion:           execution.ProviderCredentialVersionSnapshot,
+		ProviderResumeStrategy:              execution.ProviderResumeStrategySnapshot,
+		RemoteWorkspaceID:                   execution.RemoteWorkspaceID,
+		WorkspaceMaterializationID:          execution.WorkspaceMaterializationID,
+		RestoreCheckpointID:                 execution.RestoreCheckpointID,
 	}
 	payload := recoveryBundlePayload{
 		SchemaVersion:                RecoveryBundleSchemaVersionV1,
@@ -206,8 +211,9 @@ func (s *Service) loadRecoveryBundle(
 		)
 	}
 
-	payload, actualSHA256, err := decodeRecoveryBundlePayload(model.Payload)
-	if err != nil {
+	var payload recoveryBundlePayload
+	err = sharedrecoverybundle.DecodeAndValidate(model, &payload)
+	if errors.Is(err, sharedrecoverybundle.ErrPayloadInvalid) {
 		return RecoveryBundle{}, Workload{}, problem.Wrap(
 			500,
 			"recovery_bundle_decode_failed",
@@ -215,15 +221,27 @@ func (s *Service) loadRecoveryBundle(
 			err,
 		)
 	}
-	if actualSHA256 != model.PayloadSHA256 {
+	if errors.Is(err, sharedrecoverybundle.ErrIntegrityFailed) {
 		return RecoveryBundle{}, Workload{}, problem.New(
 			409,
 			"recovery_bundle_integrity_failed",
 			"The current Recovery Bundle payload hash does not match its immutable envelope.",
 		)
 	}
-	if err := validateRecoveryBundleEnvelope(model, payload); err != nil {
-		return RecoveryBundle{}, Workload{}, err
+	if errors.Is(err, sharedrecoverybundle.ErrEnvelopeMismatch) {
+		return RecoveryBundle{}, Workload{}, problem.New(
+			409,
+			"recovery_bundle_envelope_mismatch",
+			"The current Recovery Bundle payload does not match its immutable execution envelope.",
+		)
+	}
+	if err != nil {
+		return RecoveryBundle{}, Workload{}, problem.Wrap(
+			500,
+			"recovery_bundle_decode_failed",
+			"The current Recovery Bundle payload is invalid.",
+			err,
+		)
 	}
 
 	bundle := recoveryBundleFromModel(model, payload)
@@ -236,33 +254,7 @@ func (s *Service) loadRecoveryBundle(
 }
 
 func encodeRecoveryBundlePayload(payload recoveryBundlePayload) (map[string]any, string, error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, "", err
-	}
-	var normalized map[string]any
-	if err := json.Unmarshal(encoded, &normalized); err != nil {
-		return nil, "", err
-	}
-	canonical, err := json.Marshal(normalized)
-	if err != nil {
-		return nil, "", err
-	}
-	digest := sha256.Sum256(canonical)
-	return normalized, hex.EncodeToString(digest[:]), nil
-}
-
-func decodeRecoveryBundlePayload(payload map[string]any) (recoveryBundlePayload, string, error) {
-	canonical, err := json.Marshal(payload)
-	if err != nil {
-		return recoveryBundlePayload{}, "", err
-	}
-	digest := sha256.Sum256(canonical)
-	var decoded recoveryBundlePayload
-	if err := json.Unmarshal(canonical, &decoded); err != nil {
-		return recoveryBundlePayload{}, "", err
-	}
-	return decoded, hex.EncodeToString(digest[:]), nil
+	return sharedrecoverybundle.Encode(payload)
 }
 
 func recoveryBundleFromModel(
@@ -276,29 +268,6 @@ func recoveryBundleFromModel(
 		AuthoritativeHistorySequence: model.AuthoritativeHistorySequence,
 		Execution:                    payload.Execution, PayloadSHA256: model.PayloadSHA256, CreatedAt: model.CreatedAt,
 	}
-}
-
-func validateRecoveryBundleEnvelope(
-	model persistence.ExecutionRecoveryBundle,
-	payload recoveryBundlePayload,
-) error {
-	if payload.SchemaVersion != RecoveryBundleSchemaVersionV1 ||
-		model.SchemaVersion != payload.SchemaVersion ||
-		model.ExecutionID != payload.ExecutionID || model.SessionID != payload.SessionID ||
-		model.TurnID != payload.TurnID || model.Generation != payload.Generation ||
-		model.RecoveryReason != payload.RecoveryReason ||
-		!equalUUIDPointers(model.PreviousBundleID, payload.PreviousBundleID) ||
-		model.AuthoritativeHistorySequence != payload.AuthoritativeHistorySequence ||
-		payload.Workload.SessionID != model.SessionID || payload.Workload.TurnID != model.TurnID ||
-		payload.Workload.ResumeSnapshot == nil ||
-		payload.Workload.ResumeSnapshot.AuthoritativeHistorySequence != model.AuthoritativeHistorySequence {
-		return problem.New(
-			409,
-			"recovery_bundle_envelope_mismatch",
-			"The current Recovery Bundle payload does not match its immutable execution envelope.",
-		)
-	}
-	return nil
 }
 
 // ValidateRecoveryBundle verifies that the Workload received by agentd is the
@@ -324,12 +293,27 @@ func ValidateRecoveryBundle(execution Execution, workload Workload) error {
 		bundle.TurnID != execution.TurnID || bundle.Generation != execution.Generation ||
 		bundle.Execution.ExecutionTargetID != execution.ExecutionTargetID ||
 		bundle.Execution.TargetKind != execution.TargetKind ||
+		bundle.Execution.PlacementRegion != execution.PlacementRegion ||
+		bundle.Execution.PlacementClusterID != execution.PlacementClusterID ||
+		!sameSchedulingPolicySnapshot(
+			bundle.Execution.TenantSchedulingPolicyVersion,
+			bundle.Execution.TenantSchedulingPolicyDigest,
+			execution.TenantSchedulingPolicyVersion,
+			execution.TenantSchedulingPolicyDigest,
+		) ||
+		!sameSchedulingPolicySnapshot(
+			bundle.Execution.OrganizationSchedulingPolicyVersion,
+			bundle.Execution.OrganizationSchedulingPolicyDigest,
+			execution.OrganizationSchedulingPolicyVersion,
+			execution.OrganizationSchedulingPolicyDigest,
+		) ||
 		!equalUUIDPointers(bundle.Execution.TargetGroupID, execution.TargetGroupID) ||
 		!equalInt64Pointers(bundle.Execution.TargetGroupVersion, execution.TargetGroupVersion) ||
 		!equalInt64Pointers(bundle.Execution.TargetGroupMemberVersion, execution.TargetGroupMemberVersion) ||
 		!equalStringPointers(bundle.Execution.SelectedRegion, execution.SelectedRegion) ||
 		!equalStringPointers(bundle.Execution.SelectedClusterID, execution.SelectedClusterID) ||
 		!equalStringPointers(bundle.Execution.RoutingReason, execution.RoutingReason) ||
+		!sameSchedulingDecisionIdentity(bundle.Execution.SchedulingDecisionID, execution.SchedulingDecisionID) ||
 		!equalUUIDPointers(bundle.Execution.PredecessorExecutionID, execution.PredecessorExecutionID) ||
 		!equalUUIDPointers(bundle.Execution.WorkerManifestID, execution.WorkerManifestID) ||
 		!equalUUIDPointers(bundle.Execution.WorkerReleaseRevisionID, execution.WorkerReleaseRevisionID) ||
@@ -378,6 +362,31 @@ func ValidateRecoveryBundle(execution Execution, workload Workload) error {
 		)
 	}
 	return nil
+}
+
+func sameSchedulingDecisionIdentity(bundleID, executionID *uuid.UUID) bool {
+	if bundleID == nil {
+		// Recovery Bundles are immutable. Bundles frozen before migration 000076
+		// cannot be rewritten after their Execution receives a legacy-selected-only
+		// decision during backfill, so preserve that exact rolling-upgrade shape.
+		return true
+	}
+	return executionID != nil && *bundleID == *executionID
+}
+
+func sameSchedulingPolicySnapshot(bundleVersion int64, bundleDigest string, executionVersion int64, executionDigest string) bool {
+	if bundleVersion != executionVersion {
+		return false
+	}
+	if bundleDigest == executionDigest {
+		return true
+	}
+	// Recovery Bundles created before Execution Scheduling Policy v1 did not
+	// encode these additive fields. Migration 000074 backfills the corresponding
+	// Execution with the well-known unrestricted v0 snapshot, so only that exact
+	// legacy shape is accepted.
+	return bundleVersion == 0 && bundleDigest == "" &&
+		executionDigest == "48646d468c45b8a2257c2080fce3ef0697f7ec181ca7e085eb49a194a92a90b2"
 }
 
 func equalUUIDPointers(left, right *uuid.UUID) bool {

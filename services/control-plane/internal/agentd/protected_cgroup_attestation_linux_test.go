@@ -19,6 +19,7 @@ func TestProtectedCgroupIdentityStringIncludesUIDAndGID(t *testing.T) {
 }
 
 func TestProtectedCgroupProbeHelperReportsIdentityAndEscapedSentinel(t *testing.T) {
+	t.Setenv("SYNARA_PROTECTED_CGROUP_SECRET_SENTINEL", "must-not-reach-helper-or-child")
 	pipes, err := openProtectedCgroupProbePipes()
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,9 @@ func TestProtectedCgroupProbeHelperReportsIdentityAndEscapedSentinel(t *testing.
 	command, err := defaultProtectedCgroupProbeCommand(pipes.reportWrite, pipes.readyWrite, pipes.sentinelWrite)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if command.Env == nil || len(command.Env) != 0 {
+		t.Fatalf("protected cgroup helper environment = %#v, want explicit empty environment", command.Env)
 	}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -57,6 +61,11 @@ func TestProtectedCgroupProbeHelperReportsIdentityAndEscapedSentinel(t *testing.
 		_ = command.Process.Kill()
 		_ = waitProtectedCgroupProbeCommand(command)
 		t.Fatalf("probe helper identity = uid:%d gid:%d, want uid:%d gid:%d", identity.UID, identity.GID, os.Geteuid(), os.Getegid())
+	}
+	if identity.EnvironmentEntries != 0 {
+		_ = command.Process.Kill()
+		_ = waitProtectedCgroupProbeCommand(command)
+		t.Fatalf("probe helper inherited %d environment entries", identity.EnvironmentEntries)
 	}
 	if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatal(err)

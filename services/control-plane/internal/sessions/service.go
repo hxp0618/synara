@@ -23,7 +23,6 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
-	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
 var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering", "suspended"}
@@ -67,6 +66,9 @@ type Service struct {
 	providerCapabilityHeartbeatTimeout time.Duration
 	lifecyclePolicies                  LifecyclePolicyResolver
 	now                                func() time.Time
+	// Package-private deterministic seam for selection-to-commit race tests.
+	// Production services leave this nil.
+	targetFailoverBeforeCommitValidation func(context.Context, *gorm.DB, routing.SelectRequest, routing.Selection) error
 }
 
 func NewService(
@@ -99,6 +101,17 @@ func (s *Service) RequireExecutionQuotaAvailable(
 	tx *gorm.DB,
 	tenantID uuid.UUID,
 ) error {
+	if err := s.lockExecutionQuotaAuthority(ctx, tx, tenantID); err != nil {
+		return err
+	}
+	return s.requireExecutionQuotaAvailableAfterAuthorityLock(ctx, tx, tenantID)
+}
+
+func (s *Service) lockExecutionQuotaAuthority(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+) error {
 	// Serialize count-based admission on the Tenant row. Locking only the quota
 	// row is insufficient because an absent (unlimited) row can be created
 	// concurrently, while every admission and quota update already shares this
@@ -108,13 +121,29 @@ func (s *Service) RequireExecutionQuotaAvailable(
 		Select("id").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
 		return problem.Wrap(500, "execution_quota_check_failed", "Failed to lock the tenant execution quota authority.", err)
 	}
+	return nil
+}
+
+// requireExecutionQuotaAvailableAfterAuthorityLock performs the count-based
+// admission check after lockExecutionQuotaAuthority has established the
+// transaction-wide serialization point. Keeping the operations separate lets
+// replacement flows lock in the global Tenant-before-Session order and decide
+// later whether they consume new capacity.
+func (s *Service) requireExecutionQuotaAvailableAfterAuthorityLock(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+) error {
 	var quota persistence.TenantQuota
 	quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
-	if errors.Is(quotaErr, gorm.ErrRecordNotFound) || quota.MaxConcurrentExecutions == nil {
+	if errors.Is(quotaErr, gorm.ErrRecordNotFound) {
 		return nil
 	}
 	if quotaErr != nil {
 		return problem.Wrap(500, "execution_quota_check_failed", "Failed to load the tenant execution quota.", quotaErr)
+	}
+	if quota.MaxConcurrentExecutions == nil {
+		return nil
 	}
 	var activeExecutions int64
 	if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
@@ -395,6 +424,9 @@ func (s *Service) CreateWithIdempotency(
 				return &targetModel
 			}(),
 			routeRequest,
+			ExecutionLaunchPolicyScope{
+				TenantID: tenantID, OrganizationID: project.OrganizationID, Provider: provider,
+			},
 			lifecyclePolicy.WarmPoolMode,
 			func(
 				ctx context.Context,
@@ -746,6 +778,9 @@ func (s *Service) CreateTurnWithIdempotency(
 				return &target
 			}(),
 			routeRequest,
+			ExecutionLaunchPolicyScope{
+				TenantID: tenantID, OrganizationID: locked.OrganizationID, Provider: locked.Provider,
+			},
 			locked.WarmPoolMode,
 			func(
 				ctx context.Context,
@@ -788,43 +823,44 @@ func (s *Service) CreateTurnWithIdempotency(
 			WarmPoolModeSnapshot:       locked.WarmPoolMode,
 			Generation:                 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
-		placement.ApplySelection(&execution, launchTargetPlan.PlacementSelection)
-		if launchTargetPlan.RoutingSelection != nil {
-			routing.ApplyExecutionSelection(&execution, *launchTargetPlan.RoutingSelection)
-		}
-		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, target.ID, execution.ID)
-		if err != nil {
-			return Turn{}, err
-		}
-		if releaseSelection != nil {
-			execution.WorkerReleaseRevisionID = &releaseSelection.RevisionID
-			execution.WorkerReleaseChannel = &releaseSelection.Channel
-		}
 		if err := tx.Create(&turn).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
 		}
-		if err := tx.Create(&execution).Error; err != nil {
-			return Turn{}, problem.Wrap(409, "execution_create_rejected", "Execution creation was rejected by a tenant isolation constraint.", err)
+		scheduled, err := CreateScheduledExecution(ctx, tx, execution, launchTargetPlan, queuedAt)
+		if err != nil {
+			return Turn{}, err
 		}
+		execution = scheduled.Execution
+		decision := scheduled.Decision
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
 			Payload: map[string]any{
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId":  execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":     execution.WorkerReleaseChannel,
-				"workerPoolId":             execution.WorkerPoolID,
-				"workerPoolVersion":        execution.WorkerPoolVersion,
-				"capacityClass":            execution.CapacityClass,
-				"placementPolicyVersion":   execution.PlacementPolicyVersion,
-				"targetGroupId":            execution.TargetGroupID,
-				"targetGroupVersion":       execution.TargetGroupVersion,
-				"targetGroupMemberVersion": execution.TargetGroupMemberVersion,
-				"selectedRegion":           execution.SelectedRegion,
-				"selectedClusterId":        execution.SelectedClusterID,
-				"routingReason":            execution.RoutingReason,
-				"provider":                 provider, "providerRuntimeBindingId": resources.BindingID,
+				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":                execution.WorkerReleaseChannel,
+				"workerPoolId":                        execution.WorkerPoolID,
+				"workerPoolVersion":                   execution.WorkerPoolVersion,
+				"capacityClass":                       execution.CapacityClass,
+				"placementPolicyVersion":              execution.PlacementPolicyVersion,
+				"placementRegion":                     execution.PlacementRegion,
+				"placementClusterId":                  execution.PlacementClusterID,
+				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+				"targetGroupId":                       execution.TargetGroupID,
+				"targetGroupVersion":                  execution.TargetGroupVersion,
+				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+				"selectedRegion":                      execution.SelectedRegion,
+				"selectedClusterId":                   execution.SelectedClusterID,
+				"routingReason":                       execution.RoutingReason,
+				"schedulingDecisionId":                decision.ID,
+				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+				"provider":                            provider, "providerRuntimeBindingId": resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,
@@ -838,21 +874,31 @@ func (s *Service) CreateTurnWithIdempotency(
 		turnCreatedPayload := map[string]any{
 			"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 			"status": "queued", "executionTargetId": execution.ExecutionTargetID,
-			"targetKind":                 execution.TargetKind,
-			"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
-			"workerReleaseChannel":       execution.WorkerReleaseChannel,
-			"workerPoolId":               execution.WorkerPoolID,
-			"workerPoolVersion":          execution.WorkerPoolVersion,
-			"capacityClass":              execution.CapacityClass,
-			"placementPolicyVersion":     execution.PlacementPolicyVersion,
-			"targetGroupId":              execution.TargetGroupID,
-			"targetGroupVersion":         execution.TargetGroupVersion,
-			"targetGroupMemberVersion":   execution.TargetGroupMemberVersion,
-			"selectedRegion":             execution.SelectedRegion,
-			"selectedClusterId":          execution.SelectedClusterID,
-			"routingReason":              execution.RoutingReason,
-			"workspaceMaterializationId": resources.MaterializationID,
-			"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
+			"targetKind":                          execution.TargetKind,
+			"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+			"workerReleaseChannel":                execution.WorkerReleaseChannel,
+			"workerPoolId":                        execution.WorkerPoolID,
+			"workerPoolVersion":                   execution.WorkerPoolVersion,
+			"capacityClass":                       execution.CapacityClass,
+			"placementPolicyVersion":              execution.PlacementPolicyVersion,
+			"placementRegion":                     execution.PlacementRegion,
+			"placementClusterId":                  execution.PlacementClusterID,
+			"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+			"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+			"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+			"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+			"targetGroupId":                       execution.TargetGroupID,
+			"targetGroupVersion":                  execution.TargetGroupVersion,
+			"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+			"selectedRegion":                      execution.SelectedRegion,
+			"selectedClusterId":                   execution.SelectedClusterID,
+			"routingReason":                       execution.RoutingReason,
+			"schedulingDecisionId":                decision.ID,
+			"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+			"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+			"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+			"workspaceMaterializationId":          resources.MaterializationID,
+			"runtimeMode":                         runtimeMode, "interactionMode": interactionMode,
 		}
 		if sourceProposedPlan != nil {
 			turnCreatedPayload["sourceProposedPlan"] = sourceProposedPlan

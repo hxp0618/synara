@@ -35,11 +35,13 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
+	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
 	"github.com/synara-ai/synara/services/control-plane/internal/retention"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/scim"
 	"github.com/synara-ai/synara/services/control-plane/internal/serviceaccounts"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
@@ -84,6 +86,7 @@ type Server struct {
 	workerReleases     *workerreleases.Service
 	placement          *placement.Service
 	routing            *routing.Service
+	schedulingPolicies *schedulingpolicy.Service
 	retention          *retention.Service
 	metrics            *observability.Registry
 	outbox             *outbox.Service
@@ -162,7 +165,8 @@ func New(
 		quotas:      quotaService,
 		credentials: credentialService, credentialBindings: credentialbindings.NewService(db, credentialService),
 		workerReleases: workerreleases.NewService(db), placement: placement.NewService(db), routing: routing.NewService(db),
-		retention: retentionService, metrics: metrics, outbox: outboxService,
+		schedulingPolicies: schedulingpolicy.NewService(db),
+		retention:          retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
 		scim: scimService, schema: schemaChecker, logger: logger, eventStreams: eventStreams,
 		sessionEventPoll: cfg.SSEPollInterval, sessionEventBeat: cfg.SSEHeartbeatInterval,
@@ -243,6 +247,8 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/outbox-messages", server.requireAuth(http.HandlerFunc(server.listOutboxMessages)))
 	mux.Handle("POST /v1/tenants/{tenantID}/outbox-messages/{messageID}/replay", server.requireAuth(http.HandlerFunc(server.replayOutboxMessage)))
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.listExecutionTargets)))
+	mux.Handle("GET /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getTenantExecutionSchedulingPolicy)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putTenantExecutionSchedulingPolicy)))
 	mux.Handle("GET /v1/tenants/{tenantID}/workers", server.requireAuth(http.HandlerFunc(server.listTenantWorkers)))
 	mux.Handle("POST /v1/tenants/{tenantID}/workers/{workerID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeTenantWorker)))
 	mux.Handle("GET /v1/tenants/{tenantID}/worker-manifests", server.requireAuth(http.HandlerFunc(server.listWorkerManifests)))
@@ -272,6 +278,9 @@ func New(
 	mux.Handle("PUT /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.putTenantQuota)))
 	mux.Handle("GET /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.listBillingTariffs)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.createBillingTariff)))
+	mux.Handle("GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.getBillingSharedTargetLedgerCoverage)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.sealBillingSharedTargetLedgerCoverage)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/allocations:sweep", server.requireAuth(http.HandlerFunc(server.sweepBillingSharedTargetAllocations)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}", server.requireAuth(http.HandlerFunc(server.triggerBillingImport)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile", server.requireAuth(http.HandlerFunc(server.reconcileBillingImport)))
 	mux.Handle("GET /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.getRetentionPolicy)))
@@ -318,6 +327,8 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.listOrganizations)))
 	mux.Handle("POST /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.createOrganization)))
 	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.getOrganization)))
+	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getOrganizationExecutionSchedulingPolicy)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putOrganizationExecutionSchedulingPolicy)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.updateOrganization)))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.archiveOrganization)))
 	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}/members", server.requireAuth(http.HandlerFunc(server.listOrganizationMembers)))
@@ -1420,7 +1431,13 @@ func queryInt(r *http.Request, name string, fallback int) (int, error) {
 
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var apiError *problem.Error
-	if !errors.As(err, &apiError) {
+	if podlifecycle.IsLogicalIdentityLockUnavailable(err) {
+		apiError = problem.New(
+			http.StatusServiceUnavailable,
+			"worker_logical_identity_lock_unavailable",
+			"The Worker logical identity is changing; retry the request.",
+		)
+	} else if !errors.As(err, &apiError) {
 		apiError = problem.Wrap(500, "internal_error", "The control plane encountered an unexpected error.", err)
 	}
 	if recorder, ok := w.(interface{ recordProblem(string) }); ok {

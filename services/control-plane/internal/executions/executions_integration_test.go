@@ -471,6 +471,7 @@ func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 	fixture := seedExecutionFixture(t, db)
 	completeExecutionFixtureForNextTurn(t, db, fixture)
 	rollback := errors.New("rollback create turn integration test")
+	var createdExecutionID, createdDecisionID uuid.UUID
 	err := db.Transaction(func(tx *gorm.DB) error {
 		targetService := executiontargets.NewService(tx, testPlatformConfig(), nil)
 		sessionService := sessions.NewService(tx, projects.NewService(tx), targetService)
@@ -490,6 +491,29 @@ func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 		if execution.QueuedAt.Year() < 2020 {
 			t.Fatalf("execution queued_at was persisted as a zero timestamp: %s", execution.QueuedAt)
 		}
+		if execution.SchedulingDecisionID == nil {
+			t.Fatal("queued execution omitted its immutable scheduling decision identity")
+		}
+		createdExecutionID = execution.ID
+		createdDecisionID = *execution.SchedulingDecisionID
+		var decision persistence.ExecutionSchedulingDecision
+		if err := tx.Where("tenant_id = ? AND execution_id = ?", fixture.TenantID, execution.ID).
+			Take(&decision).Error; err != nil {
+			t.Fatalf("scheduling decision missing: %v", err)
+		}
+		if decision.ID != createdDecisionID || decision.EvidenceCompleteness != "selected-only" ||
+			decision.CandidateCount != 1 || decision.CandidateSetSHA256 == "" {
+			t.Fatalf("unexpected scheduling decision: %#v", decision)
+		}
+		var candidates int64
+		if err := tx.Model(&persistence.ExecutionSchedulingCandidate{}).
+			Where("tenant_id = ? AND decision_id = ?", fixture.TenantID, decision.ID).
+			Count(&candidates).Error; err != nil {
+			t.Fatal(err)
+		}
+		if candidates != 1 {
+			t.Fatalf("scheduling candidate count = %d, want 1", candidates)
+		}
 		var outbox persistence.OutboxMessage
 		if err := tx.Where("topic = ? AND message_key = ?", "execution.queued", execution.ID.String()).Take(&outbox).Error; err != nil {
 			t.Fatalf("execution outbox missing: %v", err)
@@ -500,6 +524,10 @@ func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 		if outbox.AvailableAt.Year() < 2020 || outbox.CreatedAt.Year() < 2020 {
 			t.Fatalf("execution outbox timestamps were persisted as zero values: %#v", outbox)
 		}
+		if outbox.Payload["schedulingDecisionId"] != decision.ID.String() ||
+			outbox.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 {
+			t.Fatalf("execution outbox omitted scheduling decision identity: %#v", outbox.Payload)
+		}
 		var event persistence.SessionEvent
 		if err := tx.Where("tenant_id = ? AND session_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.SessionID, execution.ID, "turn.created").Take(&event).Error; err != nil {
 			t.Fatalf("turn event is not linked to execution: %v", err)
@@ -508,6 +536,18 @@ func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 	})
 	if !errors.Is(err, rollback) {
 		t.Fatalf("create turn transaction: %v", err)
+	}
+	for model, id := range map[any]uuid.UUID{
+		&persistence.AgentExecution{}:              createdExecutionID,
+		&persistence.ExecutionSchedulingDecision{}: createdDecisionID,
+	} {
+		var count int64
+		if err := db.Model(model).Where("tenant_id = ? AND id = ?", fixture.TenantID, id).Count(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("outer rollback retained %T id=%s", model, id)
+		}
 	}
 }
 
@@ -2838,6 +2878,81 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 
 func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		// Claim/release facts are append-only in production. PostgreSQL integration
+		// fixtures must explicitly disable only their immutability triggers and
+		// remove child releases before claims so test cleanup cannot weaken runtime
+		// code or leave facts that retain the fixture Execution rows.
+		if err := tx.Exec(
+			"ALTER TABLE worker_claim_release_facts DISABLE TRIGGER trg_worker_claim_release_facts_immutable",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"DELETE FROM worker_claim_release_facts WHERE claim_fact_id IN (SELECT id FROM worker_claim_facts WHERE tenant_id = ?)",
+			tenantID,
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_claim_release_facts ENABLE TRIGGER trg_worker_claim_release_facts_immutable",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_claim_facts DISABLE TRIGGER trg_worker_claim_facts_immutable",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("DELETE FROM worker_claim_facts WHERE tenant_id = ?", tenantID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_claim_facts ENABLE TRIGGER trg_worker_claim_facts_immutable",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_generation_facts DISABLE TRIGGER trg_execution_generation_facts_update",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("DELETE FROM execution_generation_facts WHERE tenant_id = ?", tenantID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_generation_facts ENABLE TRIGGER trg_execution_generation_facts_update",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_incarnation_facts DISABLE TRIGGER trg_worker_incarnation_facts_update",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("DELETE FROM worker_incarnation_facts WHERE tenant_id = ?", tenantID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_incarnation_facts ENABLE TRIGGER trg_worker_incarnation_facts_update",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_target_health DISABLE TRIGGER trg_execution_target_health_monotonic",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"DELETE FROM execution_target_health WHERE execution_target_id IN (SELECT id FROM execution_targets WHERE tenant_id = ?)",
+			tenantID,
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_target_health ENABLE TRIGGER trg_execution_target_health_monotonic",
+		).Error; err != nil {
+			return err
+		}
 		if err := tx.Exec(
 			"ALTER TABLE execution_recovery_bundles DISABLE TRIGGER trg_execution_recovery_bundles_immutable",
 		).Error; err != nil {

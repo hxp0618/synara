@@ -23,75 +23,76 @@ import (
 )
 
 type Config struct {
-	Platform                       platform.Config
-	ResourceLifecycle              lifecyclepolicy.Config
-	ListenAddress                  string
-	DatabaseURL                    string
-	DatabaseMaxOpenConnections     int
-	DatabaseMaxIdleConnections     int
-	DatabaseConnectionMaxLifetime  time.Duration
-	DatabaseConnectionMaxIdleTime  time.Duration
-	DatabaseMigrationLockTimeout   time.Duration
-	SQLitePath                     string
-	ArtifactLocalPath              string
-	ArtifactBucket                 string
-	ArtifactRegion                 string
-	ArtifactEndpoint               string
-	ArtifactPublicEndpoint         string
-	ArtifactAccessKeyID            string
-	ArtifactSecretAccessKey        string
-	ArtifactSessionToken           string
-	ArtifactUsePathStyle           bool
-	ArtifactPresignTTL             time.Duration
-	ArtifactMaxUploadBytes         int64
-	InstallationID                 string
-	CookieName                     string
-	CookieDomain                   string
-	CookiePath                     string
-	CookieSameSite                 string
-	CookieSecure                   bool
-	DevBootstrapEnabled            bool
-	SessionTTL                     time.Duration
-	SessionIdleTTL                 time.Duration
-	TrustedProxyCIDRs              []netip.Prefix
-	ShutdownTimeout                time.Duration
-	WorkerRegistrationToken        string
-	WorkerLeaseTTL                 time.Duration
-	WorkerHeartbeatTimeout         time.Duration
-	WorkerReceiptTTL               time.Duration
-	ProviderCredentialAccessTTL    time.Duration
-	ProviderCursorKey              []byte
-	ProviderCursorMaximumAge       time.Duration
-	LocalAgentdRunnerCommand       []string
-	LocalAgentdWorkspaceRoot       string
-	LocalAgentdGitCacheRoot        string
-	LocalAgentdRestartBackoff      time.Duration
-	CredentialKMSProvider          string
-	CredentialKMSKeyID             string
-	CredentialKMSLocalKey          []byte
-	CredentialKMSAWSRegion         string
-	PublicControlPlaneURL          string
-	AgentdBinaryPath               string
-	SSHProvisionTimeout            time.Duration
-	DockerReconcileInterval        time.Duration
-	KubernetesReconcileInterval    time.Duration
-	ResourceLifecycleSweepInterval time.Duration
-	WorkerAutoRollbackEnabled      bool
-	WorkerAutoRollbackInterval     time.Duration
-	RetentionSweepInterval         time.Duration
-	OutboxPollInterval             time.Duration
-	OutboxClaimTTL                 time.Duration
-	OutboxBatchSize                int
-	OutboxMaxAttempts              int
-	OutboxBaseBackoff              time.Duration
-	OutboxMaxBackoff               time.Duration
-	SSEPollInterval                time.Duration
-	SSEHeartbeatInterval           time.Duration
-	SSEWriteTimeout                time.Duration
-	SSELeaseTTL                    time.Duration
-	SSEMaxConnectionsPerUser       int
-	SSEMaxConnectionsPerTenant     int
-	Billing                        billing.RuntimeConfig
+	Platform                             platform.Config
+	ResourceLifecycle                    lifecyclepolicy.Config
+	ListenAddress                        string
+	DatabaseURL                          string
+	DatabaseMaxOpenConnections           int
+	DatabaseMaxIdleConnections           int
+	DatabaseConnectionMaxLifetime        time.Duration
+	DatabaseConnectionMaxIdleTime        time.Duration
+	DatabaseMigrationLockTimeout         time.Duration
+	SQLitePath                           string
+	ArtifactLocalPath                    string
+	ArtifactBucket                       string
+	ArtifactRegion                       string
+	ArtifactEndpoint                     string
+	ArtifactPublicEndpoint               string
+	ArtifactAccessKeyID                  string
+	ArtifactSecretAccessKey              string
+	ArtifactSessionToken                 string
+	ArtifactUsePathStyle                 bool
+	ArtifactPresignTTL                   time.Duration
+	ArtifactMaxUploadBytes               int64
+	InstallationID                       string
+	CookieName                           string
+	CookieDomain                         string
+	CookiePath                           string
+	CookieSameSite                       string
+	CookieSecure                         bool
+	DevBootstrapEnabled                  bool
+	SessionTTL                           time.Duration
+	SessionIdleTTL                       time.Duration
+	TrustedProxyCIDRs                    []netip.Prefix
+	ShutdownTimeout                      time.Duration
+	WorkerRegistrationToken              string
+	WorkerLeaseTTL                       time.Duration
+	WorkerHeartbeatTimeout               time.Duration
+	WorkerReceiptTTL                     time.Duration
+	ProviderCredentialAccessTTL          time.Duration
+	ProviderCursorKey                    []byte
+	ProviderCursorMaximumAge             time.Duration
+	LocalAgentdRunnerCommand             []string
+	LocalAgentdWorkspaceRoot             string
+	LocalAgentdGitCacheRoot              string
+	LocalAgentdRestartBackoff            time.Duration
+	CredentialKMSProvider                string
+	CredentialKMSKeyID                   string
+	CredentialKMSLocalKey                []byte
+	CredentialKMSAWSRegion               string
+	PublicControlPlaneURL                string
+	AgentdBinaryPath                     string
+	SSHProvisionTimeout                  time.Duration
+	DockerReconcileInterval              time.Duration
+	KubernetesReconcileInterval          time.Duration
+	KubernetesPodPendingFailureThreshold time.Duration
+	ResourceLifecycleSweepInterval       time.Duration
+	WorkerAutoRollbackEnabled            bool
+	WorkerAutoRollbackInterval           time.Duration
+	RetentionSweepInterval               time.Duration
+	OutboxPollInterval                   time.Duration
+	OutboxClaimTTL                       time.Duration
+	OutboxBatchSize                      int
+	OutboxMaxAttempts                    int
+	OutboxBaseBackoff                    time.Duration
+	OutboxMaxBackoff                     time.Duration
+	SSEPollInterval                      time.Duration
+	SSEHeartbeatInterval                 time.Duration
+	SSEWriteTimeout                      time.Duration
+	SSELeaseTTL                          time.Duration
+	SSEMaxConnectionsPerUser             int
+	SSEMaxConnectionsPerTenant           int
+	Billing                              billing.RuntimeConfig
 }
 
 func Load() (Config, error) {
@@ -255,6 +256,9 @@ func Load() (Config, error) {
 	if cfg.KubernetesReconcileInterval, err = envDurationStrict("SYNARA_KUBERNETES_RECONCILE_INTERVAL", 5*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.KubernetesPodPendingFailureThreshold, err = envDurationStrict("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD", 2*time.Minute); err != nil {
+		return Config{}, err
+	}
 	if cfg.ResourceLifecycleSweepInterval, err = envDurationStrict("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", 10*time.Second); err != nil {
 		return Config{}, err
 	}
@@ -341,6 +345,12 @@ func Load() (Config, error) {
 		cfg.Billing.Imports, err = parseBillingImportMappings(rawMappings)
 		if err != nil {
 			return Config{}, fmt.Errorf("SYNARA_BILLING_IMPORT_MAPPINGS_JSON: %w", err)
+		}
+	}
+	if rawMappings, ok := nonEmptyEnv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON"); ok {
+		cfg.Billing.SharedAllocations, err = parseBillingSharedAllocationMappings(rawMappings)
+		if err != nil {
+			return Config{}, fmt.Errorf("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON: %w", err)
 		}
 	}
 	if cfg.Billing, err = cfg.Billing.Normalize(); err != nil {
@@ -469,6 +479,10 @@ func Load() (Config, error) {
 	}
 	if cfg.KubernetesReconcileInterval <= 0 {
 		return Config{}, errors.New("SYNARA_KUBERNETES_RECONCILE_INTERVAL must be positive")
+	}
+	if cfg.KubernetesPodPendingFailureThreshold < cfg.KubernetesReconcileInterval ||
+		cfg.KubernetesPodPendingFailureThreshold > 24*time.Hour {
+		return Config{}, errors.New("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD must be between SYNARA_KUBERNETES_RECONCILE_INTERVAL and 24h")
 	}
 	if cfg.ResourceLifecycleSweepInterval <= 0 {
 		return Config{}, errors.New("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL must be positive")
@@ -747,6 +761,20 @@ type billingImportMapping struct {
 	EstimateAfterImport bool                       `json:"estimateAfterImport"`
 }
 
+type billingSharedAllocationMappingEnvelope struct {
+	Allocations *[]billingSharedAllocationMapping `json:"allocations"`
+}
+
+type billingSharedAllocationMapping struct {
+	ExecutionTargetID    string `json:"executionTargetId"`
+	Provider             string `json:"provider"`
+	CurrencyCode         string `json:"currencyCode"`
+	BillingPeriodStartAt string `json:"billingPeriodStartAt"`
+	BillingPeriodEndAt   string `json:"billingPeriodEndAt"`
+	SettlementDelay      string `json:"settlementDelay"`
+	ScheduleInterval     string `json:"scheduleInterval"`
+}
+
 func parseBillingImportMappings(raw string) ([]billing.ConfiguredImport, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -805,6 +833,60 @@ func parseBillingImportMappings(raw string) ([]billing.ConfiguredImport, error) 
 		})
 	}
 	return imports, nil
+}
+
+func parseBillingSharedAllocationMappings(raw string) ([]billing.ConfiguredSharedAllocation, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var items []billingSharedAllocationMapping
+	switch raw[0] {
+	case '[':
+		if err := decodeStrictBillingJSON(raw, &items); err != nil {
+			return nil, err
+		}
+	case '{':
+		envelope := billingSharedAllocationMappingEnvelope{}
+		if err := decodeStrictBillingJSON(raw, &envelope); err != nil {
+			return nil, err
+		}
+		if envelope.Allocations == nil {
+			return nil, errors.New("must be a JSON array or an object with an allocations array")
+		}
+		items = *envelope.Allocations
+	default:
+		return nil, errors.New("must be a JSON array or an object with an allocations array")
+	}
+	allocations := make([]billing.ConfiguredSharedAllocation, 0, len(items))
+	for index, item := range items {
+		targetID, err := uuid.Parse(strings.TrimSpace(item.ExecutionTargetID))
+		if err != nil || targetID == uuid.Nil {
+			return nil, fmt.Errorf("allocations[%d].executionTargetId must be a UUID", index)
+		}
+		periodStart, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.BillingPeriodStartAt))
+		if err != nil {
+			return nil, fmt.Errorf("allocations[%d].billingPeriodStartAt must use RFC3339", index)
+		}
+		periodEnd, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.BillingPeriodEndAt))
+		if err != nil {
+			return nil, fmt.Errorf("allocations[%d].billingPeriodEndAt must use RFC3339", index)
+		}
+		settlementDelay, err := time.ParseDuration(strings.TrimSpace(item.SettlementDelay))
+		if err != nil {
+			return nil, fmt.Errorf("allocations[%d].settlementDelay must be a valid duration", index)
+		}
+		scheduleInterval, err := time.ParseDuration(strings.TrimSpace(item.ScheduleInterval))
+		if err != nil {
+			return nil, fmt.Errorf("allocations[%d].scheduleInterval must be a valid duration", index)
+		}
+		allocations = append(allocations, billing.ConfiguredSharedAllocation{
+			ExecutionTargetID: targetID, Provider: item.Provider, CurrencyCode: item.CurrencyCode,
+			BillingPeriodStartAt: periodStart, BillingPeriodEndAt: periodEnd,
+			SettlementDelay: settlementDelay, ScheduleInterval: scheduleInterval,
+		})
+	}
+	return allocations, nil
 }
 
 func decodeStrictBillingJSON(raw string, destination any) error {

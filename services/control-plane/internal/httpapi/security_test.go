@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
@@ -118,6 +119,37 @@ func TestWriteErrorRecordsStableProblemCodeForRequestMetrics(t *testing.T) {
 	if recorder.status != http.StatusConflict || recorder.problemCode != "generation_fenced" {
 		t.Fatalf("recorded response = status %d problem %q", recorder.status, recorder.problemCode)
 	}
+}
+
+func TestWriteErrorMapsOnlyOwnedLogicalIdentityContentionToRetryableResponse(t *testing.T) {
+	var logs bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewJSONHandler(&logs, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", nil)
+
+	contention := problem.Wrap(
+		http.StatusConflict,
+		"worker_revocation_conflict",
+		"The Worker revocation conflicted with another update.",
+		&pgconn.PgError{Code: "40001", Message: "Worker logical identity lock is unavailable"},
+	)
+	response := httptest.NewRecorder()
+	server.writeError(response, request, contention)
+	assertProblemResponse(
+		t,
+		response,
+		http.StatusServiceUnavailable,
+		"worker_logical_identity_lock_unavailable",
+	)
+
+	unrelatedSerialization := problem.Wrap(
+		http.StatusInternalServerError,
+		"worker_heartbeat_failed",
+		"The Worker heartbeat could not be recorded.",
+		&pgconn.PgError{Code: "40001", Message: "could not serialize access due to concurrent update"},
+	)
+	response = httptest.NewRecorder()
+	server.writeError(response, request, unrelatedSerialization)
+	assertProblemResponse(t, response, http.StatusInternalServerError, "worker_heartbeat_failed")
 }
 
 func TestRequestLogScopeIncludesAvailableDomainAndGenerationContext(t *testing.T) {

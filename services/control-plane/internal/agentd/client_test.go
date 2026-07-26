@@ -54,19 +54,21 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sshBootstrapGeneration := int64(13)
 	cfg := Config{
-		ControlPlaneURL:   controlPlaneURL,
-		RegistrationToken: "registration-token",
-		ExecutionTargetID: uuid.New(),
-		TargetKind:        platform.TargetLocal,
-		ClusterID:         "test-cluster",
-		Namespace:         "test-namespace",
-		PodName:           "test-worker",
-		InstanceUID:       uuid.NewString(),
-		Version:           "test-version",
-		Capabilities:      map[string]any{"workspace": true},
-		RequestTimeout:    time.Second,
-		ArtifactTimeout:   time.Second,
+		ControlPlaneURL:        controlPlaneURL,
+		RegistrationToken:      "registration-token",
+		ExecutionTargetID:      uuid.New(),
+		TargetKind:             platform.TargetSSH,
+		SSHBootstrapGeneration: &sshBootstrapGeneration,
+		ClusterID:              "test-cluster",
+		Namespace:              "test-namespace",
+		PodName:                "test-worker",
+		InstanceUID:            uuid.NewString(),
+		Version:                "test-version",
+		Capabilities:           map[string]any{"workspace": true},
+		RequestTimeout:         time.Second,
+		ArtifactTimeout:        time.Second,
 	}
 	client := NewClient(cfg)
 	if _, err := client.Register(context.Background(), cfg); err != nil {
@@ -86,6 +88,10 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 	}
 	if registerInput.WorkerMode != executions.WorkerModeGeneralPool {
 		t.Fatalf("register workerMode = %q, want %q", registerInput.WorkerMode, executions.WorkerModeGeneralPool)
+	}
+	if registerInput.SSHBootstrapGeneration == nil || *registerInput.SSHBootstrapGeneration != sshBootstrapGeneration ||
+		heartbeatInput.SSHBootstrapGeneration == nil || *heartbeatInput.SSHBootstrapGeneration != sshBootstrapGeneration {
+		t.Fatalf("SSH bootstrap generation was not carried on register/heartbeat: %#v / %#v", registerInput, heartbeatInput)
 	}
 	if heartbeatInput.ProtocolVersion != 2 {
 		t.Fatalf("heartbeat protocolVersion = %d, want Worker Protocol v2", heartbeatInput.ProtocolVersion)

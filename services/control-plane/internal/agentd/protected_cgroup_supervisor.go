@@ -1,6 +1,10 @@
 package agentd
 
-import "github.com/google/uuid"
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
 
 // ProtectedCgroupIdentity identifies the OS principal that must own the
 // protected cgroup subtree or that is expected to run the untrusted Provider.
@@ -13,6 +17,7 @@ type ProtectedCgroupIdentity struct {
 // generation and one worker incarnation so stale supervisors cannot attach or
 // clean up a replacement runtime.
 type ProtectedCgroupFence struct {
+	ExecutionID       uuid.UUID
 	Generation        int64
 	WorkerIncarnation uuid.UUID
 }
@@ -24,6 +29,22 @@ type ProtectedCgroupSupervisorConfig struct {
 	SupervisorIdentity ProtectedCgroupIdentity
 	ProviderIdentity   ProtectedCgroupIdentity
 	Fence              ProtectedCgroupFence
+	SupervisorInstance uuid.UUID
+	RuntimeInstance    uuid.UUID
+	// RootLease is held by the daemon for its entire process lifetime. It is
+	// nil for the standalone diagnostic preflight, which is deliberately
+	// non-destructive and never performs startup recovery.
+	RootLease  *ProtectedCgroupRootLease
+	Diagnostic bool
+}
+
+// ProtectedCgroupRootLeaseConfig identifies the daemon process that may run
+// startup recovery for one protected delegated cgroup parent.
+type ProtectedCgroupRootLeaseConfig struct {
+	ParentPath         string
+	SupervisorIdentity ProtectedCgroupIdentity
+	ProviderIdentity   ProtectedCgroupIdentity
+	SupervisorInstance uuid.UUID
 }
 
 // ProtectedCgroupPaths exposes the fenced cgroup layout created under the
@@ -33,4 +54,18 @@ type ProtectedCgroupPaths struct {
 	BundlePath   string
 	AgentdPath   string
 	ProviderPath string
+}
+
+type protectedCgroupRootLeaseContextKey struct{}
+
+func withProtectedCgroupRootLease(ctx context.Context, lease *ProtectedCgroupRootLease) context.Context {
+	if lease == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, protectedCgroupRootLeaseContextKey{}, lease)
+}
+
+func protectedCgroupRootLeaseFromContext(ctx context.Context) *ProtectedCgroupRootLease {
+	lease, _ := ctx.Value(protectedCgroupRootLeaseContextKey{}).(*ProtectedCgroupRootLease)
+	return lease
 }

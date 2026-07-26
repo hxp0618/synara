@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "synara.billing-postgres-minio-acceptance.v1",
+  "runID": "20260725182344-59843-14672",
+  "startedAt": "2026-07-25T18:23:44Z",
+  "finishedAt": "2026-07-25T18:25:45Z",
+  "status": "failed",
+  "exitCode": 1,
+  "phase": "start-minio",
+  "failure": "acceptance failed during start-minio",
+  "test": {
+    "name": "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+    "status": "not-run",
+    "exitCode": 0
+  },
+  "checks": {
+    "detailProduced": false,
+    "detailValidJSON": false,
+    "detailWithin65536Bytes": false,
+    "detailContainsNoCredentials": false,
+    "detailAssertionsAllowlistedBooleans": false,
+    "integrationAssertions": {}
+  },
+  "detail": {
+    "bytes": 0,
+    "sha256": null
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true
+  },
+  "runtime": {
+    "metadataStore": "disposable-postgresql",
+    "objectStore": "disposable-versioned-minio-s3-compatible",
+    "exactObjectVersionPinned": false,
+    "cloudWorkloadIdentityVerified": false
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17-alpine",
+      "id": "sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f",
+      "version": "unknown"
+    },
+    "minio": {
+      "reference": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+      "id": "sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d"
+    },
+    "mc": {
+      "reference": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+      "id": "sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71"
+    }
+  },
+  "cleanup": {
+    "status": "corrected-after-run"
+  },
+  "safety": {
+    "disposableRuntimeRemoved": false,
+    "credentialsPersistedAfterCleanup": null,
+    "objectContentsPersistedAfterCleanup": null
+  },
+  "postRunRemediation": {
+    "performedAt": "2026-07-25T18:31:35Z",
+    "reason": "anonymous Docker volumes were not removed by the original container cleanup",
+    "removedExactVolumeIDs": [
+      "12f6a83b62146fb489f282ee1aa5c2d455f9b9d088c7ee8310f1580fbf98d831",
+      "2bf91fcd69326c5064f76d7aa49058b151af91b789531cdfa4a1572c4e2fb6ee"
+    ],
+    "currentDisposableRuntimeRemoved": true
+  }
+}

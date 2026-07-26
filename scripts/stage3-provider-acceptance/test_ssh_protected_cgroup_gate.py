@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
@@ -37,7 +39,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         preflight = {
             "enabled": True,
             "mode": "cgroup-v2",
-            "supervisorVersion": "agentd-protected-cgroup-supervisor-v1",
+            "supervisorVersion": "agentd-protected-cgroup-supervisor-v2",
             "probeVersion": 1,
             "probeSha256": probe_sha256,
             "supervisorIdentity": "uid:0 gid:0",
@@ -164,6 +166,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
                 "SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE='/etc/synara/keys/process-containment.ed25519'",
                 "SYNARA_AGENTD_BUILD_GIT_SHA='abcdef0'",
                 "SYNARA_AGENTD_IMAGE_DIGEST='sha256:" + "12" * 32 + "'",
+                "SYNARA_AGENTD_VERSION='agentd-1.2.3'",
             ]
         )
 
@@ -178,42 +181,80 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         cgroup_root: str | None = None,
         environment_file: str | None = None,
         process_executable: str | None = None,
+        parent_processes: str | None = None,
+        final_overrides: Mapping[str, Any] | None = None,
+        final_bracket_overrides: Mapping[str, Any] | None = None,
     ) -> Any:
         env_payload = self.live_env_payload(options, cgroup_root=cgroup_root)
         control_group = "/system.slice/" + options.service_name
+        after_preflight = False
+        after_first_final_core = False
+        post_preflight_stat_reads = 0
+        final_overrides = dict(final_overrides or {})
+        final_bracket_overrides = dict(final_bracket_overrides or {})
+
+        def current(name: str, initial: Any) -> Any:
+            if after_preflight and after_first_final_core and name in final_bracket_overrides:
+                return final_bracket_overrides[name]
+            if after_preflight and name in final_overrides:
+                return final_overrides[name]
+            return initial
 
         def remote_runner(_: ssh_protected_cgroup_gate.SSHProtectedCgroupGateOptions, command: str) -> str:
+            nonlocal after_preflight, after_first_final_core, post_preflight_stat_reads
             if commands is not None:
                 commands.append(command)
             if command.startswith("grep -E "):
-                return env_payload
+                return str(current("env_payload", env_payload))
             if "--property=User" in command:
-                return "root\n"
+                return str(current("service_user", "root")) + "\n"
             if "--property=Delegate" in command:
-                return "yes\n"
+                return str(current("delegate", "yes")) + "\n"
             if "--property=ActiveState" in command:
-                return active_state + "\n"
+                return str(current("active_state", active_state)) + "\n"
             if "--property=SubState" in command:
-                return sub_state + "\n"
+                return str(current("sub_state", sub_state)) + "\n"
             if "--property=MainPID" in command:
-                return "4242\n"
+                return str(current("main_pid", 4242)) + "\n"
             if "--property=ControlGroup" in command:
-                return control_group + "\n"
+                return str(current("control_group", control_group)) + "\n"
             if "--property=EnvironmentFiles" in command:
-                return (environment_file or str(options.remote_env_file)) + " (ignore_errors=no)\n"
+                return str(current("environment_file", environment_file or str(options.remote_env_file))) + " (ignore_errors=no)\n"
+            if command.startswith("cat -- /proc/") and command.endswith("/stat"):
+                pid = int(current("main_pid", 4242))
+                starttime = int(current("starttime", 987654))
+                result = self.proc_stat(pid, starttime)
+                if after_preflight:
+                    post_preflight_stat_reads += 1
+                    # Core 3 has an initial and tail stat read. Switch only
+                    # after core 4's initial stat so its own tail bracket must
+                    # detect the simulated restart/PID reuse.
+                    if post_preflight_stat_reads == 3:
+                        after_first_final_core = True
+                return result
             if command.startswith("readlink -f /proc/"):
-                return (process_executable or options.remote_agentd_binary) + "\n"
+                return str(current("process_executable", process_executable or options.remote_agentd_binary)) + "\n"
             if command.startswith("awk -F:"):
-                return control_group + "\n"
+                return str(current("process_control_group", current("control_group", control_group))) + "\n"
             if command.startswith("tr '") and "/environ" in command:
-                return env_payload
+                return str(current("process_env_payload", current("env_payload", env_payload)))
             if command.startswith("stat -fc %T "):
-                return "cgroup2fs\n"
+                return str(current("cgroup_filesystem", "cgroup2fs")) + "\n"
+            if command.startswith("stat -Lc '%d:%i' "):
+                return str(current("cgroup_root_identity", "42:84")) + "\n"
+            if command.startswith("cat -- ") and command.endswith("/cgroup.procs"):
+                return str(current("parent_processes", parent_processes or f"{current('main_pid', 4242)}\n"))
             if "protected-cgroup-preflight" in command:
+                after_preflight = True
                 return json.dumps(preflight)
             return ""
 
         return remote_runner
+
+    @staticmethod
+    def proc_stat(pid: int, starttime: int) -> str:
+        suffix = ["S", *(["0"] * 18), str(starttime), *(["0"] * 5)]
+        return f"{pid} (synara agentd ) worker) {' '.join(suffix)}\n"
 
     def test_parse_args_requires_allow_remote_host(self) -> None:
         temporary_directory, _, _ = self.make_fixture()
@@ -288,6 +329,34 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "standard base64"):
             ssh_protected_cgroup_gate.parse_process_containment_policy(policy)
 
+    def test_parse_proc_stat_starttime_handles_spaces_and_parentheses_in_comm(self) -> None:
+        payload = self.proc_stat(4242, 987654)
+        self.assertEqual(ssh_protected_cgroup_gate.parse_proc_stat_starttime(payload, 4242), 987654)
+        with self.assertRaisesRegex(ValueError, "PID does not match"):
+            ssh_protected_cgroup_gate.parse_proc_stat_starttime(payload, 5252)
+
+    def test_live_preflight_uses_minimal_quoted_environment_without_sourcing_secrets(self) -> None:
+        temporary_directory, options, _ = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        marker = Path(temporary_directory.name) / "command-injection-marker"
+        malicious_payload = self.live_env_payload(options).replace(
+            "SYNARA_AGENTD_INSTANCE_ID='ssh-worker'",
+            f"SYNARA_AGENTD_INSTANCE_ID='worker$(touch {marker})`touch {marker}`'",
+        )
+        values = ssh_protected_cgroup_gate.parse_shell_environment(malicious_payload)
+        values["SYNARA_WORKER_REGISTRATION_TOKEN"] = "REAL_REGISTRATION_SECRET_SENTINEL"
+        values["SYNARA_AGENTD_RUNNER_COMMAND_JSON"] = '["secret-provider-command"]'
+        safe_options = dataclasses.replace(options, remote_agentd_binary="/usr/bin/printf")
+        command = ssh_protected_cgroup_gate.build_live_preflight_command(safe_options, values)
+        self.assertTrue(command.startswith("/usr/bin/env -i "))
+        self.assertNotIn(options.remote_env_file, command)
+        self.assertNotIn("REAL_REGISTRATION_SECRET_SENTINEL", command)
+        self.assertNotIn("secret-provider-command", command)
+        self.assertIn("ssh-protected-cgroup-preflight-dummy", command)
+        self.assertIn("SYNARA_AGENTD_RUNNER_COMMAND_JSON", command)
+        subprocess.run(["sh", "-ceu", command], check=True, capture_output=True, text=True)
+        self.assertFalse(marker.exists())
+
     def test_validate_live_preflight_rejects_same_uid(self) -> None:
         env_values = {
             "SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID": "10001",
@@ -312,6 +381,27 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "supervisor is not root|share a UID"):
             ssh_protected_cgroup_gate.validate_live_preflight("root", "yes", env_values, preflight)
 
+    def test_validate_manifest_trusted_rejects_signed_legacy_supervisor(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        preflight = dict(fixture["preflight"])
+        preflight["supervisorVersion"] = "agentd-protected-cgroup-supervisor-v1"
+        worker_runtime = dict(fixture["worker_manifest"]["capabilities"]["workerRuntime"])
+        containment = dict(worker_runtime["processContainment"])
+        containment["supervisorVersion"] = preflight["supervisorVersion"]
+        worker_runtime["processContainment"] = containment
+        with self.assertRaisesRegex(ValueError, "supervisorVersion is unsupported"):
+            ssh_protected_cgroup_gate.validate_manifest_trusted(
+                {"workerRuntime": worker_runtime},
+                json.loads(options.registration_context_file.read_text(encoding="utf-8")),
+                ssh_protected_cgroup_gate.parse_process_containment_policy(
+                    json.loads(options.target_capabilities_file.read_text(encoding="utf-8"))
+                ),
+                preflight,
+                verifier=lambda *_: None,
+            )
+
+
     def test_run_gate_uses_allowlisted_env_and_requires_verified_projection(self) -> None:
         temporary_directory, options, fixture = self.make_fixture()
         self.addCleanup(temporary_directory.cleanup)
@@ -335,8 +425,12 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         self.assertTrue(commands)
         self.assertIn("grep -E", commands[0])
         self.assertNotIn("cat ", commands[0])
-        self.assertFalse(any("SYNARA_WORKER_REGISTRATION_TOKEN" in command for command in commands))
-        self.assertTrue(any("set -a" in command and "protected-cgroup-preflight" in command for command in commands))
+        self.assertFalse(any("SYNARA_WORKER_REGISTRATION_TOKEN_FILE" in command for command in commands))
+        self.assertTrue(any("ssh-protected-cgroup-preflight-dummy" in command for command in commands))
+        self.assertTrue(any(command.startswith("/usr/bin/env -i ") and "protected-cgroup-preflight" in command for command in commands))
+        self.assertFalse(any("set -a" in command or ". " + str(options.remote_env_file) in command for command in commands))
+        self.assertEqual(sum("--property=MainPID" in command for command in commands), 8)
+        self.assertEqual(sum(command.startswith("cat -- /proc/") and command.endswith("/stat") for command in commands), 8)
         self.assertEqual(len(verifier_calls), 1)
         public_key, envelope, statement = verifier_calls[0]
         self.assertEqual(public_key, fixture["public_key"])
@@ -375,6 +469,128 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
                 remote_runner=remote_runner,
                 attestation_verifier=lambda *_: None,
             )
+
+    def test_run_gate_rejects_additional_service_parent_process(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            parent_processes="4242\n5252\n",
+        )
+        with self.assertRaisesRegex(ValueError, "service parent must contain only the systemd MainPID"):
+            ssh_protected_cgroup_gate.run_gate(
+                options,
+                remote_runner=remote_runner,
+                attestation_verifier=lambda *_: None,
+            )
+
+    def test_run_gate_rejects_main_pid_change_during_preflight(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_overrides={"main_pid": 5252, "parent_processes": "5252\n"},
+        )
+        with self.assertRaisesRegex(ValueError, "incarnation changed.*mainPid"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_run_gate_rejects_same_pid_reuse_during_preflight(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_overrides={"starttime": 987655},
+        )
+        with self.assertRaisesRegex(ValueError, "incarnation changed.*processStartTime"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_final_snapshot_bracket_rejects_same_pid_reuse_after_first_sample(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_bracket_overrides={"starttime": 987656},
+        )
+        with self.assertRaisesRegex(ValueError, "within core snapshot.*processStartTime"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_final_snapshot_bracket_rejects_restart_after_first_sample(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_bracket_overrides={"main_pid": 6262, "parent_processes": "6262\n"},
+        )
+        with self.assertRaisesRegex(ValueError, "service parent must contain only|within core snapshot.*mainPid"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_final_snapshot_bracket_rejects_user_delegate_and_root_inode_changes(self) -> None:
+        for name, overrides, expected in (
+            ("user", {"service_user": "nobody"}, "serviceUser"),
+            ("delegate", {"delegate": "no"}, "delegate"),
+            ("root-inode", {"cgroup_root_identity": "42:85"}, "cgroupRootIdentity"),
+        ):
+            with self.subTest(name=name):
+                temporary_directory, options, fixture = self.make_fixture()
+                self.addCleanup(temporary_directory.cleanup)
+                remote_runner = self.successful_remote_runner(
+                    options,
+                    fixture["preflight"],
+                    final_bracket_overrides=overrides,
+                )
+                with self.assertRaisesRegex(ValueError, "within (?:core snapshot|one live-host snapshot).*" + expected):
+                    ssh_protected_cgroup_gate.run_gate(
+                        options,
+                        remote_runner=remote_runner,
+                        attestation_verifier=lambda *_: None,
+                    )
+
+    def test_run_gate_rejects_bound_environment_change_during_preflight(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        changed_env = self.live_env_payload(options).replace("SYNARA_AGENTD_BUILD_GIT_SHA='abcdef0'", "SYNARA_AGENTD_BUILD_GIT_SHA='abcdef1'")
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_overrides={"env_payload": changed_env, "process_env_payload": changed_env},
+        )
+        with self.assertRaisesRegex(ValueError, "incarnation changed.*env"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_run_gate_rejects_executable_change_during_preflight(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_overrides={"process_executable": "/opt/synara/test/restarted-agentd"},
+        )
+        with self.assertRaisesRegex(ValueError, "does not execute the expected agentd binary"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
+
+    def test_run_gate_rejects_control_group_change_during_preflight(self) -> None:
+        temporary_directory, options, fixture = self.make_fixture()
+        self.addCleanup(temporary_directory.cleanup)
+        changed_control_group = "/system.slice/synara-agentd-restarted.service"
+        changed_root = "/sys/fs/cgroup" + changed_control_group
+        changed_env = self.live_env_payload(options, cgroup_root=changed_root)
+        remote_runner = self.successful_remote_runner(
+            options,
+            fixture["preflight"],
+            final_overrides={
+                "control_group": changed_control_group,
+                "process_control_group": changed_control_group,
+                "env_payload": changed_env,
+                "process_env_payload": changed_env,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "incarnation changed.*controlGroup"):
+            ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
 
     def test_run_gate_rejects_cgroup_root_outside_service_control_group(self) -> None:
         temporary_directory, options, fixture = self.make_fixture()

@@ -135,8 +135,44 @@ func (s *Service) cancelExecutionLocked(
 		if err != nil {
 			return persistence.SessionEvent{}, err
 		}
-		if err := tx.WithContext(ctx).Delete(lease).Error; err != nil {
-			return persistence.SessionEvent{}, problem.Wrap(500, "lease_release_failed", "Failed to release the cancelled Execution lease.", err)
+		leaseDelete := tx.WithContext(ctx).Delete(lease)
+		if leaseDelete.Error != nil {
+			return persistence.SessionEvent{}, problem.Wrap(500, "lease_release_failed", "Failed to release the cancelled Execution lease.", leaseDelete.Error)
+		}
+		if leaseDelete.RowsAffected > 0 {
+			releaseReason := workerClaimReleaseUserCancelled
+			releasedAt := now
+			switch reason {
+			case "tenant-delete":
+				releaseReason = workerClaimReleaseTenantDeleted
+			case sessionAbsoluteExpiryAction:
+				releaseReason = workerClaimReleaseSessionAbsoluteExpired
+				var session persistence.AgentSession
+				if err := tx.WithContext(ctx).Select("absolute_expires_at").
+					Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+					Take(&session).Error; err != nil {
+					return persistence.SessionEvent{}, problem.Wrap(500, "session_lifetime_load_failed", "The Session absolute release time could not be loaded.", err)
+				}
+				if session.AbsoluteExpiresAt == nil {
+					return persistence.SessionEvent{}, problem.New(500, "session_lifetime_missing", "The Session absolute release time is missing.")
+				}
+				releasedAt = *session.AbsoluteExpiresAt
+			}
+			authorityKind := workerClaimReleaseAuthorityControlPlane
+			if actorType == "worker" {
+				authorityKind = workerClaimReleaseAuthorityWorker
+			} else if actorType == "user" {
+				authorityKind = workerClaimReleaseAuthorityUser
+			}
+			authorityID := ""
+			if actorID != nil {
+				authorityID = actorID.String()
+			}
+			if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+				*lease, releasedAt, now, releaseReason, authorityKind, authorityID, "",
+			)); err != nil {
+				return persistence.SessionEvent{}, err
+			}
 		}
 		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, *lease, now); err != nil {
 			return persistence.SessionEvent{}, err

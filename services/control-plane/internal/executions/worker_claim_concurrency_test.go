@@ -35,7 +35,7 @@ func TestPostgresConcurrentExecutionClaimSameRequestIDReplaysSingleClaimLedgerEn
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	primaryDB, replicaDB := isolatedPostgresClaimTestDBs(t)
+	primaryDB, replicaDB := isolatedPostgresTestDBs(t)
 	fixture := seedExecutionFixtureWithoutCleanup(t, primaryDB)
 	services := [2]*Service{integrationService(t, primaryDB), integrationService(t, replicaDB)}
 	worker := registerManifestTestWorker(t, services[0], fixture.TargetID, fixture.TargetKind, "claim-concurrency-execution")
@@ -84,7 +84,7 @@ func TestPostgresConcurrentWorkspaceCleanupClaimSameRequestIDReplaysSingleClaimL
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	primaryDB, replicaDB := isolatedPostgresClaimTestDBs(t)
+	primaryDB, replicaDB := isolatedPostgresTestDBs(t)
 	fixture, _, _ := seedWorkspaceCleanupFixtureWithoutCleanup(t, primaryDB, false)
 	services := [2]*Service{integrationService(t, primaryDB), integrationService(t, replicaDB)}
 	worker := registerManifestTestWorker(t, services[0], fixture.TargetID, fixture.TargetKind, "claim-concurrency-cleanup")
@@ -407,7 +407,7 @@ func describeClaimTestError(err error) string {
 	return fmt.Sprintf("%T: %v", err, err)
 }
 
-func isolatedPostgresClaimTestDBs(t *testing.T) (*gorm.DB, *gorm.DB) {
+func isolatedPostgresTestDBs(t *testing.T) (*gorm.DB, *gorm.DB) {
 	t.Helper()
 
 	databaseURL := strings.TrimSpace(os.Getenv("SYNARA_TEST_DATABASE_URL"))
@@ -421,7 +421,7 @@ func isolatedPostgresClaimTestDBs(t *testing.T) (*gorm.DB, *gorm.DB) {
 		t.Fatalf("open postgres admin db: %v", err)
 	}
 
-	schemaName := "claim_concurrency_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	schemaName := "execution_test_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
 	if err := adminDB.WithContext(ctx).Exec(fmt.Sprintf(`CREATE SCHEMA "%s"`, schemaName)).Error; err != nil {
 		t.Fatalf("create isolated schema %s: %v", schemaName, err)
 	}

@@ -335,6 +335,15 @@ func verifyWorkerProcessContainmentAttestation(
 		return err
 	}
 	containment := runtime.ProcessContainment
+	if containment.Mode == "cgroup-v2" &&
+		containment.SupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV2 {
+		err := problem.New(409, "worker_containment_supervisor_unsupported", "Strict cgroup containment requires a supported supervisor version.")
+		err.Details = map[string]any{
+			"reportedSupervisorVersion": containment.SupervisorVersion,
+			"requiredSupervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV2,
+		}
+		return err
+	}
 	if containment.Attestation == nil {
 		return problem.New(409, "worker_attestation_required", "Strict process containment requires an Execution Target trusted attestation.")
 	}

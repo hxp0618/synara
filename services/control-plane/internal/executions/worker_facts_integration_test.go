@@ -337,11 +337,12 @@ func TestWorkspaceCleanupAcknowledgementReturnsWorkerFactToIdle(t *testing.T) {
 
 func TestWorkspaceCleanupReleaseFailAndExpiryReturnWorkerFactToIdle(t *testing.T) {
 	for _, scenario := range []struct {
-		name   string
-		action func(t *testing.T, service *Service, worker persistence.WorkerInstance, claim WorkspaceCleanupClaim)
+		name          string
+		releaseReason string
+		action        func(t *testing.T, service *Service, worker persistence.WorkerInstance, claim WorkspaceCleanupClaim)
 	}{
 		{
-			name: "release",
+			name: "release", releaseReason: workerClaimReleaseCleanupWorkerReleased,
 			action: func(t *testing.T, service *Service, worker persistence.WorkerInstance, claim WorkspaceCleanupClaim) {
 				leaseInput := WorkspaceCleanupLeaseInput{
 					DispatchGeneration: claim.DispatchGeneration,
@@ -353,7 +354,7 @@ func TestWorkspaceCleanupReleaseFailAndExpiryReturnWorkerFactToIdle(t *testing.T
 			},
 		},
 		{
-			name: "fail",
+			name: "fail", releaseReason: workerClaimReleaseCleanupFailedTerminal,
 			action: func(t *testing.T, service *Service, worker persistence.WorkerInstance, claim WorkspaceCleanupClaim) {
 				input := WorkspaceCleanupFailedInput{
 					WorkspaceCleanupLeaseInput: WorkspaceCleanupLeaseInput{
@@ -370,7 +371,24 @@ func TestWorkspaceCleanupReleaseFailAndExpiryReturnWorkerFactToIdle(t *testing.T
 			},
 		},
 		{
-			name: "expiry",
+			name: "fail-retryable", releaseReason: workerClaimReleaseCleanupFailedRetryable,
+			action: func(t *testing.T, service *Service, worker persistence.WorkerInstance, claim WorkspaceCleanupClaim) {
+				input := WorkspaceCleanupFailedInput{
+					WorkspaceCleanupLeaseInput: WorkspaceCleanupLeaseInput{
+						DispatchGeneration: claim.DispatchGeneration,
+						LeaseToken:         claim.Lease.LeaseToken,
+					},
+					ErrorCode:    "cleanup_retryable",
+					ErrorMessage: "retry cleanup",
+					Retryable:    true,
+				}
+				if _, err := service.FailWorkspaceCleanup(context.Background(), worker, claim.CleanupID, input, "worker-fact-cleanup-fail-retryable-"+uuid.NewString()); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "expiry", releaseReason: workerClaimReleaseCleanupLeaseExpired,
 			action: func(t *testing.T, service *Service, _ persistence.WorkerInstance, _ WorkspaceCleanupClaim) {
 				recovered, err := service.RecoverExpiredWorkspaceCleanupLeases(context.Background(), service.now(), 10)
 				if err != nil {
@@ -422,6 +440,16 @@ func TestWorkspaceCleanupReleaseFailAndExpiryReturnWorkerFactToIdle(t *testing.T
 			}
 			service.now = func() time.Time { return actionAt }
 			scenario.action(t, service, worker, *claimed.Value.Cleanup)
+			_, release := loadWorkspaceCleanupClaimReleaseFactForTest(
+				t, db, claimed.Value.Cleanup.CleanupID, claimed.Value.Cleanup.DispatchGeneration,
+			)
+			expectedReleasedAt := actionAt
+			if scenario.name == "expiry" {
+				expectedReleasedAt = claimed.Value.Cleanup.Lease.ExpiresAt
+			}
+			if release.ReleaseReason != scenario.releaseReason || !release.ReleasedAt.Equal(expectedReleasedAt) {
+				t.Fatalf("%s cleanup release fact = %#v", scenario.name, release)
+			}
 
 			fact := loadWorkerIncarnationFactForTest(t, db, worker.ID, worker.Incarnation)
 			if fact.CurrentState != workerFactStateIdle || fact.ClaimCount != 1 || fact.AccumulatedActiveSeconds != expectedActiveSeconds {

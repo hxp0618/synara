@@ -199,7 +199,7 @@ func loadResumeSnapshotThroughSequence(
 	currentTurnSequence int64,
 ) (int64, error) {
 	priorTurnThrough := currentTurnSequence - 1
-	if execution.Generation <= 1 {
+	if execution.Generation <= 1 && execution.PredecessorExecutionID == nil {
 		return priorTurnThrough, nil
 	}
 	var session persistence.AgentSession
@@ -427,11 +427,53 @@ func loadCurrentTurnSequence(
 	tx *gorm.DB,
 	execution persistence.AgentExecution,
 ) (int64, bool, error) {
+	executionIDs := []uuid.UUID{execution.ID}
+	visited := map[uuid.UUID]struct{}{execution.ID: {}}
+	predecessorID := execution.PredecessorExecutionID
+	for predecessorID != nil {
+		if _, duplicate := visited[*predecessorID]; duplicate {
+			return 0, false, problem.New(
+				409,
+				"execution_history_ancestry_invalid",
+				"The Execution recovery ancestry contains a cycle.",
+			)
+		}
+		var predecessor persistence.AgentExecution
+		err := tx.WithContext(ctx).
+			Select("id", "predecessor_execution_id").
+			Where(
+				"tenant_id = ? AND session_id = ? AND turn_id = ? AND id = ?",
+				execution.TenantID,
+				execution.SessionID,
+				execution.TurnID,
+				*predecessorID,
+			).
+			Take(&predecessor).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, false, problem.New(
+				409,
+				"execution_history_ancestry_invalid",
+				"The Execution recovery predecessor is outside the current Tenant, Session, or Turn.",
+			)
+		}
+		if err != nil {
+			return 0, false, problem.Wrap(
+				500,
+				"execution_history_ancestry_load_failed",
+				"Failed to load the Execution recovery ancestry.",
+				err,
+			)
+		}
+		visited[predecessor.ID] = struct{}{}
+		executionIDs = append(executionIDs, predecessor.ID)
+		predecessorID = predecessor.PredecessorExecutionID
+	}
+
 	var current persistence.SessionEvent
 	err := tx.WithContext(ctx).
 		Select("tenant_id", "session_id", "sequence").
-		Where("tenant_id = ? AND session_id = ? AND execution_id = ? AND event_type = ?",
-			execution.TenantID, execution.SessionID, execution.ID, "turn.created").
+		Where("tenant_id = ? AND session_id = ? AND execution_id IN ? AND event_type = ?",
+			execution.TenantID, execution.SessionID, executionIDs, "turn.created").
 		Order("sequence").Take(&current).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, false, nil

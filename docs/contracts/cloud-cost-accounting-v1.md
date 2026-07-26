@@ -5,6 +5,7 @@ This contract defines the first Control Plane billing-accounting boundary for re
 It is deliberately split into three durable domains:
 
 - `worker_claim_facts` is the append-only authoritative request-claim ledger for one worker incarnation.
+- `worker_claim_release_facts` is the one-to-one append-only closure ledger for claims that have left active delivery.
 - `billing_estimated_usage_charges` is internal cost attribution derived from immutable `worker_incarnation_facts`, `worker_claim_facts`, and versioned provider tariffs.
 - `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are imported external billing truth keyed by tenant-scoped provider external IDs.
 
@@ -23,9 +24,11 @@ Estimates and actuals must never share a table or a mutable "final cost" column.
 Tariff rows are platform-global catalog entries today and therefore do not carry `tenant_id`.
 Listing is tenant-authorized: callers must operate through an active tenant with `billing.manage`, but that
 authorization does not re-scope row ownership. Appending a global row additionally requires the path/active Tenant
-to match the platform-configured `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`. The mutation API fails closed when that
-authority is unset outside Personal profile; Personal binds it to the bootstrapped Tenant. A customer Tenant's owner
-or billing administrator therefore cannot change rates used by other Tenants merely by holding `billing.manage`.
+to match the platform-configured `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`. This Tenant is the platform billing
+operator for both global Tariffs and shared-Target accounting authority; the historical environment-variable name is
+retained for compatibility. The mutation APIs fail closed when that authority is unset outside Personal profile;
+Personal binds it to the bootstrapped Tenant. A customer Tenant's owner or billing administrator therefore cannot
+change rates or seal shared accounting history merely by holding `billing.manage`.
 
 Rates are stored in currency micros for these units:
 
@@ -44,6 +47,9 @@ Current management/runtime surface:
 
 - `GET /v1/tenants/{tenantID}/billing/tariffs`
 - `POST /v1/tenants/{tenantID}/billing/tariffs` (configured platform tariff-operator Tenant only)
+- `GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
+- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
+- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/allocations:sweep`
 - `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}`
 - `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`
 
@@ -78,9 +84,107 @@ Time-based charge kinds (`cpu`, `memory`, `ephemeral-storage`, `pod`) split exac
 - When the ledger is incomplete, the old safe fallback remains: only a fully enclosed incarnation lifetime under one effective request rate may emit request charges; crossing a billing boundary, using a non-terminal worker, or spanning a request-tariff change still fails closed with `billing_request_charge_delta_unavailable`.
 - A shared Target whose Worker fact has no authoritative tenant attribution still fails closed with `billing_worker_fact_tenant_unattributed` instead of creating a global or `NULL`-tenant estimate.
 
+`worker_claim_release_facts` never rewrites the claim row. It records one stable release reason, the business-effective
+`released_at`, the later-or-equal `recorded_at`, bounded authority/request evidence, and bounded object metadata. Exact
+replay is idempotent; different content for the same claim fails closed. Lease TTL uses the original lease deadline,
+Interaction and Session expiry use their persisted deadline, Kubernetes terminal suspension uses the Pod proof
+observation, and ordinary Worker/control operations freeze one transaction timestamp.
+
+Migration `000075` is intentionally a first-phase dual-write rollout. A migration-era active lease or cleanup delivery
+may lack its older `worker_claim_facts` parent and therefore cannot produce a fabricated release row. Deletion guards are
+not enabled until live rows are backfilled and a minimum writer version proves every release path writes the ledger.
+Historical already-deleted claims cannot be reconstructed from inference. Billing that requires release completeness or
+shared cost allocation must fail closed across that incomplete interval; v1 request charging continues to use claim
+timestamps only.
+
+## Shared Target estimated-cost allocation
+
+Migration `000077` adds a separate retained accounting graph for platform-shared Targets:
+
+- `billing_shared_target_ledger_coverages` is the operator-sealed, immutable cutover authority for one shared Target;
+- `billing_shared_cost_allocation_runs` freezes one terminal Worker incarnation, period, tariff scope, algorithm,
+  complete ledger digest, and tenant/platform-idle second totals;
+- `billing_shared_estimated_charge_slices` retains exact `tenant-claim` or `platform-idle` charge slices.
+
+`closed-claim-interval-v1` applies only when the Target and Worker fact are globally shared, the Worker is terminal,
+the incarnation registered at or after the sealed `completeFromAt`, every immutable Claim has exactly one immutable
+Release, and the Claim/Release counts equal the terminal Worker fact. Claim intervals must not overlap. Any missing
+coverage, historical gap, count drift, missing release, invalid timeline, overlap, or future terminal timestamp fails
+closed; a positive resource rate with a missing CPU/Memory/Ephemeral request fact also fails closed instead of
+silently omitting that charge. Migration `000077` performs no inferred backfill.
+
+For each tariff segment, Claim/Release boundaries assign active time to the Claim's exact Tenant and leave every gap
+as explicit `platform-idle` cost with no synthetic Tenant. Cumulative whole-second and cumulative-amount differences
+conserve the segment despite sub-second Claim boundaries. The complete run additionally requires
+`tenantAllocatedSeconds + platformIdleSeconds` to equal the whole terminal usage window. CPU, Memory, Ephemeral
+Storage, and Pod amounts therefore conserve the full tariff-segment estimate. Request charges use the exact Claim
+timestamp and Tenant; a Claim exactly at terminal `usageEnd` uses the final tariff, while platform idle can never
+receive a request charge.
+
+The transaction uses one PostgreSQL advisory lock for the Worker/provider/currency/algorithm scope plus the terminal
+Worker-fact row lock. Distinct half-open billing periods may be adjacent but cannot overlap; this prevents full-period
+and partial-period Runs from charging the same usage twice. Run and Slice IDs are deterministic. Concurrent identical
+first writes serialize to one graph; exact replay returns that graph, and any authoritative evidence mismatch is a
+conflict. The single-replica SQLite Service serializes its local check/create/replay sequence with the same outcome.
+
+PostgreSQL and SQLite additionally reject duplicate semantic Slices, a global fallback while an exact regional tariff
+is effective, a rate or requested-resource snapshot that differs from the selected Tariff/Worker fact, a nonzero or
+mispriced Request amount, and a right-boundary Request unless the Run ends at the exact Worker terminal timestamp.
+Whole-second ownership and cumulative time-charge amounts still require the sole Control Plane allocation core; direct
+table INSERT privileges must not be granted to tenant/API roles. The original tenant-owned `EstimateUsageCharges` and
+its sweeper remain unchanged and still reject a `NULL`-Tenant Worker fact.
+
+The shared management API is intentionally operator-only. Sealing coverage requires the active path Tenant to be the
+configured platform billing operator with `billing.manage`, a platform-shared Target, a non-future `completeFromAt`, a
+bounded writer version, and a lowercase deployment-attestation SHA-256. The Coverage row and
+`billing.shared_target_ledger_coverage_sealed` audit entry commit atomically. PostgreSQL serializes concurrent first
+seals by Target; SQLite serializes them inside its single-replica Service. An exact retry returns the retained row and
+does not duplicate the audit entry; changing any asserted field returns
+`billing_shared_ledger_coverage_conflict`. The API never derives a cutover from historical rows. Operators must first
+prove that every production Claim release path is running at least `minimumWriterVersion`, then seal the observed
+deployment digest; supplying those assertions is an operational authority action, not an automated inference.
+
+The explicit allocation sweep accepts one shared Target, provider, currency, and already-closed half-open billing
+period. It scans every overlapping `NULL`-Tenant Worker fact, including non-terminal or otherwise ineligible rows, and
+invokes the same immutable allocator independently for each Worker. Successful Run/Slice graphs commit even when
+another Worker fails. The response is `completed` only when every overlapping Worker succeeds; otherwise it is
+`retry-required` with counts and at most 20 bounded Worker/error entries plus `failuresOmitted`. Repeating the request
+after a crash or failure replays successful deterministic graphs and retries the remainder, so a browser heartbeat is
+neither required nor treated as scheduling authority. Every manual request first records
+`billing.shared_cost_allocation_sweep_requested`.
+
+Unattended retries use `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON`. Every mapping freezes an exact shared Target,
+provider, currency, half-open period, settlement delay, and retry interval; the scheduler never derives calendar
+months from wall-clock time. Periods are at most 366 days, settlement delay is `1m..2160h`, retry interval is at least
+`1m`, duplicate identities are rejected, and periods for the same Target/provider/currency cannot overlap. A mapping
+does not run before `billingPeriodEndAt + settlementDelay`.
+
+Only the holder of the separate `synara:billing-shared-allocation-scheduler` database lease runs configured mappings.
+The lease carries a monotonic fencing token and every scheduler mutation receives the transaction write fence. A
+standby therefore cannot write while the leader is active; takeover revalidates the explicit period immediately and
+then resumes the configured interval. The in-memory timestamp is only a per-process throttle: durable Run/Slice
+identity is the restart cursor, so losing scheduler memory causes a safe replay rather than a skipped period. Repeated
+settled-period scans intentionally catch late Worker facts; operators remove a static mapping only after their external
+settlement/ingestion authority says no later facts can arrive.
+
+Every due scheduled attempt records `billing.shared_cost_allocation_sweep_scheduled` as a `system` actor under the
+configured platform billing operator Tenant before scanning. A partial Worker result fails the leader cycle with
+`billing_shared_allocation_sweep_partial_failure`, preserves successful graphs, and is retried after the configured
+interval. Local operator/API, PostgreSQL concurrency, and two-holder leadership-handoff evidence is recorded in
+[`stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md`](../reports/stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md).
+
+This graph is an estimated shared-cost allocation from the versioned tariff catalog. It does not claim to allocate an
+account-level actual invoice among Tenants: the current actual invoice model is tenant-owned and the provider rows may
+be period-aggregated. A future actual-allocation graph must separately prove source scope and amount conservation
+before shared slices participate in reconciliation. Local OrbStack PostgreSQL evidence is recorded in
+[`stage-4-shared-cost-allocation-orbstack-pg-20260726-final4.md`](../reports/stage-4-shared-cost-allocation-orbstack-pg-20260726-final4.md).
+
 ## Actual invoice imports
 
 `billing_actual_invoice_imports` is immutable and idempotent by `(tenant_id, provider, external_import_id)`.
+PostgreSQL serializes that exact identity with a transaction-scoped advisory lock before lookup/insert: concurrent
+checksum-identical first imports return the same committed import/line identities, while different contents return
+`billing_invoice_import_conflict`. The single-replica SQLite profile retains its in-process transaction behavior.
 
 `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are tenant-owned rows:
 
@@ -128,23 +232,36 @@ The current v1 report also returns unmatched estimated charge IDs for the import
 ## Provider Adapter Appendix
 
 The `services/control-plane/internal/billing` package now includes blob-backed actual-invoice adapters for strict offline imports.
+Managed-cloud acceptance evidence is governed separately by
+[`managed-cloud-billing-acceptance-v1.md`](managed-cloud-billing-acceptance-v1.md); local Kubernetes, MinIO, and
+provider-compatible emulators cannot be promoted to a managed-cloud identity or native-export pass.
 
 Delimited provider/object mappings are configured by `(tenant_id, provider, external_import_id)` and resolve to one export object plus one parser format:
 
 - `aws-cur-csv`
+- `aws-cur-2-manifest`
 - `gcp-cloud-billing-json`
 - `azure-cost-normalized-csv`
 - `azure-cost-normalized-json`
+
+The provider label and parser format are one fail-closed pair: both AWS formats require `provider=aws`, the GCP
+format requires `provider=gcp`, and both Azure formats require `provider=azure`. A mismatched mapping is rejected
+during configuration normalization, before any object-store read or invoice import can occur.
 
 Security and failure-mode requirements:
 
 - sources are read-only
 - local sources use root-relative file access and reject a symlink base, intermediate symlink, final symlink, inode replacement, and non-regular files
 - S3, GCS, and Azure Blob sources use their default SDK credential/workload-identity chain; configured imports pin an immutable S3/Azure version or GCS generation
+- `aws-cur-2-manifest` is S3-only. The configured manifest is read at its exact VersionId. Each listed chunk is first resolved by HEAD to an immutable VersionId, ETag, LastModified, and size, then read with a versioned GET; an unversioned GET is never allowed.
+- CUR 2.0 manifests must expose the native `dataFiles` list with path strings or `filePath` objects. Legacy `reportKeys` alone and unknown file-list shapes fail closed rather than being guessed.
+- CUR 2.0 ingestion accepts gzip CSV chunks. Parquet and Snappy Parquet are rejected before chunk resolution until a bounded native Parquet reader is implemented.
+- Native manifests must use the AWS execution-specific layout `<root>/metadata/<partition>/<execution-id>/<manifest>` and list chunks only from `<root>/data/<same-partition>/<same-execution-id>/`. Root, partition, execution ID, and the complete common chunk directory must match; basename-only matching is forbidden. A chunk whose captured LastModified is later than the pinned manifest is rejected as an overwritten/stale-manifest mismatch; equal timestamps are allowed because S3-compatible implementations may expose coarse timestamp precision.
+- CUR 2.0 source provenance includes the pinned manifest and every sorted chunk key, VersionId, ETag, LastModified, size, and content SHA-256. A deterministic bundle checksum is included in the durable import SourceChecksum and the detailed provenance is returned by the import adapter/result and recorded in scheduled-import audit metadata.
 - a custom S3 endpoint requires an explicit enable flag, accepts only an HTTP(S) origin without userinfo/query/fragment/path, and requires HTTPS unless a second local-emulator flag enables HTTP
 - an Azure container URL accepts only HTTPS, or HTTP under its explicit local-emulator flag, rejects userinfo/query/fragment, and must name a container path
 - object keys and prefixes are relative and cannot escape their configured root
-- oversized blobs are rejected before parsing completes
+- oversized blobs are rejected before parsing completes. CUR 2.0 additionally enforces one whole-import budget before accumulation: at most 128 chunks, 64 MiB total source/compressed bytes, 256 MiB total manifest-plus-decompressed bytes, and 1,000,000 CSV rows. Per-import test overrides may only lower these ceilings.
 - missing required fields fail closed
 - mixed billing periods inside one object fail closed
 - mixed currencies inside one object fail closed
@@ -157,7 +274,10 @@ Runtime scheduling rules:
 - import mappings are parsed with unknown-field and trailing-JSON rejection
 - only the current `synara:billing-import-scheduler` leader performs scheduled reads
 - a provider external ID is immutable: the same checksum is an idempotent replay and a different checksum is a conflict
-- scheduled audit and optional follow-up work run only for a newly created import; unchanged replay does not create duplicate audit entries
+- each due scheduler job creates one bounded system correlation request ID shared by its import and reconciliation audit
+  entries; the ID is never empty, and checksum-identical replay does not create replacement audit rows
+- scheduled import audit is written only for a newly created import; checksum-identical replay does not create a
+  duplicate import audit, while estimate/reconciliation follow-up may rerun idempotently to close post-import crash gaps
 - reconciliation audit is written only when line reconciliation state actually changes
 - `estimateAfterImport` requires an explicit non-empty `executionTargetIds` list. Every listed Target must be tenant-owned;
   shared, missing, or foreign Targets fail closed, and one Target cannot be assigned to different estimate providers in
@@ -183,9 +303,14 @@ Normalization rules:
   `aws:<account>:<region>:<resource-id>`
   `gcp:<project>:<region>:<resource-name>`
   `azure:<subscription>:<region>:<resource-id>`
+- CUR 2.0 exact `kubernetes:` keys require either all four trusted `user:synara:*` identity tags or a structurally valid EKS Pod ARN. Instance/Pod UID must parse as a UUID; ARN region/account must agree with the row; trusted tag and ARN identity must agree. Generic `cluster`, `namespace`, `pod`, or UID aliases never produce an exact key.
+- CUR 2.0 rows that cannot prove exact workload identity use an explicit `aws-allocation-<quality>:` key. Current qualities include partial/malformed Kubernetes identity, split rows missing Pod UID, provider-resource fallback, and a parent compute row referenced by split children but not safely replaced.
+- A ResourceId-less `Credit`, `Refund`, Savings Plan negation, or discount is an account-level adjustment rather than Pod usage. The v1 five-kind line schema cannot persist a provider-wide adjustment honestly, so only recognized, account-identified adjustments whose original exported amount is already non-positive are explicitly filtered. The importer does not change their sign based on line-item type. Their count and signed micros total remain in source provenance, the durable checksum, and audit metadata. Unknown, positive, or account-less ResourceId-less rows fail closed.
 
 Provider-specific expectations:
 
 - AWS CUR CSV requires line-item IDs, billing-period start/end, currency, decimal cost, and either complete Synara Kubernetes tags or a resource ID.
+- AWS CUR 2.0 split children use `NetSplitCost + NetUnusedCost` when the net pair is present, otherwise `SplitCost + UnusedCost`. Net and non-net layers are never mixed. Parent EC2 compute suppression requires an exact replacement boundary over parent resource, usage interval, operation, product code, and net/non-net cost family. CPU and Memory children in that boundary are combined before comparison with the single parent cost. Every child boundary must have exactly one parent across the complete multi-chunk import; a child-only boundary, missing parent chunk, net/non-net family mismatch, incomplete boundary, duplicate parent, or amount mismatch fails the entire import. A complete different boundary on the same instance is retained as unrelated usage.
+- The versioned S3 acceptance root must execute and individually gate named child-only, net-parent/gross-child, and cross-chunk-missing-parent negative subtests. Root-only success is insufficient evidence for these fail-closed paths.
 - GCP Cloud Billing JSON requires line-item IDs, currency, decimal cost, `invoice.month` or explicit billing-period start/end, and either complete Kubernetes labels or a resource global name.
 - Azure normalized CSV/JSON requires explicit external line IDs, billing-period start/end, currency, decimal cost, charge kind, and either complete Kubernetes identity fields or a resource ID.

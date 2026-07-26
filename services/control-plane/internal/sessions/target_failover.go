@@ -14,7 +14,6 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
-	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
 const (
@@ -76,6 +75,13 @@ func (s *Service) FailoverExecution(
 			}
 			return problem.Wrap(500, "target_failover_leadership_check_failed", "The target-failover leadership epoch could not be verified.", err)
 		}
+		// Lock the shared admission authority before any Session row so failover,
+		// turn creation, resume, and quota updates use one deadlock-safe order.
+		// Queued/recovering failover is a capacity-neutral replacement; a
+		// suspended source is checked later because it had released its slot.
+		if err := s.lockExecutionQuotaAuthority(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		var source persistence.AgentExecution
 		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND id = ?", tenantID, sourceExecutionID).Take(&source).Error
@@ -102,15 +108,6 @@ func (s *Service) FailoverExecution(
 			Take(&group).Error; err != nil {
 			return problem.Wrap(409, "target_failover_group_unavailable", "Execution Target Group is unavailable.", err)
 		}
-		var committed int64
-		if err := tx.WithContext(ctx).Model(&persistence.ExecutionFailoverAttempt{}).
-			Where("tenant_id = ? AND session_id = ? AND turn_id = ? AND status = ?", tenantID, source.SessionID, source.TurnID, "committed").
-			Count(&committed).Error; err != nil {
-			return problem.Wrap(500, "target_failover_count_failed", "Previous failovers could not be counted.", err)
-		}
-		if committed >= int64(group.MaxFailoverAttempts) {
-			return problem.New(409, "target_failover_limit_reached", "The Target Group failover limit has been reached for this Turn.")
-		}
 		if err := requireFailoverSafeSource(ctx, tx, source); err != nil {
 			return err
 		}
@@ -121,6 +118,11 @@ func (s *Service) FailoverExecution(
 		}
 		if leaseCount != 0 || source.WorkerID != nil {
 			return problem.New(409, "target_failover_source_not_fenced", "Source Execution still has a Worker identity or Lease.")
+		}
+		if source.Status == "suspended" {
+			if err := s.requireExecutionQuotaAvailableAfterAuthorityLock(ctx, tx, tenantID); err != nil {
+				return err
+			}
 		}
 
 		var sourceBundle *persistence.ExecutionRecoveryBundle
@@ -165,6 +167,9 @@ func (s *Service) FailoverExecution(
 			tx,
 			nil,
 			&routeRequest,
+			ExecutionLaunchPolicyScope{
+				TenantID: tenantID, OrganizationID: session.OrganizationID, Provider: session.Provider,
+			},
 			session.WarmPoolMode,
 			func(
 				ctx context.Context,
@@ -189,6 +194,27 @@ func (s *Service) FailoverExecution(
 			return err
 		}
 		selection := *launchTargetPlan.RoutingSelection
+		if s.targetFailoverBeforeCommitValidation != nil {
+			if err := s.targetFailoverBeforeCommitValidation(ctx, tx, routeRequest, selection); err != nil {
+				return err
+			}
+		}
+		selection, err = routing.NewService(s.db).LockSelectionForCommit(ctx, tx, routeRequest, selection)
+		if err != nil {
+			return err
+		}
+		launchTargetPlan.Target = selection.Target
+		launchTargetPlan.RoutingSelection = &selection
+		launchTargetPlan.SchedulingPolicySnapshot = selection.SchedulingPolicySnapshot
+		var committed int64
+		if err := tx.WithContext(ctx).Model(&persistence.ExecutionFailoverAttempt{}).
+			Where("tenant_id = ? AND session_id = ? AND turn_id = ? AND status = ?", tenantID, source.SessionID, source.TurnID, "committed").
+			Count(&committed).Error; err != nil {
+			return problem.Wrap(500, "target_failover_count_failed", "Previous failovers could not be counted.", err)
+		}
+		if committed >= int64(selection.Group.MaxFailoverAttempts) {
+			return problem.New(409, "target_failover_limit_reached", "The Target Group failover limit has been reached for this Turn.")
+		}
 
 		now := s.now()
 		failover := persistence.ExecutionFailoverAttempt{
@@ -251,19 +277,12 @@ func (s *Service) FailoverExecution(
 			recoveryReason := "disaster-recovery"
 			destination.NextRecoveryReason = &recoveryReason
 		}
-		routing.ApplyExecutionSelection(&destination, selection)
-		placement.ApplySelection(&destination, launchTargetPlan.PlacementSelection)
-		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, selection.Target.ID, destination.ID)
+		scheduled, err := CreateScheduledExecution(ctx, tx, destination, launchTargetPlan, now)
 		if err != nil {
 			return err
 		}
-		if releaseSelection != nil {
-			destination.WorkerReleaseRevisionID = &releaseSelection.RevisionID
-			destination.WorkerReleaseChannel = &releaseSelection.Channel
-		}
-		if err := tx.WithContext(ctx).Create(&destination).Error; err != nil {
-			return problem.Wrap(409, "target_failover_destination_create_failed", "Destination Execution could not be created.", err)
-		}
+		destination = scheduled.Execution
+		decision := scheduled.Decision
 
 		interactionMove := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
 			Where("tenant_id = ? AND execution_id = ? AND delivery_status IN ?", tenantID, source.ID, []string{"not-ready", "resume-recorded"}).
@@ -295,7 +314,16 @@ func (s *Service) FailoverExecution(
 			"sourceExecutionTargetId":      source.ExecutionTargetID,
 			"destinationExecutionTargetId": destination.ExecutionTargetID,
 			"destinationRegion":            selection.Member.Region, "destinationClusterId": selection.Member.ClusterID,
-			"leaderFencingToken": leaderFence.FencingToken, "reason": reason,
+			"placementRegion": destination.PlacementRegion, "placementClusterId": destination.PlacementClusterID,
+			"tenantSchedulingPolicyVersion":       destination.TenantSchedulingPolicyVersion,
+			"tenantSchedulingPolicyDigest":        destination.TenantSchedulingPolicyDigest,
+			"organizationSchedulingPolicyVersion": destination.OrganizationSchedulingPolicyVersion,
+			"organizationSchedulingPolicyDigest":  destination.OrganizationSchedulingPolicyDigest,
+			"schedulingDecisionId":                decision.ID,
+			"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+			"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+			"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+			"leaderFencingToken":                  leaderFence.FencingToken, "reason": reason,
 			"sourceRecoveryBundleId": failover.SourceRecoveryBundleID,
 			"sourceDrDomain":         failoverAuthority.SourceDRDomain,
 		}
@@ -307,7 +335,16 @@ func (s *Service) FailoverExecution(
 			"targetGroupId":           selection.Group.ID, "targetGroupVersion": selection.Group.Version,
 			"targetGroupMemberVersion": selection.Member.Version,
 			"selectedRegion":           selection.Member.Region, "selectedClusterId": selection.Member.ClusterID,
-			"leaderFencingToken": leaderFence.FencingToken, "reason": reason,
+			"placementRegion": destination.PlacementRegion, "placementClusterId": destination.PlacementClusterID,
+			"tenantSchedulingPolicyVersion":       destination.TenantSchedulingPolicyVersion,
+			"tenantSchedulingPolicyDigest":        destination.TenantSchedulingPolicyDigest,
+			"organizationSchedulingPolicyVersion": destination.OrganizationSchedulingPolicyVersion,
+			"organizationSchedulingPolicyDigest":  destination.OrganizationSchedulingPolicyDigest,
+			"schedulingDecisionId":                decision.ID,
+			"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+			"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+			"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+			"leaderFencingToken":                  leaderFence.FencingToken, "reason": reason,
 			"sourceDrDomain": failoverAuthority.SourceDRDomain,
 		}
 		if !failoverAuthority.ReplicatedThroughAt.IsZero() {
@@ -320,9 +357,13 @@ func (s *Service) FailoverExecution(
 		}
 		if selection.DRReadiness != nil {
 			authority := map[string]any{
+				"version":             selection.DRReadiness.Version,
 				"sourceDrDomain":      selection.DRReadiness.SourceDRDomain,
 				"drDomain":            selection.DRReadiness.DRDomain,
 				"replicatedThroughAt": selection.DRReadiness.ReplicatedThroughAt,
+				"artifactsReady":      selection.DRReadiness.ArtifactsReady,
+				"checkpointsReady":    selection.DRReadiness.CheckpointsReady,
+				"memoryReady":         selection.DRReadiness.MemoryReady,
 				"publisherIdentity":   selection.DRReadiness.PublisherIdentity,
 				"observedAt":          selection.DRReadiness.ObservedAt,
 				"expiresAt":           selection.DRReadiness.ExpiresAt,

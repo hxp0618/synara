@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
 )
 
 const (
@@ -149,12 +151,24 @@ type SelectRequest struct {
 }
 
 type Selection struct {
-	Target        persistence.ExecutionTarget
-	Group         persistence.ExecutionTargetGroup
-	Member        persistence.ExecutionTargetGroupMember
-	Health        persistence.ExecutionTargetHealth
-	DRReadiness   *persistence.ExecutionTargetDRReadiness
-	RoutingReason string
+	Target                   persistence.ExecutionTarget
+	Group                    persistence.ExecutionTargetGroup
+	Member                   persistence.ExecutionTargetGroupMember
+	Health                   persistence.ExecutionTargetHealth
+	DRReadiness              *persistence.ExecutionTargetDRReadiness
+	SchedulingPolicySnapshot schedulingpolicy.Snapshot
+	QueuePressure            QueuePressureSnapshot
+	RoutingReason            string
+}
+
+// QueuePressureSnapshot freezes the durable, not-yet-serviced Execution
+// pressure used by queue-pressure-v1. The health authority remains the source
+// of truth for hard capacity admission: a queued Execution may already have a
+// Pod counted by AllocatedCapacityUnits, so adding these values is deliberately
+// only a conservative routing rank.
+type QueuePressureSnapshot struct {
+	QueuedExecutionUnits int64
+	EffectiveLoadRank    int64
 }
 
 type MemberState struct {
@@ -420,9 +434,15 @@ func (s *Service) AddMember(ctx context.Context, input AddMemberInput) (persiste
 	if err != nil {
 		return persistence.ExecutionTargetGroupMember{}, err
 	}
+	if strings.Contains(region, "/") {
+		return persistence.ExecutionTargetGroupMember{}, problem.New(400, "invalid_target_group_member_region", "region must not contain '/'.")
+	}
 	clusterID, err := normalizeLocation(input.ClusterID, 200, "invalid_target_group_member_cluster", "clusterId")
 	if err != nil {
 		return persistence.ExecutionTargetGroupMember{}, err
+	}
+	if strings.Contains(clusterID, "/") {
+		return persistence.ExecutionTargetGroupMember{}, problem.New(400, "invalid_target_group_member_cluster", "clusterId must not contain '/'.")
 	}
 	priority := input.Priority
 	if priority < 0 || priority > 1_000_000 {
@@ -491,8 +511,12 @@ func (s *Service) ObserveHealth(ctx context.Context, input HealthObservation) (p
 		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_source", "Target health source must be between 1 and 160 characters.")
 	}
 	observedAt := input.ObservedAt.UTC()
+	now := s.now()
 	if observedAt.IsZero() {
-		observedAt = s.now()
+		observedAt = now
+	}
+	if observedAt.After(now) {
+		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_observed_at", "observedAt must not be later than server time.")
 	}
 	if input.TTL < 10*time.Second || input.TTL > time.Hour {
 		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_ttl", "Target health TTL must be between 10 seconds and 1 hour.")
@@ -509,7 +533,6 @@ func (s *Service) ObserveHealth(ctx context.Context, input HealthObservation) (p
 		var current persistence.ExecutionTargetHealth
 		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("execution_target_id = ?", input.ExecutionTargetID).Take(&current).Error
-		now := s.now()
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			result = persistence.ExecutionTargetHealth{
 				ExecutionTargetID: input.ExecutionTargetID, Status: status, CapacityStatus: capacity,
@@ -578,8 +601,12 @@ func (s *Service) ObserveDRReadiness(ctx context.Context, input DRReadinessObser
 		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_reason", "Target DR readiness reason is too long.")
 	}
 	observedAt := input.ObservedAt.UTC()
+	now := s.now()
 	if observedAt.IsZero() {
-		observedAt = s.now()
+		observedAt = now
+	}
+	if observedAt.After(now) {
+		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_observed_at", "observedAt must not be later than server time.")
 	}
 	if replicatedThroughAt.After(observedAt) {
 		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_replicated_through_at", "replicatedThroughAt must not be later than observedAt.")
@@ -597,7 +624,6 @@ func (s *Service) ObserveDRReadiness(ctx context.Context, input DRReadinessObser
 		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("execution_target_id = ? AND source_dr_domain = ?", input.ExecutionTargetID, sourceDRDomain).
 			Take(&current).Error
-		now := s.now()
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			result = persistence.ExecutionTargetDRReadiness{
 				ExecutionTargetID:   input.ExecutionTargetID,
@@ -695,6 +721,14 @@ func (s *Service) ObserveLocationOutage(
 
 	var result persistence.ExecutionLocationOutage
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		// The Tenant row is the range-lock authority for location outages. An
+		// exact outage row may not exist yet, so row locking alone cannot prevent
+		// an insert from crossing selection-to-commit validation.
+		var tenant persistence.Tenant
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Select("id").Where("id = ? AND deleted_at IS NULL", input.TenantID).Take(&tenant).Error; err != nil {
+			return problem.Wrap(500, "location_outage_tenant_lock_failed", "Location outage authority could not lock its Tenant scope.", err)
+		}
 		var current persistence.ExecutionLocationOutage
 		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND region = ? AND cluster_id = ?", input.TenantID, region, clusterID).
@@ -748,8 +782,23 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	if db == nil {
 		db = s.db
 	}
+	organizationID := request.OrganizationID
+	policySnapshot, err := schedulingpolicy.NewService(db).Resolve(
+		ctx,
+		db,
+		request.TenantID,
+		&organizationID,
+	)
+	if err != nil {
+		return Selection{}, problem.Wrap(
+			500,
+			"execution_scheduling_policy_load_failed",
+			"The effective Execution Scheduling Policy could not be loaded.",
+			err,
+		)
+	}
 	var group persistence.ExecutionTargetGroup
-	err := db.WithContext(ctx).
+	err = db.WithContext(ctx).
 		Where("tenant_id = ? AND id = ? AND status = ?", request.TenantID, request.TargetGroupID, GroupStatusActive).
 		Where("organization_id IS NULL OR organization_id = ?", request.OrganizationID).
 		Take(&group).Error
@@ -782,6 +831,15 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	var healthRows []persistence.ExecutionTargetHealth
 	if err := db.WithContext(ctx).Where("execution_target_id IN ?", targetIDs).Find(&healthRows).Error; err != nil {
 		return Selection{}, problem.Wrap(500, "target_group_health_load_failed", "Execution Target health could not be loaded.", err)
+	}
+	queuedExecutionUnitsByTarget, err := loadQueuedExecutionUnits(ctx, db, targetIDs)
+	if err != nil {
+		return Selection{}, problem.Wrap(
+			500,
+			"target_group_queue_pressure_load_failed",
+			"Execution Target queue pressure could not be loaded.",
+			err,
+		)
 	}
 	now := s.now()
 	var locationOutageRows []persistence.ExecutionLocationOutage
@@ -827,6 +885,8 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	candidates := make([]routeCandidate, 0, len(members))
 	blockedLocationCandidates := make([]blockedLocationCandidate, 0, len(members))
 	blockedCandidates := make([]blockedDRCandidate, 0, len(members))
+	policyCandidateCount := 0
+	policyBlockedCandidateCount := 0
 	for _, member := range members {
 		if _, skip := excluded[member.ExecutionTargetID]; skip {
 			continue
@@ -836,6 +896,13 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 			continue
 		}
 		if request.RequiredTargetKind != "" && target.Kind != request.RequiredTargetKind {
+			continue
+		}
+		policyCandidateCount++
+		if !schedulingpolicy.AllowsTarget(policySnapshot.Effective, schedulingpolicy.Target{
+			ID: target.ID, Region: member.Region, Cluster: member.ClusterID, Provider: request.Provider,
+		}) {
+			policyBlockedCandidateCount++
 			continue
 		}
 		health, ok := healthByID[member.ExecutionTargetID]
@@ -852,10 +919,15 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 				continue
 			}
 		}
+		queuePressure := queuePressureSnapshot(
+			health,
+			queuedExecutionUnitsByTarget[member.ExecutionTargetID],
+			member.Weight,
+		)
 		candidate := routeCandidate{
 			member: member, target: target, health: health,
 			preferred:  request.PreferredTargetID != nil && member.ExecutionTargetID == *request.PreferredTargetID,
-			regionRank: regionRank, healthRank: healthStatusRank(health.Status), loadRank: loadRank(health, member.Weight),
+			regionRank: regionRank, healthRank: healthStatusRank(health.Status), queuePressure: queuePressure,
 		}
 		affinityRank, err := providerAffinityRank(target.Capabilities, request.Provider)
 		if err != nil {
@@ -904,6 +976,9 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
+		if policyCandidateCount != 0 && policyBlockedCandidateCount == policyCandidateCount {
+			return Selection{}, noPolicyEligibleDestination(policySnapshot)
+		}
 		if len(blockedCandidates) != 0 {
 			return Selection{}, blockedCandidates[bestBlockedCandidateIndex(blockedCandidates, group.Strategy)].problem()
 		}
@@ -924,13 +999,281 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 		reason = "disaster-recovery"
 	}
 	return Selection{
-		Target:        selected.target,
-		Group:         group,
-		Member:        selected.member,
-		Health:        selected.health,
-		DRReadiness:   selected.drReadiness,
-		RoutingReason: reason,
+		Target:                   selected.target,
+		Group:                    group,
+		Member:                   selected.member,
+		Health:                   selected.health,
+		DRReadiness:              selected.drReadiness,
+		SchedulingPolicySnapshot: policySnapshot,
+		QueuePressure:            selected.queuePressure,
+		RoutingReason:            reason,
 	}, nil
+}
+
+// LockSelectionForCommit linearizes a previously computed routing decision
+// against its mutable authorities. It never selects a replacement candidate:
+// any changed identity or version fails closed so the caller can retry from a
+// new decision. The lock order is tenant, organization, Tenant/Organization
+// scheduling-policy heads and revisions, target, group, member, location
+// outage rows, health, readiness, then a read of durable queued/recovering
+// Executions while the Target serialization lock is retained.
+// Health and readiness publishers only lock their own authority row, so they
+// cannot form a reverse dependency on the preceding routing locks.
+func (s *Service) LockSelectionForCommit(
+	ctx context.Context,
+	tx *gorm.DB,
+	request SelectRequest,
+	selection Selection,
+) (Selection, error) {
+	if tx == nil {
+		return Selection{}, problem.New(500, "target_routing_commit_transaction_required", "Routing commit validation requires an active transaction.")
+	}
+	if request.TenantID == uuid.Nil || request.OrganizationID == uuid.Nil || request.TargetGroupID == uuid.Nil ||
+		selection.Target.ID == uuid.Nil || selection.Group.ID == uuid.Nil || selection.Member.ID == uuid.Nil {
+		return Selection{}, staleSelectionProblem("selection-scope-invalid", selection)
+	}
+	var tenant persistence.Tenant
+	if err := lockRoutingAuthority(tx, ctx).
+		Select("id").Where("id = ? AND deleted_at IS NULL", request.TenantID).
+		Take(&tenant).Error; err != nil {
+		return Selection{}, routingCommitLoadError(err, "tenant", selection)
+	}
+	organizationID := request.OrganizationID
+	if err := schedulingpolicy.NewService(s.db).LockEffectiveForCommit(
+		ctx,
+		tx,
+		request.TenantID,
+		&organizationID,
+		selection.SchedulingPolicySnapshot,
+	); err != nil {
+		if errors.Is(err, schedulingpolicy.ErrPolicyStale) {
+			return Selection{}, staleSelectionProblem("scheduling-policy-changed", selection)
+		}
+		return Selection{}, problem.Wrap(
+			500,
+			"target_routing_commit_authority_load_failed",
+			"The effective Execution Scheduling Policy could not be locked for routing commit.",
+			err,
+		)
+	}
+
+	var target persistence.ExecutionTarget
+	if err := lockRoutingAuthority(tx, ctx).
+		Where("id = ?", selection.Target.ID).
+		Take(&target).Error; err != nil {
+		return Selection{}, routingCommitLoadError(err, "target", selection)
+	}
+	if target.Status != "active" || !sameExecutionTargetAuthority(target, selection.Target) ||
+		(target.TenantID != nil && *target.TenantID != request.TenantID) ||
+		(target.OrganizationID != nil && *target.OrganizationID != request.OrganizationID) {
+		return Selection{}, staleSelectionProblem("target-changed", selection)
+	}
+
+	var group persistence.ExecutionTargetGroup
+	if err := lockRoutingAuthority(tx, ctx).
+		Where("tenant_id = ? AND id = ?", request.TenantID, selection.Group.ID).
+		Take(&group).Error; err != nil {
+		return Selection{}, routingCommitLoadError(err, "group", selection)
+	}
+	if group.ID != request.TargetGroupID || group.Status != GroupStatusActive ||
+		!sameTargetGroupAuthority(group, selection.Group) ||
+		(group.OrganizationID != nil && *group.OrganizationID != request.OrganizationID) {
+		return Selection{}, staleSelectionProblem("group-changed", selection)
+	}
+
+	var member persistence.ExecutionTargetGroupMember
+	if err := lockRoutingAuthority(tx, ctx).
+		Where("tenant_id = ? AND id = ?", request.TenantID, selection.Member.ID).
+		Take(&member).Error; err != nil {
+		return Selection{}, routingCommitLoadError(err, "member", selection)
+	}
+	if member.Status != MemberStatusActive || member.TargetGroupID != group.ID || member.ExecutionTargetID != target.ID ||
+		!sameTargetGroupMemberAuthority(member, selection.Member) {
+		return Selection{}, staleSelectionProblem("member-changed", selection)
+	}
+
+	var locationOutages []persistence.ExecutionLocationOutage
+	if err := lockRoutingAuthority(tx, ctx).
+		Where(
+			"tenant_id = ? AND region = ? AND cluster_id IN ?",
+			request.TenantID,
+			member.Region,
+			[]string{"", member.ClusterID},
+		).
+		Order("cluster_id").Find(&locationOutages).Error; err != nil {
+		return Selection{}, problem.Wrap(500, "target_routing_commit_authority_load_failed", "Destination location outage authority could not be locked for commit.", err)
+	}
+
+	var health persistence.ExecutionTargetHealth
+	if err := lockRoutingAuthority(tx, ctx).
+		Where("execution_target_id = ?", target.ID).
+		Take(&health).Error; err != nil {
+		return Selection{}, routingCommitLoadError(err, "health", selection)
+	}
+	now := s.now()
+	for _, outage := range locationOutages {
+		if outage.ObservedAt.After(now) ||
+			(outage.ExpiresAt.After(now) && slices.Contains(
+				[]string{LocationStatusDraining, LocationStatusUnreachable}, outage.Status,
+			)) {
+			return Selection{}, staleSelectionProblem("destination-location-outage-changed", selection)
+		}
+	}
+	if !sameTargetHealthAuthority(health, selection.Health) || !healthEligible(health, group, now) {
+		return Selection{}, staleSelectionProblem("health-changed-or-ineligible", selection)
+	}
+
+	requirement := drReadinessRequirement(request, member)
+	var readiness *persistence.ExecutionTargetDRReadiness
+	if requirement.required {
+		if selection.DRReadiness == nil || requirement.sourceDRDomain == "" || requirement.replicatedThroughAt.IsZero() {
+			return Selection{}, staleSelectionProblem("dr-readiness-selection-missing", selection)
+		}
+		var current persistence.ExecutionTargetDRReadiness
+		if err := lockRoutingAuthority(tx, ctx).
+			Where("execution_target_id = ? AND source_dr_domain = ?", target.ID, requirement.sourceDRDomain).
+			Take(&current).Error; err != nil {
+			return Selection{}, routingCommitLoadError(err, "dr-readiness", selection)
+		}
+		blockedReason, _ := drReadinessBlockedReason(current, requirement, now)
+		if !sameTargetDRReadinessAuthority(current, *selection.DRReadiness) || blockedReason != "" {
+			return Selection{}, staleSelectionProblem("dr-readiness-changed-or-ineligible", selection)
+		}
+		readiness = &current
+	} else if selection.DRReadiness != nil {
+		return Selection{}, staleSelectionProblem("dr-readiness-selection-unexpected", selection)
+	}
+	queuedExecutionUnitsByTarget, err := loadQueuedExecutionUnits(ctx, tx, []uuid.UUID{target.ID})
+	if err != nil {
+		return Selection{}, problem.Wrap(
+			500,
+			"target_routing_commit_queue_pressure_load_failed",
+			"Destination queue pressure could not be revalidated for routing commit.",
+			err,
+		)
+	}
+	actualQueuedExecutionUnits := queuedExecutionUnitsByTarget[target.ID]
+	if actualQueuedExecutionUnits != selection.QueuePressure.QueuedExecutionUnits {
+		return Selection{}, staleQueuePressureProblem(
+			selection,
+			selection.QueuePressure.QueuedExecutionUnits,
+			actualQueuedExecutionUnits,
+		)
+	}
+
+	locked := selection
+	locked.Target = target
+	locked.Group = group
+	locked.Member = member
+	locked.Health = health
+	locked.DRReadiness = readiness
+	locked.QueuePressure = queuePressureSnapshot(health, actualQueuedExecutionUnits, member.Weight)
+	return locked, nil
+}
+
+func lockRoutingAuthority(tx *gorm.DB, ctx context.Context) *gorm.DB {
+	return persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "")
+}
+
+func routingCommitLoadError(err error, authority string, selection Selection) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return staleSelectionProblem(authority+"-missing", selection)
+	}
+	return problem.Wrap(500, "target_routing_commit_authority_load_failed", "Destination routing authority could not be locked for commit.", err)
+}
+
+func staleSelectionProblem(reason string, selection Selection) *problem.Error {
+	apiError := problem.New(409, "target_routing_selection_stale", "Destination routing authority changed after selection; retry from a new routing decision.")
+	apiError.Details = map[string]any{
+		"reason":            reason,
+		"targetGroupId":     selection.Group.ID,
+		"memberId":          selection.Member.ID,
+		"executionTargetId": selection.Target.ID,
+	}
+	return apiError
+}
+
+func staleQueuePressureProblem(
+	selection Selection,
+	expectedQueuedExecutionUnits int64,
+	actualQueuedExecutionUnits int64,
+) *problem.Error {
+	apiError := staleSelectionProblem("queue-pressure-changed", selection)
+	apiError.Details["expectedQueuedExecutionUnits"] = expectedQueuedExecutionUnits
+	apiError.Details["actualQueuedExecutionUnits"] = actualQueuedExecutionUnits
+	return apiError
+}
+
+func noPolicyEligibleDestination(snapshot schedulingpolicy.Snapshot) error {
+	apiError := problem.New(
+		409,
+		"target_group_no_policy_eligible_destination",
+		"The effective Execution Scheduling Policy does not allow a Target Group destination for this launch.",
+	)
+	details := map[string]any{
+		"tenantPolicyVersion": snapshot.Tenant.Version,
+		"tenantPolicyDigest":  snapshot.Tenant.Digest,
+	}
+	if snapshot.Organization != nil {
+		details["organizationPolicyVersion"] = snapshot.Organization.Version
+		details["organizationPolicyDigest"] = snapshot.Organization.Digest
+	}
+	apiError.Details = details
+	return apiError
+}
+
+func sameExecutionTargetAuthority(current, selected persistence.ExecutionTarget) bool {
+	return current.ID == selected.ID && sameOptionalUUID(current.TenantID, selected.TenantID) &&
+		sameOptionalUUID(current.OrganizationID, selected.OrganizationID) && current.Kind == selected.Kind &&
+		current.Status == selected.Status && current.UpdatedAt.Equal(selected.UpdatedAt) &&
+		reflect.DeepEqual(current.ConfigurationEncrypted, selected.ConfigurationEncrypted) &&
+		reflect.DeepEqual(current.Capabilities, selected.Capabilities)
+}
+
+func sameTargetGroupAuthority(current, selected persistence.ExecutionTargetGroup) bool {
+	return current.ID == selected.ID && current.TenantID == selected.TenantID &&
+		sameOptionalUUID(current.OrganizationID, selected.OrganizationID) && current.Version == selected.Version &&
+		current.Strategy == selected.Strategy && slices.Equal(current.PreferredRegions, selected.PreferredRegions) &&
+		current.AllowCrossRegion == selected.AllowCrossRegion && current.MaxFailoverAttempts == selected.MaxFailoverAttempts &&
+		current.HealthMaxStalenessSeconds == selected.HealthMaxStalenessSeconds && current.Status == selected.Status
+}
+
+func sameTargetGroupMemberAuthority(current, selected persistence.ExecutionTargetGroupMember) bool {
+	return current.ID == selected.ID && current.TenantID == selected.TenantID && current.TargetGroupID == selected.TargetGroupID &&
+		current.ExecutionTargetID == selected.ExecutionTargetID && current.Region == selected.Region &&
+		current.ClusterID == selected.ClusterID && current.Priority == selected.Priority && current.Weight == selected.Weight &&
+		current.Status == selected.Status && current.Version == selected.Version
+}
+
+func sameTargetHealthAuthority(current, selected persistence.ExecutionTargetHealth) bool {
+	return current.ExecutionTargetID == selected.ExecutionTargetID && current.Version == selected.Version &&
+		current.Status == selected.Status && current.CapacityStatus == selected.CapacityStatus &&
+		sameOptionalInt(current.AvailableCapacityUnits, selected.AvailableCapacityUnits) &&
+		current.AllocatedCapacityUnits == selected.AllocatedCapacityUnits && current.Source == selected.Source &&
+		sameOptionalString(current.Reason, selected.Reason) && current.ObservedAt.Equal(selected.ObservedAt) &&
+		current.ExpiresAt.Equal(selected.ExpiresAt)
+}
+
+func sameTargetDRReadinessAuthority(current, selected persistence.ExecutionTargetDRReadiness) bool {
+	return current.ExecutionTargetID == selected.ExecutionTargetID && current.SourceDRDomain == selected.SourceDRDomain &&
+		current.DRDomain == selected.DRDomain && current.Version == selected.Version &&
+		current.ReplicatedThroughAt.Equal(selected.ReplicatedThroughAt) &&
+		current.ArtifactsReady == selected.ArtifactsReady && current.CheckpointsReady == selected.CheckpointsReady &&
+		current.MemoryReady == selected.MemoryReady && current.PublisherIdentity == selected.PublisherIdentity &&
+		sameOptionalString(current.Reason, selected.Reason) && current.ObservedAt.Equal(selected.ObservedAt) &&
+		current.ExpiresAt.Equal(selected.ExpiresAt)
+}
+
+func sameOptionalUUID(left, right *uuid.UUID) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
+}
+
+func sameOptionalInt(left, right *int) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
+}
+
+func sameOptionalString(left, right *string) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
 }
 
 func ApplySessionSelection(session *persistence.AgentSession, selection Selection, requestedTargetID *uuid.UUID, preferredRegion *string) {
@@ -966,6 +1309,12 @@ func ApplyExecutionSelection(execution *persistence.AgentExecution, selection Se
 	execution.SelectedRegion = &region
 	execution.SelectedClusterID = &clusterID
 	execution.RoutingReason = &reason
+	if execution.PlacementRegion == "" {
+		execution.PlacementRegion = region
+	}
+	if execution.PlacementClusterID == "" {
+		execution.PlacementClusterID = clusterID
+	}
 }
 
 type routeCandidate struct {
@@ -977,13 +1326,14 @@ type routeCandidate struct {
 	regionRank           int
 	healthRank           int
 	providerAffinityRank int
-	loadRank             int64
+	queuePressure        QueuePressureSnapshot
 }
 
 type drReadinessRequirementState struct {
 	required            bool
 	reason              string
 	sourceDRDomain      string
+	destinationDRDomain string
 	replicatedThroughAt time.Time
 	requiredStores      DRStoreRequirements
 }
@@ -1017,6 +1367,12 @@ func (candidate blockedDRCandidate) problem() error {
 	case "dr-readiness-source-mismatch":
 		code = "target_group_dr_source_domain_mismatch"
 		message = "Cross-domain placement is blocked because the target DR readiness authority does not cover the required source DR domain."
+	case "dr-readiness-destination-mismatch":
+		code = "target_group_dr_destination_domain_mismatch"
+		message = "Cross-domain placement is blocked because the target DR readiness authority does not cover the candidate's current destination DR domain."
+	case "dr-readiness-observed-in-future":
+		code = "target_group_dr_readiness_observed_in_future"
+		message = "Cross-domain placement is blocked because the target DR readiness authority was observed later than server time."
 	case "dr-readiness-watermark-stale":
 		code = "target_group_dr_recovery_watermark_stale"
 		message = "Cross-domain placement is blocked because the target DR readiness watermark does not cover the required recovery authority timestamp."
@@ -1026,6 +1382,7 @@ func (candidate blockedDRCandidate) problem() error {
 		"blockedReason":        candidate.blockedReason,
 		"readinessRequiredFor": candidate.requirement.reason,
 		"sourceDrDomain":       candidate.requirement.sourceDRDomain,
+		"destinationDrDomain":  candidate.requirement.destinationDRDomain,
 		"executionTargetId":    candidate.candidate.target.ID,
 		"region":               candidate.candidate.member.Region,
 		"clusterId":            candidate.candidate.member.ClusterID,
@@ -1071,14 +1428,14 @@ func candidateLess(left, right routeCandidate, strategy string) bool {
 	if left.providerAffinityRank != right.providerAffinityRank {
 		return left.providerAffinityRank < right.providerAffinityRank
 	}
-	if strategy == StrategyBalanced && left.loadRank != right.loadRank {
-		return left.loadRank < right.loadRank
+	if strategy == StrategyBalanced && left.queuePressure.EffectiveLoadRank != right.queuePressure.EffectiveLoadRank {
+		return left.queuePressure.EffectiveLoadRank < right.queuePressure.EffectiveLoadRank
 	}
 	if left.member.Priority != right.member.Priority {
 		return left.member.Priority < right.member.Priority
 	}
-	if strategy != StrategyBalanced && left.loadRank != right.loadRank {
-		return left.loadRank < right.loadRank
+	if strategy != StrategyBalanced && left.queuePressure.EffectiveLoadRank != right.queuePressure.EffectiveLoadRank {
+		return left.queuePressure.EffectiveLoadRank < right.queuePressure.EffectiveLoadRank
 	}
 	if left.member.Weight != right.member.Weight {
 		return left.member.Weight > right.member.Weight
@@ -1090,7 +1447,7 @@ func healthEligible(health persistence.ExecutionTargetHealth, group persistence.
 	if health.Status != HealthHealthy && health.Status != HealthDegraded {
 		return false
 	}
-	if !health.ExpiresAt.After(now) || health.ObservedAt.Add(time.Duration(group.HealthMaxStalenessSeconds)*time.Second).Before(now) {
+	if health.ObservedAt.After(now) || !health.ExpiresAt.After(now) || health.ObservedAt.Add(time.Duration(group.HealthMaxStalenessSeconds)*time.Second).Before(now) {
 		return false
 	}
 	if health.CapacityStatus == CapacitySaturated {
@@ -1107,6 +1464,7 @@ func drReadinessRequirement(
 	sourceClusterID := strings.TrimSpace(request.SourceClusterID)
 	requirement := drReadinessRequirementState{
 		sourceDRDomain:      strings.TrimSpace(request.SourceDRDomain),
+		destinationDRDomain: DRDomainForLocation(candidate.Region, candidate.ClusterID),
 		replicatedThroughAt: request.ReplicatedThroughAt.UTC(),
 		requiredStores:      request.RequiredDRStores,
 	}
@@ -1174,6 +1532,12 @@ func drReadinessBlockedReason(
 	if readiness.SourceDRDomain != requirement.sourceDRDomain {
 		return "dr-readiness-source-mismatch", nil
 	}
+	if readiness.DRDomain != requirement.destinationDRDomain {
+		return "dr-readiness-destination-mismatch", nil
+	}
+	if readiness.ObservedAt.After(now) {
+		return "dr-readiness-observed-in-future", nil
+	}
 	if !readiness.ExpiresAt.After(now) {
 		return "dr-readiness-expired", nil
 	}
@@ -1187,14 +1551,72 @@ func drReadinessBlockedReason(
 	return "", nil
 }
 
-func loadRank(health persistence.ExecutionTargetHealth, weight int) int64 {
-	if health.AvailableCapacityUnits == nil || *health.AvailableCapacityUnits == 0 {
-		return math.MaxInt64 / 4
+func queuePressureSnapshot(
+	health persistence.ExecutionTargetHealth,
+	queuedExecutionUnits int64,
+	weight int,
+) QueuePressureSnapshot {
+	return QueuePressureSnapshot{
+		QueuedExecutionUnits: queuedExecutionUnits,
+		EffectiveLoadRank:    effectiveLoadRank(health, queuedExecutionUnits, weight),
 	}
+}
+
+func effectiveLoadRank(health persistence.ExecutionTargetHealth, queuedExecutionUnits int64, weight int) int64 {
 	if weight <= 0 {
 		weight = 1
 	}
-	return int64(health.AllocatedCapacityUnits) * 1_000_000 / int64(*health.AvailableCapacityUnits*weight)
+	pressure := queuedExecutionUnits
+	if health.AvailableCapacityUnits != nil && *health.AvailableCapacityUnits > 0 {
+		pressure += int64(health.AllocatedCapacityUnits)
+	}
+	if pressure < 0 || pressure > math.MaxInt64/1_000_000 {
+		return math.MaxInt64
+	}
+	denominator := int64(weight)
+	if health.AvailableCapacityUnits != nil && *health.AvailableCapacityUnits > 0 {
+		available := int64(*health.AvailableCapacityUnits)
+		if available > math.MaxInt64/denominator {
+			denominator = math.MaxInt64
+		} else {
+			denominator *= available
+		}
+	}
+	if denominator <= 0 {
+		return math.MaxInt64
+	}
+	return pressure * 1_000_000 / denominator
+}
+
+type queuedExecutionUnitsRow struct {
+	ExecutionTargetID    uuid.UUID `gorm:"column:execution_target_id"`
+	QueuedExecutionUnits int64     `gorm:"column:queued_execution_units"`
+}
+
+func loadQueuedExecutionUnits(
+	ctx context.Context,
+	db *gorm.DB,
+	targetIDs []uuid.UUID,
+) (map[uuid.UUID]int64, error) {
+	unitsByTarget := make(map[uuid.UUID]int64, len(targetIDs))
+	if len(targetIDs) == 0 {
+		return unitsByTarget, nil
+	}
+	var rows []queuedExecutionUnitsRow
+	if err := db.WithContext(ctx).
+		Model(&persistence.AgentExecution{}).
+		Select("execution_target_id, COUNT(*) AS queued_execution_units").
+		Where("execution_target_id IN ? AND status IN ?", targetIDs, []string{"queued", "recovering"}).
+		Group("execution_target_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.ExecutionTargetID != uuid.Nil && row.QueuedExecutionUnits >= 0 {
+			unitsByTarget[row.ExecutionTargetID] = row.QueuedExecutionUnits
+		}
+	}
+	return unitsByTarget, nil
 }
 
 func healthStatusRank(status string) int {

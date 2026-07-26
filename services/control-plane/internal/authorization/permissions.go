@@ -42,6 +42,8 @@ const (
 	RetentionManage        Permission = "retention.manage"
 	LifecycleRead          Permission = "lifecycle.read"
 	LifecycleManage        Permission = "lifecycle.manage"
+	SchedulingPolicyRead   Permission = "scheduling_policy.read"
+	SchedulingPolicyManage Permission = "scheduling_policy.manage"
 	IdentityRead           Permission = "identity.read"
 	IdentityManage         Permission = "identity.manage"
 	IdentitySessionsRevoke Permission = "identity.sessions.revoke"
@@ -61,6 +63,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ArtifactRead, ArtifactWrite, ArtifactDelete,
 		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, BillingManage,
 		QuotaRead, QuotaManage, RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
+		SchedulingPolicyRead, SchedulingPolicyManage,
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
@@ -72,6 +75,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ExecutionApprove, ExecutionReadLogs, WorkerRead, WorkerManage, AuditRead,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse, QuotaRead, QuotaManage,
 		RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
+		SchedulingPolicyRead, SchedulingPolicyManage,
 		IdentityRead, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
@@ -79,11 +83,12 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead,
 		ExecutionReadLogs, ArtifactRead, CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, AuditRead,
 		RetentionRead, RetentionManage, LifecycleRead,
+		SchedulingPolicyRead, SchedulingPolicyManage,
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead,
 	),
 	"billing_admin": permissionSet(TenantRead, TenantMembersRead, BillingManage, QuotaRead, QuotaManage),
-	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, LifecycleRead, OutboxRead),
+	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, LifecycleRead, SchedulingPolicyRead, OutboxRead),
 	"member":        permissionSet(TenantRead),
 }
 
@@ -93,23 +98,27 @@ var organizationRolePermissions = map[string]map[Permission]struct{}{
 		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionArchive,
 		SessionDelete, ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
+		SchedulingPolicyRead, SchedulingPolicyManage,
 	),
 	"admin": permissionSet(
 		OrganizationRead, OrganizationUpdate, OrganizationMembers, ProjectCreate, ProjectRead,
 		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionArchive,
 		SessionDelete, ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
+		SchedulingPolicyRead, SchedulingPolicyManage,
 	),
 	"agent_operator": permissionSet(
 		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionShare, SessionArchive,
 		ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
+		SchedulingPolicyRead,
 	),
 	"member": permissionSet(
 		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionArchive,
 		ExecutionCreate, ExecutionCancel, ExecutionReadLogs, ArtifactRead, ArtifactWrite, CredentialsUse,
+		SchedulingPolicyRead,
 	),
-	"viewer": permissionSet(OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead),
+	"viewer": permissionSet(OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, SchedulingPolicyRead),
 }
 
 func TenantAllows(role string, permission Permission) bool {

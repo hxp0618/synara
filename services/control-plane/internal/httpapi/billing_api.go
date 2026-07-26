@@ -55,6 +55,90 @@ func (s *Server) createBillingTariff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
+func (s *Server) getBillingSharedTargetLedgerCoverage(w http.ResponseWriter, r *http.Request) {
+	service := s.requireBillingService(w, r)
+	if service == nil {
+		return
+	}
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	item, err := service.GetSharedTargetLedgerCoverageAuthorized(
+		r.Context(), mustPrincipal(r), tenantID, targetID,
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) sealBillingSharedTargetLedgerCoverage(w http.ResponseWriter, r *http.Request) {
+	service := s.requireBillingService(w, r)
+	if service == nil {
+		return
+	}
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var input billing.SealSharedTargetLedgerCoverageInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, created, err := service.SealSharedTargetLedgerCoverageAuthorized(
+		r.Context(), mustPrincipal(r), tenantID, targetID, input, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, item)
+}
+
+func (s *Server) sweepBillingSharedTargetAllocations(w http.ResponseWriter, r *http.Request) {
+	service := s.requireBillingService(w, r)
+	if service == nil {
+		return
+	}
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var input billing.SweepSharedUsageChargesInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	input.ExecutionTargetID = targetID
+	result, err := service.SweepSharedUsageChargesAuthorized(
+		r.Context(), mustPrincipal(r), tenantID, input, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) triggerBillingImport(w http.ResponseWriter, r *http.Request) {
 	service := s.requireBillingService(w, r)
 	if service == nil {

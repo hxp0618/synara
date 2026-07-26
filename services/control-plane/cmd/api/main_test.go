@@ -88,3 +88,15 @@ func TestBillingImportScheduleIntervalUsesMinimumConfiguredJob(t *testing.T) {
 		t.Fatalf("billing import schedule interval = %s, want 1h", interval)
 	}
 }
+
+func TestBillingSharedAllocationScheduleIntervalUsesMinimumConfiguredJob(t *testing.T) {
+	interval := billingSharedAllocationScheduleInterval(billing.RuntimeConfig{
+		SharedAllocations: []billing.ConfiguredSharedAllocation{
+			{ExecutionTargetID: uuid.New(), ScheduleInterval: 12 * time.Hour},
+			{ExecutionTargetID: uuid.New(), ScheduleInterval: 30 * time.Minute},
+		},
+	})
+	if interval != 30*time.Minute {
+		t.Fatalf("billing shared allocation schedule interval = %s, want 30m", interval)
+	}
+}

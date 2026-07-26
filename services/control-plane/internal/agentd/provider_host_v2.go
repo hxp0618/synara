@@ -191,7 +191,7 @@ func (r *Runner) CapabilitySummary(ctx context.Context) (map[string]any, error) 
 }
 
 func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (descriptor providerHostDescriptor, err error) {
-	process, err := r.startProviderHostV2(ctx, nil)
+	process, err := r.startProviderHostV2(ctx, nil, r.providerProbeExecutionID(), 1)
 	if err != nil {
 		return providerHostDescriptor{}, err
 	}
@@ -233,7 +233,12 @@ func (r *Runner) runProviderHostV2(
 	controls <-chan RunnerControl,
 	handle func(context.Context, RunnerMessage) error,
 ) (result RunnerResult, err error) {
-	process, err := r.startProviderHostV2(ctx, credential)
+	process, err := r.startProviderHostV2(
+		ctx,
+		credential,
+		input.Execution.ID,
+		input.Execution.Generation,
+	)
 	if err != nil {
 		return RunnerResult{}, err
 	}
@@ -939,6 +944,8 @@ func (e *providerHostCommandExecution) waitContext(ctx context.Context) (provide
 func (r *Runner) startProviderHostV2(
 	ctx context.Context,
 	credential *RunnerCredential,
+	executionID uuid.UUID,
+	generation int64,
 ) (*providerHostV2Process, error) {
 	if len(r.command) == 0 {
 		return nil, &runnerFailure{code: "provider_unavailable", message: "Provider Host command is empty", canMoveWorker: true}
@@ -948,7 +955,7 @@ func (r *Runner) startProviderHostV2(
 		arguments = append(arguments, "--protocol-v2")
 	}
 	command := exec.Command(r.command[0], arguments...)
-	processTree, err := newProcessTree(command, r.processTreeOptions())
+	processTree, err := newProcessTree(command, r.processTreeOptions(executionID, generation))
 	if err != nil {
 		return nil, &runnerFailure{
 			code: "provider_unavailable", message: safeRunnerMessage("prepare Provider Host process tree: " + err.Error()),

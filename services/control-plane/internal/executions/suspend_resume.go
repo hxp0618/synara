@@ -293,26 +293,7 @@ func requireResourceSuspendCompletionModeStillSafe(
 }
 
 func workerManifestSupportsStrictResourceSuspendContainment(manifest persistence.WorkerManifest) bool {
-	mode := strings.TrimSpace(manifest.ProcessContainmentMode)
-	if mode != "cgroup-v2" && mode != "job-object" {
-		return false
-	}
-	if manifest.ProcessContainmentSupervisorVersion == nil ||
-		manifest.ProcessContainmentProbeVersion == nil || *manifest.ProcessContainmentProbeVersion <= 0 ||
-		manifest.ProcessContainmentProbeSHA256 == nil || !validWorkerManifestSHA256(strings.TrimSpace(*manifest.ProcessContainmentProbeSHA256)) ||
-		manifest.ProcessContainmentSupervisorIdentity == nil ||
-		manifest.ProcessContainmentProviderIdentity == nil {
-		return false
-	}
-	supervisorVersion := strings.TrimSpace(*manifest.ProcessContainmentSupervisorVersion)
-	supervisorIdentity := strings.TrimSpace(*manifest.ProcessContainmentSupervisorIdentity)
-	providerIdentity := strings.TrimSpace(*manifest.ProcessContainmentProviderIdentity)
-	if supervisorVersion == "" || supervisorIdentity == "" || providerIdentity == "" ||
-		supervisorIdentity == providerIdentity {
-		return false
-	}
-	return (mode == "cgroup-v2" && manifest.OperatingSystem == "linux") ||
-		(mode == "job-object" && manifest.OperatingSystem == "windows")
+	return executiontargets.WorkerManifestHasSupportedStrictProcessContainment(manifest)
 }
 
 func (s *Service) MarkResourceSuspendQuiesced(
@@ -557,8 +538,15 @@ func (s *Service) CompleteResourceSuspend(
 		if err := expectOne(completed, 409, "resource_suspend_attempt_conflict", "The resource suspension attempt changed concurrently."); err != nil {
 			return Execution{}, err
 		}
-		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+		leaseDelete := tx.WithContext(ctx).Delete(&lease)
+		if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The suspended Execution lease changed during release."); err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the suspended Execution lease.", err)
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, now, now, workerClaimReleaseResourceSuspendedWorkerAttested,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
+			return Execution{}, err
 		}
 		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 			return Execution{}, err
@@ -756,6 +744,12 @@ func (s *Service) FinalizeKubernetesResourceSuspend(
 			lease.WorkerIncarnation, lease.WorkerInstanceUID,
 		).Delete(&persistence.WorkerLease{})
 		if err := expectOne(leaseDelete, 409, "lease_release_failed", "Failed to release the Pod-terminal suspended Execution Lease."); err != nil {
+			return err
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, proof.ObservedAt, now, workerClaimReleaseResourceSuspendedPodTerminal,
+			workerClaimReleaseAuthorityKubernetes, proof.PodUID, "",
+		)); err != nil {
 			return err
 		}
 		if err := terminalizeWorkerIncarnationFromLeaseLocked(

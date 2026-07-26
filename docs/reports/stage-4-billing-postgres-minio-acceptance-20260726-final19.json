@@ -1,0 +1,112 @@
+{
+  "schemaVersion": "synara.billing-postgres-minio-acceptance.v3",
+  "acceptanceGeneration": "final19",
+  "runID": "20260725213807-40220-2873",
+  "startedAt": "2026-07-25T21:38:07Z",
+  "finishedAt": "2026-07-25T21:38:18Z",
+  "status": "passed",
+  "exitCode": 0,
+  "phase": "test-complete",
+  "failure": null,
+  "test": {
+    "cases": [
+      "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+      "TestBillingCUR2ManifestVersionedS3Acceptance",
+      "TestPostgresConcurrentInitialInvoiceImportsSerializeByIdentity"
+    ],
+    "requiredSubtests": [
+      "TestBillingCUR2ManifestVersionedS3Acceptance/child_only_rejected",
+      "TestBillingCUR2ManifestVersionedS3Acceptance/net_parent_gross_child_rejected",
+      "TestBillingCUR2ManifestVersionedS3Acceptance/cross_chunk_missing_parent_rejected"
+    ],
+    "invocations": [
+      {
+        "root": "TestPostgresConcurrentInitialInvoiceImportsSerializeByIdentity",
+        "exactRunPattern": "^TestPostgresConcurrentInitialInvoiceImportsSerializeByIdentity$"
+      },
+      {
+        "root": "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+        "exactRunPattern": "^TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay$"
+      },
+      {
+        "root": "TestBillingCUR2ManifestVersionedS3Acceptance",
+        "exactRunPattern": "^TestBillingCUR2ManifestVersionedS3Acceptance$"
+      }
+    ],
+    "status": "passed",
+    "exitCode": 0
+  },
+  "checks": {
+    "detailProduced": true,
+    "detailValidJSON": true,
+    "detailWithin65536Bytes": true,
+    "detailContainsNoCredentials": true,
+    "detailAssertionsAllowlistedBooleans": true,
+    "testBinaryUnchangedDuringRun": true,
+    "billingSourceFilesUnchangedDuringRun": true,
+    "requiredTestCasesPassedWithoutSkip": true,
+    "billingSourceFilesBoundToEvidence": true,
+    "integrationAssertions": {
+      "estimateTariffSegmentsPersisted": true,
+      "exactObjectVersionRead": true,
+      "invoiceImported": true,
+      "postgresMigrationsApplied": true,
+      "reconciliationPersisted": true,
+      "restartReplayIdempotent": true,
+      "scheduledAuditIdempotent": true
+    }
+  },
+  "detail": {
+    "bytes": 735,
+    "sha256": "924bf5152979d33a7e70c1ef125851ec81cda94b36dedb6f740e0dfcedd32de6"
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true,
+    "hostGoVersion": "go version go1.26.5 darwin/arm64",
+    "acceptanceScriptSHA256": "fe2ae900d89304ab3d28b4513684fb21517058e2525c277f817b8fb4e4304e79",
+    "runtimeTestSourceSHA256": "29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69",
+    "concurrentImportTestSourceSHA256": "fc547c4026403f608be59cdb26e0141dbff1bc5d2ed2442941be39fc257e5d06",
+    "cur2ManifestTestSourceSHA256": "7c81ab5264b2bf35914a26425b2f062b2950f8b7a43cd7e4b93e586967616102",
+    "billingServiceSourceSHA256": "9e75b8d1d5f28c69ff1faa9b6e5808fc814bf022f9771f0a83f28bca9dc6e5af",
+    "blobParsersSourceSHA256": "90b1343c19bfa583569742b76a020a0ac51a1fa33e10dba01e4f6ba5f7cc9b3d",
+    "blobSourceSHA256": "ab830965db6fc2224ac01d0b052407ab81a2a0dbc291da7d4e851e29378045ff",
+    "cloudSourcesSourceSHA256": "fef9ac7350b79151c28bcc364ecbcb3f42e54d66a9471b91a8a5949a1fa344fc",
+    "testBinarySHA256": "e7c2891d55f2f02bafb927bb188b954ce096543da3db2e2d2bbb9c8828967f35"
+  },
+  "runtime": {
+    "metadataStore": "disposable-postgresql",
+    "objectStore": "disposable-versioned-minio-s3-compatible",
+    "exactObjectVersionPinned": true,
+    "cur2NativeManifestVersionedS3Verified": true,
+    "cloudWorkloadIdentityVerified": false
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17-alpine",
+      "id": "sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f",
+      "version": "17.10"
+    },
+    "minio": {
+      "reference": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+      "id": "sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d"
+    },
+    "mc": {
+      "reference": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+      "id": "sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71"
+    },
+    "testRuntime": {
+      "reference": "golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669",
+      "id": "sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86",
+      "architecture": "arm64"
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "disposableRuntimeRemoved": true,
+    "credentialsPersistedAfterCleanup": false,
+    "objectContentsPersistedAfterCleanup": false
+  }
+}

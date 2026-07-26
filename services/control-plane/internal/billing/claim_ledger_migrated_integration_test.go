@@ -282,7 +282,7 @@ func seedMigratedWorkerClaimScenario(
 		TargetKind:            fixture.target.Kind,
 		WorkerMode:            "general-pool",
 		RegistrationTrustMode: "kubernetes-pod-bound-v1",
-		ClusterID:             "cluster-a",
+		ClusterID:             "kubernetes",
 		Namespace:             "default",
 		PodName:               seed.workerName + "-pod",
 		Version:               "test",

@@ -49,14 +49,14 @@ func (s *Service) CreateTariffAuthorized(
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.BillingManage); err != nil {
 		return Tariff{}, err
 	}
-	if s.tariffOperatorTenantID == uuid.Nil {
+	if s.platformBillingOperatorTenantID == uuid.Nil {
 		return Tariff{}, problem.New(
 			503,
 			"billing_tariff_management_unavailable",
 			"Billing tariff management requires an explicitly configured platform operator Tenant.",
 		)
 	}
-	if tenantID != s.tariffOperatorTenantID {
+	if tenantID != s.platformBillingOperatorTenantID {
 		return Tariff{}, problem.New(
 			403,
 			"billing_tariff_operator_forbidden",
@@ -203,9 +203,11 @@ func (s *Service) ReconcileActualInvoiceImportAuthorized(
 func (s *Service) importConfiguredInvoiceScheduled(
 	ctx context.Context,
 	configuredImport ConfiguredImport,
+	requestID string,
 ) (importedInvoiceMutation, error) {
 	return s.importConfiguredInvoiceWithAudit(ctx, configuredImport, audit.Entry{
 		TenantID: configuredImport.TenantID, ActorType: "system", Action: "billing.invoice_import_scheduled",
+		RequestID: requestID,
 	}, true)
 }
 
@@ -213,9 +215,11 @@ func (s *Service) reconcileActualInvoiceImportScheduled(
 	ctx context.Context,
 	configuredImport ConfiguredImport,
 	importID uuid.UUID,
+	requestID string,
 ) (reconciliationMutation, error) {
 	return s.reconcileActualInvoiceImportWithAudit(ctx, configuredImport.TenantID, importID, audit.Entry{
 		TenantID: configuredImport.TenantID, ActorType: "system", Action: "billing.invoice_reconciled_scheduled",
+		RequestID: requestID,
 	}, true)
 }
 
@@ -251,6 +255,7 @@ func (s *Service) importConfiguredInvoiceWithAudit(
 				"provider": result.Result.Import.Provider, "externalImportId": result.Result.Import.ExternalImportID,
 				"billingPeriodStartAt": result.Result.Import.BillingPeriodStartAt, "billingPeriodEndAt": result.Result.Import.BillingPeriodEndAt,
 				"currencyCode": result.Result.Import.CurrencyCode, "lineCount": len(result.Result.Lines),
+				"sourceProvenance": result.Result.SourceProvenance,
 			},
 		})
 	})

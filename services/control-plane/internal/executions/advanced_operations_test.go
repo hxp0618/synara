@@ -383,18 +383,28 @@ func TestPrimaryOperationsFreezeGroupRoutingSnapshotIntoExecutionEventAndOutbox(
 		execution.RoutingReason == nil || *execution.RoutingReason != "preferred-target" {
 		t.Fatalf("execution routing snapshot = %#v", execution)
 	}
+	if execution.SchedulingDecisionID == nil {
+		t.Fatal("routed operation omitted its scheduling decision identity")
+	}
+	var decision persistence.ExecutionSchedulingDecision
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	event := fixture.loadTurnCreatedEvent(t, result.Value.ExecutionID)
 	fixture.assertRoutingPayload(t, event.Payload, routingPayloadExpectation{
 		TargetGroupID: group.ID, GroupVersion: group.Version, MemberVersion: sourceMember.Version,
 		Region: "cn-shanghai", ClusterID: "cluster-a", Reason: "preferred-target",
 	})
+	fixture.assertSchedulingDecisionPayload(t, event.Payload, decision)
 
 	outboxMessage := fixture.loadLatestExecutionQueuedOutbox(t)
 	fixture.assertRoutingPayload(t, outboxMessage.Payload, routingPayloadExpectation{
 		TargetGroupID: group.ID, GroupVersion: group.Version, MemberVersion: sourceMember.Version,
 		Region: "cn-shanghai", ClusterID: "cluster-a", Reason: "preferred-target",
 	})
+	fixture.assertSchedulingDecisionPayload(t, outboxMessage.Payload, decision)
 
 	session := fixture.loadSession(t)
 	if session.ExecutionTargetID != source.ID || session.RoutingPolicyVersion == nil || *session.RoutingPolicyVersion != group.Version {
@@ -416,7 +426,7 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 		"cn-beijing",
 		"cluster-b",
 	)
-	now := time.Now().UTC()
+	now := time.Now().UTC().Add(-10 * time.Second)
 	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 
@@ -438,7 +448,7 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 	}
 	fixture.completeExecutionWithCurrentManifest(t, first.Value.ExecutionID)
 
-	readyAt := now.Add(time.Minute)
+	readyAt := now.Add(time.Second)
 	fixture.createReadyWorkspaceCheckpoint(t, firstExecution, first.Value.Turn.ID, readyAt)
 	fixture.observeTargetHealth(t, source.ID, routing.HealthUnreachable, routing.CapacityUnknown, nil, 0, readyAt.Add(time.Second))
 	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, readyAt.Add(2*time.Second))
@@ -477,6 +487,30 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 		execution.SelectedClusterID == nil || *execution.SelectedClusterID != "cluster-b" ||
 		execution.RoutingReason == nil || *execution.RoutingReason != routing.StrategyPriority {
 		t.Fatalf("rerouted execution snapshot = %#v", execution)
+	}
+	if execution.SchedulingDecisionID == nil {
+		t.Fatal("cross-domain routed Execution omitted its scheduling decision identity")
+	}
+	var decision persistence.ExecutionSchedulingDecision
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
+	var candidate persistence.ExecutionSchedulingCandidate
+	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
+		Take(&candidate).Error; err != nil {
+		t.Fatal(err)
+	}
+	if decision.AlgorithmVersion != "queue-pressure-v1" || decision.EvidenceCompleteness != "selected-only" ||
+		candidate.DRReadinessVersion == nil || candidate.SourceDRDomain == nil ||
+		*candidate.SourceDRDomain != sourceDRDomain || candidate.DRDomain == nil ||
+		*candidate.DRDomain != routing.DRDomainForLocation("cn-beijing", "cluster-b") ||
+		candidate.DRReplicatedThroughAt == nil || !candidate.DRReplicatedThroughAt.Equal(readyAt) ||
+		candidate.DRArtifactsReady == nil || *candidate.DRArtifactsReady ||
+		candidate.DRCheckpointsReady == nil || !*candidate.DRCheckpointsReady ||
+		candidate.DRMemoryReady == nil || *candidate.DRMemoryReady ||
+		candidate.DRObservedAt == nil || candidate.DRExpiresAt == nil {
+		t.Fatalf("cross-domain scheduling evidence = decision %#v candidate %#v", decision, candidate)
 	}
 
 	session := fixture.loadSession(t)
@@ -534,7 +568,7 @@ func TestPrimaryOperationsCrossDomainRerouteUsesProviderAffinityBetweenEligibleD
 		t.Fatal(err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Add(-10 * time.Second)
 	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 	fixture.observeTargetHealth(t, avoidDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 	fixture.observeTargetHealth(t, preferDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
@@ -557,7 +591,7 @@ func TestPrimaryOperationsCrossDomainRerouteUsesProviderAffinityBetweenEligibleD
 	}
 	fixture.completeExecutionWithCurrentManifest(t, first.Value.ExecutionID)
 
-	readyAt := now.Add(time.Minute)
+	readyAt := now.Add(time.Second)
 	fixture.createReadyWorkspaceCheckpoint(t, firstExecution, first.Value.Turn.ID, readyAt)
 	fixture.observeTargetHealth(t, source.ID, routing.HealthUnreachable, routing.CapacityUnknown, nil, 0, readyAt.Add(time.Second))
 	fixture.observeTargetHealth(t, avoidDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, readyAt.Add(2*time.Second))
@@ -1115,6 +1149,29 @@ func (f advancedOperationFixture) assertRoutingPayload(
 	}
 	if got := payload["routingReason"]; got != expected.Reason {
 		t.Fatalf("payload routingReason = %#v, want %s", got, expected.Reason)
+	}
+}
+
+func (f advancedOperationFixture) assertSchedulingDecisionPayload(
+	t *testing.T,
+	payload map[string]any,
+	decision persistence.ExecutionSchedulingDecision,
+) {
+	t.Helper()
+	if payload == nil {
+		t.Fatal("scheduling decision payload is nil")
+	}
+	if got := payload["schedulingDecisionId"]; got != decision.ID.String() {
+		t.Fatalf("payload schedulingDecisionId = %#v, want %s", got, decision.ID)
+	}
+	if got := payload["schedulingAlgorithmVersion"]; got != decision.AlgorithmVersion {
+		t.Fatalf("payload schedulingAlgorithmVersion = %#v, want %s", got, decision.AlgorithmVersion)
+	}
+	if got := payload["schedulingEvidenceCompleteness"]; got != decision.EvidenceCompleteness {
+		t.Fatalf("payload schedulingEvidenceCompleteness = %#v, want %s", got, decision.EvidenceCompleteness)
+	}
+	if got := payload["schedulingCandidateSetSha256"]; got != decision.CandidateSetSHA256 {
+		t.Fatalf("payload schedulingCandidateSetSha256 = %#v, want %s", got, decision.CandidateSetSHA256)
 	}
 }
 

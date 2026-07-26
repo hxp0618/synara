@@ -3,7 +3,8 @@ package sessions
 import (
 	"bytes"
 	"context"
-	"strings"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	sharedrecoverybundle "github.com/synara-ai/synara/services/control-plane/internal/recoverybundle"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 )
 
@@ -21,6 +24,18 @@ func TestFailoverExecutionCreatesSuccessorWithoutRewritingSourcePlacement(t *tes
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()
 	sourceTarget, destinationTarget, group, sourceMember := configureFailoverTargets(t, fixture)
+	policyDocument := schedulingpolicy.UnrestrictedDocument()
+	policyDocument.Provider = schedulingpolicy.Rule{Mode: schedulingpolicy.ModeAllow, Values: []string{"codex"}}
+	policySnapshot, err := schedulingpolicy.NewService(fixture.db).UpdateTenant(
+		ctx,
+		fixture.tenantID,
+		schedulingpolicy.UpdateInput{
+			ExpectedVersion: 0, Document: policyDocument, ActorID: fixture.principal.UserID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	turnID := uuid.New()
 	if err := fixture.db.Create(&persistence.AgentTurn{
 		ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
@@ -34,6 +49,10 @@ func TestFailoverExecutionCreatesSuccessorWithoutRewritingSourcePlacement(t *tes
 		Attempt: 1, Status: "queued", ExecutionTargetID: sourceTarget.ID, TargetKind: sourceTarget.Kind,
 		Provider: &provider, ProviderResumeStrategySnapshot: "authoritative-history",
 		WarmPoolModeSnapshot: "disabled", RequestedBy: fixture.principal.UserID, QueuedAt: time.Now().UTC(),
+		TenantSchedulingPolicyVersion:       policySnapshot.Tenant.Version,
+		TenantSchedulingPolicyDigest:        policySnapshot.Tenant.Digest,
+		OrganizationSchedulingPolicyVersion: 0,
+		OrganizationSchedulingPolicyDigest:  schedulingpolicy.UnrestrictedDigest,
 	}
 	routing.ApplyExecutionSelection(&source, routing.Selection{
 		Target: sourceTarget, Group: group, Member: sourceMember, RoutingReason: routing.StrategyPriority,
@@ -66,6 +85,40 @@ func TestFailoverExecutionCreatesSuccessorWithoutRewritingSourcePlacement(t *tes
 		*destination.PredecessorExecutionID != source.ID || destination.ExecutionTargetID != destinationTarget.ID ||
 		destination.NextRecoveryReason != nil || destination.RoutingReason == nil || *destination.RoutingReason != "disaster-recovery" {
 		t.Fatalf("destination = %#v", destination)
+	}
+	if destination.TenantSchedulingPolicyVersion != policySnapshot.Tenant.Version ||
+		destination.TenantSchedulingPolicyDigest != policySnapshot.Tenant.Digest ||
+		destination.OrganizationSchedulingPolicyVersion != 0 ||
+		destination.OrganizationSchedulingPolicyDigest != schedulingpolicy.UnrestrictedDigest {
+		t.Fatalf("failover successor Scheduling Policy snapshot = %#v, policy = %#v", destination, policySnapshot)
+	}
+	if destination.SchedulingDecisionID == nil {
+		t.Fatal("failover successor omitted its immutable scheduling decision identity")
+	}
+	var decision persistence.ExecutionSchedulingDecision
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, destination.ID).
+		Take(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
+	if decision.ID != *destination.SchedulingDecisionID || decision.AlgorithmVersion != "queue-pressure-v1" ||
+		decision.EvidenceCompleteness != "selected-only" || decision.CandidateCount != 1 ||
+		decision.SelectedExecutionTargetID != destinationTarget.ID {
+		t.Fatalf("failover successor scheduling decision = %#v", decision)
+	}
+	var destinationMember persistence.ExecutionTargetGroupMember
+	if err := fixture.db.Where("tenant_id = ? AND target_group_id = ? AND execution_target_id = ?",
+		fixture.tenantID, group.ID, destinationTarget.ID).Take(&destinationMember).Error; err != nil {
+		t.Fatal(err)
+	}
+	var candidate persistence.ExecutionSchedulingCandidate
+	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
+		Take(&candidate).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !candidate.Selected || candidate.TargetGroupMemberID == nil ||
+		*candidate.TargetGroupMemberID != destinationMember.ID || candidate.HealthVersion == nil ||
+		candidate.QueuedExecutionUnits == nil || candidate.EffectiveLoadRank == nil {
+		t.Fatalf("failover successor scheduling candidate = %#v", candidate)
 	}
 	var session persistence.AgentSession
 	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).Take(&session).Error; err != nil {
@@ -317,7 +370,7 @@ func TestFailoverExecutionUsesManagedKubernetesRoutingPublisherHealth(t *testing
 		CapacityStatus:         routing.CapacityAvailable,
 		AvailableCapacityUnits: targetFailoverIntPointer(1),
 		AllocatedCapacityUnits: 0,
-		ObservedAt:             now.Add(time.Second),
+		ObservedAt:             now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +530,7 @@ func TestReconcileTargetFailoversIgnoresFutureLocationOutageRows(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()
 	sourceTarget, _, group, sourceMember := configureFailoverTargets(t, fixture)
-	now := time.Now().UTC().Add(time.Second)
+	now := time.Now().UTC()
 	router := routing.NewService(fixture.db)
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID:      sourceTarget.ID,
@@ -571,8 +624,9 @@ func TestFailoverExecutionCarriesClaimedRecoveryLineageAcrossAttempts(t *testing
 	bundle := persistence.ExecutionRecoveryBundle{
 		ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
 		ExecutionID: source.ID, Generation: 1, SchemaVersion: 1, RecoveryReason: "initial-claim",
-		AuthoritativeHistorySequence: 0, Payload: map[string]any{}, PayloadSHA256: strings.Repeat("0", 64), CreatedAt: now,
+		AuthoritativeHistorySequence: 0, Payload: map[string]any{}, CreatedAt: now,
 	}
+	sealTargetFailoverRecoveryBundle(t, &bundle)
 	if err := fixture.db.Create(&bundle).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -603,6 +657,270 @@ func TestFailoverExecutionCarriesClaimedRecoveryLineageAcrossAttempts(t *testing
 	}
 	if audit.SourceRecoveryBundleID == nil || *audit.SourceRecoveryBundleID != bundle.ID {
 		t.Fatalf("audit source bundle = %#v", audit.SourceRecoveryBundleID)
+	}
+}
+
+func TestFailoverExecutionSuspendedSourceReacquiresTenantQuotaWithoutMutation(t *testing.T) {
+	fixture, source, sourceTarget := seedSuspendedTargetFailoverSource(t)
+	blockerExecutionID := createTargetFailoverQuotaBlocker(t, fixture, sourceTarget)
+
+	assertFailoverRejectionIsMutationFree(
+		t,
+		fixture,
+		source.ID,
+		82,
+		"execution_quota_exceeded",
+	)
+
+	now := time.Now().UTC()
+	update := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND status = ?", fixture.tenantID, blockerExecutionID, "queued").
+		Updates(map[string]any{"status": "completed", "finished_at": now})
+	if update.Error != nil || update.RowsAffected != 1 {
+		t.Fatalf("release failover quota blocker: rows=%d err=%v", update.RowsAffected, update.Error)
+	}
+
+	result, err := fixture.service.FailoverExecution(
+		context.Background(),
+		fixture.tenantID,
+		source.ID,
+		createTargetFailoverFence(t, fixture.db, 83),
+		FailoverReasonTargetUnreachable,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var destination persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, result.DestinationExecutionID).
+		Take(&destination).Error; err != nil {
+		t.Fatal(err)
+	}
+	if destination.Status != "recovering" || destination.PredecessorExecutionID == nil ||
+		*destination.PredecessorExecutionID != source.ID {
+		t.Fatalf("destination after quota release = %#v", destination)
+	}
+}
+
+func seedSuspendedTargetFailoverSource(
+	t *testing.T,
+) (tenantExecutionPolicyFixture, persistence.AgentExecution, persistence.ExecutionTarget) {
+	t.Helper()
+	fixture := newTenantExecutionPolicyFixture(t)
+	sourceTarget, _, group, sourceMember := configureFailoverTargets(t, fixture)
+	now := time.Now().UTC()
+	turnID := uuid.New()
+	if err := fixture.db.Create(&persistence.AgentTurn{
+		ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+		CreatedBy: fixture.principal.UserID, Status: "queued", InputText: "resume under quota", CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	provider := "codex"
+	source := persistence.AgentExecution{
+		ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+		Attempt: 1, Status: "leased", ExecutionTargetID: sourceTarget.ID, TargetKind: sourceTarget.Kind,
+		Provider: &provider, ProviderResumeStrategySnapshot: "authoritative-history",
+		WarmPoolModeSnapshot: "disabled", Generation: 1, RequestedBy: fixture.principal.UserID, QueuedAt: now,
+	}
+	routing.ApplyExecutionSelection(&source, routing.Selection{
+		Target: sourceTarget, Group: group, Member: sourceMember, RoutingReason: routing.StrategyPriority,
+	})
+	if err := fixture.db.Create(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	bundle := persistence.ExecutionRecoveryBundle{
+		ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+		ExecutionID: source.ID, Generation: 1, SchemaVersion: 1, RecoveryReason: "initial-claim",
+		AuthoritativeHistorySequence: 0, Payload: map[string]any{}, CreatedAt: now,
+	}
+	sealTargetFailoverRecoveryBundle(t, &bundle)
+	if err := fixture.db.Create(&bundle).Error; err != nil {
+		t.Fatal(err)
+	}
+	recoveryReason := "suspend-resume"
+	update := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND status = ?", fixture.tenantID, source.ID, "leased").
+		Updates(map[string]any{"status": "suspended", "next_recovery_reason": recoveryReason})
+	if update.Error != nil || update.RowsAffected != 1 {
+		t.Fatalf("suspend failover source: rows=%d err=%v", update.RowsAffected, update.Error)
+	}
+	source.Status = "suspended"
+	source.NextRecoveryReason = &recoveryReason
+	return fixture, source, sourceTarget
+}
+
+func createTargetFailoverQuotaBlocker(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	target persistence.ExecutionTarget,
+) uuid.UUID {
+	t.Helper()
+	limit := 1
+	now := time.Now().UTC()
+	sessionID := uuid.New()
+	turnID := uuid.New()
+	executionID := uuid.New()
+	provider := "codex"
+	models := []any{
+		&persistence.TenantQuota{
+			TenantID: fixture.tenantID, MaxConcurrentExecutions: &limit,
+			UpdatedBy: fixture.principal.UserID, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.AgentSession{
+			ID: sessionID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			ProjectID: fixture.projectID, CreatedBy: fixture.principal.UserID, Title: "failover quota blocker",
+			Status: "active", Visibility: "private", Provider: provider, ExecutionTargetID: target.ID,
+		},
+		&persistence.AgentTurn{
+			ID: turnID, TenantID: fixture.tenantID, SessionID: sessionID,
+			CreatedBy: fixture.principal.UserID, Status: "queued", InputText: "occupy failover quota", CreatedAt: now,
+		},
+		&persistence.AgentExecution{
+			ID: executionID, TenantID: fixture.tenantID, SessionID: sessionID, TurnID: turnID,
+			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
+			Provider: &provider, Generation: 0, RequestedBy: fixture.principal.UserID, QueuedAt: now,
+		},
+	}
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		for _, model := range models {
+			if err := tx.Create(model).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return executionID
+}
+
+func TestFailoverExecutionRejectsTamperedSourceRecoveryBundleWithoutMutation(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		wantCode string
+		tamper   func(*testing.T, *persistence.ExecutionRecoveryBundle)
+	}{
+		{
+			name:     "canonical hash",
+			wantCode: "target_failover_bundle_integrity_failed",
+			tamper: func(_ *testing.T, bundle *persistence.ExecutionRecoveryBundle) {
+				bundle.PayloadSHA256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+			},
+		},
+		{
+			name:     "immutable envelope",
+			wantCode: "target_failover_bundle_envelope_mismatch",
+			tamper: func(t *testing.T, bundle *persistence.ExecutionRecoveryBundle) {
+				bundle.Payload["executionId"] = uuid.New()
+				normalized, sha256, err := sharedrecoverybundle.Encode(bundle.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bundle.Payload = normalized
+				bundle.PayloadSHA256 = sha256
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newTenantExecutionPolicyFixture(t)
+			sourceTarget, _, group, sourceMember := configureFailoverTargets(t, fixture)
+			now := time.Now().UTC()
+			turnID := uuid.New()
+			if err := fixture.db.Create(&persistence.AgentTurn{
+				ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+				CreatedBy: fixture.principal.UserID, Status: "queued", InputText: "reject corrupt bundle", CreatedAt: now,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+			provider := "codex"
+			source := persistence.AgentExecution{
+				ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+				Attempt: 1, Status: "leased", ExecutionTargetID: sourceTarget.ID, TargetKind: sourceTarget.Kind,
+				Provider: &provider, ProviderResumeStrategySnapshot: "authoritative-history",
+				WarmPoolModeSnapshot: "disabled", Generation: 1, RequestedBy: fixture.principal.UserID, QueuedAt: now,
+			}
+			routing.ApplyExecutionSelection(&source, routing.Selection{
+				Target: sourceTarget, Group: group, Member: sourceMember, RoutingReason: routing.StrategyPriority,
+			})
+			if err := fixture.db.Create(&source).Error; err != nil {
+				t.Fatal(err)
+			}
+			bundle := persistence.ExecutionRecoveryBundle{
+				ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+				ExecutionID: source.ID, Generation: 1, SchemaVersion: 1, RecoveryReason: "initial-claim",
+				CreatedAt: now,
+			}
+			sealTargetFailoverRecoveryBundle(t, &bundle)
+			testCase.tamper(t, &bundle)
+			if err := fixture.db.Create(&bundle).Error; err != nil {
+				t.Fatal(err)
+			}
+			recoveryReason := "suspend-resume"
+			if err := fixture.db.Model(&persistence.AgentExecution{}).
+				Where("tenant_id = ? AND id = ?", fixture.tenantID, source.ID).
+				Updates(map[string]any{"status": "suspended", "next_recovery_reason": recoveryReason}).Error; err != nil {
+				t.Fatal(err)
+			}
+			source.Status = "suspended"
+			source.NextRecoveryReason = &recoveryReason
+			var beforeEvents, beforeOutbox int64
+			if err := fixture.db.Model(&persistence.SessionEvent{}).
+				Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
+				Count(&beforeEvents).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.Model(&persistence.OutboxMessage{}).
+				Where("tenant_id = ?", fixture.tenantID).Count(&beforeOutbox).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := fixture.service.FailoverExecution(
+				context.Background(), fixture.tenantID, source.ID,
+				createTargetFailoverFence(t, fixture.db, 81), FailoverReasonTargetUnreachable,
+			)
+			assertSessionProblemCode(t, err, testCase.wantCode)
+
+			var persisted persistence.AgentExecution
+			if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, source.ID).
+				Take(&persisted).Error; err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != "suspended" || persisted.FinishedAt != nil {
+				t.Fatalf("tampered bundle mutated source: %#v", persisted)
+			}
+			var session persistence.AgentSession
+			if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+				Take(&session).Error; err != nil {
+				t.Fatal(err)
+			}
+			if session.ExecutionTargetID != sourceTarget.ID {
+				t.Fatalf("tampered bundle moved Session target to %s", session.ExecutionTargetID)
+			}
+			var attempts, executions, afterEvents, afterOutbox int64
+			for model, destination := range map[any]*int64{
+				&persistence.ExecutionFailoverAttempt{}: &attempts,
+				&persistence.AgentExecution{}:           &executions,
+				&persistence.SessionEvent{}:             &afterEvents,
+				&persistence.OutboxMessage{}:            &afterOutbox,
+			} {
+				query := fixture.db.Model(model).Where("tenant_id = ?", fixture.tenantID)
+				if _, ok := model.(*persistence.AgentExecution); ok {
+					query = query.Where("turn_id = ?", turnID)
+				}
+				if _, ok := model.(*persistence.SessionEvent); ok {
+					query = query.Where("session_id = ?", fixture.sessionID)
+				}
+				if err := query.Count(destination).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if attempts != 0 || executions != 1 || afterEvents != beforeEvents || afterOutbox != beforeOutbox {
+				t.Fatalf(
+					"tampered bundle left mutations: attempts=%d executions=%d events=%d/%d outbox=%d/%d",
+					attempts, executions, beforeEvents, afterEvents, beforeOutbox, afterOutbox,
+				)
+			}
+		})
 	}
 }
 
@@ -676,6 +994,12 @@ func TestFailoverExecutionRequiresFreshArtifactAuthorityFromCurrentSessionHistor
 			false,
 			watermark.Add(time.Second),
 		)
+		var authority persistence.ExecutionTargetDRReadiness
+		if err := fixture.db.Where(
+			"execution_target_id = ? AND source_dr_domain = ?", destination.ID, sourceDRDomain,
+		).Take(&authority).Error; err != nil {
+			t.Fatal(err)
+		}
 
 		result, err := fixture.service.FailoverExecution(
 			context.Background(),
@@ -690,7 +1014,280 @@ func TestFailoverExecutionRequiresFreshArtifactAuthorityFromCurrentSessionHistor
 		if result.DestinationExecutionTargetID != destination.ID {
 			t.Fatalf("destination target = %s, want %s", result.DestinationExecutionTargetID, destination.ID)
 		}
+		for name, payload := range map[string]map[string]any{
+			"event":  loadFailoverCommittedEventPayload(t, fixture, source.SessionID),
+			"outbox": loadFailoverCommittedOutboxPayload(t, fixture),
+		} {
+			destinationAuthority, ok := payload["destinationDrAuthority"].(map[string]any)
+			if !ok || fmt.Sprint(destinationAuthority["version"]) != fmt.Sprint(authority.Version) ||
+				destinationAuthority["artifactsReady"] != true || destinationAuthority["checkpointsReady"] != false ||
+				destinationAuthority["memoryReady"] != false {
+				t.Fatalf("%s destination authority version = %#v, want %d", name, destinationAuthority, authority.Version)
+			}
+		}
 	})
+}
+
+func TestFailoverExecutionRevalidatesSelectedAuthorityBeforeMutation(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*testing.T, *gorm.DB, routing.Selection)
+	}{
+		{
+			name: "group version",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				if err := tx.Model(&persistence.ExecutionTargetGroup{}).Where("id = ?", selection.Group.ID).
+					Update("version", selection.Group.Version+1).Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "member location and version",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				if err := tx.Model(&persistence.ExecutionTargetGroupMember{}).Where("id = ?", selection.Member.ID).
+					Updates(map[string]any{"region": "cn-guangdong", "cluster_id": "cluster-c", "version": selection.Member.Version + 1}).Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "target disabled",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				if err := tx.Model(&persistence.ExecutionTarget{}).Where("id = ?", selection.Target.ID).
+					Update("status", "disabled").Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "destination location outage inserted",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				now := time.Now().UTC()
+				if err := tx.Create(&persistence.ExecutionLocationOutage{
+					TenantID: selection.Group.TenantID, Region: selection.Member.Region,
+					ClusterID: selection.Member.ClusterID, Status: routing.LocationStatusUnreachable,
+					PublisherIdentity: "selection-race-test", ObservedAt: now,
+					ExpiresAt: now.Add(time.Minute), Version: 1, UpdatedAt: now,
+				}).Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "health version",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				observedAt := time.Now().UTC()
+				if err := tx.Model(&persistence.ExecutionTargetHealth{}).
+					Where("execution_target_id = ?", selection.Target.ID).
+					Updates(map[string]any{
+						"status": routing.HealthDegraded, "observed_at": observedAt,
+						"expires_at": observedAt.Add(time.Minute), "version": selection.Health.Version + 1,
+					}).Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "readiness version and store bits",
+			mutate: func(t *testing.T, tx *gorm.DB, selection routing.Selection) {
+				t.Helper()
+				if selection.DRReadiness == nil {
+					t.Fatal("expected DR readiness selection")
+				}
+				observedAt := time.Now().UTC()
+				if err := tx.Model(&persistence.ExecutionTargetDRReadiness{}).
+					Where("execution_target_id = ? AND source_dr_domain = ?", selection.Target.ID, selection.DRReadiness.SourceDRDomain).
+					Updates(map[string]any{
+						"artifacts_ready": false, "observed_at": observedAt,
+						"expires_at": observedAt.Add(time.Minute), "version": selection.DRReadiness.Version + 1,
+					}).Error; err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for index, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture, source, destination, _, sourceDRDomain, watermark := seedFailoverArtifactAuthorityFixture(t)
+			observeTargetDRReadiness(
+				t, fixture, destination.ID, sourceDRDomain,
+				routing.DRDomainForLocation("cn-beijing", "cluster-b"), watermark,
+				true, false, false, time.Now().UTC(),
+			)
+			fixture.service.targetFailoverBeforeCommitValidation = func(
+				_ context.Context,
+				tx *gorm.DB,
+				_ routing.SelectRequest,
+				selection routing.Selection,
+			) error {
+				testCase.mutate(t, tx, selection)
+				return nil
+			}
+
+			assertFailoverRejectionIsMutationFree(
+				t, fixture, source.ID, int64(101+index), "target_routing_selection_stale",
+			)
+		})
+	}
+}
+
+func TestFailoverExecutionRejectsInvalidDestinationAuthorityWithoutMutation(t *testing.T) {
+	t.Run("wrong destination domain", func(t *testing.T) {
+		fixture, source, destination, _, sourceDRDomain, watermark := seedFailoverArtifactAuthorityFixture(t)
+		observeTargetDRReadiness(
+			t, fixture, destination.ID, sourceDRDomain, "cn-beijing/wrong-cluster", watermark,
+			true, false, false, watermark.Add(time.Second),
+		)
+
+		assertFailoverRejectionIsMutationFree(
+			t, fixture, source.ID, 91, "target_group_dr_destination_domain_mismatch",
+		)
+	})
+
+	t.Run("future readiness", func(t *testing.T) {
+		fixture, source, destination, _, sourceDRDomain, watermark := seedFailoverArtifactAuthorityFixture(t)
+		futureObservedAt := time.Now().UTC().Add(time.Minute)
+		if err := fixture.db.Create(&persistence.ExecutionTargetDRReadiness{
+			ExecutionTargetID: destination.ID, SourceDRDomain: sourceDRDomain,
+			DRDomain: routing.DRDomainForLocation("cn-beijing", "cluster-b"), ReplicatedThroughAt: watermark,
+			ArtifactsReady: true, PublisherIdentity: "bypassed-service",
+			ObservedAt: futureObservedAt, ExpiresAt: futureObservedAt.Add(time.Minute),
+			Version: 1, UpdatedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		assertFailoverRejectionIsMutationFree(
+			t, fixture, source.ID, 92, "target_group_dr_readiness_observed_in_future",
+		)
+	})
+}
+
+func assertFailoverRejectionIsMutationFree(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	sourceExecutionID uuid.UUID,
+	fencingToken int64,
+	wantCode string,
+) {
+	t.Helper()
+	var beforeSource persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, sourceExecutionID).Take(&beforeSource).Error; err != nil {
+		t.Fatal(err)
+	}
+	var beforeSession persistence.AgentSession
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, beforeSource.SessionID).Take(&beforeSession).Error; err != nil {
+		t.Fatal(err)
+	}
+	beforeCounts := loadFailoverMutationCounts(t, fixture, beforeSource)
+
+	_, err := fixture.service.FailoverExecution(
+		context.Background(), fixture.tenantID, sourceExecutionID,
+		createTargetFailoverFence(t, fixture.db, fencingToken), FailoverReasonTargetUnreachable,
+	)
+	assertSessionProblemCode(t, err, wantCode)
+
+	var afterSource persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, sourceExecutionID).Take(&afterSource).Error; err != nil {
+		t.Fatal(err)
+	}
+	var afterSession persistence.AgentSession
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, beforeSource.SessionID).Take(&afterSession).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(beforeSource, afterSource) {
+		t.Fatalf("rejected failover mutated source execution: before=%#v after=%#v", beforeSource, afterSource)
+	}
+	if !reflect.DeepEqual(beforeSession, afterSession) {
+		t.Fatalf("rejected failover mutated session: before=%#v after=%#v", beforeSession, afterSession)
+	}
+	afterCounts := loadFailoverMutationCounts(t, fixture, beforeSource)
+	if beforeCounts != afterCounts {
+		t.Fatalf("rejected failover left mutations: before=%#v after=%#v", beforeCounts, afterCounts)
+	}
+}
+
+type targetFailoverMutationCounts struct {
+	executions       int64
+	decisions        int64
+	candidates       int64
+	failoverAttempts int64
+	auditLogs        int64
+	events           int64
+	outbox           int64
+}
+
+func loadFailoverMutationCounts(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	source persistence.AgentExecution,
+) targetFailoverMutationCounts {
+	t.Helper()
+	var counts targetFailoverMutationCounts
+	queries := []struct {
+		model       any
+		where       string
+		args        []any
+		destination *int64
+	}{
+		{&persistence.AgentExecution{}, "tenant_id = ? AND turn_id = ?", []any{fixture.tenantID, source.TurnID}, &counts.executions},
+		{&persistence.ExecutionSchedulingDecision{}, "tenant_id = ? AND execution_id IN (?)", []any{
+			fixture.tenantID,
+			fixture.db.Model(&persistence.AgentExecution{}).Select("id").
+				Where("tenant_id = ? AND turn_id = ?", fixture.tenantID, source.TurnID),
+		}, &counts.decisions},
+		{&persistence.ExecutionSchedulingCandidate{}, "tenant_id = ? AND decision_id IN (?)", []any{
+			fixture.tenantID,
+			fixture.db.Model(&persistence.ExecutionSchedulingDecision{}).Select("id").
+				Where("tenant_id = ? AND execution_id IN (?)", fixture.tenantID,
+					fixture.db.Model(&persistence.AgentExecution{}).Select("id").
+						Where("tenant_id = ? AND turn_id = ?", fixture.tenantID, source.TurnID)),
+		}, &counts.candidates},
+		{&persistence.ExecutionFailoverAttempt{}, "tenant_id = ? AND source_execution_id = ?", []any{fixture.tenantID, source.ID}, &counts.failoverAttempts},
+		{&persistence.AuditLog{}, "tenant_id = ?", []any{fixture.tenantID}, &counts.auditLogs},
+		{&persistence.SessionEvent{}, "tenant_id = ? AND session_id = ?", []any{fixture.tenantID, source.SessionID}, &counts.events},
+		{&persistence.OutboxMessage{}, "tenant_id = ?", []any{fixture.tenantID}, &counts.outbox},
+	}
+	for _, query := range queries {
+		if err := fixture.db.Model(query.model).Where(query.where, query.args...).Count(query.destination).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	return counts
+}
+
+func loadFailoverCommittedEventPayload(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	sessionID uuid.UUID,
+) map[string]any {
+	t.Helper()
+	var event persistence.SessionEvent
+	if err := fixture.db.Where(
+		"tenant_id = ? AND session_id = ? AND event_type = ?",
+		fixture.tenantID, sessionID, "execution.failover-committed",
+	).Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	return event.Payload
+}
+
+func loadFailoverCommittedOutboxPayload(t *testing.T, fixture tenantExecutionPolicyFixture) map[string]any {
+	t.Helper()
+	var message persistence.OutboxMessage
+	if err := fixture.db.Where(
+		"tenant_id = ? AND topic = ?", fixture.tenantID, "execution.failover-committed",
+	).Take(&message).Error; err != nil {
+		t.Fatal(err)
+	}
+	return message.Payload
 }
 
 func TestFailoverExecutionAcceptsForkAncestorArtifactAuthorityOutsideCurrentTail(t *testing.T) {
@@ -715,7 +1312,7 @@ func TestFailoverExecutionAcceptsForkAncestorArtifactAuthorityOutsideCurrentTail
 		504,
 	)
 
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	turnID := uuid.New()
 	if err := fixture.db.Create(&persistence.AgentTurn{
 		ID: turnID, TenantID: fixture.tenantID, SessionID: childSession.ID,
@@ -793,8 +1390,9 @@ func TestFailoverExecutionAcceptsForkAncestorArtifactAuthorityOutsideCurrentTail
 				"memoryReferences": []map[string]any{},
 			},
 		},
-		PayloadSHA256: strings.Repeat("0", 64), CreatedAt: now,
+		CreatedAt: now,
 	}
+	sealTargetFailoverRecoveryBundle(t, &bundle)
 	if err := fixture.db.Create(&bundle).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -844,10 +1442,9 @@ func seedFailoverArtifactAuthorityFixture(
 ) {
 	t.Helper()
 	fixture := newTenantExecutionPolicyFixture(t)
-	ctx := context.Background()
 	sourceTarget, destinationTarget, group, sourceMember := configureFailoverTargets(t, fixture)
 	turnID := uuid.New()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	if err := fixture.db.Create(&persistence.AgentTurn{
 		ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
 		CreatedBy: fixture.principal.UserID, Status: "queued", InputText: "fail me over", CreatedAt: now,
@@ -892,8 +1489,9 @@ func seedFailoverArtifactAuthorityFixture(
 		ID: uuid.New(), TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
 		ExecutionID: source.ID, Generation: 1, SchemaVersion: 1, RecoveryReason: "initial-claim",
 		AuthoritativeHistorySequence: loadSessionLastEventSequence(t, fixture), Payload: payload,
-		PayloadSHA256: strings.Repeat("0", 64), CreatedAt: now,
+		CreatedAt: now,
 	}
+	sealTargetFailoverRecoveryBundle(t, &bundle)
 	if err := fixture.db.Create(&bundle).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -914,13 +1512,6 @@ func seedFailoverArtifactAuthorityFixture(
 	}
 	if session.LastEventSequence <= bundle.AuthoritativeHistorySequence {
 		t.Fatalf("session authoritative history did not advance past bundle snapshot: session=%d bundle=%d", session.LastEventSequence, bundle.AuthoritativeHistorySequence)
-	}
-	if _, err := routing.NewService(fixture.db).ObserveHealth(ctx, routing.HealthObservation{
-		ExecutionTargetID: destinationTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
-		AvailableCapacityUnits: targetFailoverIntPointer(10), Source: "target-failover-artifact-test",
-		ObservedAt: runtimeArtifactAt.Add(time.Second), TTL: time.Minute,
-	}); err != nil {
-		t.Fatal(err)
 	}
 	return fixture, source, destinationTarget, bundle.ID, routing.DRDomainForLocation("cn-shanghai", "cluster-a"), runtimeArtifactAt
 }
@@ -1033,6 +1624,45 @@ func loadTargetFailoverExecutionTarget(t *testing.T, db *gorm.DB, targetID uuid.
 		t.Fatal(err)
 	}
 	return target
+}
+
+func sealTargetFailoverRecoveryBundle(t *testing.T, bundle *persistence.ExecutionRecoveryBundle) {
+	t.Helper()
+	if bundle.Payload == nil {
+		bundle.Payload = make(map[string]any)
+	}
+	bundle.Payload["schemaVersion"] = bundle.SchemaVersion
+	bundle.Payload["executionId"] = bundle.ExecutionID
+	bundle.Payload["sessionId"] = bundle.SessionID
+	bundle.Payload["turnId"] = bundle.TurnID
+	bundle.Payload["generation"] = bundle.Generation
+	bundle.Payload["recoveryReason"] = bundle.RecoveryReason
+	if bundle.PreviousBundleID != nil {
+		bundle.Payload["previousBundleId"] = *bundle.PreviousBundleID
+	}
+	bundle.Payload["authoritativeHistorySequence"] = bundle.AuthoritativeHistorySequence
+	if _, ok := bundle.Payload["execution"].(map[string]any); !ok {
+		bundle.Payload["execution"] = map[string]any{}
+	}
+	workload, ok := bundle.Payload["workload"].(map[string]any)
+	if !ok {
+		workload = make(map[string]any)
+		bundle.Payload["workload"] = workload
+	}
+	workload["sessionId"] = bundle.SessionID
+	workload["turnId"] = bundle.TurnID
+	resumeSnapshot, ok := workload["resumeSnapshot"].(map[string]any)
+	if !ok {
+		resumeSnapshot = make(map[string]any)
+		workload["resumeSnapshot"] = resumeSnapshot
+	}
+	resumeSnapshot["authoritativeHistorySequence"] = bundle.AuthoritativeHistorySequence
+	normalized, sha256, err := sharedrecoverybundle.Encode(bundle.Payload)
+	if err != nil {
+		t.Fatalf("seal target failover Recovery Bundle: %v", err)
+	}
+	bundle.Payload = normalized
+	bundle.PayloadSHA256 = sha256
 }
 
 func managedKubernetesFailoverTestConfiguration(maxActivePods int) map[string]any {

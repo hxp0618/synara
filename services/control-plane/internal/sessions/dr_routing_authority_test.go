@@ -17,7 +17,7 @@ func TestCreateTurnBlocksCrossDomainRerouteWithoutFrozenSourceAuthority(t *testi
 	ctx := context.Background()
 	sourceTarget, destinationTarget, _, _ := configureFailoverTargets(t, fixture)
 	router := routing.NewService(fixture.db)
-	now := time.Now().UTC().Add(2 * time.Second).Truncate(time.Second)
+	now := time.Now().UTC()
 
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: sourceTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
@@ -65,7 +65,7 @@ func TestCreateTurnBlocksCrossDomainRerouteWithoutFrozenSourceAuthority(t *testi
 		Take(&workspace).Error; err != nil {
 		t.Fatal(err)
 	}
-	readyAt := now.Add(time.Minute)
+	readyAt := time.Now().UTC()
 	turnID := legacyTurnID
 	checkpoint := persistence.WorkspaceCheckpoint{
 		ID: uuid.New(), TenantID: fixture.tenantID, WorkspaceID: workspace.ID, SessionID: fixture.sessionID,
@@ -84,14 +84,14 @@ func TestCreateTurnBlocksCrossDomainRerouteWithoutFrozenSourceAuthority(t *testi
 
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: sourceTarget.ID, Status: routing.HealthUnreachable, CapacityStatus: routing.CapacityUnknown,
-		Source: "create-turn-dr-test", ObservedAt: readyAt.Add(time.Second), TTL: time.Minute,
+		Source: "create-turn-dr-test", ObservedAt: time.Now().UTC(), TTL: time.Minute,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: destinationTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
 		AvailableCapacityUnits: targetFailoverIntPointer(10), Source: "create-turn-dr-test",
-		ObservedAt: readyAt.Add(2 * time.Second), TTL: time.Minute,
+		ObservedAt: time.Now().UTC(), TTL: time.Minute,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestCreateTurnBlocksLegacyGroupRoutingWithoutFrozenSourceDomainEvenWhenTarg
 	ctx := context.Background()
 	sourceTarget, _, _, _ := configureFailoverTargets(t, fixture)
 	router := routing.NewService(fixture.db)
-	now := time.Now().UTC().Add(2 * time.Second).Truncate(time.Second)
+	now := time.Now().UTC()
 
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: sourceTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
@@ -179,7 +179,7 @@ func TestCreateTurnCrossDomainRerouteRequiresFreshArtifactAuthority(t *testing.T
 			false,
 			false,
 			false,
-			readyAt.Add(time.Second),
+			time.Now().UTC(),
 		)
 
 		_, err := fixture.service.CreateTurn(
@@ -205,7 +205,7 @@ func TestCreateTurnCrossDomainRerouteRequiresFreshArtifactAuthority(t *testing.T
 			true,
 			false,
 			false,
-			readyAt.Add(time.Second),
+			time.Now().UTC(),
 		)
 
 		_, err := fixture.service.CreateTurn(
@@ -231,7 +231,7 @@ func TestCreateTurnCrossDomainRerouteRequiresFreshArtifactAuthority(t *testing.T
 			true,
 			false,
 			false,
-			readyAt.Add(time.Second),
+			time.Now().UTC(),
 		)
 
 		if _, err := fixture.service.CreateTurn(
@@ -260,7 +260,7 @@ func seedCreateTurnArtifactAuthorityFixture(
 	ctx := context.Background()
 	sourceTarget, destinationTarget, _, _ := configureFailoverTargets(t, fixture)
 	router := routing.NewService(fixture.db)
-	now := time.Now().UTC().Add(2 * time.Second).Truncate(time.Second)
+	now := time.Now().UTC()
 
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: sourceTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
@@ -282,20 +282,20 @@ func seedCreateTurnArtifactAuthorityFixture(
 	sourceExecution := loadSessionExecution(t, fixture, "artifact-authority-seed")
 	completeSessionExecutionForNextTurn(t, fixture, sourceExecution)
 
-	readyAt := now.Add(time.Minute)
+	readyAt := time.Now().UTC()
 	artifact := createReadyExecutionArtifact(t, fixture, fixture.sessionID, &sourceExecution.ID, readyAt)
 	appendArtifactReadyEvent(t, fixture, fixture.sessionID, &sourceExecution.ID, artifact.ID, readyAt)
 
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: sourceTarget.ID, Status: routing.HealthUnreachable, CapacityStatus: routing.CapacityUnknown,
-		Source: "create-turn-dr-artifact-test", ObservedAt: readyAt.Add(2 * time.Second), TTL: time.Minute,
+		Source: "create-turn-dr-artifact-test", ObservedAt: time.Now().UTC(), TTL: time.Minute,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
 		ExecutionTargetID: destinationTarget.ID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
 		AvailableCapacityUnits: targetFailoverIntPointer(10), Source: "create-turn-dr-artifact-test",
-		ObservedAt: readyAt.Add(3 * time.Second), TTL: time.Minute,
+		ObservedAt: time.Now().UTC(), TTL: time.Minute,
 	}); err != nil {
 		t.Fatal(err)
 	}

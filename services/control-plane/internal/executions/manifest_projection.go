@@ -234,6 +234,11 @@ func projectWorkerProcessContainment(
 		view.ReasonCode = stringReference("no-attestation")
 		return view, nil
 	}
+	if executiontargets.WorkerManifestReportsUnsupportedCgroupSupervisor(manifest) {
+		view.TrustState = "untrusted"
+		view.ReasonCode = stringReference("unsupported-supervisor-version")
+		return view, nil
+	}
 	if !workerManifestSupportsStrictResourceSuspendContainment(manifest) {
 		return WorkerProcessContainmentView{}, invalidStoredWorkerManifest()
 	}

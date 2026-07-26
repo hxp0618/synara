@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -359,6 +360,62 @@ func TestVerifyKubernetesWorkloadIdentityRejectsReplacedPodUID(t *testing.T) {
 
 	service := configureKubernetesWorkloadIdentityService(t, fixture, claims.Namespace, serviceAccountName, server)
 	assertProblemCode(t, service.VerifyWorkerRegistration(context.Background(), targetID, claims.Namespace, claims.PodName, claims.PodUID, "workload-bearer-token"), 401, "kubernetes_workload_identity_pod_uid_mismatch")
+}
+
+func TestVerifyKubernetesWorkloadIdentityRejectsTerminatingPod(t *testing.T) {
+	claims := KubernetesWorkloadIdentityClaims{
+		Namespace: "synara-target", PodName: "synara-worker-0", PodUID: "pod-uid-1",
+	}
+	serviceAccountName := "synara-worker"
+	fixture := newKubernetesReconcileFixture(t, "")
+	targetID := fixture.targetID
+	expectedUsername := "system:serviceaccount:" + claims.Namespace + ":" + serviceAccountName
+	server := httptest.NewTLSServer(http.HandlerFunc((&kubernetesWorkloadIdentityServerState{
+		t:                  t,
+		targetID:           targetID,
+		serviceAccountName: serviceAccountName,
+		reviewStatusCode:   http.StatusCreated,
+		reviewResponse: map[string]any{
+			"status": map[string]any{
+				"authenticated": true,
+				"user": map[string]any{
+					"username": expectedUsername,
+					"extra": map[string]any{
+						kubernetesPodNameExtraKey: []string{claims.PodName},
+						kubernetesPodUIDExtraKey:  []string{claims.PodUID},
+					},
+				},
+				"audiences": []string{KubernetesWorkloadIdentityAudience(targetID)},
+			},
+		},
+		podStatusCode: http.StatusOK,
+		podResponse: map[string]any{
+			"metadata": map[string]any{
+				"uid":               claims.PodUID,
+				"deletionTimestamp": time.Now().UTC().Format(time.RFC3339),
+				"labels": map[string]any{
+					kubernetesManagedLabel: "true", kubernetesTargetLabel: targetID.String(),
+				},
+			},
+			"spec": map[string]any{"serviceAccountName": serviceAccountName},
+		},
+	}).serveHTTP))
+	defer server.Close()
+
+	service := configureKubernetesWorkloadIdentityService(t, fixture, claims.Namespace, serviceAccountName, server)
+	assertProblemCode(
+		t,
+		service.VerifyWorkerRegistration(
+			context.Background(),
+			targetID,
+			claims.Namespace,
+			claims.PodName,
+			claims.PodUID,
+			"workload-bearer-token",
+		),
+		409,
+		"kubernetes_workload_identity_pod_terminating",
+	)
 }
 
 func TestVerifyKubernetesWorkloadIdentityRejectsWrongPodLabels(t *testing.T) {

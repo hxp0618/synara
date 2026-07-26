@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +51,7 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 	invalidTarget.WorkerPoolID = fixture.otherPool.ID
 	invalidTarget.WorkerPoolVersion = fixture.otherPool.Version
 	invalidTarget.ExecutionTargetID = fixture.target.ID
-	assertStage4MigrationRejected(
+	assertWorkerPoolWarmCapacityConstraintRejected(
 		t,
 		db.Create(&invalidTarget).Error,
 		"Worker pool warm capacity scope is invalid",
@@ -59,7 +61,7 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 	invalidRelease.WorkerPoolID = fixture.otherWarmPoolSameTarget.ID
 	invalidRelease.WorkerPoolVersion = fixture.otherWarmPoolSameTarget.Version
 	invalidRelease.WorkerReleaseRevisionID = &fixture.otherTargetRelease.ID
-	assertStage4MigrationRejected(
+	assertWorkerPoolWarmCapacityConstraintRejected(
 		t,
 		db.Create(&invalidRelease).Error,
 		"Worker pool warm capacity scope is invalid",
@@ -76,7 +78,7 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 		}).Error; err != nil {
 		t.Fatalf("valid warm capacity update rejected: %v", err)
 	}
-	assertStage4MigrationRejected(
+	assertWorkerPoolWarmCapacityConstraintRejected(
 		t,
 		db.Model(&persistence.WorkerPoolWarmCapacity{}).
 			Where("tenant_id = ? AND execution_target_id = ? AND worker_pool_id = ? AND worker_pool_version = ?",
@@ -88,13 +90,28 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 			}).Error,
 		"Worker pool warm capacity version must advance exactly once and observed_at must advance",
 	)
-	assertStage4MigrationRejected(
+	assertWorkerPoolWarmCapacityConstraintRejected(
 		t,
 		db.Delete(&persistence.WorkerPoolWarmCapacity{},
 			"tenant_id = ? AND execution_target_id = ? AND worker_pool_id = ? AND worker_pool_version = ?",
 			fixture.tenantID, fixture.target.ID, fixture.pool.ID, fixture.pool.Version,
 		).Error,
 		"Worker pool warm capacity observations cannot be deleted",
+	)
+}
+
+func assertWorkerPoolWarmCapacityConstraintRejected(t *testing.T, err error, expected string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("PostgreSQL accepted invalid Worker Pool warm capacity state (want containing %q)", expected)
+	}
+	if strings.Contains(err.Error(), expected) || errors.Is(err, gorm.ErrCheckConstraintViolated) {
+		return
+	}
+	t.Fatalf(
+		"PostgreSQL returned the wrong Worker Pool warm capacity rejection: %v (want containing %q or a translated check constraint)",
+		err,
+		expected,
 	)
 }
 
@@ -120,11 +137,19 @@ func seedWorkerPoolWarmCapacityFixture(t *testing.T, db *gorm.DB) workerPoolWarm
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&persistence.Tenant{
-		ID: tenantID, Slug: "warm-capacity-pg-" + uuid.NewString()[:8], Name: "Warm Capacity PG Tenant",
-		Status: "active", PlanCode: "enterprise", Region: "default", Settings: map[string]any{},
-		CreatedBy: userID, CreatedAt: now, UpdatedAt: now,
-	}).Error; err != nil {
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.Tenant{
+			ID: tenantID, Slug: "warm-capacity-pg-" + uuid.NewString()[:8], Name: "Warm Capacity PG Tenant",
+			Status: "active", PlanCode: "enterprise", Region: "default", Settings: map[string]any{},
+			CreatedBy: userID, CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&persistence.TenantMembership{
+			TenantID: tenantID, UserID: userID, Role: "owner", Status: "active",
+			JoinedAt: &now, CreatedAt: now, UpdatedAt: now,
+		}).Error
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,7 +193,7 @@ func seedWorkerPoolWarmCapacityFixture(t *testing.T, db *gorm.DB) workerPoolWarm
 
 	firstManifest := persistence.WorkerManifest{
 		ID:                    uuid.New(),
-		ManifestHash:          uuid.NewString(),
+		ManifestHash:          strings.Repeat(strings.ReplaceAll(uuid.NewString(), "-", ""), 2),
 		WorkerBuildVersion:    "1.0.0",
 		WorkerProtocolMinimum: 2,
 		WorkerProtocolMaximum: 2,
@@ -181,7 +206,7 @@ func seedWorkerPoolWarmCapacityFixture(t *testing.T, db *gorm.DB) workerPoolWarm
 	}
 	secondManifest := firstManifest
 	secondManifest.ID = uuid.New()
-	secondManifest.ManifestHash = uuid.NewString()
+	secondManifest.ManifestHash = strings.Repeat(strings.ReplaceAll(uuid.NewString(), "-", ""), 2)
 	if err := db.Create(&firstManifest).Error; err != nil {
 		t.Fatal(err)
 	}

@@ -266,6 +266,7 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	t.Setenv("SYNARA_SSH_PROVISION_TIMEOUT", "45s")
 	t.Setenv("SYNARA_DOCKER_RECONCILE_INTERVAL", "7s")
 	t.Setenv("SYNARA_KUBERNETES_RECONCILE_INTERVAL", "3s")
+	t.Setenv("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD", "12s")
 	t.Setenv("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", "4s")
 	cfg, err := Load()
 	if err != nil {
@@ -279,8 +280,18 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	if cfg.KubernetesReconcileInterval.String() != "3s" {
 		t.Fatalf("unexpected Kubernetes reconcile interval: %s", cfg.KubernetesReconcileInterval)
 	}
+	if cfg.KubernetesPodPendingFailureThreshold.String() != "12s" {
+		t.Fatalf("unexpected Kubernetes Pod Pending failure threshold: %s", cfg.KubernetesPodPendingFailureThreshold)
+	}
 	if cfg.ResourceLifecycleSweepInterval.String() != "4s" {
 		t.Fatalf("unexpected Resource Lifecycle sweep interval: %s", cfg.ResourceLifecycleSweepInterval)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_KUBERNETES_RECONCILE_INTERVAL", "30s")
+	t.Setenv("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD", "20s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD") {
+		t.Fatalf("expected Pending threshold/reconcile interval safety error, got %v", err)
 	}
 
 	clearConfigEnvironment(t)
@@ -436,6 +447,15 @@ func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
 		"reconcile":true,
 		"estimateAfterImport":true
 	}]`)
+	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
+		"executionTargetId":"`+targetID.String()+`",
+		"provider":" AWS ",
+		"currencyCode":" usd ",
+		"billingPeriodStartAt":"2026-07-01T00:00:00Z",
+		"billingPeriodEndAt":"2026-08-01T00:00:00Z",
+		"settlementDelay":"24h",
+		"scheduleInterval":"6h"
+	}]}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -458,6 +478,55 @@ func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
 		len(mapping.ExecutionTargetIDs) != 1 || mapping.ExecutionTargetIDs[0] != targetID ||
 		!mapping.Reconcile || !mapping.EstimateAfterImport {
 		t.Fatalf("unexpected billing import mapping: %#v", mapping)
+	}
+	if len(cfg.Billing.SharedAllocations) != 1 {
+		t.Fatalf("billing shared allocations = %#v", cfg.Billing.SharedAllocations)
+	}
+	shared := cfg.Billing.SharedAllocations[0]
+	if shared.ExecutionTargetID != targetID || shared.Provider != "aws" || shared.CurrencyCode != "USD" ||
+		!shared.BillingPeriodStartAt.Equal(time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)) ||
+		!shared.BillingPeriodEndAt.Equal(time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)) ||
+		shared.SettlementDelay != 24*time.Hour || shared.ScheduleInterval != 6*time.Hour {
+		t.Fatalf("unexpected billing shared allocation mapping: %#v", shared)
+	}
+}
+
+func TestParseBillingSharedAllocationMappingsRejectsUnknownAndInvalidFields(t *testing.T) {
+	targetID := uuid.New()
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "unknown field",
+			raw: `[{"executionTargetId":"` + targetID.String() + `","provider":"aws","currencyCode":"USD",` +
+				`"billingPeriodStartAt":"2026-07-01T00:00:00Z","billingPeriodEndAt":"2026-08-01T00:00:00Z",` +
+				`"settlementDelay":"24h","scheduleInterval":"6h","calendar":"monthly"}]`,
+			want: "unknown field \"calendar\"",
+		},
+		{
+			name: "invalid start",
+			raw: `[{"executionTargetId":"` + targetID.String() + `","provider":"aws","currencyCode":"USD",` +
+				`"billingPeriodStartAt":"July","billingPeriodEndAt":"2026-08-01T00:00:00Z",` +
+				`"settlementDelay":"24h","scheduleInterval":"6h"}]`,
+			want: "billingPeriodStartAt must use RFC3339",
+		},
+		{
+			name: "missing settlement delay",
+			raw: `[{"executionTargetId":"` + targetID.String() + `","provider":"aws","currencyCode":"USD",` +
+				`"billingPeriodStartAt":"2026-07-01T00:00:00Z","billingPeriodEndAt":"2026-08-01T00:00:00Z",` +
+				`"scheduleInterval":"6h"}]`,
+			want: "settlementDelay must be a valid duration",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseBillingSharedAllocationMappings(test.raw)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
 	}
 }
 
@@ -598,6 +667,20 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "negative schedule interval") {
 		t.Fatalf("expected negative schedule interval error, got %v", err)
 	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"gcp",
+		"externalImportId":"provider-format-mismatch",
+		"format":"aws-cur-csv",
+		"objectKey":"cur.csv"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires provider aws, not gcp") {
+		t.Fatalf("expected billing provider/format mismatch error, got %v", err)
+	}
 }
 
 func clearConfigEnvironment(t *testing.T) {
@@ -624,6 +707,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_SSH_PROVISION_TIMEOUT",
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
+		"SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD",
 		"SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL",
 		"SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", "SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL",
 		"SYNARA_RETENTION_SWEEP_INTERVAL",
@@ -646,7 +730,8 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_BILLING_S3_ALLOW_HTTP", "SYNARA_BILLING_GCS_BUCKET",
 		"SYNARA_BILLING_AZURE_CONTAINER_URL", "SYNARA_BILLING_AZURE_ALLOW_HTTP",
 		"SYNARA_BILLING_BLOB_PREFIX", "SYNARA_BILLING_MAX_OBJECT_BYTES",
-		"SYNARA_BILLING_IMPORT_MAPPINGS_JSON", "SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID",
+		"SYNARA_BILLING_IMPORT_MAPPINGS_JSON", "SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON",
+		"SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID",
 	} {
 		t.Setenv(name, "")
 	}

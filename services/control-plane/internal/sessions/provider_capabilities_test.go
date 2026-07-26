@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,6 +17,54 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
+
+func TestSelectExecutionLaunchTargetRechecksCapabilitiesAfterPlacementLock(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	var target persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.executionTargetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	staleCapability := errors.New("capability projection changed after preview")
+	gateCalls := 0
+	var previewPoolID uuid.UUID
+	err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		_, selectErr := SelectExecutionLaunchTarget(
+			context.Background(),
+			tx,
+			&target,
+			nil,
+			ExecutionLaunchPolicyScope{
+				TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, Provider: "codex",
+			},
+			placement.WarmPoolModeDefault,
+			func(
+				_ context.Context,
+				_ *gorm.DB,
+				_ persistence.ExecutionTarget,
+				selection placement.Selection,
+				_ *routing.Selection,
+			) error {
+				gateCalls++
+				if gateCalls == 1 {
+					previewPoolID = selection.Pool.ID
+					return nil
+				}
+				if selection.Pool.ID != previewPoolID {
+					t.Fatalf("final pool = %s, want unchanged preview pool %s", selection.Pool.ID, previewPoolID)
+				}
+				return staleCapability
+			},
+		)
+		return selectErr
+	})
+	if !errors.Is(err, staleCapability) {
+		t.Fatalf("selection error = %v, want stale capability rejection", err)
+	}
+	if gateCalls != 2 {
+		t.Fatalf("capability gate calls = %d, want preview and post-lock validation", gateCalls)
+	}
+}
 
 func TestCreateSessionCapabilityGateRejectsLocalOnlyAndDroidButAllowsUnobserved(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
@@ -212,6 +261,41 @@ func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T
 	}
 	if execution.ExecutionTargetID != destination.ID {
 		t.Fatalf("execution target = %s, want %s", execution.ExecutionTargetID, destination.ID)
+	}
+	if execution.SchedulingDecisionID == nil {
+		t.Fatal("routed Execution omitted its immutable scheduling decision identity")
+	}
+	var decision persistence.ExecutionSchedulingDecision
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
+	if decision.ID != *execution.SchedulingDecisionID || decision.AlgorithmVersion != "queue-pressure-v1" ||
+		decision.EvidenceCompleteness != "selected-only" || decision.CandidateCount != 1 ||
+		decision.SelectedExecutionTargetID != destination.ID {
+		t.Fatalf("routed scheduling decision = %#v", decision)
+	}
+	var candidate persistence.ExecutionSchedulingCandidate
+	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
+		Take(&candidate).Error; err != nil {
+		t.Fatal(err)
+	}
+	var member persistence.ExecutionTargetGroupMember
+	if err := fixture.db.Where("tenant_id = ? AND target_group_id = ? AND execution_target_id = ?",
+		fixture.tenantID, group.ID, destination.ID).Take(&member).Error; err != nil {
+		t.Fatal(err)
+	}
+	var health persistence.ExecutionTargetHealth
+	if err := fixture.db.Where("execution_target_id = ?", destination.ID).Take(&health).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !candidate.Selected || candidate.TargetGroupMemberID == nil || *candidate.TargetGroupMemberID != member.ID ||
+		candidate.HealthVersion == nil || *candidate.HealthVersion != health.Version ||
+		candidate.QueuedExecutionUnits == nil || candidate.EffectiveLoadRank == nil ||
+		candidate.Priority == nil || *candidate.Priority != member.Priority ||
+		candidate.Weight == nil || *candidate.Weight != member.Weight ||
+		candidate.WorkerPoolID == nil || *candidate.WorkerPoolID != destinationPool.ID {
+		t.Fatalf("routed scheduling candidate = %#v, member = %#v, health = %#v", candidate, member, health)
 	}
 	var session persistence.AgentSession
 	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).Take(&session).Error; err != nil {

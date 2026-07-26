@@ -97,6 +97,14 @@ func TestWorkerRevocationFencesTokenAndRecoversExecutionAndCleanupLeases(t *test
 	if leaseCount != 0 {
 		t.Fatalf("revoked Worker retained %d execution leases", leaseCount)
 	}
+	_, executionRelease := loadExecutionClaimReleaseFactForTest(
+		t, db, fixture.ExecutionID, claim.Value.Lease.Generation,
+	)
+	if executionRelease.ReleaseReason != workerClaimReleaseWorkerRevoked ||
+		executionRelease.AuthorityKind != workerClaimReleaseAuthorityUser || executionRelease.RequestID == nil ||
+		*executionRelease.RequestID != "worker-revoke-request" {
+		t.Fatalf("revoked Execution release fact = %#v", executionRelease)
+	}
 	var cleanupAfter persistence.WorkspaceCleanupCommand
 	if err := db.Where("id = ?", cleanup.ID).Take(&cleanupAfter).Error; err != nil {
 		t.Fatal(err)
@@ -128,6 +136,182 @@ func TestWorkerRevocationFencesTokenAndRecoversExecutionAndCleanupLeases(t *test
 	}, "worker-revocation-reclaim")
 	if err != nil || reclaimed.Value.Lease == nil || reclaimed.Value.Lease.Generation != claim.Value.Lease.Generation+1 {
 		t.Fatalf("recovered Execution was not generation-fenced and reclaimed: %#v, %v", reclaimed, err)
+	}
+}
+
+func TestSSHTargetRevocationAtomicallyFencesAllWorkerAuthority(t *testing.T) {
+	db, service, fixture := newSQLiteWorkerRevocationFixture(t)
+	ctx := context.Background()
+	fixture.TargetKind = "ssh"
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.TargetID).
+			Update("kind", fixture.TargetKind).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Update("target_kind", fixture.TargetKind).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registration := RegisterWorkerInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+		InstanceUID: uuid.NewString(), ClusterID: "ssh", Namespace: "default",
+		PodName: "ssh-target-worker", Version: "worker-test",
+		ProtocolVersion: WorkerProtocolVersion, Capabilities: workerManifestTestCapabilities(),
+		LeaseSupported: true, FencingSupported: true,
+	}
+	const bootstrapGeneration int64 = 1
+	expectedInstanceUID := uuid.MustParse(registration.InstanceUID)
+	if err := db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.TargetID).
+		Updates(map[string]any{
+			"status": "offline", "ssh_operation_generation": bootstrapGeneration,
+			"ssh_operation_kind": "install", "ssh_operation_started_at": time.Now().UTC(),
+			"ssh_expected_instance_uid": expectedInstanceUID,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	registration.SSHBootstrapGeneration = func() *int64 { value := bootstrapGeneration; return &value }()
+	registered, err := service.Register(ctx, registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.TargetID).
+		Updates(map[string]any{
+			"status": "active", "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
+			"ssh_expected_instance_uid": nil,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	worker, err := service.Authenticate(ctx, registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "ssh-target-revocation-claim")
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("claim before SSH Target revoke: %#v, %v", claim, err)
+	}
+	cleanup := seedLeasedWorkspaceCleanup(t, db, service, fixture, worker)
+	now := time.Now().UTC()
+	const operationGeneration int64 = 7
+	if err := db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.TargetID).
+		Updates(map[string]any{
+			"status": "offline", "ssh_operation_generation": operationGeneration,
+			"ssh_operation_kind": "revoke", "ssh_operation_started_at": now,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	if err := db.Exec(`
+		CREATE TRIGGER fail_test_worker_revoked_outbox
+		BEFORE INSERT ON outbox_messages
+		WHEN NEW.topic = 'worker.revoked'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected Worker revoke outbox failure');
+		END
+	`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RevokeExecutionTargetWorkers(
+		ctx, principal, fixture.TenantID, fixture.TargetID, operationGeneration,
+		"injected atomic rollback", "ssh-target-revoke-rollback", "127.0.0.1",
+	); err == nil {
+		t.Fatal("injected Worker revoke failure unexpectedly committed")
+	}
+	if err := db.Exec("DROP TRIGGER fail_test_worker_revoked_outbox").Error; err != nil {
+		t.Fatal(err)
+	}
+	var rollbackWorker persistence.WorkerInstance
+	if err := db.Where("id = ?", worker.ID).Take(&rollbackWorker).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rollbackWorker.AdministrativeStatus != "active" {
+		t.Fatalf("failed revoke committed Worker state: %#v", rollbackWorker)
+	}
+	var rollbackLeaseCount int64
+	if err := db.Model(&persistence.WorkerLease{}).Where("worker_id = ?", worker.ID).
+		Count(&rollbackLeaseCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rollbackLeaseCount != 1 {
+		t.Fatalf("failed revoke retained %d Worker leases, want 1", rollbackLeaseCount)
+	}
+	var rollbackExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+		Take(&rollbackExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	var rollbackCleanup persistence.WorkspaceCleanupCommand
+	if err := db.Where("id = ?", cleanup.ID).Take(&rollbackCleanup).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rollbackExecution.Status != "leased" || rollbackExecution.WorkerID == nil ||
+		rollbackCleanup.Status != "leased" || rollbackCleanup.DeliveryWorkerID == nil {
+		t.Fatalf("failed revoke partially committed authority: execution=%#v cleanup=%#v", rollbackExecution, rollbackCleanup)
+	}
+	if err := service.RevokeExecutionTargetWorkers(
+		ctx, principal, fixture.TenantID, fixture.TargetID, operationGeneration+1,
+		"wrong generation", "ssh-target-revoke-stale", "127.0.0.1",
+	); err == nil {
+		t.Fatal("stale SSH Target revoke generation withdrew Worker authority")
+	} else {
+		assertWorkerRevocationProblem(t, err, 409, "ssh_operation_superseded")
+	}
+	if _, err := service.Authenticate(ctx, registered.Token); err != nil {
+		t.Fatalf("stale revoke changed Worker authentication: %v", err)
+	}
+	if err := service.RevokeExecutionTargetWorkers(
+		ctx, principal, fixture.TenantID, fixture.TargetID, operationGeneration,
+		"SSH Target operator revoke", "ssh-target-revoke", "127.0.0.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Authenticate(ctx, registered.Token)
+	assertWorkerRevocationProblem(t, err, 401, "worker_token_revoked")
+	leaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: claim.Value.Lease.Generation,
+		LeaseToken: claim.Value.Lease.LeaseToken,
+	}
+	_, err = service.Renew(ctx, worker, fixture.ExecutionID, RenewLeaseInput{LeaseInput: leaseInput}, "ssh-target-renew-after-revoke")
+	assertWorkerRevocationProblem(t, err, 401, "worker_token_revoked")
+	_, err = service.Start(ctx, worker, fixture.ExecutionID, leaseInput, "ssh-target-start-after-revoke")
+	assertWorkerRevocationProblem(t, err, 401, "worker_token_revoked")
+	_, err = service.Complete(ctx, worker, fixture.ExecutionID, CompleteExecutionInput{
+		LeaseInput: leaseInput, Output: map[string]any{"should": "be fenced"},
+	}, "ssh-target-complete-after-revoke")
+	assertWorkerRevocationProblem(t, err, 401, "worker_token_revoked")
+
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "recovering" || execution.WorkerID != nil {
+		t.Fatalf("SSH Target revoke did not recover Execution: %#v", execution)
+	}
+	var leaseCount int64
+	if err := db.Model(&persistence.WorkerLease{}).Where("worker_id = ?", worker.ID).Count(&leaseCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leaseCount != 0 {
+		t.Fatalf("SSH Target revoked Worker retained %d leases", leaseCount)
+	}
+	var cleanupAfter persistence.WorkspaceCleanupCommand
+	if err := db.Where("id = ?", cleanup.ID).Take(&cleanupAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cleanupAfter.Status != "pending" || cleanupAfter.DeliveryWorkerID != nil {
+		t.Fatalf("SSH Target revoke did not requeue Workspace cleanup: %#v", cleanupAfter)
+	}
+	var target persistence.ExecutionTarget
+	if err := db.Where("id = ?", fixture.TargetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != "offline" || target.SSHOperationGeneration != operationGeneration ||
+		target.SSHOperationKind == nil || *target.SSHOperationKind != "revoke" {
+		t.Fatalf("Worker authority transaction changed SSH operation fence: %#v", target)
 	}
 }
 

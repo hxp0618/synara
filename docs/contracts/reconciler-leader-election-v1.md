@@ -44,8 +44,9 @@ Durable leadership currently covers:
 - Kubernetes Execution reconciliation;
 - global Target failover;
 - Session resource lifecycle enforcement;
-- Worker Release automatic rollback; and
-- Tenant retention sweeping.
+- Worker Release automatic rollback;
+- Tenant retention sweeping;
+- scheduled cloud invoice import, estimate sweep, and reconciliation.
 
 The Outbox dispatcher remains multi-active because its database claim/lease protocol is independently safe across
 replicas.

@@ -186,6 +186,10 @@ func (s *Service) RecoverExpiredWorkspaceCleanupLeases(ctx context.Context, now 
 				ctx, tx, command, now,
 				"workspace_cleanup_lease_expired",
 				"The Workspace cleanup lease expired before acknowledgement.",
+				workerClaimReleaseCleanupLeaseExpired,
+				workerClaimReleaseAuthorityControlPlane,
+				"",
+				"",
 			)
 			if err != nil {
 				return err
@@ -208,6 +212,7 @@ func (s *Service) recoverWorkspaceCleanupCommandLocked(
 	command persistence.WorkspaceCleanupCommand,
 	now time.Time,
 	code, message string,
+	releaseReason, authorityKind, authorityID, requestID string,
 ) (bool, error) {
 	if command.DeliveryWorkerID == nil || command.DeliveryWorkerIncarnation == nil {
 		return false, nil
@@ -221,6 +226,7 @@ func (s *Service) recoverWorkspaceCleanupCommandLocked(
 		code = "workspace_cleanup_attempts_exhausted"
 		message = "Workspace cleanup exhausted its delivery attempt limit. " + message
 		failedAt = now
+		releaseReason = workerClaimReleaseCleanupAttemptsExhausted
 	}
 	updated := tx.WithContext(ctx).Model(&persistence.WorkspaceCleanupCommand{}).
 		Where(
@@ -239,6 +245,15 @@ func (s *Service) recoverWorkspaceCleanupCommandLocked(
 	}
 	if updated.RowsAffected != 1 {
 		return false, nil
+	}
+	releasedAt := now
+	if releaseReason == workerClaimReleaseCleanupLeaseExpired && command.LeaseExpiresAt != nil {
+		releasedAt = *command.LeaseExpiresAt
+	}
+	if err := recordWorkerClaimReleaseFact(ctx, tx, workspaceCleanupClaimReleaseInput(
+		command, releasedAt, now, releaseReason, authorityKind, authorityID, requestID,
+	)); err != nil {
+		return false, err
 	}
 	materialization, _, err := lockWorkspaceCleanupScope(ctx, tx, command.MaterializationID)
 	if err != nil || materialization.IncarnationID != command.MaterializationIncarnationID {
@@ -305,6 +320,9 @@ func (s *Service) ClaimWorkspaceCleanup(
 		result := WorkspaceCleanupClaimResult{}
 		replayed := false
 		err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+			if _, _, err := s.targets.ResolveWorkerTargetInTransaction(ctx, tx, targetID, targetKind); err != nil {
+				return err
+			}
 			receipt, lookupErr, lockErr := lockWorkerAndLoadRequestReceipt(ctx, tx, worker, requestID)
 			if lockErr != nil {
 				return lockErr
@@ -579,6 +597,14 @@ func (s *Service) AcknowledgeWorkspaceCleanup(
 		if err := acknowledgeWorkspaceCleanup(ctx, tx, command, now); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
+		if command.DeliveryWorkerID != nil && command.DeliveryWorkerIncarnation != nil {
+			if err := recordWorkerClaimReleaseFact(ctx, tx, workspaceCleanupClaimReleaseInput(
+				command, now, now, workerClaimReleaseCleanupAcknowledged,
+				workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+			)); err != nil {
+				return WorkspaceCleanupState{}, err
+			}
+		}
 		if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
@@ -643,6 +669,18 @@ func (s *Service) FailWorkspaceCleanup(
 				command.ID, []string{"leased", "running"}, input.DispatchGeneration, worker.ID, worker.Incarnation).
 			Updates(updates)
 		if err := expectOne(updated, 409, "workspace_cleanup_lease_fenced", "The Workspace cleanup lease is no longer current."); err != nil {
+			return WorkspaceCleanupState{}, err
+		}
+		releaseReason := workerClaimReleaseCleanupFailedTerminal
+		if retry {
+			releaseReason = workerClaimReleaseCleanupFailedRetryable
+		} else if input.Retryable && command.DeliveryAttempts >= workspaceCleanupMaxAttempts {
+			releaseReason = workerClaimReleaseCleanupAttemptsExhausted
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, workspaceCleanupClaimReleaseInput(
+			command, now, now, releaseReason,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
 		materializationUpdates := map[string]any{"state": materializationState, "updated_at": now}
@@ -719,6 +757,12 @@ func (s *Service) ReleaseWorkspaceCleanup(
 		if err := expectOne(updated, 409, "workspace_cleanup_lease_fenced", "The Workspace cleanup lease is no longer current."); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, workspaceCleanupClaimReleaseInput(
+			command, now, now, workerClaimReleaseCleanupWorkerReleased,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
+			return WorkspaceCleanupState{}, err
+		}
 		if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
@@ -742,8 +786,9 @@ func (s *Service) ReconcileEphemeralWorkspaceCleanup(
 	if executionTargetID == uuid.Nil {
 		return 0, problem.New(400, "invalid_ephemeral_workspace_cleanup", "executionTargetId is required.")
 	}
+	recordedAt := s.now()
 	if confirmedAt.IsZero() {
-		confirmedAt = s.now()
+		confirmedAt = recordedAt
 	}
 	present := make(map[string]struct{}, len(presentInstanceUIDs))
 	for _, value := range presentInstanceUIDs {
@@ -795,6 +840,14 @@ func (s *Service) ReconcileEphemeralWorkspaceCleanup(
 			}
 			if err := acknowledgeWorkspaceCleanup(ctx, tx, command, confirmedAt); err != nil {
 				return err
+			}
+			if command.DeliveryWorkerID != nil && command.DeliveryWorkerIncarnation != nil {
+				if err := recordWorkerClaimReleaseFact(ctx, tx, workspaceCleanupClaimReleaseInput(
+					command, confirmedAt, recordedAt, workerClaimReleaseCleanupPodConfirmedAbsent,
+					workerClaimReleaseAuthorityKubernetes, *materialization.WorkerInstanceUID, "",
+				)); err != nil {
+					return err
+				}
 			}
 			changed = true
 			return nil

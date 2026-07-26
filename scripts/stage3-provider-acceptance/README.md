@@ -233,6 +233,9 @@ The SSH real-provider path cross-builds `synara-agentd` and the Provider Host bu
 installs the exact Codex and Claude Code versions from `deploy/worker/provider-tools/package-lock.json`, verifies the
 remote CLI versions and Host SHA, and then provisions through the product SSH install API. The deterministic SSH
 suite continues to upload only `provider-host-fixture.mjs`; fixture and real runtime artifacts are never confused.
+Every SSH cleanup now also verifies the isolated metadata store after the product revoke returns: the Target must be
+disabled with no active operation, at least one Worker must be revoked, no live Worker authority may remain, and all
+Execution and Workspace-cleanup leases for that Target must be gone before remote/infrastructure cleanup can pass.
 
 An operator-owned host requires a separate, explicit boundary. The identity and pinned Host Key files must be
 absolute, outside the repository, and the private key must be readable only by its owner. The command never accepts
@@ -275,6 +278,50 @@ key path must already exist as operator-managed absolute paths, the Provider UID
 UID, and `synara-agentd protected-cgroup-preflight` must succeed on the live host. A release claim must also verify
 that the preflight public key matches the target `processContainmentPolicy`; a local probe without that policy match
 is not signed strict-containment evidence.
+
+### Disposable live systemd/cgroup-v2 supervisor lane
+
+`protected_cgroup_live_gate.py` is the narrow real-kernel acceptance lane for supervisor-v2 recovery and exclusion
+semantics. It cross-compiles the current `internal/agentd` test binary for Linux arm64, hashes the complete package
+source set and binary, copies only that binary into one uniquely named Ubuntu 24.04 OrbStack VM, and runs the exact
+env-gated test as the sole MainPID of a `Delegate=yes`, `KillMode=process` service. The test covers a live Provider plus
+`setsid` descendant, the actual standalone live preflight, lease and same-fence overlap, parent-PID and legacy-v1 zero-mutation
+rejection, unknown-child repair, and SIGKILL lease-holder recovery through real `cgroup.kill`/`cgroup.events`.
+
+The gate holds a non-blocking per-name local `flock`, refuses an existing VM name, and records the pre-existing
+`debian` VM identity as a preservation oracle. It does not claim ownership until successful creation is followed by
+an exact name/ID/distro/version/architecture inventory match. Because OrbStack `create` has no JSON/opaque-ID output,
+the VM must also present a root-only, run-random cloud-init marker whose hash is checked between two inventories with
+the same ID. A timed-out or otherwise ambiguous create is owned only when that marker proof completes; an unproved
+same-name candidate is recorded as an orphan and never deleted. While still holding the name lock, cleanup performs a
+bounded exponential-backoff reconciliation so a VM or cloud-init marker that appears late can still be proven and
+deleted by its captured exact ID. Deadline exhaustion records the last candidate, attempt count, marker/inventory
+error, and an explicit unresolved late-create risk in both the raised failure and cleanup evidence. Cleanup deletes
+only a proven captured VM ID.
+
+Cleanup uses only OrbStack's documented opaque-ID delete. OrbStack 2.2.1 can return a nil-pointer panic for that form;
+the runner records its bounded output/digest and fails with `manualCleanupRequired` rather than falling back to a name
+delete. Even a fresh marker check cannot close the ID-check-to-name-delete replacement window, so automatic name
+deletion is forbidden. An operator must perform separate fresh identity/marker verification and cleanup; that manual
+operation is outside this runner and the gate cannot pass until final inventory confirms the captured ID is absent.
+
+The local lock directory and file are opened fd-relative with `O_NOFOLLOW` and must be private, regular, and owned by
+the current user. Bounded secret-free JSON is attempted after every cleanup path. A separate fallback evidence file is
+pre-opened before VM work and receives the aggregate primary, cleanup, and report-write failures if both normal report
+writes fail:
+
+```sh
+python3 scripts/stage3-provider-acceptance/protected_cgroup_live_gate.py \
+  --allow-create-disposable-vm \
+  --output .tmp/stage3-protected-cgroup-live/acceptance.json
+```
+
+This lane proves local Linux host containment only. It does not run a real Codex/Claude Provider, a cloud target, a
+signed Control Plane projection, deployment, or release gate. The Go test skips unless the dedicated runner sets
+`SYNARA_CGROUP_V2_LIVE=1` inside its disposable delegated service.
+Every report binds the tested source set and cross-built binary. A later runner-only cleanup hardening does not
+invalidate the captured kernel/test-binary result, but the older report is not evidence for the newer runner source;
+rerun the lane before claiming a single aggregate pass for the current runner and live containment together.
 
 The Runner reads the value only when creating the isolated Control Plane Credential, registers it with the output
 redactor before the API call, binds the Credential ID to the real Provider Session, and never persists the variable
@@ -678,8 +725,16 @@ Use `ssh_protected_cgroup_gate.py` for that narrow host proof. It refuses to tou
 protected-cgroup env keys from the remote `agentd.env`, and requires an active/running systemd MainPID whose executable,
 EnvironmentFile, allowlisted process environment, and cgroup membership bind to those exact inputs. The configured
 cgroup root must be that unit's delegated `ControlGroup`, and the live registration identity must match the supplied
-control-plane projection context. The gate then requires projected `processContainment.trustState=verified` and
-independently re-verifies the signed live preflight attestation against the Target `processContainmentPolicy`.
+control-plane projection context. Every core sample rechecks its critical process/cgroup fence at the tail, every
+snapshot is double-sampled, and both layers bind cgroup-root device/inode; the gate records
+`/proc/<MainPID>/stat` starttime using the final parenthesis of the possibly space-containing comm field, then repeats
+the bracketed active unit/process/environment/cgroup snapshot after preflight and local manifest verification.
+MainPID reuse or any snapshot change fails closed. Preflight does not source the remote EnvironmentFile: it uses
+absolute `/usr/bin/env -i`, only the parsed non-secret allowlist, and fixed loopback/dummy-token/`/bin/false` Runner
+defaults, so real registration credentials, Runner configuration, capabilities, inherited environment, and Provider
+secrets never enter the diagnostic process. The gate then requires
+projected `processContainment.trustState=verified` and independently re-verifies the signed live preflight attestation
+against the Target `processContainmentPolicy`.
 It emits `ssh-release-gate.json` and `ssh-release-gate.md`. Unlike Docker/Kubernetes, there is no shared image: each
 child intentionally rebuilds and verifies the same runtime from the clean checkout. The implementation and
 unit/runtime preflight evidence are not a real SSH Provider release pass until dedicated Credentials and a usable

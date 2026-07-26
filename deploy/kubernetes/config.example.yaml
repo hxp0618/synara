@@ -10,3 +10,28 @@ data:
   artifact-bucket: synara-artifacts
   aws-region: us-east-1
   credential-kms-key-id: alias/synara-provider-credentials
+  # Billing import is disabled by default. For s3/gcs/azure, the SDK uses the
+  # Control Plane Pod's workload identity/default credential chain; do not add
+  # long-lived cloud keys to this ConfigMap. The operator Tenant also owns
+  # shared Target Coverage seals and scheduled-sweep audits.
+  billing-tariff-operator-tenant-id: ""
+  billing-blob-source: disabled
+  billing-local-base-dir: ""
+  billing-s3-bucket: ""
+  billing-s3-region: us-east-1
+  billing-s3-endpoint: ""
+  billing-s3-use-path-style: "false"
+  billing-s3-allow-custom-endpoint: "false"
+  billing-s3-allow-http: "false"
+  billing-gcs-bucket: ""
+  billing-azure-container-url: ""
+  billing-azure-allow-http: "false"
+  billing-blob-prefix: ""
+  # 0 selects the bounded 16 MiB runtime default; it does not disable the limit.
+  billing-max-object-bytes: "0"
+  # Every cloud object mapping must pin an immutable objectVersion/generation.
+  billing-import-mappings-json: "[]"
+  # Static closed-period mappings only; the scheduler never infers calendar
+  # periods. Each item includes executionTargetId, provider, currencyCode,
+  # RFC3339 period bounds, settlementDelay, and scheduleInterval.
+  billing-shared-allocation-mappings-json: "[]"

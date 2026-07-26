@@ -188,6 +188,13 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 			"Kubernetes workload Pod UID does not match the presented token.",
 		)
 	}
+	if pod.DeletionTimestamp != nil {
+		return VerifiedKubernetesWorkloadIdentity{}, problem.New(
+			409,
+			"kubernetes_workload_identity_pod_terminating",
+			"Kubernetes workload Pod is terminating and cannot register.",
+		)
+	}
 	if pod.Labels[kubernetesManagedLabel] != "true" || pod.Labels[kubernetesTargetLabel] != targetID.String() {
 		return VerifiedKubernetesWorkloadIdentity{}, problem.New(
 			401,
@@ -525,6 +532,7 @@ type kubernetesTokenReviewStatus struct {
 
 type kubernetesVerifiedPod struct {
 	UID                    string
+	DeletionTimestamp      *time.Time
 	Labels                 map[string]string
 	ServiceAccountName     string
 	AgentdResourceRequests map[string]string
@@ -569,8 +577,9 @@ func (c *kubernetesHTTPClient) GetPod(
 ) (kubernetesVerifiedPod, error) {
 	var response struct {
 		Metadata struct {
-			UID    string            `json:"uid"`
-			Labels map[string]string `json:"labels"`
+			UID               string            `json:"uid"`
+			DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
+			Labels            map[string]string `json:"labels"`
 		} `json:"metadata"`
 		Spec struct {
 			ServiceAccountName string `json:"serviceAccountName"`
@@ -602,6 +611,7 @@ func (c *kubernetesHTTPClient) GetPod(
 	}
 	return kubernetesVerifiedPod{
 		UID:                    strings.TrimSpace(response.Metadata.UID),
+		DeletionTimestamp:      response.Metadata.DeletionTimestamp,
 		Labels:                 response.Metadata.Labels,
 		ServiceAccountName:     strings.TrimSpace(response.Spec.ServiceAccountName),
 		AgentdResourceRequests: agentdRequests,

@@ -111,6 +111,42 @@ func TestSQLiteExecutionGenerationFactsBackfillAndDeleteFence(t *testing.T) {
 		fact.DispatchRequestedAt == nil || !fact.DispatchRequestedAt.Equal(bundleCreatedAt) {
 		t.Fatalf("SQLite backfilled generation fact = %#v", fact)
 	}
+	podAppliedAt := bundleCreatedAt.Add(time.Second)
+	podPendingAt := podAppliedAt.Add(time.Second)
+	podRunningAt := podPendingAt.Add(time.Second)
+	if err := store.DB().Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2).
+		Updates(map[string]any{
+			"pod_provisioning_started_at": podAppliedAt,
+			"pod_pending_since_at":        podPendingAt,
+			"pod_running_at":              podRunningAt,
+			"pod_last_observed_at":        podRunningAt,
+			"updated_at":                  podRunningAt,
+		}).Error; err != nil {
+		t.Fatalf("advance SQLite Pod provisioning fact: %v", err)
+	}
+	if err := store.DB().Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2).
+		Update("pod_provisioning_started_at", podAppliedAt.Add(time.Second)).Error; err == nil || !strings.Contains(err.Error(), "Pod provisioning start is immutable") {
+		t.Fatalf("SQLite Pod provisioning immutability fence = %v", err)
+	}
+	podUID := uuid.NewString()
+	failure := persistence.ExecutionGenerationPodFailureFact{
+		TenantID: domain.TenantID, ExecutionID: executionID, Generation: 2,
+		FailureClass: "image-pull", ExecutionTargetID: fact.ExecutionTargetID,
+		Namespace: "default", PodName: "generation-fact-worker", PodUID: &podUID,
+		ReasonCode: "image-pull-backoff", FirstObservedAt: podPendingAt,
+		LastObservedAt: podPendingAt, CreatedAt: podPendingAt, UpdatedAt: podPendingAt,
+	}
+	if err := store.DB().Create(&failure).Error; err != nil {
+		t.Fatalf("create SQLite Pod failure fact: %v", err)
+	}
+	if err := store.DB().Model(&failure).Update("reason_code", "err-image-pull").Error; err == nil || !strings.Contains(err.Error(), "Pod failure fact identity is immutable") {
+		t.Fatalf("SQLite Pod failure identity fence = %v", err)
+	}
+	if err := store.DB().Delete(&failure).Error; err == nil || !strings.Contains(err.Error(), "Pod failure facts cannot be deleted") {
+		t.Fatalf("SQLite Pod failure delete fence = %v", err)
+	}
 	if err := store.DB().Delete(&persistence.ExecutionGenerationFact{},
 		"tenant_id = ? AND execution_id = ? AND generation = ?",
 		domain.TenantID, executionID, 2,

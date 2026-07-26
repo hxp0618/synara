@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"path"
@@ -14,13 +15,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type parsedInvoice struct {
-	BillingPeriodStartAt time.Time
-	BillingPeriodEndAt   time.Time
-	CurrencyCode         string
-	Rows                 []parsedInvoiceRow
+	BillingPeriodStartAt     time.Time
+	BillingPeriodEndAt       time.Time
+	CurrencyCode             string
+	Rows                     []parsedInvoiceRow
+	FilteredAdjustmentCount  int
+	FilteredAdjustmentAmount *big.Rat
 }
 
 type parsedInvoiceRow struct {
@@ -46,6 +51,8 @@ type jsonRowsEnvelope struct {
 }
 
 var dateOnlyPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+var awsAccountIDPattern = regexp.MustCompile(`^\d{12}$`)
+var awsRegionPattern = regexp.MustCompile(`^[a-z]{2}(-gov)?-[a-z0-9-]+-\d+$`)
 
 func parseImportedInvoiceBlob(
 	provider string,
@@ -225,12 +232,73 @@ func parseAWSCURCSV(blob []byte) (parsedInvoice, error) {
 	if err != nil {
 		return parsedInvoice{}, err
 	}
+	return parseAWSCURRecords(records, false)
+}
+
+func parseAWSCURRecords(records []map[string]string, isCUR2 bool) (parsedInvoice, error) {
+	parentResourceIDs := make(map[string]struct{})
+	replacementBoundaries := make(map[string]*big.Rat)
+	parentBoundaryCounts := make(map[string]int)
+	for index, record := range records {
+		parentResourceID := normalizeProviderResourceID(record["splitlineitemparentresourceid"])
+		if parentResourceID != "" {
+			parentResourceIDs[parentResourceID] = struct{}{}
+			boundary, ok := awsCURReplacementBoundary(record, parentResourceID)
+			if !ok {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: split child replacement boundary is incomplete", index+2)
+			}
+			amount, err := awsCURCost(record)
+			if err != nil {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
+			}
+			if replacementBoundaries[boundary] == nil {
+				replacementBoundaries[boundary] = new(big.Rat)
+			}
+			replacementBoundaries[boundary].Add(replacementBoundaries[boundary], amount)
+		} else if awsCURReplaceableParent(record) {
+			resourceID := normalizeProviderResourceID(record["lineitemresourceid"])
+			if boundary, ok := awsCURReplacementBoundary(record, resourceID); ok {
+				parentBoundaryCounts[boundary]++
+			}
+		}
+	}
+	for boundary := range replacementBoundaries {
+		if parentBoundaryCounts[boundary] != 1 {
+			return parsedInvoice{}, fmt.Errorf(
+				"aws cur split replacement boundary has %d parent rows, want exactly 1",
+				parentBoundaryCounts[boundary],
+			)
+		}
+	}
+	invoice := parsedInvoice{FilteredAdjustmentAmount: new(big.Rat)}
+	rawLineIDs := make(map[string]struct{}, len(records))
 	rows := make([]parsedInvoiceRow, 0, len(records))
 	for index, record := range records {
+		resourceID := normalizeProviderResourceID(record["lineitemresourceid"])
+		parentResourceID := normalizeProviderResourceID(record["splitlineitemparentresourceid"])
+		replacementBoundary := ""
+		if parentResourceID == "" && awsCURReplaceableParent(record) {
+			if _, referencedBySplitChildren := parentResourceIDs[resourceID]; referencedBySplitChildren {
+				boundary, ok := awsCURReplacementBoundary(record, resourceID)
+				if !ok {
+					return parsedInvoice{}, fmt.Errorf("aws cur row %d: referenced parent replacement boundary is incomplete", index+2)
+				}
+				if _, replaced := replacementBoundaries[boundary]; replaced {
+					replacementBoundary = boundary
+				}
+				if replacementBoundary == "" {
+					record["synaraallocationquality"] = "split-parent-not-replaced"
+				}
+			}
+		}
 		lineID, err := requireField(record, "identitylineitemid")
 		if err != nil {
 			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
 		}
+		if _, duplicate := rawLineIDs[lineID]; duplicate {
+			return parsedInvoice{}, fmt.Errorf("aws cur row %d: duplicate external line id %q", index+2, lineID)
+		}
+		rawLineIDs[lineID] = struct{}{}
 		periodStartAt, err := parseBillingTimeForField(record, "billbillingperiodstartdate")
 		if err != nil {
 			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
@@ -243,9 +311,32 @@ func parseAWSCURCSV(blob []byte) (parsedInvoice, error) {
 		if err != nil {
 			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
 		}
-		amount, err := parseDecimalField(record, "lineitemnetunblendedcost", "lineitemunblendedcost")
+		amount, err := awsCURCost(record)
 		if err != nil {
 			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
+		}
+		if replacementBoundary != "" {
+			if parentBoundaryCounts[replacementBoundary] != 1 {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: split replacement boundary has %d parent rows", index+2, parentBoundaryCounts[replacementBoundary])
+			}
+			if replacementBoundaries[replacementBoundary].Cmp(amount) != 0 {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: split children do not exactly replace parent cost", index+2)
+			}
+			continue
+		}
+		if isCUR2 && resourceID == "" && awsCURAccountAdjustment(record) {
+			if firstNonEmptyField(record, "lineitemusageaccountid", "billpayeraccountid") == "" {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: account-level adjustment is missing an account id", index+2)
+			}
+			if amount.Sign() > 0 {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: account-level adjustment must not be positive", index+2)
+			}
+			if err := setParsedInvoiceMetadata(&invoice, periodStartAt, periodEndAt, currencyCode); err != nil {
+				return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
+			}
+			invoice.FilteredAdjustmentCount++
+			invoice.FilteredAdjustmentAmount.Add(invoice.FilteredAdjustmentAmount, amount)
+			continue
 		}
 		chargeKind, err := normalizeImportedChargeKind(firstNonEmpty(
 			record["resourcetagsusersynarachargekind"],
@@ -264,7 +355,7 @@ func parseAWSCURCSV(blob []byte) (parsedInvoice, error) {
 			awsRegionFromAZ(record["lineitemavailabilityzone"]),
 			awsRegionFromResourceID(record["lineitemresourceid"]),
 		)
-		resourceKey, err := buildAWSResourceKey(record, region)
+		resourceKey, err := buildAWSResourceKey(record, region, isCUR2)
 		if err != nil {
 			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
 		}
@@ -278,8 +369,139 @@ func parseAWSCURCSV(blob []byte) (parsedInvoice, error) {
 			ResourceKey:          resourceKey,
 			Amount:               amount,
 		})
+		if err := setParsedInvoiceMetadata(&invoice, periodStartAt, periodEndAt, currencyCode); err != nil {
+			return parsedInvoice{}, fmt.Errorf("aws cur row %d: %w", index+2, err)
+		}
 	}
-	return parsedInvoice{Rows: rows}, nil
+	invoice.Rows = rows
+	return invoice, nil
+}
+
+func awsCURReplacementBoundary(record map[string]string, resourceID string) (string, bool) {
+	usageStart := firstNonEmptyField(record, "lineitemusagestartdate")
+	usageEnd := firstNonEmptyField(record, "lineitemusageenddate")
+	if usageStart == "" || usageEnd == "" {
+		interval := strings.Split(firstNonEmptyField(record, "identitytimeinterval"), "/")
+		if len(interval) == 2 {
+			usageStart, usageEnd = interval[0], interval[1]
+		}
+	}
+	operation := firstNonEmptyField(record, "lineitemoperation")
+	productCode := firstNonEmptyField(record, "lineitemproductcode")
+	_, costFamily, err := awsCURCostAndFamily(record)
+	if resourceID == "" || usageStart == "" || usageEnd == "" || operation == "" || productCode == "" || err != nil {
+		return "", false
+	}
+	return strings.Join([]string{
+		normalizeProviderResourceID(resourceID), strings.TrimSpace(usageStart), strings.TrimSpace(usageEnd),
+		strings.ToLower(operation), strings.ToLower(productCode), costFamily,
+	}, "\x00"), true
+}
+
+func awsCURAccountAdjustment(record map[string]string) bool {
+	lineItemType := strings.ToLower(firstNonEmptyField(record, "lineitemlineitemtype"))
+	return lineItemType == "credit" || lineItemType == "refund" || lineItemType == "savingsplannegation" ||
+		(strings.HasSuffix(lineItemType, "discount") && lineItemType != "discountedusage")
+}
+
+func setParsedInvoiceMetadata(invoice *parsedInvoice, startAt, endAt time.Time, currency string) error {
+	if invoice.BillingPeriodStartAt.IsZero() {
+		invoice.BillingPeriodStartAt, invoice.BillingPeriodEndAt, invoice.CurrencyCode = startAt, endAt, currency
+		return nil
+	}
+	if !invoice.BillingPeriodStartAt.Equal(startAt) || !invoice.BillingPeriodEndAt.Equal(endAt) {
+		return errors.New("aws cur mixes billing periods")
+	}
+	if !strings.EqualFold(invoice.CurrencyCode, currency) {
+		return errors.New("aws cur mixes currencies")
+	}
+	return nil
+}
+
+func awsCURReplaceableParent(record map[string]string) bool {
+	switch strings.ToLower(firstNonEmptyField(record, "lineitemlineitemtype")) {
+	case "", "usage", "discountedusage", "savingsplancoveredusage":
+		return true
+	default:
+		return false
+	}
+}
+
+func awsCURCost(record map[string]string) (*big.Rat, error) {
+	amount, _, err := awsCURCostAndFamily(record)
+	return amount, err
+}
+
+func awsCURCostAndFamily(record map[string]string) (*big.Rat, string, error) {
+	if firstNonEmptyField(record, "splitlineitemparentresourceid") != "" {
+		return awsCURSplitCost(record)
+	}
+	for _, candidate := range []struct {
+		field, family string
+	}{
+		{"reservationneteffectivecost", "net"},
+		{"reservationeffectivecost", "non-net"},
+		{"savingsplannetsavingsplaneffectivecost", "net"},
+		{"savingsplansavingsplaneffectivecost", "non-net"},
+		{"lineitemnetunblendedcost", "net"},
+		{"lineitemunblendedcost", "non-net"},
+	} {
+		amount, found, err := parseOptionalDecimalField(record, candidate.field)
+		if err != nil {
+			return nil, "", err
+		}
+		if found {
+			return amount, candidate.family, nil
+		}
+	}
+	return nil, "", errors.New("missing required cost")
+}
+
+func awsCURSplitCost(record map[string]string) (*big.Rat, string, error) {
+	netSplit, hasNetSplit, err := parseOptionalDecimalField(record, "splitlineitemnetsplitcost")
+	if err != nil {
+		return nil, "", err
+	}
+	netUnused, hasNetUnused, err := parseOptionalDecimalField(record, "splitlineitemnetunusedcost")
+	if err != nil {
+		return nil, "", err
+	}
+	split, hasSplit, err := parseOptionalDecimalField(record, "splitlineitemsplitcost")
+	if err != nil {
+		return nil, "", err
+	}
+	unused, hasUnused, err := parseOptionalDecimalField(record, "splitlineitemunusedcost")
+	if err != nil {
+		return nil, "", err
+	}
+	switch {
+	case hasNetSplit:
+		if !hasNetUnused && hasUnused {
+			return nil, "", errors.New("net split cost cannot be combined with non-net unused cost")
+		}
+		if !hasNetUnused {
+			netUnused = new(big.Rat)
+		}
+		return new(big.Rat).Add(netSplit, netUnused), "net", nil
+	case hasNetUnused:
+		return nil, "", errors.New("net unused cost requires net split cost")
+	case hasSplit:
+		if !hasUnused {
+			unused = new(big.Rat)
+		}
+		return new(big.Rat).Add(split, unused), "non-net", nil
+	default:
+		return nil, "", errors.New("missing required split cost")
+	}
+}
+
+func parseOptionalDecimalField(record map[string]string, alias string) (*big.Rat, bool, error) {
+	value := strings.TrimSpace(record[canonicalFieldName(alias)])
+	if value == "" {
+		return nil, false, nil
+	}
+	parsed, err := parseDecimalRat(value)
+	return parsed, true, err
 }
 
 func parseGCPBillingJSON(blob []byte) (parsedInvoice, error) {
@@ -762,29 +984,184 @@ func gcpBillingPeriod(record map[string]string) (time.Time, time.Time, error) {
 	return startAtParsed, startAtParsed.AddDate(0, 1, 0), nil
 }
 
-func buildAWSResourceKey(record map[string]string, region string) (string, error) {
-	clusterID, namespace, podName, instanceUID, hasKubernetesLabels, err := kubernetesLabelSet(record,
-		[]string{"resourcetagsusersynaraclusterid"},
-		[]string{"resourcetagsusersynaranamespace"},
-		[]string{"resourcetagsusersynarapod"},
-		[]string{"resourcetagsusersynarainstanceuid"},
-	)
-	if err != nil {
-		return "", err
+func buildAWSResourceKey(record map[string]string, region string, isCUR2 bool) (string, error) {
+	tags := awsCURResourceTags(record)
+	clusterID := firstNonEmptyField(record, "resourcetagsusersynaraclusterid")
+	namespace := firstNonEmptyField(record, "resourcetagsusersynaranamespace")
+	podName := firstNonEmptyField(record, "resourcetagsusersynarapod")
+	instanceUID := firstNonEmptyField(record, "resourcetagsusersynarainstanceuid")
+	if clusterID == "" {
+		clusterID = firstNestedMapValue(tags, "usersynaraclusterid")
 	}
-	if hasKubernetesLabels {
-		return kubernetesResourceKey("kubernetes", clusterID, region, namespace, podName, instanceUID), nil
+	if namespace == "" {
+		namespace = firstNestedMapValue(tags, "usersynaranamespace")
+	}
+	if podName == "" {
+		podName = firstNestedMapValue(tags, "usersynarapod")
+	}
+	if instanceUID == "" {
+		instanceUID = firstNestedMapValue(tags, "usersynarainstanceuid")
+	}
+	tagPopulated := countNonEmpty(clusterID, namespace, podName, instanceUID)
+	tagExact := tagPopulated == 4
+	if tagExact {
+		if _, err := uuid.Parse(instanceUID); err != nil {
+			return "", fmt.Errorf("trusted Synara instance UID %q is not a UUID", instanceUID)
+		}
+		if !awsRegionPattern.MatchString(strings.ToLower(strings.TrimSpace(region))) {
+			return "", fmt.Errorf("trusted Synara tags require a valid AWS region, got %q", region)
+		}
+	}
+	if !isCUR2 {
+		if tagPopulated > 0 && !tagExact {
+			return "", fmt.Errorf("partial kubernetes correlation labels are not allowed")
+		}
+		if tagExact {
+			return kubernetesResourceKey("kubernetes", clusterID, region, namespace, podName, instanceUID), nil
+		}
 	}
 
-	resourceID, err := requireField(record, "lineitemresourceid")
-	if err != nil {
-		return "", err
+	resourceID := firstNonEmptyField(record, "lineitemresourceid")
+	arnIdentity, arnKind, arnErr := parseAWSEKSPodIdentity(resourceID)
+	if arnErr != nil && tagExact {
+		return "", arnErr
+	}
+	if isCUR2 {
+		if arnKind {
+			if arnErr == nil {
+				accountID := firstNonEmptyField(record, "lineitemusageaccountid")
+				if region != "" && !strings.EqualFold(region, arnIdentity.Region) {
+					return "", fmt.Errorf("EKS Pod ARN region %q conflicts with row region %q", arnIdentity.Region, region)
+				}
+				if accountID != "" && accountID != arnIdentity.AccountID {
+					return "", fmt.Errorf("EKS Pod ARN account %q conflicts with usage account %q", arnIdentity.AccountID, accountID)
+				}
+				if (clusterID != "" && clusterID != arnIdentity.ClusterID) ||
+					(namespace != "" && namespace != arnIdentity.Namespace) ||
+					(podName != "" && podName != arnIdentity.PodName) ||
+					(instanceUID != "" && !strings.EqualFold(instanceUID, arnIdentity.PodUID)) {
+					return "", errors.New("trusted Synara tags conflict with EKS Pod ARN identity")
+				}
+				if tagExact {
+					return kubernetesResourceKey("kubernetes", clusterID, region, namespace, podName, instanceUID), nil
+				}
+				return kubernetesResourceKey(
+					"kubernetes", arnIdentity.ClusterID, arnIdentity.Region, arnIdentity.Namespace, arnIdentity.PodName, arnIdentity.PodUID,
+				), nil
+			}
+			// A Pod ARN with malformed identity is retained only as an explicitly
+			// non-exact provider allocation below.
+		}
+		if tagExact {
+			return kubernetesResourceKey("kubernetes", clusterID, region, namespace, podName, instanceUID), nil
+		}
+	}
+	parentResourceID := firstNonEmptyField(record, "splitlineitemparentresourceid")
+	allocationQuality := firstNonEmptyField(record, "synaraallocationquality")
+	if allocationQuality == "" {
+		allocationQuality = "provider-resource"
+	}
+	if parentResourceID != "" {
+		allocationQuality = "split-missing-pod-uid"
+	} else if tagPopulated > 0 {
+		allocationQuality = "partial-kubernetes-identity"
+	} else if arnKind && arnErr != nil {
+		allocationQuality = "invalid-eks-pod-identity"
+	}
+	if resourceID == "" {
+		resourceID = parentResourceID
+	}
+	if resourceID == "" {
+		return "", fmt.Errorf("missing required field %q", "line_item_resource_id")
 	}
 	accountID := firstNonEmptyField(record, "lineitemusageaccountid")
 	if accountID == "" {
 		accountID = awsAccountIDFromResourceID(resourceID)
 	}
-	return providerResourceKey("aws", accountID, region, resourceID), nil
+	if !isCUR2 {
+		return providerResourceKey("aws", accountID, region, resourceID), nil
+	}
+	return providerResourceKey("aws-allocation-"+allocationQuality, accountID, region, resourceID), nil
+}
+
+func countNonEmpty(values ...string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func awsCURResourceTags(record map[string]string) map[string]string {
+	raw := firstNonEmptyField(record, "resourcetags")
+	if raw == "" {
+		return nil
+	}
+	result := make(map[string]string)
+	var jsonTags map[string]any
+	if err := json.Unmarshal([]byte(raw), &jsonTags); err == nil {
+		for key, value := range jsonTags {
+			result[canonicalFieldName(key)] = strings.TrimSpace(fmt.Sprint(value))
+		}
+		return result
+	}
+	trimmed := strings.TrimSpace(strings.Trim(raw, "{}"))
+	for _, part := range strings.Split(trimmed, ",") {
+		key, value, found := strings.Cut(part, "=")
+		if !found {
+			key, value, found = strings.Cut(part, ":")
+		}
+		if !found {
+			continue
+		}
+		result[canonicalFieldName(strings.Trim(strings.TrimSpace(key), `"'`))] = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return result
+}
+
+func firstNestedMapValue(values map[string]string, aliases ...string) string {
+	for _, alias := range aliases {
+		if value := strings.TrimSpace(values[canonicalFieldName(alias)]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+type awsEKSPodIdentity struct {
+	Region, AccountID, ClusterID, Namespace, PodName, PodUID string
+}
+
+func parseAWSEKSPodIdentity(resourceID string) (awsEKSPodIdentity, bool, error) {
+	trimmed := strings.TrimSpace(resourceID)
+	parts := strings.SplitN(trimmed, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "eks" || !strings.HasPrefix(parts[5], "pod/") {
+		return awsEKSPodIdentity{}, false, nil
+	}
+	resourceParts := strings.Split(strings.TrimPrefix(parts[5], "pod/"), "/")
+	if parts[3] == "" || parts[4] == "" || len(resourceParts) != 4 {
+		return awsEKSPodIdentity{}, true, errors.New("EKS Pod ARN identity is incomplete")
+	}
+	if parts[1] != "aws" && parts[1] != "aws-cn" && parts[1] != "aws-us-gov" {
+		return awsEKSPodIdentity{}, true, fmt.Errorf("EKS Pod ARN partition %q is unsupported", parts[1])
+	}
+	if !awsRegionPattern.MatchString(parts[3]) || !awsAccountIDPattern.MatchString(parts[4]) {
+		return awsEKSPodIdentity{}, true, errors.New("EKS Pod ARN region or account is invalid")
+	}
+	for _, value := range resourceParts {
+		if strings.TrimSpace(value) == "" {
+			return awsEKSPodIdentity{}, true, errors.New("EKS Pod ARN identity is incomplete")
+		}
+	}
+	if _, err := uuid.Parse(resourceParts[3]); err != nil {
+		return awsEKSPodIdentity{}, true, fmt.Errorf("EKS Pod ARN UID %q is not a UUID", resourceParts[3])
+	}
+	return awsEKSPodIdentity{
+		Region: parts[3], AccountID: parts[4], ClusterID: resourceParts[0], Namespace: resourceParts[1],
+		PodName: resourceParts[2], PodUID: resourceParts[3],
+	}, true, nil
 }
 
 func buildGCPResourceKey(record map[string]string, region string) (string, error) {

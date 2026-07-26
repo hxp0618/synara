@@ -19,12 +19,17 @@ func TestExecutionGenerationFactMetricsIncludeEndToEndColdStartAndWarmOutcome(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&persistence.ExecutionGenerationFact{}); err != nil {
+	if err := db.AutoMigrate(
+		&persistence.ExecutionGenerationFact{},
+		&persistence.ExecutionGenerationPodFailureFact{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	dispatchedAt := now.Add(-12 * time.Second)
 	readyAt := now.Add(-2 * time.Second)
+	podAppliedAt := now.Add(-11 * time.Second)
+	podRunningAt := now.Add(-7 * time.Second)
 	terminalAt := now.Add(-time.Second)
 	completed := "completed"
 	fact := persistence.ExecutionGenerationFact{
@@ -33,10 +38,22 @@ func TestExecutionGenerationFactMetricsIncludeEndToEndColdStartAndWarmOutcome(t 
 		TargetKind: "kubernetes", Provider: "codex", RecoveryReason: "initial-claim",
 		WarmPoolMode: "low-latency", WarmPoolResult: "hit",
 		DispatchRequestedAt: &dispatchedAt, ProviderReadyAt: &readyAt,
+		PodProvisioningStartedAt: &podAppliedAt, PodPendingSinceAt: &podAppliedAt,
+		PodRunningAt: &podRunningAt, PodLastObservedAt: &podRunningAt,
 		TerminalAt: &terminalAt, TerminalOutcome: &completed,
 		ProviderResumeStrategy: "native-cursor", CreatedAt: dispatchedAt, UpdatedAt: terminalAt,
 	}
 	if err := db.Create(&fact).Error; err != nil {
+		t.Fatal(err)
+	}
+	podUID := uuid.NewString()
+	if err := db.Create(&persistence.ExecutionGenerationPodFailureFact{
+		TenantID: fact.TenantID, ExecutionID: fact.ExecutionID, Generation: fact.Generation,
+		FailureClass: "image-pull", ExecutionTargetID: fact.ExecutionTargetID,
+		Namespace: "synara-test", PodName: "worker", PodUID: &podUID,
+		ReasonCode: "image-pull-backoff", FirstObservedAt: podAppliedAt,
+		LastObservedAt: podAppliedAt, CreatedAt: podAppliedAt, UpdatedAt: podAppliedAt,
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
@@ -51,6 +68,11 @@ func TestExecutionGenerationFactMetricsIncludeEndToEndColdStartAndWarmOutcome(t 
 		`synara_execution_cold_start_duration_seconds_30d{recovery_reason="initial-claim",target_kind="kubernetes",warm_pool_mode="low-latency",warm_pool_result="hit",quantile="0.95"} 10`,
 		`synara_execution_cold_start_duration_seconds_30d{recovery_reason="initial-claim",target_kind="kubernetes",warm_pool_mode="low-latency",warm_pool_result="hit",quantile="0.99"} 10`,
 		`synara_execution_cold_start_samples_30d{recovery_reason="initial-claim",target_kind="kubernetes",warm_pool_mode="low-latency",warm_pool_result="hit"} 1`,
+		`synara_execution_pod_queue_duration_seconds_30d{recovery_reason="initial-claim",target_kind="kubernetes",quantile="0.5"} 1`,
+		`synara_execution_pod_queue_samples_30d{recovery_reason="initial-claim",target_kind="kubernetes"} 1`,
+		`synara_execution_pod_provisioning_duration_seconds_30d{recovery_reason="initial-claim",target_kind="kubernetes",quantile="0.95"} 4`,
+		`synara_execution_pod_provisioning_samples_30d{recovery_reason="initial-claim",target_kind="kubernetes"} 1`,
+		`synara_execution_pod_failure_generations_30d{failure_class="image-pull",target_kind="kubernetes"} 1`,
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)

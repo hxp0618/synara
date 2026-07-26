@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 const resourceSuspendContainmentCapabilityKey = "resourceSuspendContainment"
@@ -15,6 +17,10 @@ type processTreeOptions struct {
 	CgroupV2Root              string
 	ProtectedProviderIdentity *ProtectedCgroupIdentity
 	ContainmentFence          ProtectedCgroupFence
+	SupervisorInstance        uuid.UUID
+	RuntimeInstance           uuid.UUID
+	ProtectedRootLease        *ProtectedCgroupRootLease
+	ProtectedDiagnostic       bool
 }
 
 type containmentError struct {

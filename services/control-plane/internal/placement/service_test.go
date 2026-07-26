@@ -113,6 +113,103 @@ func TestSelectExecutionFallsBackAcrossActivePools(t *testing.T) {
 	}
 }
 
+func TestSelectExecutionPrefersFirstFreshReadyWarmCandidate(t *testing.T) {
+	fixture := newPlacementFixture(t)
+	fixture.service.now = func() time.Time { return fixture.now }
+	ctx := context.Background()
+	target := fixture.createTarget(t, "kubernetes", false)
+	state, err := fixture.service.List(ctx, fixture.owner, fixture.tenantID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	balanced := fixture.createPool(t, target, "balanced", PoolModeWarm, PoolStatusActive)
+	lowLatency := fixture.createPool(t, target, "low-latency", PoolModeWarm, PoolStatusActive)
+	state, err = fixture.service.UpdatePolicy(ctx, fixture.owner, fixture.tenantID, target.ID, UpdatePolicyInput{
+		ExpectedVersion:  state.Policy.Version,
+		DefaultPoolID:    state.Policy.DefaultPoolID,
+		BalancedPoolID:   &balanced.ID,
+		LowLatencyPoolID: &lowLatency.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.createWarmCapacity(t, target, balanced, true, 1, fixture.now.Add(time.Minute))
+
+	for name, selectExecution := range map[string]func() (Selection, error){
+		"preview": func() (Selection, error) {
+			return fixture.service.PreviewExecution(ctx, fixture.db, target, WarmPoolModeLowLatency)
+		},
+		"final": func() (Selection, error) {
+			return fixture.service.SelectExecution(ctx, fixture.db, target, WarmPoolModeLowLatency)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			selected, err := selectExecution()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected.Pool.ID != balanced.ID || selected.PolicyVersion != state.Policy.Version {
+				t.Fatalf("selection = %#v, want fresh balanced pool %s", selected, balanced.ID)
+			}
+		})
+	}
+}
+
+func TestSelectExecutionFallsBackToFirstActiveCandidateWithoutFreshReadyWarmCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		warmSupported bool
+		readyIdle     int
+		expiresAt     func(time.Time) time.Time
+	}{
+		{name: "fresh zero", warmSupported: true, readyIdle: 0, expiresAt: func(now time.Time) time.Time { return now.Add(time.Minute) }},
+		{name: "expired ready", warmSupported: true, readyIdle: 1, expiresAt: func(now time.Time) time.Time { return now }},
+		{name: "unsupported", warmSupported: false, readyIdle: 0, expiresAt: func(now time.Time) time.Time { return now.Add(time.Minute) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPlacementFixture(t)
+			fixture.service.now = func() time.Time { return fixture.now }
+			ctx := context.Background()
+			target := fixture.createTarget(t, "kubernetes", false)
+			state, err := fixture.service.List(ctx, fixture.owner, fixture.tenantID, target.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			balanced := fixture.createPool(t, target, "balanced", PoolModeWarm, PoolStatusActive)
+			lowLatency := fixture.createPool(t, target, "low-latency", PoolModeWarm, PoolStatusActive)
+			state, err = fixture.service.UpdatePolicy(ctx, fixture.owner, fixture.tenantID, target.ID, UpdatePolicyInput{
+				ExpectedVersion:  state.Policy.Version,
+				DefaultPoolID:    state.Policy.DefaultPoolID,
+				BalancedPoolID:   &balanced.ID,
+				LowLatencyPoolID: &lowLatency.ID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.createWarmCapacity(t, target, balanced, tc.warmSupported, tc.readyIdle, tc.expiresAt(fixture.now))
+
+			for name, selectExecution := range map[string]func() (Selection, error){
+				"preview": func() (Selection, error) {
+					return fixture.service.PreviewExecution(ctx, fixture.db, target, WarmPoolModeLowLatency)
+				},
+				"final": func() (Selection, error) {
+					return fixture.service.SelectExecution(ctx, fixture.db, target, WarmPoolModeLowLatency)
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					selected, err := selectExecution()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if selected.Pool.ID != lowLatency.ID || selected.PolicyVersion != state.Policy.Version {
+						t.Fatalf("selection = %#v, want low-latency cold fallback %s", selected, lowLatency.ID)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestUpdatePolicyEnforcesCASAndTargetScope(t *testing.T) {
 	fixture := newPlacementFixture(t)
 	ctx := context.Background()
@@ -437,6 +534,41 @@ func (f placementFixture) createPool(
 		t.Fatal(err)
 	}
 	return pool
+}
+
+func (f placementFixture) createWarmCapacity(
+	t *testing.T,
+	target persistence.ExecutionTarget,
+	pool persistence.WorkerPool,
+	warmSupported bool,
+	readyIdle int,
+	expiresAt time.Time,
+) {
+	t.Helper()
+	desiredTotal := 1
+	if !warmSupported {
+		desiredTotal = 0
+		readyIdle = 0
+	}
+	if err := f.db.Create(&persistence.WorkerPoolWarmCapacity{
+		WorkerPoolID:      pool.ID,
+		WorkerPoolVersion: pool.Version,
+		TenantID:          f.tenantID,
+		ExecutionTargetID: target.ID,
+		CapacityClass:     pool.CapacityClass,
+		WarmSupported:     warmSupported,
+		DesiredIdleUnits:  pool.DesiredIdleUnits,
+		MaxActiveUnits:    pool.MaxActiveUnits,
+		DesiredTotalUnits: desiredTotal,
+		ReadyIdleUnits:    readyIdle,
+		Source:            "placement-test",
+		ObservedAt:        f.now.Add(-time.Second),
+		ExpiresAt:         expiresAt,
+		Version:           1,
+		UpdatedAt:         f.now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f placementFixture) createMember(t *testing.T, role string) identity.Principal {

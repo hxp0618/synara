@@ -114,7 +114,7 @@ func TestNormalizeWorkerManifestFreezesProcessContainmentEvidence(t *testing.T) 
 	}
 	manifest := normalized.Manifest
 	if manifest.ProcessContainmentMode != "cgroup-v2" ||
-		manifest.ProcessContainmentSupervisorVersion == nil || *manifest.ProcessContainmentSupervisorVersion != "supervisor-test" ||
+		manifest.ProcessContainmentSupervisorVersion == nil || *manifest.ProcessContainmentSupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV2 ||
 		manifest.ProcessContainmentProbeVersion == nil || *manifest.ProcessContainmentProbeVersion != 1 ||
 		manifest.ProcessContainmentProbeSHA256 == nil || len(*manifest.ProcessContainmentProbeSHA256) != 64 ||
 		manifest.ProcessContainmentSupervisorIdentity == nil || *manifest.ProcessContainmentSupervisorIdentity != "uid:10001" ||
@@ -164,6 +164,22 @@ func TestNormalizeWorkerManifestRequiresSignedAttestationWhenConfigured(t *testi
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != "worker_attestation_required" {
 		t.Fatalf("verified attestor policy error = %#v", err)
+	}
+}
+
+func TestNormalizeWorkerManifestRejectsSignedLegacyProtectedCgroupSupervisor(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	registration := workerManifestTestRegistrationContext(platform.TargetKubernetes)
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	capabilities["workerRuntime"].(map[string]any)["processContainment"].(map[string]any)["supervisorVersion"] =
+		"agentd-protected-cgroup-supervisor-v1"
+	signWorkerManifestTestContainment(t, capabilities, registration)
+	_, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(), registration,
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "worker_containment_supervisor_unsupported" {
+		t.Fatalf("signed legacy supervisor error = %#v", err)
 	}
 }
 
@@ -529,7 +545,7 @@ func workerManifestTestRegistrationContext(targetKind platform.ExecutionTargetKi
 
 func addWorkerManifestTestContainmentEvidence(capabilities map[string]any) {
 	capabilities["workerRuntime"].(map[string]any)["processContainment"] = map[string]any{
-		"mode": "cgroup-v2", "supervisorVersion": "supervisor-test",
+		"mode": "cgroup-v2", "supervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV2,
 		"probeVersion":       1,
 		"probeSha256":        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 		"supervisorIdentity": "uid:10001", "providerIdentity": "uid:10002",

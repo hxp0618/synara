@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +22,25 @@ type labeledAmount struct {
 type leaseStateMetric struct {
 	LeaseName string    `gorm:"column:lease_name"`
 	ExpiresAt time.Time `gorm:"column:expires_at"`
+}
+
+type warmCapacityAuthorityGroup struct {
+	CapacityClass string `gorm:"column:capacity_class"`
+	WarmSupported bool   `gorm:"column:warm_supported"`
+	Count         int64  `gorm:"column:count"`
+}
+
+type warmCapacityUnitGroup struct {
+	CapacityClass     string `gorm:"column:capacity_class"`
+	DesiredTotalUnits int64  `gorm:"column:desired_total_units"`
+	ClaimedUnits      int64  `gorm:"column:claimed_units"`
+	ReadyIdleUnits    int64  `gorm:"column:ready_idle_units"`
+}
+
+type warmCapacityAuthorityMetricKey struct {
+	CapacityClass string
+	Freshness     string
+	WarmSupported bool
 }
 
 func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
@@ -50,6 +70,9 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		"Authoritative cross-Target successor attempts by immutable status and reason.",
 		"status", "reason", failovers,
 	)
+	if err := r.writeWorkerPoolWarmCapacityMetrics(ctx, output, now); err != nil {
+		return err
+	}
 
 	var leases []leaseStateMetric
 	if err := r.db.WithContext(ctx).Table("reconciler_leases").
@@ -127,6 +150,137 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 	return nil
 }
 
+func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
+	ctx context.Context,
+	output *bytes.Buffer,
+	now time.Time,
+) error {
+	authorities := make(map[warmCapacityAuthorityMetricKey]int64)
+	for _, freshness := range []string{"fresh", "expired"} {
+		var rows []warmCapacityAuthorityGroup
+		query := r.db.WithContext(ctx).Table("worker_pool_warm_capacity").
+			Select("capacity_class, warm_supported, COUNT(*) AS count").
+			Group("capacity_class, warm_supported")
+		if freshness == "fresh" {
+			query = query.Where("expires_at > ?", now)
+		} else {
+			query = query.Where("expires_at <= ?", now)
+		}
+		if err := query.Scan(&rows).Error; err != nil {
+			return fmt.Errorf("collect Worker Pool warm capacity %s authority metrics: %w", freshness, err)
+		}
+		for _, row := range rows {
+			key := warmCapacityAuthorityMetricKey{
+				CapacityClass: boundedWarmCapacityClass(row.CapacityClass),
+				Freshness:     freshness,
+				WarmSupported: row.WarmSupported,
+			}
+			authorities[key] += row.Count
+		}
+	}
+
+	authorityKeys := make([]warmCapacityAuthorityMetricKey, 0, len(authorities))
+	for key := range authorities {
+		authorityKeys = append(authorityKeys, key)
+	}
+	sort.Slice(authorityKeys, func(left, right int) bool {
+		leftKey := authorityKeys[left]
+		rightKey := authorityKeys[right]
+		if leftKey.CapacityClass != rightKey.CapacityClass {
+			return leftKey.CapacityClass < rightKey.CapacityClass
+		}
+		if leftKey.Freshness != rightKey.Freshness {
+			return leftKey.Freshness < rightKey.Freshness
+		}
+		return !leftKey.WarmSupported && rightKey.WarmSupported
+	})
+	writeHelp(
+		output,
+		"synara_worker_pool_warm_capacity_authorities",
+		"Authoritative Worker Pool warm-capacity observations by bounded capacity class, freshness, and warm-support state.",
+		"gauge",
+	)
+	for _, key := range authorityKeys {
+		fmt.Fprintf(
+			output,
+			"synara_worker_pool_warm_capacity_authorities%s %d\n",
+			labels(map[string]string{
+				"capacity_class": key.CapacityClass,
+				"freshness":      key.Freshness,
+				"warm_supported": strconv.FormatBool(key.WarmSupported),
+			}),
+			authorities[key],
+		)
+	}
+
+	var unitRows []warmCapacityUnitGroup
+	if err := r.db.WithContext(ctx).Table("worker_pool_warm_capacity").
+		Select(`capacity_class,
+			SUM(desired_total_units) AS desired_total_units,
+			SUM(claimed_units) AS claimed_units,
+			SUM(ready_idle_units) AS ready_idle_units`).
+		Where("expires_at > ?", now).
+		Group("capacity_class").
+		Scan(&unitRows).Error; err != nil {
+		return fmt.Errorf("collect fresh Worker Pool warm capacity unit metrics: %w", err)
+	}
+	type unitTotals struct {
+		desiredTotal int64
+		claimed      int64
+		readyIdle    int64
+	}
+	units := make(map[string]unitTotals)
+	for _, row := range unitRows {
+		capacityClass := boundedWarmCapacityClass(row.CapacityClass)
+		totals := units[capacityClass]
+		totals.desiredTotal += row.DesiredTotalUnits
+		totals.claimed += row.ClaimedUnits
+		totals.readyIdle += row.ReadyIdleUnits
+		units[capacityClass] = totals
+	}
+	capacityClasses := make([]string, 0, len(units))
+	for capacityClass := range units {
+		capacityClasses = append(capacityClasses, capacityClass)
+	}
+	sort.Strings(capacityClasses)
+	writeHelp(
+		output,
+		"synara_worker_pool_warm_capacity_units",
+		"Fresh authoritative Worker Pool warm-capacity units by bounded capacity class and counter kind.",
+		"gauge",
+	)
+	for _, capacityClass := range capacityClasses {
+		totals := units[capacityClass]
+		for _, sample := range []struct {
+			kind  string
+			value int64
+		}{
+			{kind: "desired_total", value: totals.desiredTotal},
+			{kind: "claimed", value: totals.claimed},
+			{kind: "ready_idle", value: totals.readyIdle},
+		} {
+			fmt.Fprintf(
+				output,
+				"synara_worker_pool_warm_capacity_units%s %d\n",
+				labels(map[string]string{"capacity_class": capacityClass, "kind": sample.kind}),
+				sample.value,
+			)
+		}
+	}
+	return nil
+}
+
+func boundedWarmCapacityClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "standard":
+		return "standard"
+	case "interactive":
+		return "interactive"
+	default:
+		return "other"
+	}
+}
+
 func boundedReconcilerLeaseName(value string) string {
 	switch value {
 	case "synara:docker-worker-pool-reconciler":
@@ -143,6 +297,8 @@ func boundedReconcilerLeaseName(value string) string {
 		return "retention"
 	case "synara:billing-import-scheduler":
 		return "billing-import"
+	case "synara:billing-shared-allocation-scheduler":
+		return "billing-shared-allocation"
 	default:
 		return "other"
 	}

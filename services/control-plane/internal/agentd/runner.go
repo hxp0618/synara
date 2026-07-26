@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"sync/atomic"
 
 	"github.com/google/uuid"
 )
@@ -25,7 +24,8 @@ type Runner struct {
 	cgroupV2Root             string
 	cgroupV2ProviderIdentity *ProtectedCgroupIdentity
 	instanceUID              uuid.UUID
-	processTreeGeneration    atomic.Int64
+	supervisorInstance       uuid.UUID
+	protectedRootLease       *ProtectedCgroupRootLease
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -48,6 +48,7 @@ func NewRunner(cfg Config) *Runner {
 		cgroupV2Root:             cfg.CgroupV2Root,
 		cgroupV2ProviderIdentity: providerIdentity,
 		instanceUID:              instanceUID,
+		supervisorInstance:       uuid.New(),
 	}
 }
 
@@ -70,7 +71,7 @@ func (r *Runner) experimentalProviderList() []string {
 	return providers
 }
 
-func (r *Runner) processTreeOptions() processTreeOptions {
+func (r *Runner) processTreeOptions(executionID uuid.UUID, generation int64) processTreeOptions {
 	options := processTreeOptions{CgroupV2Root: r.cgroupV2Root}
 	if r.cgroupV2ProviderIdentity == nil {
 		return options
@@ -78,10 +79,22 @@ func (r *Runner) processTreeOptions() processTreeOptions {
 	identityCopy := *r.cgroupV2ProviderIdentity
 	options.ProtectedProviderIdentity = &identityCopy
 	options.ContainmentFence = ProtectedCgroupFence{
-		Generation:        r.processTreeGeneration.Add(1),
+		ExecutionID:       executionID,
+		Generation:        generation,
 		WorkerIncarnation: r.instanceUID,
 	}
+	options.SupervisorInstance = r.supervisorInstance
+	options.RuntimeInstance = uuid.New()
+	options.ProtectedRootLease = r.protectedRootLease
 	return options
+}
+
+func (r *Runner) providerProbeExecutionID() uuid.UUID {
+	namespace := r.instanceUID
+	if namespace == uuid.Nil {
+		namespace = uuid.NameSpaceOID
+	}
+	return uuid.NewSHA1(namespace, []byte("synara-provider-probe"))
 }
 
 func (r *Runner) Run(
@@ -124,7 +137,10 @@ func (r *Runner) runLegacy(
 		return RunnerResult{}, fmt.Errorf("encode runner input: %w", err)
 	}
 	command := exec.Command(r.command[0], r.command[1:]...)
-	processTree, err := newProcessTree(command, r.processTreeOptions())
+	processTree, err := newProcessTree(
+		command,
+		r.processTreeOptions(input.Execution.ID, input.Execution.Generation),
+	)
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("prepare runner process tree: %w", err)
 	}

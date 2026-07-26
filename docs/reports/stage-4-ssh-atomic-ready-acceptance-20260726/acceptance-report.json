@@ -1,0 +1,821 @@
+{
+  "artifacts": {
+    "jsonReport": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/acceptance-report.json",
+    "logsDirectory": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs",
+    "markdownReport": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/acceptance-report.md"
+  },
+  "cases": [
+    {
+      "durationMs": 44187,
+      "evidence": {
+        "controlPlane": {
+          "binary": "/var/folders/jd/yq6p0jr96rnfywdlyrsxtvf00000gn/T/synara-stage3-provider-acceptance-xntp7ssj/bin/synara-control-plane",
+          "build": "completed",
+          "durationMs": 1583,
+          "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/control-plane-build.log",
+          "resourceOwner": "b248556a6d874847a791"
+        },
+        "ssh": {
+          "agentd": {
+            "durationMs": 6279,
+            "goarch": "arm64",
+            "goos": "linux",
+            "path": "/var/folders/jd/yq6p0jr96rnfywdlyrsxtvf00000gn/T/synara-stage3-provider-acceptance-xntp7ssj/bin/synara-agentd-linux-arm64",
+            "sha256": "77a951b2dfde3e6db1409b267dca9ea4f988a95635ea31190a23aab9b08c2880"
+          },
+          "algorithm": "ssh-ed25519",
+          "controlPlaneCredentialLifecycle": "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after provisioning, and relies on the Control Plane encrypted credential until ssh/revoke",
+          "controlPlaneTransport": {
+            "description": "runner-owned reverse SSH relay to the local Worker-only proxy",
+            "mode": "reverse-ssh-loopback",
+            "vmListenHost": "127.0.0.1"
+          },
+          "credentialSource": "generated under isolated acceptance state",
+          "hostKeyFingerprint": "SHA256:khNCVsicVlV2vUaWfAWEZq2IL5KHZQXmvKuwiE9+0fY",
+          "initSystem": "systemd",
+          "localPrivateKeyPlaintextDeletedAfterProvision": true,
+          "machineAddress": "192.168.139.168",
+          "machineArch": "arm64",
+          "machineImage": "ubuntu:24.04",
+          "machineName": "synara-stage4-ready-20260726",
+          "nodeVersion": "24.13.1",
+          "ownedMachine": true,
+          "providerHostFixture": {
+            "durationMs": 73,
+            "path": "/var/folders/jd/yq6p0jr96rnfywdlyrsxtvf00000gn/T/synara-stage3-provider-acceptance-xntp7ssj/bin/provider-host-fixture.mjs",
+            "remotePath": "/opt/synara/acceptance/provider-host-fixture.mjs",
+            "runtime": "deterministic-fixture",
+            "sha256": "0b25f2eba94ff8833281e9828cf1f3a34205288829876940ee6e5b5c02dea3d4"
+          },
+          "providerRuntime": {
+            "kind": "deterministic-fixture"
+          },
+          "sshd": "active"
+        }
+      },
+      "finishedAt": "2026-07-25T18:57:26.692Z",
+      "id": "environment.target-prepare",
+      "name": "Prepare isolated Control Plane and Target runtime",
+      "startedAt": "2026-07-25T18:56:42.505Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1686,
+      "evidence": {
+        "baseUrl": "http://127.0.0.1:64148",
+        "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/control-plane-1.log",
+        "pid": 87866,
+        "processGeneration": 1,
+        "readiness": {
+          "checks": {
+            "artifactStore": {
+              "kind": "local",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "database": {
+              "kind": "sqlite",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "databaseWrite": {
+              "kind": "sqlite",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "queue": {
+              "kind": "in-process",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "schema": {
+              "kind": "sqlite",
+              "latencyMs": 3,
+              "status": "ready"
+            }
+          },
+          "status": "ready"
+        },
+        "workerProxy": {
+          "advertisedHost": "127.0.0.1",
+          "allowedPathPrefixes": [
+            "/v1/workers/",
+            "/v1/artifact-content/"
+          ],
+          "faultInjection": "runner-owned transport close before HTTP forwarding",
+          "listenAddress": "0.0.0.0",
+          "port": 64991,
+          "upstreamAddress": "127.0.0.1:64148"
+        },
+        "workerProxyRelay": {
+          "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/ssh-worker-proxy-relay.log",
+          "mode": "reverse-ssh-loopback",
+          "readsUserSSHConfiguration": false,
+          "upstreamAddress": "127.0.0.1:64991",
+          "vmListenHost": "127.0.0.1",
+          "vmListenPort": 64992
+        }
+      },
+      "finishedAt": "2026-07-25T18:57:28.378Z",
+      "id": "environment.control-plane-start",
+      "name": "Start isolated Personal Control Plane",
+      "startedAt": "2026-07-25T18:57:26.692Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 6,
+      "evidence": {
+        "authenticated": true,
+        "organization": {
+          "id": "518a0be8-caf3-57e1-8b1c-5e453c422ac2",
+          "kind": "root",
+          "slug": "personal"
+        },
+        "tenantId": "c83a8230-94cf-59a6-9a83-ebe90adcaac8",
+        "userId": "2bbe44a5-4060-51bd-ac38-3e87ec030a55"
+      },
+      "finishedAt": "2026-07-25T18:57:28.385Z",
+      "id": "identity.dev-login",
+      "name": "Authenticate through dev-login",
+      "startedAt": "2026-07-25T18:57:28.379Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 16654,
+      "evidence": {
+        "driverEvidence": {
+          "binarySha256": "77a951b2dfde3e6db1409b267dca9ea4f988a95635ea31190a23aab9b08c2880",
+          "controlPlaneCredentialLifecycle": "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after provisioning, and relies on the Control Plane encrypted credential until ssh/revoke",
+          "controlPlaneTransport": {
+            "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/ssh-worker-proxy-relay.log",
+            "mode": "reverse-ssh-loopback",
+            "readsUserSSHConfiguration": false,
+            "upstreamAddress": "127.0.0.1:64991",
+            "vmListenHost": "127.0.0.1",
+            "vmListenPort": 64992
+          },
+          "credentialSource": "runner-generated one-time Ed25519 key",
+          "hostKeyAlgorithm": "ssh-ed25519",
+          "hostKeyFingerprint": "SHA256:khNCVsicVlV2vUaWfAWEZq2IL5KHZQXmvKuwiE9+0fY",
+          "hostKeyMismatch": {
+            "errorCode": "ssh_connection_failed",
+            "rejected": true,
+            "targetId": "10a9adfa-af8e-480a-8e5f-1e96817b1da3"
+          },
+          "installationId": "stage3-provider-acceptance-83b3518f-5a65-4b88-a20d-1fb6a2fe9994",
+          "machineAddress": "192.168.139.168",
+          "machineName": "synara-stage4-ready-20260726",
+          "ownedMachine": true,
+          "runtime": "owned-disposable-orbstack",
+          "service": {
+            "activeState": "active",
+            "mainPid": 3062,
+            "restartCount": 0,
+            "serviceName": "synara-agentd-91f7d39d-0bd8-42bb-a262-7f5e5ae9de85.service",
+            "subState": "running",
+            "unitFileState": "enabled"
+          },
+          "workerAllocation": "standing"
+        },
+        "manifestId": "1a449549-d885-4df6-980e-b0a10bfc30c6",
+        "provider": {
+          "compatibilityStatus": "compatible",
+          "provider": "codex",
+          "releasePolicy": {
+            "enabled": true,
+            "requiresExplicitEnablement": true
+          },
+          "runtime": {
+            "available": true,
+            "compatible": true,
+            "compatibleRange": {
+              "maximumExclusive": "0.146.0",
+              "minimumInclusive": "0.145.0"
+            },
+            "kind": "cli",
+            "name": "codex",
+            "version": "0.145.0",
+            "versionSource": "probe"
+          },
+          "supportTier": "experimental"
+        },
+        "runtimeEvent": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "target": {
+          "id": "91f7d39d-0bd8-42bb-a262-7f5e5ae9de85",
+          "kind": "ssh",
+          "name": "stage3-ssh-74877eaef469",
+          "organizationId": "518a0be8-caf3-57e1-8b1c-5e453c422ac2",
+          "status": "active",
+          "tenantId": "c83a8230-94cf-59a6-9a83-ebe90adcaac8"
+        },
+        "workerBuild": {
+          "architecture": "arm64",
+          "operatingSystem": "linux",
+          "version": "managed"
+        },
+        "workerProtocol": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "workerStatusCounts": {
+          "draining": 0,
+          "offline": 0,
+          "online": 1
+        }
+      },
+      "finishedAt": "2026-07-25T18:57:45.039Z",
+      "id": "runtime.worker-discovery",
+      "name": "Provision the exact Target and discover a real compatible Worker manifest",
+      "startedAt": "2026-07-25T18:57:28.385Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 7,
+      "evidence": {
+        "credential": {
+          "credentialType": "api_key",
+          "delivery": "acceptance-fixture",
+          "id": "90c0a7ad-5fe2-422d-b36d-91cdb9317b94",
+          "organizationId": "518a0be8-caf3-57e1-8b1c-5e453c422ac2",
+          "provider": "codex",
+          "version": 1
+        },
+        "project": {
+          "id": "e532341b-186e-4941-9b73-2afe7fded803",
+          "organizationId": "518a0be8-caf3-57e1-8b1c-5e453c422ac2",
+          "repositoryUrl": null
+        },
+        "session": {
+          "executionTargetId": "91f7d39d-0bd8-42bb-a262-7f5e5ae9de85",
+          "id": "ec81f0fd-7c4d-4247-8579-37a507d3b750",
+          "lastEventSequence": 1,
+          "provider": "codex",
+          "providerCredentialId": "90c0a7ad-5fe2-422d-b36d-91cdb9317b94"
+        }
+      },
+      "finishedAt": "2026-07-25T18:57:45.046Z",
+      "id": "resources.credential-project-session",
+      "name": "Create bound Credential, empty Repository Project, and Session",
+      "startedAt": "2026-07-25T18:57:45.039Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1824,
+      "evidence": {
+        "artifact": {
+          "contentType": "text/plain",
+          "id": "e42b82e4-ebe1-4e66-83fd-b592199f81b0",
+          "kind": "generated_file",
+          "originalName": "artifact.txt",
+          "sha256": "5da2790ad273f8535991c95abed867ed3e786a0ad2ca22b0fabbbda344d9ff4b",
+          "sizeBytes": 42,
+          "status": "ready"
+        },
+        "credentialEvidence": {
+          "credentialPayloadKeys": [
+            "apiKey"
+          ],
+          "credentialVerified": true
+        },
+        "eventTypes": [
+          "turn.created",
+          "execution.leased",
+          "workspace.ready",
+          "execution.started",
+          "item.started",
+          "item.completed",
+          "thread.token-usage.updated",
+          "artifact.ready",
+          "content.delta",
+          "workspace.dirty",
+          "checkpoint.created",
+          "artifact.ready",
+          "checkpoint.ready",
+          "execution.completed"
+        ],
+        "executionId": "0aadcc21-b5c4-4604-bd40-cccb9e94a162",
+        "generation": 1,
+        "sequenceRange": {
+          "count": 14,
+          "first": 2,
+          "last": 15
+        },
+        "turnId": "b3f75b4e-85ef-4b97-add9-0ca7589c1f76",
+        "workerId": "2b74d5f9-76c6-408f-b32f-586911ef9b4e"
+      },
+      "finishedAt": "2026-07-25T18:57:46.870Z",
+      "id": "fixture.text-tool-usage-artifact",
+      "name": "Run text, tool, usage, Artifact, and Credential fixture flow",
+      "startedAt": "2026-07-25T18:57:45.046Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1579,
+      "evidence": {
+        "deliveryStatus": "pending",
+        "executionId": "31765e12-7a27-4b47-b240-54f58de3f5b4",
+        "interactionId": "ff89f277-ad97-4f98-adeb-0eb9d61329f7",
+        "requestId": "fixture-approval-generation-1-1",
+        "resolutionStatus": "resolved",
+        "sequenceRange": {
+          "count": 11,
+          "first": 16,
+          "last": 26
+        },
+        "singleTerminal": true,
+        "targetTerminal": null,
+        "turnId": "4e02bbbe-546b-436e-82d7-fb6e00ee91be"
+      },
+      "finishedAt": "2026-07-25T18:57:48.448Z",
+      "id": "fixture.approval-resolution",
+      "name": "Resolve Provider approval through the user API",
+      "startedAt": "2026-07-25T18:57:46.870Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1826,
+      "evidence": {
+        "completion": {
+          "exitCode": 0,
+          "previewBytes": 32768,
+          "segmentCount": 3,
+          "totalBytes": 2097409,
+          "truncated": true
+        },
+        "executionId": "43240346-5970-441d-9f9f-b7c6dc2cbd29",
+        "preview": {
+          "bytes": 32768,
+          "eventCount": 1,
+          "sha256": "31e153e2aa53cad80b7572b88da87ee3b43f40d1213ab96077754f6c1dcb3e34",
+          "truncated": true
+        },
+        "runtimePhysicalPathLeak": false,
+        "segments": [
+          {
+            "artifact": {
+              "contentType": "text/plain; charset=utf-8",
+              "id": "fa6d6e34-5a39-4643-8879-8414825ce610",
+              "kind": "terminal_log",
+              "originalName": "terminal-log-000001.log",
+              "sha256": "f22d03ccbcfd9f40f8a8adb9deaa74e9c4fddc6f0325158a260021c698f0c869",
+              "sizeBytes": 1048576,
+              "status": "ready"
+            },
+            "length": 1048576,
+            "offset": 0,
+            "segmentIndex": 0
+          },
+          {
+            "artifact": {
+              "contentType": "text/plain; charset=utf-8",
+              "id": "f3adac94-bab5-4b4d-ae99-4645e40f7b1a",
+              "kind": "terminal_log",
+              "originalName": "terminal-log-000002.log",
+              "sha256": "eb149a408fa80e2faf39670f5e8e357a61d723d5d5b5d3620a9ca05105b636be",
+              "sizeBytes": 1048576,
+              "status": "ready"
+            },
+            "length": 1048576,
+            "offset": 1048576,
+            "segmentIndex": 1
+          },
+          {
+            "artifact": {
+              "contentType": "text/plain; charset=utf-8",
+              "id": "4554c90f-5a69-47b6-9131-0291d40cb1d6",
+              "kind": "terminal_log",
+              "originalName": "terminal-log-000003.log",
+              "sha256": "5fa2911d4a2a4821ba301f5256983895d62da71a9a5c4e8237e6a8900d4c09c1",
+              "sizeBytes": 257,
+              "status": "ready"
+            },
+            "length": 257,
+            "offset": 2097152,
+            "segmentIndex": 2
+          }
+        ],
+        "sequenceRange": {
+          "count": 18,
+          "first": 27,
+          "last": 44
+        },
+        "terminalId": "fixture-terminal-large-1",
+        "turnId": "cee57dd4-191e-4330-8cfa-e304097bd73c"
+      },
+      "finishedAt": "2026-07-25T18:57:50.275Z",
+      "id": "fixture.terminal-large-log",
+      "name": "Persist a large Terminal stream as a bounded preview and segmented Artifacts",
+      "startedAt": "2026-07-25T18:57:48.449Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1848,
+      "evidence": {
+        "deliveryStatus": "pending",
+        "executionId": "1cbc564b-1dc0-463f-a635-3091ba6611e4",
+        "interactionId": "a8884cef-6398-427b-affc-2ab068494e59",
+        "requestId": "fixture-user-input-generation-1-1",
+        "resolutionStatus": "resolved",
+        "sequenceRange": {
+          "count": 11,
+          "first": 45,
+          "last": 55
+        },
+        "singleTerminal": true,
+        "targetTerminal": null,
+        "turnId": "45e43b96-e2a2-4ea2-a1b3-4849ca36d80d"
+      },
+      "finishedAt": "2026-07-25T18:57:52.123Z",
+      "id": "fixture.user-input-resolution",
+      "name": "Resolve Provider user input through the user API",
+      "startedAt": "2026-07-25T18:57:50.275Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1317,
+      "evidence": {
+        "executionId": "c438df86-fe84-4033-98d2-dc462db23613",
+        "failureCode": "provider_rate_limited",
+        "sequenceRange": {
+          "count": 5,
+          "first": 56,
+          "last": 60
+        },
+        "turnId": "c60ccde2-06e7-4493-875a-0fb2eb843977"
+      },
+      "finishedAt": "2026-07-25T18:57:53.439Z",
+      "id": "fixture.provider-error",
+      "name": "Persist deterministic Provider failure",
+      "startedAt": "2026-07-25T18:57:52.123Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 37083,
+      "evidence": {
+        "externalHostRestarted": false,
+        "hostKeyFingerprint": "SHA256:khNCVsicVlV2vUaWfAWEZq2IL5KHZQXmvKuwiE9+0fY",
+        "instanceUidChanged": true,
+        "postReplacementManifestId": "318ed968-d21d-40a1-8631-b4eabd0c1499",
+        "previousIncarnation": 1,
+        "previousMainPid": 3062,
+        "remoteFilesystemContinuity": {
+          "preservedAcrossReplacement": true,
+          "semantics": "persisted remote-filesystem Workspace content; not Workspace Checkpoint restore"
+        },
+        "replacementIncarnation": 2,
+        "replacementMainPid": 3476,
+        "replacementWorkerId": "2b74d5f9-76c6-408f-b32f-586911ef9b4e",
+        "serviceName": "synara-agentd-91f7d39d-0bd8-42bb-a262-7f5e5ae9de85.service",
+        "sshdRestarted": true,
+        "strategy": "pinned-Host-Key SSH upgrade with systemd restart",
+        "workerIdStable": true,
+        "workerStatusCounts": {
+          "draining": 0,
+          "offline": 0,
+          "online": 1
+        }
+      },
+      "finishedAt": "2026-07-25T18:58:30.523Z",
+      "id": "recovery.worker-replacement",
+      "name": "Replace the managed Worker and verify a new agentd incarnation",
+      "startedAt": "2026-07-25T18:57:53.439Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 515,
+      "evidence": {
+        "executionId": "192dad14-3ecc-47b1-bb18-ab0b93484f88",
+        "generation": 1,
+        "semantics": "persisted remote-filesystem Workspace content; not Workspace Checkpoint restore",
+        "sequenceRange": {
+          "count": 9,
+          "first": 61,
+          "last": 69
+        },
+        "turnId": "0020d025-8842-42a8-a4c9-745aa2dbc26d",
+        "workerId": "2b74d5f9-76c6-408f-b32f-586911ef9b4e",
+        "workspaceEvidence": {
+          "artifactContentVerified": true,
+          "artifactRelativePath": ".synara-stage3-acceptance/artifact.txt"
+        }
+      },
+      "finishedAt": "2026-07-25T18:58:31.037Z",
+      "id": "recovery.post-replacement-workspace-turn",
+      "name": "Execute immediately on the replacement Worker and verify persisted Workspace content",
+      "startedAt": "2026-07-25T18:58:30.523Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 132,
+      "evidence": {
+        "baseUrl": "http://127.0.0.1:64148",
+        "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/control-plane-2.log",
+        "pid": 88160,
+        "postRestartManifestId": "318ed968-d21d-40a1-8631-b4eabd0c1499",
+        "preRestartSequence": 69,
+        "previousPid": 87866,
+        "processGeneration": 2,
+        "readiness": {
+          "checks": {
+            "artifactStore": {
+              "kind": "local",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "database": {
+              "kind": "sqlite",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "databaseWrite": {
+              "kind": "sqlite",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "queue": {
+              "kind": "in-process",
+              "latencyMs": 0,
+              "status": "ready"
+            },
+            "schema": {
+              "kind": "sqlite",
+              "latencyMs": 2,
+              "status": "ready"
+            }
+          },
+          "status": "ready"
+        },
+        "workerProxy": {
+          "advertisedHost": "127.0.0.1",
+          "allowedPathPrefixes": [
+            "/v1/workers/",
+            "/v1/artifact-content/"
+          ],
+          "faultInjection": "runner-owned transport close before HTTP forwarding",
+          "listenAddress": "0.0.0.0",
+          "port": 64991,
+          "upstreamAddress": "127.0.0.1:64148"
+        },
+        "workerProxyRelay": {
+          "log": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-ssh-atomic-ready-acceptance-20260726/logs/ssh-worker-proxy-relay.log",
+          "mode": "reverse-ssh-loopback",
+          "readsUserSSHConfiguration": false,
+          "upstreamAddress": "127.0.0.1:64991",
+          "vmListenHost": "127.0.0.1",
+          "vmListenPort": 64992
+        },
+        "workerStatusCounts": {
+          "draining": 0,
+          "offline": 0,
+          "online": 1
+        }
+      },
+      "finishedAt": "2026-07-25T18:58:31.169Z",
+      "id": "recovery.control-plane-restart",
+      "name": "Restart Control Plane with persisted state",
+      "startedAt": "2026-07-25T18:58:31.037Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 1048,
+      "evidence": {
+        "executionId": "408f9d9f-f60a-4d44-80e1-4a8ae219aa1d",
+        "firstGeneration": 1,
+        "generation": 1,
+        "generationScope": "per-execution",
+        "preRestartSequence": 69,
+        "preRestartWorkerId": "2b74d5f9-76c6-408f-b32f-586911ef9b4e",
+        "sessionSequenceRange": {
+          "count": 80,
+          "first": 1,
+          "last": 80
+        },
+        "targetWorkerReplaced": true,
+        "terminalSequence": 80,
+        "turnId": "58690577-a155-40ca-a797-610512d72d74",
+        "turnSequenceRange": {
+          "count": 11,
+          "first": 70,
+          "last": 80
+        },
+        "workerId": "2b74d5f9-76c6-408f-b32f-586911ef9b4e",
+        "workerIdChangedAfterRestart": false,
+        "workerIdSemantics": "stable registration slot; a restarted agentd registration may reuse the Worker ID"
+      },
+      "finishedAt": "2026-07-25T18:58:32.218Z",
+      "id": "fixture.second-turn-continuity",
+      "name": "Run a second post-restart Turn and verify continuity",
+      "startedAt": "2026-07-25T18:58:31.170Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 0,
+      "evidence": {
+        "broadCleanupUsed": false,
+        "externalHostPreserved": false,
+        "externalHostRestarted": false,
+        "installationId": "stage3-provider-acceptance-83b3518f-5a65-4b88-a20d-1fb6a2fe9994",
+        "localKeyMaterialRemoved": true,
+        "machineLifecycleCompleted": true,
+        "machineName": "synara-stage4-ready-20260726",
+        "machinePreservedByRequest": false,
+        "machineRemoved": true,
+        "operatorIdentitySourcePreserved": false,
+        "ownedRuntimeRemoved": true,
+        "productRevokeRequested": true,
+        "resourceOwner": "b248556a6d874847a791",
+        "runtime": "owned-disposable-orbstack",
+        "stateRemoved": true,
+        "target": "ssh"
+      },
+      "finishedAt": "2026-07-25T18:58:52.751Z",
+      "id": "environment.cleanup",
+      "name": "Clean exact runner-owned Target resources",
+      "startedAt": "2026-07-25T18:58:52.751Z",
+      "status": "pass"
+    },
+    {
+      "durationMs": 4,
+      "evidence": {
+        "fileTypes": [
+          ".json",
+          ".log",
+          ".md",
+          ".txt",
+          ".yaml",
+          ".yml"
+        ],
+        "findings": [],
+        "knownSecretCount": 11,
+        "patternNames": [
+          "private-key-pem",
+          "aws-access-key",
+          "github-token",
+          "openai-style-key"
+        ],
+        "scannedBytes": 186712,
+        "scannedFiles": 13,
+        "scope": "acceptance JSON, Markdown, text metadata, and redacted logs; binary SQLite/Artifacts excluded"
+      },
+      "finishedAt": "2026-07-25T18:58:52.820Z",
+      "id": "security.output-secret-scan",
+      "name": "Scan acceptance reports and logs for known or high-confidence Secret patterns",
+      "startedAt": "2026-07-25T18:58:52.816Z",
+      "status": "pass"
+    }
+  ],
+  "configuration": {
+    "concurrency": {
+      "barrier": null,
+      "boundary": null,
+      "providers": [],
+      "sessions": 0,
+      "workers": 0
+    },
+    "docker": null,
+    "failureMatrix": {
+      "boundary": "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths",
+      "failureOnly": false,
+      "networkOutageSeconds": 8.0,
+      "realProviderReleaseGate": false,
+      "requestedCases": []
+    },
+    "keepState": false,
+    "kubernetes": null,
+    "load": {
+      "boundary": null,
+      "maxConcurrentExecutions": null,
+      "maximumWaves": 0,
+      "measurement": {
+        "durationTargetEnforced": false,
+        "latencyPercentiles": [],
+        "operatorApprovedSla": null,
+        "operatorApprovedSlaFile": null,
+        "operatorApprovedSlaThresholdsEnforced": false,
+        "unexpectedErrorRateRecorded": false
+      },
+      "minimumDurationSeconds": 0,
+      "plannedExecutions": 0,
+      "plannedQuotaRejections": 0,
+      "providers": [],
+      "resourceProfile": null,
+      "sessions": 0,
+      "waves": 0,
+      "workers": 0
+    },
+    "loadFailure": {
+      "activeSessions": 0,
+      "boundary": null,
+      "faultCases": 0,
+      "faults": [],
+      "networkOutageSeconds": 0,
+      "postRecoveryWaves": 0,
+      "quotaRejectedSessions": 0,
+      "targeting": null
+    },
+    "realProvider": {
+      "ambientAuthentication": false,
+      "boundary": "two-Turn marker and native-cursor continuity baseline",
+      "controlledBaseUrl": false,
+      "controlledFaultCredentials": false,
+      "controlledProductCredential": false,
+      "controlledProductCredentialField": null,
+      "cursorMaximumAge": null,
+      "model": null,
+      "productCredentialEnvironmentNamePersisted": false,
+      "requestedCases": [],
+      "requestedFailureCases": [],
+      "requestedLoadCases": []
+    },
+    "realProviderLoad": {
+      "boundary": null,
+      "maxConcurrentExecutions": null,
+      "maximumWaves": 0,
+      "measurement": {
+        "durationTargetEnforced": false,
+        "latencyPercentiles": [],
+        "operatorApprovedSla": null,
+        "operatorApprovedSlaFile": null,
+        "operatorApprovedSlaThresholdsEnforced": false,
+        "unexpectedErrorRateRecorded": false
+      },
+      "minimumDurationSeconds": 0,
+      "resourceProfile": null,
+      "restartEveryWaves": 0,
+      "sessions": 0,
+      "waves": 0,
+      "workers": 0
+    },
+    "restartControlPlane": true,
+    "retentionConcurrency": {
+      "agedDays": null,
+      "artifactDeleteAfterDays": null,
+      "barrier": null,
+      "boundary": null,
+      "sessionArchiveAfterDays": null,
+      "sweepInterval": null,
+      "target": null,
+      "workspaceCleanupAfterDays": null
+    },
+    "runnerCommand": {
+      "argumentCount": 2,
+      "executable": "node"
+    },
+    "skipBuild": false,
+    "soak": {
+      "boundary": null,
+      "measurement": {
+        "durationRecorded": false,
+        "operatorApprovedSla": null,
+        "operatorApprovedSlaFile": null,
+        "operatorApprovedSlaThresholdsEnforced": false
+      },
+      "restartEvery": 0,
+      "turns": 0
+    },
+    "ssh": {
+      "cleanupSemantics": "ssh/revoke removes the systemd unit, environment, and agentd binary; deletion of the owned OrbStack machine is infrastructure cleanup and does not prove product-level Workspace purge",
+      "controlPlaneCredentialLifecycle": "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after provisioning, and relies on the Control Plane encrypted credential until ssh/revoke",
+      "controlPlaneTransport": {
+        "description": "runner-owned reverse SSH relay to the local Worker-only proxy",
+        "mode": "reverse-ssh-loopback",
+        "vmListenHost": "127.0.0.1"
+      },
+      "credentialSource": "runner-generated one-time Ed25519 key",
+      "driverPrivateKeyReferenceClearedAfterProvision": false,
+      "localPrivateKeyPlaintextDeletedAfterProvision": true,
+      "machineArch": "arm64",
+      "machineImage": "ubuntu:24.04",
+      "machineName": "synara-stage4-ready-20260726",
+      "nodeVersion": "24.13.1",
+      "operatorIdentitySourcePreserved": false,
+      "orbctlBinary": "/usr/local/bin/orbctl",
+      "readsUserSSHConfiguration": false,
+      "runtime": "owned-disposable-orbstack",
+      "runtimeBuild": "deterministic-fixture-cross-built-per-run"
+    },
+    "suite": "fixture",
+    "timeoutSeconds": 1200.0,
+    "workerTiming": {
+      "heartbeatTimeout": "18s",
+      "leaseTTL": "6s"
+    }
+  },
+  "durationMs": 130325,
+  "finishedAt": "2026-07-25T18:58:52.820Z",
+  "mode": "fixture",
+  "provider": "codex",
+  "runId": "stage3-provider-acceptance-f98febfd-6395-4212-8200-6627b4e0afb8",
+  "schemaVersion": "synara.provider-acceptance.v1",
+  "source": {
+    "gitSha": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "providerCapabilityCatalogSha256": "62f2d2c3bd446f936be80316ca1a30b2ae7fa5d64795031ce3b505366c75b0a4",
+    "worktreeDirty": true
+  },
+  "startedAt": "2026-07-25T18:56:42.494Z",
+  "status": "pass",
+  "target": "ssh"
+}

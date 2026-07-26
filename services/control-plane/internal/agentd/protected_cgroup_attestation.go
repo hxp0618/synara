@@ -10,7 +10,7 @@ import (
 
 const (
 	protectedCgroupContainmentMode    = "cgroup-v2"
-	protectedCgroupSupervisorVersion  = "agentd-protected-cgroup-supervisor-v1"
+	protectedCgroupSupervisorVersion  = "agentd-protected-cgroup-supervisor-v2"
 	protectedCgroupProbeVersion       = 1
 	protectedCgroupProbeHelperCommand = "protected-cgroup-probe-helper"
 	protectedCgroupProbeChildCommand  = "protected-cgroup-probe-child"

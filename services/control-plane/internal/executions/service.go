@@ -14,6 +14,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
@@ -115,10 +116,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 	if err != nil {
 		return RegisteredWorker{}, err
 	}
-	target, targetKind, err := s.targets.ResolveWorkerTarget(ctx, normalized.ExecutionTargetID, normalized.TargetKind)
-	if err != nil {
-		return RegisteredWorker{}, err
-	}
+	targetKind := platform.ExecutionTargetKind(normalized.TargetKind)
 	if platform.IsRemoteTarget(targetKind) && (!normalized.LeaseSupported || !normalized.FencingSupported) {
 		return RegisteredWorker{}, problem.New(400, "remote_worker_protocol_required", "Remote workers must advertise leaseSupported and fencingSupported.")
 	}
@@ -127,10 +125,46 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		return RegisteredWorker{}, problem.Wrap(500, "worker_token_generation_failed", "Failed to generate a worker credential.", err)
 	}
 	now := s.now()
+	var podIdentity *podlifecycle.ExactPodIdentity
+	if normalized.RegistrationTrustMode == WorkerRegistrationTrustKubernetesPodBoundV1 {
+		identity, err := podlifecycle.NewExactPodIdentity(
+			normalized.ExecutionTargetID,
+			normalized.Namespace,
+			normalized.PodName,
+			normalized.InstanceUID,
+		)
+		if err != nil {
+			return RegisteredWorker{}, problem.Wrap(400, "invalid_worker_registration", "The Kubernetes Pod identity is invalid.", err)
+		}
+		podIdentity = &identity
+	}
 	var model persistence.WorkerInstance
+	var target persistence.ExecutionTarget
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		if err := workerreleases.LockTargetForRelease(ctx, tx, normalized.ExecutionTargetID); err != nil {
+		resolvedTarget, resolvedKind, err := s.targets.ResolveWorkerRegistrationTargetInTransaction(
+			ctx, tx, normalized.ExecutionTargetID, normalized.TargetKind,
+			normalized.InstanceUID, normalized.SSHBootstrapGeneration,
+		)
+		if err != nil {
 			return err
+		}
+		target = resolvedTarget
+		targetKind = resolvedKind
+		if podIdentity != nil {
+			acquired, err := podlifecycle.TryTransactionLogicalIdentityLock(ctx, tx, *podIdentity)
+			if err != nil {
+				return problem.Wrap(500, "kubernetes_pod_lifecycle_lock_failed", "The Kubernetes Pod lifecycle lock could not be acquired.", err)
+			}
+			if !acquired {
+				return problem.New(503, "kubernetes_pod_lifecycle_lock_unavailable", "The Kubernetes Pod lifecycle is changing; retry registration.")
+			}
+			fenced, err := podlifecycle.IsDeletionFenced(ctx, tx, *podIdentity)
+			if err != nil {
+				return problem.Wrap(500, "kubernetes_pod_deletion_fence_lookup_failed", "The Kubernetes Pod deletion fence could not be inspected.", err)
+			}
+			if fenced {
+				return problem.New(409, "kubernetes_pod_deletion_fenced", "This Kubernetes Pod UID was fenced for deletion and cannot register.")
+			}
 		}
 		if err := validateRegisteredWorkerIdentity(ctx, tx, normalized); err != nil {
 			return err
@@ -148,13 +182,21 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		if !errors.Is(tombstoneErr, gorm.ErrRecordNotFound) {
 			return problem.Wrap(500, "worker_revocation_lookup_failed", "Failed to inspect the Worker revocation fence.", tombstoneErr)
 		}
-		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		err = persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("execution_target_id = ? AND cluster_id = ? AND namespace = ? AND pod_name = ? AND status <> ?", normalized.ExecutionTargetID, normalized.ClusterID, normalized.Namespace, normalized.PodName, "terminated").
 			Take(&model).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if targetKind == platform.TargetSSH && target.Status == "active" {
+				return problem.New(
+					409,
+					"ssh_active_reregistration_invalid",
+					"Active SSH Targets only allow restart registration for the current logical Worker identity.",
+				)
+			}
 			model = persistence.WorkerInstance{
 				ID: uuid.New(), Incarnation: 1, InstanceUID: normalized.InstanceUID,
-				ExecutionTargetID: normalized.ExecutionTargetID, TargetKind: normalized.TargetKind,
+				SSHBootstrapGeneration: normalized.SSHBootstrapGeneration,
+				ExecutionTargetID:      normalized.ExecutionTargetID, TargetKind: normalized.TargetKind,
 				WorkerMode:            normalized.WorkerMode,
 				AssignedExecutionID:   normalized.AssignedExecutionID,
 				WorkerPoolID:          normalized.WorkerPoolID,
@@ -194,6 +236,15 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		if model.AdministrativeStatus == "revoked" {
 			return problem.New(409, "worker_identity_revoked", "The logical Worker identity was administratively revoked and cannot be registered again.")
 		}
+		if targetKind == platform.TargetSSH && target.Status == "active" &&
+			(model.InstanceUID != normalized.InstanceUID ||
+				!equalOptionalInt64(model.SSHBootstrapGeneration, normalized.SSHBootstrapGeneration)) {
+			return problem.New(
+				409,
+				"ssh_active_reregistration_invalid",
+				"Active SSH Worker restart registration must match the current instance UID and bootstrap generation.",
+			)
+		}
 		if normalized.RegistrationTrustMode == WorkerRegistrationTrustKubernetesPodBoundV1 &&
 			model.RegistrationTrustMode == WorkerRegistrationTrustKubernetesPodBoundV1 &&
 			model.InstanceUID == normalized.InstanceUID {
@@ -210,7 +261,8 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		}
 		updates := persistence.WorkerInstance{
 			Incarnation: model.Incarnation + 1, InstanceUID: normalized.InstanceUID,
-			TargetKind: normalized.TargetKind, WorkerMode: normalized.WorkerMode,
+			SSHBootstrapGeneration: normalized.SSHBootstrapGeneration,
+			TargetKind:             normalized.TargetKind, WorkerMode: normalized.WorkerMode,
 			AssignedExecutionID: normalized.AssignedExecutionID,
 			WorkerPoolID:        normalized.WorkerPoolID,
 			WorkerPoolVersion:   normalized.WorkerPoolVersion,
@@ -224,7 +276,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ?", model.ID).
 			Select(
-				"incarnation", "instance_uid", "target_kind", "worker_mode", "assigned_execution_id", "worker_pool_id", "worker_pool_version", "capacity_class", "registration_trust_mode", "version", "protocol_version", "capabilities", "auth_token_hash", "lease_supported",
+				"incarnation", "instance_uid", "ssh_bootstrap_generation", "target_kind", "worker_mode", "assigned_execution_id", "worker_pool_id", "worker_pool_version", "capacity_class", "registration_trust_mode", "version", "protocol_version", "capabilities", "auth_token_hash", "lease_supported",
 				"fencing_supported", "status", "registered_at", "last_heartbeat_at", "draining_at", "terminated_at",
 			).Updates(&updates)
 		if err := expectOne(result, 500, "worker_registration_update_failed", "Failed to refresh the worker registration."); err != nil {
@@ -233,6 +285,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.ExecutionTargetID = normalized.ExecutionTargetID
 		model.Incarnation = updates.Incarnation
 		model.InstanceUID = normalized.InstanceUID
+		model.SSHBootstrapGeneration = normalized.SSHBootstrapGeneration
 		model.TargetKind = normalized.TargetKind
 		model.WorkerMode = normalized.WorkerMode
 		model.AssignedExecutionID = normalized.AssignedExecutionID
@@ -293,6 +346,9 @@ func (s *Service) Authenticate(ctx context.Context, plainToken string) (persiste
 	if worker.Status == "terminated" {
 		return persistence.WorkerInstance{}, problem.New(401, "invalid_worker_token", "The worker bearer token is invalid.")
 	}
+	if err := requireKubernetesPodNotDeletionFenced(ctx, s.db, worker); err != nil {
+		return persistence.WorkerInstance{}, err
+	}
 	return worker, nil
 }
 
@@ -313,7 +369,11 @@ func (s *Service) Heartbeat(
 	}
 	var current persistence.WorkerInstance
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		if err := workerreleases.LockTargetForRelease(ctx, tx, worker.ExecutionTargetID); err != nil {
+		target, targetKind, err := s.targets.ResolveWorkerBootstrapTargetInTransaction(
+			ctx, tx, worker.ExecutionTargetID, worker.TargetKind,
+			worker.InstanceUID, input.SSHBootstrapGeneration,
+		)
+		if err != nil {
 			return err
 		}
 		locked, err := lockCurrentWorker(ctx, tx, worker)
@@ -321,14 +381,19 @@ func (s *Service) Heartbeat(
 			return err
 		}
 		current = locked
+		if current.TargetKind == "ssh" &&
+			!equalOptionalInt64(current.SSHBootstrapGeneration, input.SSHBootstrapGeneration) {
+			return problem.New(
+				409,
+				"ssh_bootstrap_authority_invalid",
+				"SSH Worker bootstrap generation does not match its registered authority.",
+			)
+		}
+		if err := requireKubernetesPodNotDeletionFenced(ctx, tx, current); err != nil {
+			return err
+		}
 		now := s.now()
 		if input.Capabilities != nil {
-			target, targetKind, err := s.targets.ResolveWorkerTargetInTransaction(
-				ctx, tx, current.ExecutionTargetID, current.TargetKind,
-			)
-			if err != nil {
-				return err
-			}
 			manifestVersion := current.Version
 			if version != "" {
 				manifestVersion = version
@@ -402,6 +467,13 @@ func (s *Service) Heartbeat(
 	return toWorker(current), nil
 }
 
+func equalOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 func lockCurrentWorkerIncarnation(ctx context.Context, tx *gorm.DB, worker persistence.WorkerInstance) error {
 	_, err := lockCurrentWorker(ctx, tx, worker)
 	return err
@@ -432,6 +504,34 @@ func lockCurrentWorker(
 		return persistence.WorkerInstance{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
 	}
 	return current, nil
+}
+
+func requireKubernetesPodNotDeletionFenced(
+	ctx context.Context,
+	db *gorm.DB,
+	worker persistence.WorkerInstance,
+) error {
+	if worker.TargetKind != "kubernetes" ||
+		worker.RegistrationTrustMode != WorkerRegistrationTrustKubernetesPodBoundV1 {
+		return nil
+	}
+	identity, err := podlifecycle.NewExactPodIdentity(
+		worker.ExecutionTargetID,
+		worker.Namespace,
+		worker.PodName,
+		worker.InstanceUID,
+	)
+	if err != nil {
+		return problem.Wrap(500, "kubernetes_pod_identity_invalid", "The persisted Kubernetes Pod identity is invalid.", err)
+	}
+	fenced, err := podlifecycle.IsDeletionFenced(ctx, db, identity)
+	if err != nil {
+		return problem.Wrap(500, "kubernetes_pod_deletion_fence_lookup_failed", "The Kubernetes Pod deletion fence could not be inspected.", err)
+	}
+	if fenced {
+		return problem.New(409, "kubernetes_pod_deletion_fenced", "This Kubernetes Pod UID was fenced for deletion and cannot perform Worker operations.")
+	}
+	return nil
 }
 
 func (s *Service) markStaleWorkers(ctx context.Context) error {
@@ -523,6 +623,18 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	if err != nil {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "targetKind is invalid.")
 	}
+	var sshBootstrapGeneration *int64
+	if kind == platform.TargetSSH {
+		if input.SSHBootstrapGeneration != nil && *input.SSHBootstrapGeneration <= 0 {
+			return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "sshBootstrapGeneration must be greater than zero when provided.")
+		}
+		if input.SSHBootstrapGeneration != nil {
+			value := *input.SSHBootstrapGeneration
+			sshBootstrapGeneration = &value
+		}
+	} else if input.SSHBootstrapGeneration != nil {
+		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "sshBootstrapGeneration is only valid for SSH Workers.")
+	}
 	capabilities := input.Capabilities
 	if capabilities == nil {
 		capabilities = map[string]any{}
@@ -537,6 +649,9 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	}
 	if registrationTrustMode == WorkerRegistrationTrustKubernetesPodBoundV1 && kind != platform.TargetKubernetes {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration_trust", "Pod-bound registration trust is only valid for Kubernetes Workers.")
+	}
+	if registrationTrustMode == WorkerRegistrationTrustKubernetesPodBoundV1 && values[0] != podlifecycle.KubernetesClusterID {
+		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration_trust", "Pod-bound Kubernetes Workers must use the canonical cluster identity.")
 	}
 	assignedExecutionID, workerPoolID, workerPoolVersion, capacityClass, err := normalizeWorkerIdentityRegistration(
 		workerMode,
@@ -563,6 +678,7 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	return RegisterWorkerInput{
 		ExecutionTargetID:              input.ExecutionTargetID,
 		TargetKind:                     string(kind),
+		SSHBootstrapGeneration:         sshBootstrapGeneration,
 		WorkerMode:                     workerMode,
 		AssignedExecutionID:            assignedExecutionID,
 		WorkerPoolID:                   workerPoolID,

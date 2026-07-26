@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
@@ -68,6 +70,52 @@ func TestExecutionGenerationFactsMigrationFencesIdentityTimelineAndTerminalOutco
 		}).Error; err != nil {
 		t.Fatalf("advance valid generation fact: %v", err)
 	}
+	podAppliedAt := dispatchedAt.Add(500 * time.Millisecond)
+	podPendingAt := podAppliedAt.Add(time.Second)
+	podRunningAt := podPendingAt.Add(time.Second)
+	if err := db.Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = ? AND execution_id = ? AND generation = ?", seed.tenantID, seed.executionID, 1).
+		Updates(map[string]any{
+			"pod_provisioning_started_at": podAppliedAt,
+			"pod_pending_since_at":        podPendingAt,
+			"pod_running_at":              podRunningAt,
+			"pod_last_observed_at":        podRunningAt,
+			"updated_at":                  readyAt,
+		}).Error; err != nil {
+		t.Fatalf("advance valid Pod generation fact: %v", err)
+	}
+	assertStage4MigrationRejected(
+		t,
+		db.Model(&persistence.ExecutionGenerationFact{}).
+			Where("tenant_id = ? AND execution_id = ? AND generation = ?", seed.tenantID, seed.executionID, 1).
+			Update("pod_running_at", podRunningAt.Add(time.Second)).Error,
+		"chk_execution_generation_pod_running_immutable",
+	)
+	podUID := uuid.NewString()
+	failure := persistence.ExecutionGenerationPodFailureFact{
+		TenantID: seed.tenantID, ExecutionID: seed.executionID, Generation: 1,
+		FailureClass: "oom-killed", ExecutionTargetID: execution.ExecutionTargetID,
+		Namespace: "default", PodName: "migration-worker", PodUID: &podUID,
+		ReasonCode: "oom-killed", FirstObservedAt: podRunningAt,
+		LastObservedAt: podRunningAt, CreatedAt: podRunningAt, UpdatedAt: podRunningAt,
+	}
+	if err := db.Create(&failure).Error; err != nil {
+		t.Fatalf("create Pod failure fact: %v", err)
+	}
+	assertStage4MigrationRejected(
+		t,
+		db.Model(&failure).Update("reason_code", "phase-failed").Error,
+		"chk_execution_generation_pod_failure_identity_immutable",
+	)
+	invalidScope := failure
+	invalidScope.FailureClass = "evicted"
+	invalidScope.ExecutionTargetID = uuid.New()
+	invalidScope.ReasonCode = "evicted"
+	assertStage4MigrationRejected(
+		t,
+		db.Create(&invalidScope).Error,
+		"chk_execution_generation_pod_failure_scope",
+	)
 
 	completed := "completed"
 	terminalAt := readyAt.Add(time.Second)

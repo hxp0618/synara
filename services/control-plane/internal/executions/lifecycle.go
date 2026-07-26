@@ -50,12 +50,20 @@ func (s *Service) Claim(
 		var appended persistence.SessionEvent
 		replayed := false
 		err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-			if err := workerreleases.LockTargetForRelease(ctx, tx, normalizedTarget.ExecutionTargetID); err != nil {
+			if _, _, err := s.targets.ResolveWorkerTargetInTransaction(
+				ctx,
+				tx,
+				normalizedTarget.ExecutionTargetID,
+				normalizedTarget.TargetKind,
+			); err != nil {
 				return err
 			}
 			receipt, lookupErr, lockErr := lockWorkerAndLoadRequestReceipt(ctx, tx, worker, requestID)
 			if lockErr != nil {
 				return lockErr
+			}
+			if err := requireKubernetesPodNotDeletionFenced(ctx, tx, worker); err != nil {
+				return err
 			}
 			if lookupErr == nil && receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(s.now()) {
 				if receipt.Operation != "execution.claim" || receipt.RequestHash != hash {
@@ -234,14 +242,8 @@ func (s *Service) Claim(
 			}
 			claimQuery = workerreleases.FilterClaimQuery(claimQuery, claimWorker)
 			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
-			claimOrder := "agent_executions.queued_at, agent_executions.id"
-			if workerMode == WorkerModeWarmPool {
-				claimOrder = `CASE claim_session.warm_pool_mode
-					WHEN 'low-latency' THEN 0
-					WHEN 'balanced' THEN 1
-					ELSE 2 END, ` + claimOrder
-			}
-			claimErr := claimQuery.Order(claimOrder).Take(&execution).Error
+			claimQuery = applyClaimFairShareOrder(tx, claimQuery, workerMode == WorkerModeWarmPool)
+			claimErr := claimQuery.Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
 				if normalizedTarget.ExecutionID != nil {
 					var assigned persistence.AgentExecution
@@ -714,8 +716,15 @@ func (s *Service) Complete(
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
-		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+		leaseDelete := tx.WithContext(ctx).Delete(&lease)
+		if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The completed execution lease changed during release."); err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the completed execution lease.", err)
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, now, now, workerClaimReleaseExecutionCompleted,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
+			return Execution{}, err
 		}
 		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 			return Execution{}, err
@@ -815,8 +824,15 @@ func (s *Service) Fail(
 		); err != nil {
 			return Execution{}, err
 		}
-		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+		leaseDelete := tx.WithContext(ctx).Delete(&lease)
+		if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The failed execution lease changed during release."); err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the failed execution lease.", err)
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, now, now, workerClaimReleaseExecutionFailed,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
+			return Execution{}, err
 		}
 		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 			return Execution{}, err
@@ -938,8 +954,15 @@ func (s *Service) Release(
 		); err != nil {
 			return Execution{}, err
 		}
-		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+		leaseDelete := tx.WithContext(ctx).Delete(&lease)
+		if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The execution lease changed during release."); err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
+		}
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, now, now, workerClaimReleaseWorkerReleased,
+			workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+		)); err != nil {
+			return Execution{}, err
 		}
 		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 			return Execution{}, err
@@ -1072,8 +1095,17 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 				Where("id = ?", lease.ExecutionID).Take(&execution).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
-					return problem.Wrap(500, "orphan_lease_cleanup_failed", "Failed to remove an orphan execution lease.", err)
+				leaseDelete := tx.WithContext(ctx).Delete(&lease)
+				if leaseDelete.Error != nil {
+					return problem.Wrap(500, "orphan_lease_cleanup_failed", "Failed to remove an orphan execution lease.", leaseDelete.Error)
+				}
+				if leaseDelete.RowsAffected > 0 {
+					if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+						lease, lease.ExpiresAt, now, workerClaimReleaseOrphanLeaseExpired,
+						workerClaimReleaseAuthorityControlPlane, "", "",
+					)); err != nil {
+						return err
+					}
 				}
 				if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 					return err
@@ -1089,7 +1121,7 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			}
 			if deleting && containsExecutionStatus(nonterminalExecutionStatuses, execution.Status) {
 				event, err := s.cancelExecutionLocked(
-					ctx, tx, &execution, &lease, "system", nil, s.now(), "tenant-delete",
+					ctx, tx, &execution, &lease, "system", nil, now, "tenant-delete",
 				)
 				if err != nil {
 					return err
@@ -1097,8 +1129,15 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				appended = append(appended, event)
 				continue
 			}
-			if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+			leaseDelete := tx.WithContext(ctx).Delete(&lease)
+			if err := expectOne(leaseDelete, 409, "expired_lease_release_conflict", "The expired execution lease changed during release."); err != nil {
 				return problem.Wrap(500, "expired_lease_release_failed", "Failed to release an expired execution lease.", err)
+			}
+			if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+				lease, lease.ExpiresAt, now, workerClaimReleaseLeaseExpired,
+				workerClaimReleaseAuthorityControlPlane, "", "",
+			)); err != nil {
+				return err
 			}
 			if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 				return err
@@ -1667,6 +1706,9 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	}
 	if err != nil {
 		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_lock_failed", "Failed to lock the worker.", err)
+	}
+	if err := requireKubernetesPodNotDeletionFenced(ctx, tx, worker); err != nil {
+		return persistence.WorkerInstance{}, err
 	}
 	if worker.ProtocolVersion != WorkerProtocolVersion {
 		return persistence.WorkerInstance{}, unsupportedWorkerProtocol(worker.ProtocolVersion)

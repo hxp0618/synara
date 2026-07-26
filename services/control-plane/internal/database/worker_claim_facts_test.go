@@ -52,7 +52,7 @@ func seedWorkerClaimFactFixture(t *testing.T, db *gorm.DB) workerClaimFactFixtur
 		ID: uuid.New(), Incarnation: 1, InstanceUID: uuid.NewString(),
 		ExecutionTargetID: target.ID, TargetKind: target.Kind, WorkerMode: "general-pool",
 		RegistrationTrustMode: "kubernetes-pod-bound-v1",
-		ClusterID:             "cluster-a", Namespace: "default", PodName: "worker-claim-pod",
+		ClusterID:             "kubernetes", Namespace: "default", PodName: "worker-claim-pod",
 		Version: "test", ProtocolVersion: 2, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte("hash"),
 		Status: "online", AdministrativeStatus: "active", RegisteredAt: base, LastHeartbeatAt: base,
@@ -216,6 +216,17 @@ func validCleanupWorkerClaimFact(fixture workerClaimFactFixture, requestID strin
 		CleanupCommandID:          &fixture.cleanupCommand.ID,
 		CleanupDispatchGeneration: &dispatchGeneration,
 		CreatedAt:                 fixture.cleanupClaimAt,
+	}
+}
+
+func validWorkerClaimReleaseFact(
+	claim persistence.WorkerClaimFact,
+	reason string,
+	releasedAt time.Time,
+) persistence.WorkerClaimReleaseFact {
+	return persistence.WorkerClaimReleaseFact{
+		ClaimFactID: claim.ID, ReleasedAt: releasedAt, RecordedAt: releasedAt.Add(time.Second),
+		ReleaseReason: reason, AuthorityKind: "control-plane", Metadata: map[string]any{},
 	}
 }
 

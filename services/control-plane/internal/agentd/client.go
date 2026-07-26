@@ -54,7 +54,9 @@ func isWorkerRevocationError(err error) bool {
 	if !errors.As(err, &problem) {
 		return false
 	}
-	return problem.Code == "worker_token_revoked" || problem.Code == "worker_identity_revoked"
+	return problem.Code == "worker_token_revoked" ||
+		problem.Code == "worker_identity_revoked" ||
+		problem.Code == "kubernetes_pod_deletion_fenced"
 }
 
 func NewClient(cfg Config) *Client {
@@ -68,8 +70,9 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 	var output executions.RegisteredWorker
 	headers, err := c.doJSONResponse(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
 		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind), WorkerMode: effectiveWorkerMode(cfg),
-		AssignedExecutionID: cfg.AssignedExecutionID,
-		ClusterID:           cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
+		AssignedExecutionID:    cfg.AssignedExecutionID,
+		SSHBootstrapGeneration: cfg.SSHBootstrapGeneration,
+		ClusterID:              cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion,
 		Capabilities: cfg.Capabilities, LeaseSupported: true, FencingSupported: true,
 	}, &output)
@@ -85,7 +88,8 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 func (c *Client) Heartbeat(ctx context.Context, cfg Config, draining bool) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/workers/heartbeat", c.workerToken, "", executions.HeartbeatInput{
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion, Capabilities: cfg.Capabilities,
-		Draining: &draining,
+		SSHBootstrapGeneration: cfg.SSHBootstrapGeneration,
+		Draining:               &draining,
 	}, nil)
 }
 

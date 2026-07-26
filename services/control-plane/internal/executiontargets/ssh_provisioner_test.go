@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -67,6 +68,7 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL="v2"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_LEASE_RENEW_INTERVAL="2s"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION="1"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_WORKSPACE_ROOT="`+expectedWorkspaceRoot+`"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_GIT_CACHE_ROOT="`+expectedGitCacheRoot+`"`)) {
 		t.Fatalf("uploaded agentd environment is incomplete: %s", environment)
@@ -145,6 +147,504 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	}
 }
 
+func TestSSHProvisionerRevokesAuthorityBeforeRemoteCleanup(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	order := make([]string, 0, 2)
+	remote := &fakeSSHRemote{uploads: map[string][]byte{}, onRun: func(string) {
+		order = append(order, "remote")
+	}}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: remote}
+	fixture.provisioner.revokeWorkers = func(
+		_ context.Context,
+		_ *gorm.DB,
+		_ identity.Principal,
+		target persistence.ExecutionTarget,
+		generation int64,
+		_, _, _ string,
+	) (func(), error) {
+		if target.Status != "offline" || target.SSHOperationGeneration != generation ||
+			target.SSHOperationKind == nil || *target.SSHOperationKind != "revoke" {
+			return nil, fmt.Errorf("authority callback observed invalid fence: %#v", target)
+		}
+		order = append(order, "authority")
+		return nil, nil
+	}
+
+	result, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-order", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "disabled" || !reflect.DeepEqual(order, []string{"authority", "remote"}) {
+		t.Fatalf("SSH revoke order/result = %#v / %#v", order, result)
+	}
+}
+
+func TestSSHProvisionerRevokerFailureDoesNotTouchRemote(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	dialer := &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
+	fixture.provisioner.dialer = dialer
+	fixture.provisioner.revokeWorkers = func(
+		context.Context, *gorm.DB, identity.Principal, persistence.ExecutionTarget, int64, string, string, string,
+	) (func(), error) {
+		return nil, problem.New(500, "worker_revocation_failed", "Worker authority revocation failed.")
+	}
+
+	_, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-authority-failure", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "worker_revocation_failed")
+	if dialer.calls != 0 {
+		t.Fatalf("revoker failure reached SSH remote %d times", dialer.calls)
+	}
+	assertSSHTargetStatusAndNoOperation(t, fixture.db, fixture.targetID, "offline")
+}
+
+func TestSSHProvisionerRevokesAuthorityBeforeConfigurationDecrypt(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	dialer := &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
+	fixture.provisioner.dialer = dialer
+	authorityRevoked := false
+	fixture.provisioner.revokeWorkers = func(
+		context.Context, *gorm.DB, identity.Principal, persistence.ExecutionTarget, int64, string, string, string,
+	) (func(), error) {
+		authorityRevoked = true
+		return nil, nil
+	}
+	var originalTarget persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&originalTarget).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.targetID).
+		Update("configuration_encrypted", []byte("unreadable-kms-ciphertext")).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-kms-failure", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_configuration_unavailable")
+	if !authorityRevoked {
+		t.Fatal("SSH configuration decrypt failed before local Worker authority was revoked")
+	}
+	if dialer.calls != 0 {
+		t.Fatalf("SSH configuration decrypt failure reached remote %d times", dialer.calls)
+	}
+	assertSSHTargetStatusAndNoOperation(t, fixture.db, fixture.targetID, "offline")
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.targetID).
+		Update("configuration_encrypted", originalTarget.ConfigurationEncrypted).Error; err != nil {
+		t.Fatal(err)
+	}
+	retried, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-kms-retry", "127.0.0.1",
+	)
+	if err != nil || retried.Status != "disabled" {
+		t.Fatalf("SSH remote cleanup retry after decrypt recovery = %#v, %v", retried, err)
+	}
+}
+
+func TestSSHProvisionerAtomicRevokeRollsBackBeforeCommitFailure(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	dialer := &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
+	fixture.provisioner.dialer = dialer
+	var original persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&original).Error; err != nil {
+		t.Fatal(err)
+	}
+	fixture.provisioner.revokeWorkers = func(
+		ctx context.Context, tx *gorm.DB, _ identity.Principal, target persistence.ExecutionTarget, _ int64, _, _, _ string,
+	) (func(), error) {
+		if err := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).Where("id = ?", target.ID).
+			Update("name", "must-roll-back").Error; err != nil {
+			return nil, err
+		}
+		return nil, problem.New(500, "worker_revocation_failed", "Worker authority revocation failed.")
+	}
+
+	_, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-double-failure", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "worker_revocation_failed")
+	if dialer.calls != 0 {
+		t.Fatalf("pre-commit failure reached SSH remote %d times", dialer.calls)
+	}
+	var after persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != original.Name || after.Status != original.Status ||
+		after.SSHOperationGeneration != original.SSHOperationGeneration || after.SSHOperationKind != nil {
+		t.Fatalf("atomic SSH revoke failure did not roll back: before=%#v after=%#v", original, after)
+	}
+}
+
+func TestSSHProvisionerRemoteRevokeFailureKeepsRevokedAuthorityOffline(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	authorityRevoked := false
+	fixture.provisioner.revokeWorkers = func(
+		context.Context, *gorm.DB, identity.Principal, persistence.ExecutionTarget, int64, string, string, string,
+	) (func(), error) {
+		authorityRevoked = true
+		return nil, nil
+	}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: &fakeSSHRemote{
+		uploads: map[string][]byte{}, runErrors: []error{errors.New("remote unavailable")},
+	}}
+
+	_, err := fixture.provisioner.Revoke(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-revoke-remote-failure", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_revoke_failed")
+	if !authorityRevoked {
+		t.Fatal("remote failure occurred before Worker authority was revoked")
+	}
+	assertSSHTargetStatusAndNoOperation(t, fixture.db, fixture.targetID, "offline")
+}
+
+func TestSSHProvisionerOperationGenerationRejectsConcurrentAndStaleCompletion(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	ctx := context.Background()
+	target, _, err := fixture.provisioner.load(ctx, fixture.principal, fixture.tenantID, fixture.targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	fixture.provisioner.now = func() time.Time { return now }
+	firstInstanceUID, concurrentInstanceUID := uuid.New(), uuid.New()
+	first, err := fixture.provisioner.beginSSHOperation(
+		ctx, target, fixture.principal.UserID, "install", &firstInstanceUID, "ssh-operation-first", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.provisioner.beginSSHOperation(
+		ctx, target, fixture.principal.UserID, "upgrade", &concurrentInstanceUID, "ssh-operation-concurrent", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_operation_in_progress")
+	staleStartedAt := now.Add(-fixture.provisioner.timeout() - 31*time.Second)
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).Where("id = ?", fixture.targetID).
+		Update("ssh_operation_started_at", staleStartedAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.provisioner.beginSSHOperation(
+		ctx, target, fixture.principal.UserID, "revoke", nil, "ssh-operation-takeover", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation != first.Generation+1 || second.Kind != "revoke" {
+		t.Fatalf("stale operation takeover fence = %#v after %#v", second, first)
+	}
+	if err := fixture.provisioner.finishSSHOperation(
+		ctx, target, fixture.principal.UserID, second, "completed", "disabled", "ssh-operation-takeover", "127.0.0.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.provisioner.failSSHOperation(
+		ctx, target, fixture.principal.UserID, first, "ssh-operation-stale-failure", "127.0.0.1",
+	); err == nil {
+		t.Fatal("stale failure overwrote newer disabled result")
+	} else {
+		assertExecutionTargetProblemCode(t, err, "ssh_operation_superseded")
+	}
+	assertSSHTargetStatusAndNoOperation(t, fixture.db, fixture.targetID, "disabled")
+}
+
+func TestSSHProvisionerResumesCommittedRevokeFenceAfterCrash(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	target, err := fixture.provisioner.loadTargetMetadata(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	fixture.provisioner.revokeWorkers = func(
+		context.Context, *gorm.DB, identity.Principal, persistence.ExecutionTarget, int64, string, string, string,
+	) (func(), error) {
+		calls++
+		return nil, nil
+	}
+	first, err := fixture.provisioner.beginSSHRevokeOperation(
+		context.Background(), target, fixture.principal, "revoke-before-crash", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := fixture.provisioner.beginSSHRevokeOperation(
+		context.Background(), target, fixture.principal, "revoke-after-crash", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatalf("committed revoke fence could not resume: %v", err)
+	}
+	if resumed != first || calls != 2 {
+		t.Fatalf("revoke resume fence/callback = %#v/%d, want %#v/2", resumed, calls, first)
+	}
+}
+
+func TestSSHProvisionerKeepsTargetOfflineUntilExactWorkerReady(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	remote := &fakeSSHRemote{uploads: map[string][]byte{}}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: remote}
+	var observedInstanceUID string
+	fixture.provisioner.awaitWorkerReady = func(
+		ctx context.Context,
+		target persistence.ExecutionTarget,
+		_ sshTargetConfiguration,
+		instanceUID string,
+	) error {
+		var current persistence.ExecutionTarget
+		if err := fixture.db.WithContext(ctx).Where("id = ?", target.ID).Take(&current).Error; err != nil {
+			return err
+		}
+		if current.Status != "offline" {
+			return fmt.Errorf("target status during Worker readiness = %s", current.Status)
+		}
+		observedInstanceUID = instanceUID
+		return nil
+	}
+
+	result, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-ready-boundary", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := remote.uploads["/tmp/synara-agentd-"+fixture.targetID.String()+".env"]
+	if observedInstanceUID == "" || observedInstanceUID != environmentValue(t, environment, "SYNARA_AGENTD_INSTANCE_UID") {
+		t.Fatalf("readiness instance UID %q did not match installed environment", observedInstanceUID)
+	}
+	if result.Status != "active" {
+		t.Fatalf("install result = %#v", result)
+	}
+}
+
+func TestSSHProvisionerReadinessFailureLeavesTargetOffline(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
+	fixture.provisioner.awaitWorkerReady = func(
+		context.Context,
+		persistence.ExecutionTarget,
+		sshTargetConfiguration,
+		string,
+	) error {
+		return errors.New("exact Worker instance remained untrusted")
+	}
+
+	_, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-ready-failure", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_worker_readiness_failed")
+	var target persistence.ExecutionTarget
+	if loadErr := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if target.Status != "offline" {
+		t.Fatalf("failed readiness target status = %q", target.Status)
+	}
+}
+
+func TestSSHProvisionerAtomicallyRechecksWorkerBeforeActivation(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
+	fixture.provisioner.awaitWorkerReady = func(
+		context.Context,
+		persistence.ExecutionTarget,
+		sshTargetConfiguration,
+		string,
+	) error {
+		return nil
+	}
+	fixture.provisioner.checkWorkerReady = func(
+		context.Context,
+		*gorm.DB,
+		persistence.ExecutionTarget,
+		sshTargetConfiguration,
+		string,
+	) (bool, string, error) {
+		return false, "exact Worker heartbeat became stale", nil
+	}
+
+	_, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-ready-race", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_worker_readiness_changed")
+	var target persistence.ExecutionTarget
+	if loadErr := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if target.Status != "offline" {
+		t.Fatalf("readiness race target status = %q", target.Status)
+	}
+}
+
+func TestOfflineSSHTargetRequiresLockedExactBootstrapAuthority(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	target, _, err := fixture.provisioner.load(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedInstanceUID := uuid.New()
+	fence, err := fixture.provisioner.beginSSHOperation(
+		context.Background(), target, fixture.principal.UserID, "install", &expectedInstanceUID,
+		"ssh-bootstrap-authority", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.provisioner.targets.ResolveWorkerBootstrapTarget(
+		context.Background(), fixture.targetID, "ssh",
+	); err == nil {
+		t.Fatal("offline SSH Target resolved without transaction-bound bootstrap authority")
+	}
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		_, kind, resolveErr := fixture.provisioner.targets.ResolveWorkerRegistrationTargetInTransaction(
+			context.Background(), tx, fixture.targetID, "ssh", expectedInstanceUID.String(), &fence.Generation,
+		)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if kind != platform.TargetSSH {
+			return fmt.Errorf("bootstrap target kind = %q", kind)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("exact SSH bootstrap authority did not resolve: %v", err)
+	}
+}
+
+func TestSSHWorkerReadyRequiresExactFreshCompatibleManifest(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	ctx := context.Background()
+	target, configuration, err := fixture.provisioner.load(ctx, fixture.principal, fixture.tenantID, fixture.targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, _, err = fixture.provisioner.normalize(target, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	fixture.provisioner.now = func() time.Time { return now }
+	fixture.provisioner.config.WorkerHeartbeatTimeout = 30 * time.Second
+	manifest := persistence.WorkerManifest{
+		ID: uuid.New(), ManifestHash: strings.Repeat("a", 64), WorkerBuildVersion: "managed",
+		WorkerProtocolMinimum: 2, WorkerProtocolMaximum: 2,
+		RuntimeEventMinimum: 2, RuntimeEventMaximum: 2,
+		OperatingSystem: "linux", Architecture: "arm64", ProcessContainmentMode: "none",
+		ProcessContainmentTrustMode: "none", FeatureFlags: map[string]any{}, CreatedAt: now.Add(-time.Minute),
+	}
+	if err := fixture.db.Create(&manifest).Error; err != nil {
+		t.Fatal(err)
+	}
+	exactInstanceUID := uuid.NewString()
+	worker := persistence.WorkerInstance{
+		ID: uuid.New(), Incarnation: 1, InstanceUID: exactInstanceUID,
+		ExecutionTargetID: fixture.targetID, TargetKind: "ssh", WorkerMode: "general-pool",
+		RegistrationTrustMode: "shared-token", ClusterID: "ssh", Namespace: "default", PodName: "ssh-" + fixture.targetID.String(),
+		Version: "managed", ProtocolVersion: 2, Capabilities: map[string]any{}, CurrentManifestID: &manifest.ID,
+		CompatibilityStatus: "compatible", CompatibilityCheckedAt: func() *time.Time { value := now.Add(-2 * time.Minute); return &value }(),
+		LeaseSupported: true, FencingSupported: true,
+		AuthTokenHash: []byte("hash"), Status: "online", AdministrativeStatus: "active",
+		RegisteredAt: now.Add(-2 * time.Minute), LastHeartbeatAt: now.Add(-5 * time.Second),
+	}
+	if err := fixture.db.Create(&worker).Error; err != nil {
+		t.Fatal(err)
+	}
+	ready, state, err := fixture.provisioner.sshWorkerReady(ctx, target, configuration, exactInstanceUID)
+	if err != nil || !ready {
+		t.Fatalf("exact Worker readiness = ready:%t state:%q err:%v", ready, state, err)
+	}
+	fence, err := fixture.provisioner.beginSSHOperation(
+		ctx, target, fixture.principal.UserID, "install", func() *uuid.UUID {
+			value := uuid.MustParse(exactInstanceUID)
+			return &value
+		}(), "atomic-ready", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.provisioner.checkWorkerReady = fixture.provisioner.sshWorkerReadyWithDB
+	fixture.provisioner.lockWorkerReady = lockExactSSHWorkerReadiness
+	if err := fixture.provisioner.activateReadySSHWorker(
+		ctx, target, configuration, exactInstanceUID, fence, fixture.principal.UserID,
+		"atomic-ready", "127.0.0.1",
+	); err != nil {
+		t.Fatalf("atomically activate exact ready Worker: %v", err)
+	}
+	ready, _, err = fixture.provisioner.sshWorkerReady(ctx, target, configuration, uuid.NewString())
+	if err != nil || ready {
+		t.Fatalf("stale/other instance readiness = ready:%t err:%v", ready, err)
+	}
+	if err := fixture.db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("last_heartbeat_at", now.Add(-time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	ready, state, err = fixture.provisioner.sshWorkerReady(ctx, target, configuration, exactInstanceUID)
+	if err != nil || ready || !strings.Contains(state, "stale") {
+		t.Fatalf("stale heartbeat readiness = ready:%t state:%q err:%v", ready, state, err)
+	}
+	if err := fixture.db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("last_heartbeat_at", now.Add(time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	ready, _, err = fixture.provisioner.sshWorkerReady(ctx, target, configuration, exactInstanceUID)
+	if err == nil || ready || !strings.Contains(err.Error(), "future") {
+		t.Fatalf("future heartbeat readiness = ready:%t err:%v", ready, err)
+	}
+}
+
+func TestSSHWorkerReadyRejectsPersistedSignedV1ProtectedCgroupManifest(t *testing.T) {
+	publicKey := processContainmentTestPublicKeyBase64()
+	target := persistence.ExecutionTarget{
+		Capabilities: map[string]any{"processContainmentPolicy": map[string]any{
+			"trustMode": ProcessContainmentTrustSignedV1, "keyId": "trusted-key", "ed25519PublicKey": publicKey,
+		}},
+	}
+	providerUID, providerGID := 10001, 10002
+	configuration := sshTargetConfiguration{
+		AgentdVersion: "agentd-1", AgentdBuildGitSHA: "abcdef0", AgentdImageDigest: "sha256:" + strings.Repeat("1", 64),
+		CgroupV2Root:        "/sys/fs/cgroup/system.slice/synara-agentd.service",
+		CgroupV2ProviderUID: &providerUID, CgroupV2ProviderGID: &providerGID,
+		CgroupV2AttestationKeyID: "trusted-key", CgroupV2AttestationKeyPath: "/etc/synara/key",
+	}
+	version, probe, supervisor, provider := "v1", 1, "uid:0 gid:0", "uid:10001 gid:10002"
+	gitSHA, imageDigest := configuration.AgentdBuildGitSHA, configuration.AgentdImageDigest
+	manifest := persistence.WorkerManifest{
+		WorkerBuildVersion: configuration.AgentdVersion, WorkerBuildGitSHA: &gitSHA,
+		WorkerProtocolMinimum: 2, WorkerProtocolMaximum: 2, OperatingSystem: "linux",
+		ImageDigest: &imageDigest, ProcessContainmentMode: "cgroup-v2",
+		ProcessContainmentSupervisorVersion: &version, ProcessContainmentProbeVersion: &probe,
+		ProcessContainmentProbeSHA256:        func() *string { value := strings.Repeat("a", 64); return &value }(),
+		ProcessContainmentSupervisorIdentity: &supervisor, ProcessContainmentProviderIdentity: &provider,
+		ProcessContainmentTrustMode:        ProcessContainmentTrustSignedV1,
+		ProcessContainmentAttestationKeyID: func() *string { value := "trusted-key"; return &value }(),
+		ProcessContainmentAttestationKeySHA256: func() *string {
+			value := processContainmentPublicKeySHA256(processContainmentTestPublicKey())
+			return &value
+		}(),
+	}
+	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err == nil || !strings.Contains(err.Error(), "trustState") {
+		t.Fatalf("persisted signed v1 protected-cgroup Manifest error = %v", err)
+	}
+	version = ProtectedCgroupSupervisorVersionV2
+	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err != nil {
+		t.Fatalf("signed v2 protected-cgroup Manifest error = %v", err)
+	}
+}
+
 func TestSSHProvisionerFailsClosedBeforeDialForUnsafeControlPlaneURL(t *testing.T) {
 	fixture := newSSHProvisionFixture(t, "http://control-plane.example.com")
 	dialer := &fakeSSHDialer{remote: &fakeSSHRemote{uploads: map[string][]byte{}}}
@@ -214,6 +714,11 @@ func TestSSHProvisionerInstallPreflightReportsRemoteFailureSeparatelyFromConflic
 	assertExecutionTargetProblemCode(t, err, "ssh_install_preflight_failed")
 	if len(remote.uploads) != 0 {
 		t.Fatalf("failed SSH install preflight uploaded %d artifacts", len(remote.uploads))
+	}
+	if _, _, resolveErr := fixture.provisioner.targets.ResolveWorkerTarget(
+		context.Background(), fixture.targetID, "ssh",
+	); resolveErr == nil {
+		t.Fatal("failed SSH install preflight left Target routable")
 	}
 }
 
@@ -538,6 +1043,36 @@ func newSSHProvisionFixtureWithConfiguration(
 		AgentdBinaryPath: binaryPath, RegistrationToken: "worker-registration-secret",
 		WorkerLeaseTTL: 6 * time.Second, Timeout: time.Second,
 	})
+	provisioner.awaitWorkerReady = func(
+		context.Context,
+		persistence.ExecutionTarget,
+		sshTargetConfiguration,
+		string,
+	) error {
+		return nil
+	}
+	provisioner.checkWorkerReady = func(
+		context.Context,
+		*gorm.DB,
+		persistence.ExecutionTarget,
+		sshTargetConfiguration,
+		string,
+	) (bool, string, error) {
+		return true, "fixture Worker is ready", nil
+	}
+	provisioner.lockWorkerReady = func(context.Context, *gorm.DB, uuid.UUID, string) error { return nil }
+	provisioner.revokeWorkers = func(
+		context.Context,
+		*gorm.DB,
+		identity.Principal,
+		persistence.ExecutionTarget,
+		int64,
+		string,
+		string,
+		string,
+	) (func(), error) {
+		return nil, nil
+	}
 	return sshProvisionFixture{
 		db: store.DB(), provisioner: provisioner, principal: principal,
 		tenantID: domain.TenantID, targetID: target.ID,
@@ -561,6 +1096,7 @@ type fakeSSHRemote struct {
 	uploads   map[string][]byte
 	commands  []string
 	runErrors []error
+	onRun     func(string)
 	closed    bool
 }
 
@@ -575,6 +1111,9 @@ func (r *fakeSSHRemote) Upload(_ context.Context, path string, _ os.FileMode, so
 
 func (r *fakeSSHRemote) Run(_ context.Context, command string) error {
 	r.commands = append(r.commands, command)
+	if r.onRun != nil {
+		r.onRun(command)
+	}
 	if len(r.runErrors) > 0 {
 		err := r.runErrors[0]
 		r.runErrors = r.runErrors[1:]
@@ -593,6 +1132,18 @@ func assertExecutionTargetProblemCode(t *testing.T, err error, code string) {
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != code {
 		t.Fatalf("expected problem code %q, got %v", code, err)
+	}
+}
+
+func assertSSHTargetStatusAndNoOperation(t *testing.T, db *gorm.DB, targetID uuid.UUID, status string) {
+	t.Helper()
+	var target persistence.ExecutionTarget
+	if err := db.Where("id = ?", targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != status || target.SSHOperationKind != nil || target.SSHOperationStartedAt != nil ||
+		target.SSHExpectedInstanceUID != nil {
+		t.Fatalf("SSH Target state = %#v, want status %q with no active operation", target, status)
 	}
 }
 

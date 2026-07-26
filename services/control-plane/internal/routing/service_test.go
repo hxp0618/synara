@@ -12,6 +12,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
 )
 
 func TestSelectUsesFreshHealthCapacityAndImmutableSnapshot(t *testing.T) {
@@ -54,6 +55,109 @@ func TestSelectUsesFreshHealthCapacityAndImmutableSnapshot(t *testing.T) {
 		execution.SelectedRegion == nil || *execution.SelectedRegion != "cn-shanghai" ||
 		execution.SelectedClusterID == nil || *execution.SelectedClusterID != "cluster-a" {
 		t.Fatalf("routing snapshots session=%#v execution=%#v", session, execution)
+	}
+}
+
+func TestSelectUsesQueuedAndRecoveringExecutionsAsBalancedSoftPressure(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyBalanced, true, []string{"cn-shanghai"})
+	pressured := fixture.createTarget(t, "queue-pressured")
+	idle := fixture.createTarget(t, "queue-idle")
+	fixture.addMember(t, group.ID, pressured.ID, "cn-shanghai", "cluster-a", 10, 100)
+	fixture.addMember(t, group.ID, idle.ID, "cn-shanghai", "cluster-b", 10, 100)
+	fixture.observe(t, pressured.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 1)
+	fixture.observe(t, idle.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 1)
+	fixture.createPressureExecution(t, pressured.ID, "queued")
+	fixture.createPressureExecution(t, pressured.ID, "recovering")
+	fixture.createPressureExecution(t, idle.ID, "completed")
+
+	selection, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Target.ID != idle.ID || selection.QueuePressure.QueuedExecutionUnits != 0 ||
+		selection.QueuePressure.EffectiveLoadRank != 1_000 {
+		t.Fatalf("queue-pressure selection = %#v", selection)
+	}
+}
+
+func TestSelectQueuePressureRemainsSoftAndPreservesPriorityStrategy(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	priority := fixture.createTarget(t, "priority-with-queue")
+	idle := fixture.createTarget(t, "idle-lower-priority")
+	fixture.addMember(t, group.ID, priority.ID, "cn-shanghai", "cluster-a", 1, 100)
+	fixture.addMember(t, group.ID, idle.ID, "cn-shanghai", "cluster-b", 100, 100)
+	fixture.observe(t, priority.ID, fixture.now, HealthHealthy, CapacityAvailable, 1, 0)
+	fixture.observe(t, idle.ID, fixture.now, HealthHealthy, CapacityAvailable, 1, 0)
+	fixture.createPressureExecution(t, priority.ID, "queued")
+
+	selection, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Target.ID != priority.ID || selection.QueuePressure.QueuedExecutionUnits != 1 {
+		t.Fatalf("priority queue-pressure selection = %#v", selection)
+	}
+}
+
+func TestLockSelectionForCommitRejectsChangedQueuePressure(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyBalanced, true, nil)
+	target := fixture.createTarget(t, "queue-pressure-commit")
+	fixture.addMember(t, group.ID, target.ID, "cn-shanghai", "cluster-a", 10, 100)
+	fixture.observe(t, target.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	request := SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	}
+	selection, err := fixture.service.Select(context.Background(), fixture.db, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.createPressureExecution(t, target.ID, "recovering")
+
+	err = fixture.db.Transaction(func(tx *gorm.DB) error {
+		_, lockErr := fixture.service.LockSelectionForCommit(context.Background(), tx, request, selection)
+		return lockErr
+	})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "target_routing_selection_stale" {
+		t.Fatalf("queue-pressure commit err = %v", err)
+	}
+	if apiError.Details["reason"] != "queue-pressure-changed" ||
+		apiError.Details["expectedQueuedExecutionUnits"] != int64(0) ||
+		apiError.Details["actualQueuedExecutionUnits"] != int64(1) {
+		t.Fatalf("queue-pressure stale details = %#v", apiError.Details)
+	}
+}
+
+func TestAddMemberRejectsAmbiguousDRDomainComponents(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "cluster-a")
+
+	for _, testCase := range []struct {
+		name      string
+		region    string
+		clusterID string
+		wantCode  string
+	}{
+		{name: "region", region: "cn/shanghai", clusterID: "cluster-a", wantCode: "invalid_target_group_member_region"},
+		{name: "cluster", region: "cn-shanghai", clusterID: "cluster/a", wantCode: "invalid_target_group_member_cluster"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := fixture.service.AddMember(context.Background(), AddMemberInput{
+				TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: target.ID,
+				Region: testCase.region, ClusterID: testCase.clusterID, Priority: 10, Weight: 100,
+			})
+			if codeOf(err) != testCase.wantCode {
+				t.Fatalf("ambiguous component err = %v", err)
+			}
+		})
 	}
 }
 
@@ -110,6 +214,99 @@ func TestSelectProviderAffinityNeverOverridesPreferredRegion(t *testing.T) {
 	}
 	if selection.Target.ID != preferredRegionTarget.ID {
 		t.Fatalf("preferred-region selection = %#v", selection)
+	}
+}
+
+func TestSelectHardPolicyOverridesPreferredTargetAndRejectsAnEmptyAllowList(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, []string{"cn-shanghai"})
+	preferred := fixture.createTarget(t, "policy-preferred-denied")
+	allowed := fixture.createTarget(t, "policy-allowed")
+	fixture.addMember(t, group.ID, preferred.ID, "cn-shanghai", "cluster-preferred", 1, 100)
+	fixture.addMember(t, group.ID, allowed.ID, "cn-shanghai", "cluster-allowed", 100, 100)
+	fixture.observe(t, preferred.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	fixture.observe(t, allowed.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+
+	document := schedulingpolicy.UnrestrictedDocument()
+	document.Target = schedulingpolicy.Rule{Mode: schedulingpolicy.ModeAllow, Values: []string{allowed.ID.String()}}
+	policy, err := schedulingpolicy.NewService(fixture.db).UpdateTenant(
+		context.Background(),
+		fixture.tenantID,
+		schedulingpolicy.UpdateInput{ExpectedVersion: 0, Document: document, ActorID: uuid.New()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		PreferredTargetID: &preferred.ID, Provider: "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Target.ID != allowed.ID || selection.SchedulingPolicySnapshot.Tenant.Version != policy.Tenant.Version {
+		t.Fatalf("hard-policy selection = %#v, policy = %#v", selection, policy)
+	}
+
+	document.Target = schedulingpolicy.Rule{Mode: schedulingpolicy.ModeAllow, Values: []string{}}
+	if _, err := schedulingpolicy.NewService(fixture.db).UpdateTenant(
+		context.Background(),
+		fixture.tenantID,
+		schedulingpolicy.UpdateInput{ExpectedVersion: policy.Tenant.Version, Document: document, ActorID: uuid.New()},
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		Provider: "codex",
+	})
+	if codeOf(err) != "target_group_no_policy_eligible_destination" {
+		t.Fatalf("empty Target allow-list err = %v", err)
+	}
+}
+
+func TestLockSelectionForCommitRejectsSchedulingPolicyVersionChange(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "policy-commit-stale")
+	fixture.addMember(t, group.ID, target.ID, "cn-shanghai", "cluster-a", 10, 100)
+	fixture.observe(t, target.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+
+	document := schedulingpolicy.UnrestrictedDocument()
+	policy, err := schedulingpolicy.NewService(fixture.db).UpdateTenant(
+		context.Background(),
+		fixture.tenantID,
+		schedulingpolicy.UpdateInput{ExpectedVersion: 0, Document: document, ActorID: uuid.New()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		Provider: "codex",
+	}
+	selection, err := fixture.service.Select(context.Background(), fixture.db, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := schedulingpolicy.NewService(fixture.db).UpdateTenant(
+		context.Background(),
+		fixture.tenantID,
+		schedulingpolicy.UpdateInput{
+			ExpectedVersion: policy.Tenant.Version,
+			Document:        document,
+			ActorID:         uuid.New(),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err = fixture.db.Transaction(func(tx *gorm.DB) error {
+		_, lockErr := fixture.service.LockSelectionForCommit(context.Background(), tx, request, selection)
+		return lockErr
+	})
+	if codeOf(err) != "target_routing_selection_stale" {
+		t.Fatalf("policy version change commit err = %v", err)
 	}
 }
 
@@ -329,6 +526,161 @@ func TestObserveLocationOutageRejectsFutureObservedAt(t *testing.T) {
 	}
 }
 
+func TestObserveHealthRejectsFutureObservedAtWithoutAdvancingAuthority(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	target := fixture.createTarget(t, "cluster-a")
+	first := fixture.observe(t, target.ID, fixture.now.Add(-2*time.Second), HealthHealthy, CapacityAvailable, 10, 0)
+
+	_, err := fixture.service.ObserveHealth(context.Background(), HealthObservation{
+		ExecutionTargetID: target.ID, Status: HealthUnreachable, CapacityStatus: CapacityUnknown,
+		Source: "future-publisher", ObservedAt: fixture.now.Add(time.Second), TTL: time.Minute,
+	})
+	if codeOf(err) != "invalid_target_health_observed_at" {
+		t.Fatalf("future health observedAt err = %v", err)
+	}
+
+	advanced := fixture.observe(t, target.ID, fixture.now.Add(-time.Second), HealthDegraded, CapacityAvailable, 10, 0)
+	if advanced.Version != first.Version+1 || advanced.Status != HealthDegraded {
+		t.Fatalf("health authority was displaced by future observation: first=%#v advanced=%#v", first, advanced)
+	}
+}
+
+func TestObserveDRReadinessRejectsFutureObservedAtWithoutAdvancingAuthority(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	target := fixture.createTarget(t, "cluster-a")
+	sourceDRDomain := DRDomainForLocation("cn-shanghai", "source")
+	destinationDRDomain := DRDomainForLocation("cn-beijing", "cluster-a")
+	firstObservedAt := fixture.now.Add(-2 * time.Second)
+	first, err := fixture.service.ObserveDRReadiness(context.Background(), DRReadinessObservation{
+		ExecutionTargetID: target.ID, SourceDRDomain: sourceDRDomain, DRDomain: destinationDRDomain,
+		ReplicatedThroughAt: fixture.now.Add(-time.Minute), CheckpointsReady: true,
+		PublisherIdentity: "routing-test", ObservedAt: firstObservedAt, TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.service.ObserveDRReadiness(context.Background(), DRReadinessObservation{
+		ExecutionTargetID: target.ID, SourceDRDomain: sourceDRDomain, DRDomain: "future/domain",
+		ReplicatedThroughAt: fixture.now.Add(-time.Minute), CheckpointsReady: true,
+		PublisherIdentity: "future-publisher", ObservedAt: fixture.now.Add(time.Second), TTL: time.Minute,
+	})
+	if codeOf(err) != "invalid_target_dr_readiness_observed_at" {
+		t.Fatalf("future readiness observedAt err = %v", err)
+	}
+
+	advanced, err := fixture.service.ObserveDRReadiness(context.Background(), DRReadinessObservation{
+		ExecutionTargetID: target.ID, SourceDRDomain: sourceDRDomain, DRDomain: destinationDRDomain,
+		ReplicatedThroughAt: fixture.now.Add(-30 * time.Second), CheckpointsReady: true,
+		PublisherIdentity: "routing-test", ObservedAt: fixture.now.Add(-time.Second), TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.Version != first.Version+1 || advanced.DRDomain != destinationDRDomain {
+		t.Fatalf("readiness authority was displaced by future observation: first=%#v advanced=%#v", first, advanced)
+	}
+}
+
+func TestSelectRejectsFutureHealthAuthority(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "cluster-a")
+	fixture.addMember(t, group.ID, target.ID, "cn-shanghai", "cluster-a", 10, 100)
+	futureObservedAt := fixture.now.Add(time.Minute)
+	if err := fixture.db.Create(&persistence.ExecutionTargetHealth{
+		ExecutionTargetID: target.ID, Status: HealthHealthy, CapacityStatus: CapacityAvailable,
+		AvailableCapacityUnits: intPointer(10), Source: "bypassed-service",
+		ObservedAt: futureObservedAt, ExpiresAt: futureObservedAt.Add(time.Minute), Version: 1, UpdatedAt: fixture.now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	})
+	if codeOf(err) != "target_group_no_eligible_destination" {
+		t.Fatalf("future health selection err = %v", err)
+	}
+}
+
+func TestSelectBindsDRReadinessToCurrentDestinationDomain(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "destination")
+	fixture.addMember(t, group.ID, target.ID, "cn-beijing", "cluster-b", 10, 100)
+	fixture.observe(t, target.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	sourceDRDomain := DRDomainForLocation("cn-shanghai", "cluster-a")
+	watermark := fixture.now.Add(-time.Minute)
+
+	fixture.observeDRReadiness(t, target.ID, sourceDRDomain, "cn-beijing/wrong-cluster", watermark, false, true, false)
+	request := SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		SourceRegion: "cn-shanghai", SourceClusterID: "cluster-a", SourceDRDomain: sourceDRDomain,
+		ReplicatedThroughAt: watermark, RequiredDRStores: DRStoreRequirements{Checkpoints: true}, DisasterRecovery: true,
+	}
+	_, err := fixture.service.Select(context.Background(), fixture.db, request)
+	if codeOf(err) != "target_group_dr_destination_domain_mismatch" {
+		t.Fatalf("wrong destination domain err = %v", err)
+	}
+
+	fixture.now = fixture.now.Add(time.Second)
+	correct := fixture.observeDRReadiness(
+		t, target.ID, sourceDRDomain, DRDomainForLocation("cn-beijing", "cluster-b"), watermark, false, true, false,
+	)
+	selection, err := fixture.service.Select(context.Background(), fixture.db, request)
+	if err != nil || selection.DRReadiness == nil || selection.DRReadiness.Version != correct.Version {
+		t.Fatalf("correct destination authority selection = %#v err=%v", selection, err)
+	}
+
+	if err := fixture.db.Model(&persistence.ExecutionTargetGroupMember{}).
+		Where("tenant_id = ? AND target_group_id = ? AND execution_target_id = ?", fixture.tenantID, group.ID, target.ID).
+		Updates(map[string]any{"region": "cn-guangdong", "cluster_id": "cluster-c", "version": gorm.Expr("version + 1")}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.Select(context.Background(), fixture.db, request)
+	if codeOf(err) != "target_group_dr_destination_domain_mismatch" {
+		t.Fatalf("moved membership stale destination err = %v", err)
+	}
+
+	fixture.now = fixture.now.Add(time.Second)
+	fixture.observeDRReadiness(
+		t, target.ID, sourceDRDomain, DRDomainForLocation("cn-guangdong", "cluster-c"), watermark, false, true, false,
+	)
+	selection, err = fixture.service.Select(context.Background(), fixture.db, request)
+	if err != nil || selection.Member.Region != "cn-guangdong" {
+		t.Fatalf("moved membership refreshed authority selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestSelectRejectsFutureDRReadinessAuthority(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "destination")
+	fixture.addMember(t, group.ID, target.ID, "cn-beijing", "cluster-b", 10, 100)
+	fixture.observe(t, target.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	sourceDRDomain := DRDomainForLocation("cn-shanghai", "cluster-a")
+	watermark := fixture.now.Add(-time.Minute)
+	futureObservedAt := fixture.now.Add(time.Minute)
+	if err := fixture.db.Create(&persistence.ExecutionTargetDRReadiness{
+		ExecutionTargetID: target.ID, SourceDRDomain: sourceDRDomain,
+		DRDomain: DRDomainForLocation("cn-beijing", "cluster-b"), ReplicatedThroughAt: watermark,
+		CheckpointsReady: true, PublisherIdentity: "bypassed-service",
+		ObservedAt: futureObservedAt, ExpiresAt: futureObservedAt.Add(time.Minute), Version: 1, UpdatedAt: fixture.now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		SourceRegion: "cn-shanghai", SourceClusterID: "cluster-a", SourceDRDomain: sourceDRDomain,
+		ReplicatedThroughAt: watermark, RequiredDRStores: DRStoreRequirements{Checkpoints: true}, DisasterRecovery: true,
+	})
+	if codeOf(err) != "target_group_dr_readiness_observed_in_future" {
+		t.Fatalf("future readiness selection err = %v", err)
+	}
+}
+
 func TestSelectIgnoresFutureLocationOutageRows(t *testing.T) {
 	fixture := newRoutingFixture(t)
 	group := fixture.createGroup(t, StrategyPriority, true, nil)
@@ -455,7 +807,8 @@ func TestHealthObservationIsMonotonicAndExpiresClosed(t *testing.T) {
 	if codeOf(err) != "target_health_observation_stale" {
 		t.Fatalf("stale observation err = %v", err)
 	}
-	second := fixture.observe(t, target.ID, fixture.now.Add(time.Second), HealthDegraded, CapacityAvailable, 4, 1)
+	fixture.now = fixture.now.Add(time.Second)
+	second := fixture.observe(t, target.ID, fixture.now, HealthDegraded, CapacityAvailable, 4, 1)
 	if second.Version != 2 || second.Status != HealthDegraded {
 		t.Fatalf("second observation = %#v", second)
 	}
@@ -485,10 +838,13 @@ func newRoutingFixture(t *testing.T) *routingFixture {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(
-		&persistence.Tenant{}, &persistence.Organization{}, &persistence.ExecutionTarget{},
+		&persistence.Tenant{}, &persistence.Organization{}, &persistence.AuditLog{}, &persistence.ExecutionTarget{},
 		&persistence.ExecutionTargetGroup{}, &persistence.ExecutionTargetGroupMember{},
 		&persistence.ExecutionTargetHealth{}, &persistence.ExecutionTargetDRReadiness{},
 		&persistence.ExecutionLocationOutage{},
+		&persistence.AgentExecution{},
+		&persistence.ExecutionSchedulingPolicyHead{}, &persistence.ExecutionSchedulingPolicyRevision{},
+		&persistence.ExecutionSchedulingPolicyRule{}, &persistence.ExecutionSchedulingPolicyRuleValue{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -570,6 +926,18 @@ func (f *routingFixture) observe(
 		t.Fatal(err)
 	}
 	return observation
+}
+
+func (f *routingFixture) createPressureExecution(t *testing.T, targetID uuid.UUID, status string) {
+	t.Helper()
+	execution := persistence.AgentExecution{
+		ID: uuid.New(), TenantID: f.tenantID, SessionID: uuid.New(), TurnID: uuid.New(),
+		Attempt: 1, Status: status, ExecutionTargetID: targetID, TargetKind: "kubernetes",
+		Generation: 0, RequestedBy: uuid.New(), QueuedAt: f.now,
+	}
+	if err := f.db.Create(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *routingFixture) observeDRReadiness(

@@ -133,9 +133,13 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	if err := validatePublicCapabilities(capabilities); err != nil {
 		return Target{}, err
 	}
+	status := "active"
+	if kind == platform.TargetSSH {
+		status = "offline"
+	}
 	model := persistence.ExecutionTarget{
 		ID: uuid.New(), TenantID: &tenantID, OrganizationID: input.OrganizationID,
-		Kind: string(kind), Name: name, Status: "active", ConfigurationEncrypted: configuration,
+		Kind: string(kind), Name: name, Status: status, ConfigurationEncrypted: configuration,
 		Capabilities: capabilities,
 	}
 	if err := s.db.WithContext(ctx).Create(&model).Error; err != nil {
@@ -318,13 +322,96 @@ func (s *Service) ResolveWorkerTarget(ctx context.Context, targetID uuid.UUID, t
 	return resolveWorkerTarget(ctx, s.db, targetID, targetKind)
 }
 
+// ResolveWorkerBootstrapTarget is intentionally active-only. Offline SSH
+// bootstrap authority requires the operation generation and exact instance UID
+// to be validated while holding the Target lock in the caller transaction.
+func (s *Service) ResolveWorkerBootstrapTarget(
+	ctx context.Context,
+	targetID uuid.UUID,
+	targetKind string,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	return resolveWorkerTarget(ctx, s.db, targetID, targetKind)
+}
+
 func (s *Service) ResolveWorkerTargetInTransaction(
 	ctx context.Context,
 	tx *gorm.DB,
 	targetID uuid.UUID,
 	targetKind string,
 ) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
-	return resolveWorkerTarget(ctx, tx, targetID, targetKind)
+	return resolveWorkerTargetLocked(ctx, tx, targetID, targetKind)
+}
+
+func (s *Service) ResolveWorkerBootstrapTargetInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+	instanceUID string,
+	sshBootstrapGeneration *int64,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	return resolveWorkerBootstrapTargetLocked(
+		ctx, tx, targetID, targetKind, instanceUID, sshBootstrapGeneration, false,
+	)
+}
+
+func (s *Service) ResolveWorkerRegistrationTargetInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+	instanceUID string,
+	sshBootstrapGeneration *int64,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	return resolveWorkerBootstrapTargetLocked(
+		ctx, tx, targetID, targetKind, instanceUID, sshBootstrapGeneration, true,
+	)
+}
+
+func resolveWorkerBootstrapTargetLocked(
+	ctx context.Context,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+	instanceUID string,
+	sshBootstrapGeneration *int64,
+	registration bool,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	kind, err := platform.ParseExecutionTargetKind(targetKind)
+	if err != nil {
+		return persistence.ExecutionTarget{}, "", problem.New(400, "invalid_execution_target_kind", err.Error()+".")
+	}
+	var model persistence.ExecutionTarget
+	if err := persistence.WithLocking(db.WithContext(ctx), "UPDATE", "").
+		Where("id = ?", targetID).Take(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+	} else if err != nil {
+		return persistence.ExecutionTarget{}, "", problem.Wrap(500, "execution_target_lookup_failed", "Failed to resolve the execution target.", err)
+	}
+	if model.Kind != string(kind) {
+		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
+	}
+	if kind != platform.TargetSSH {
+		if model.Status != "active" {
+			return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+		}
+		return model, kind, nil
+	}
+	if model.Status == "active" {
+		return model, kind, nil
+	}
+	if model.Status != "offline" || model.SSHOperationKind == nil ||
+		(*model.SSHOperationKind != "install" && *model.SSHOperationKind != "upgrade") ||
+		model.SSHExpectedInstanceUID == nil || sshBootstrapGeneration == nil ||
+		*sshBootstrapGeneration != model.SSHOperationGeneration ||
+		strings.TrimSpace(instanceUID) != model.SSHExpectedInstanceUID.String() {
+		return persistence.ExecutionTarget{}, "", problem.New(
+			409,
+			"ssh_bootstrap_authority_invalid",
+			"SSH Worker bootstrap authority is not valid for the current Target operation.",
+		)
+	}
+	return model, kind, nil
 }
 
 func resolveWorkerTarget(
@@ -339,6 +426,30 @@ func resolveWorkerTarget(
 	}
 	var model persistence.ExecutionTarget
 	if err := db.WithContext(ctx).Where("id = ? AND status = ?", targetID, "active").Take(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+	} else if err != nil {
+		return persistence.ExecutionTarget{}, "", problem.Wrap(500, "execution_target_lookup_failed", "Failed to resolve the execution target.", err)
+	}
+	if model.Kind != string(kind) {
+		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
+	}
+	return model, kind, nil
+}
+
+func resolveWorkerTargetLocked(
+	ctx context.Context,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	kind, err := platform.ParseExecutionTargetKind(targetKind)
+	if err != nil {
+		return persistence.ExecutionTarget{}, "", problem.New(400, "invalid_execution_target_kind", err.Error()+".")
+	}
+	var model persistence.ExecutionTarget
+	if err := persistence.WithLocking(db.WithContext(ctx), "UPDATE", "").
+		Where("id = ? AND status = ?", targetID, "active").
+		Take(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
 	} else if err != nil {
 		return persistence.ExecutionTarget{}, "", problem.Wrap(500, "execution_target_lookup_failed", "Failed to resolve the execution target.", err)

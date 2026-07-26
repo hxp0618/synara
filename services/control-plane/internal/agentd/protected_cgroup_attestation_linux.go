@@ -28,7 +28,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/containmentattestation"
 )
 
-const protectedCgroupProbeDigestInput = "synara.agentd.protected-cgroup-probe.v1\ncredential-drop\nUseCgroupFD\ncgroup.kill\nsetsid-descendant"
+const protectedCgroupProbeDigestInput = "synara.agentd.protected-cgroup-probe.v1\ncredential-drop\nUseCgroupFD\ncgroup.kill\nsetsid-descendant\nempty-helper-and-child-environment"
 
 var (
 	protectedCgroupProbeHook    = buildProtectedCgroupPreflightReport
@@ -37,8 +37,9 @@ var (
 )
 
 type protectedCgroupProbeIdentityReport struct {
-	UID uint32 `json:"uid"`
-	GID uint32 `json:"gid"`
+	UID                uint32 `json:"uid"`
+	GID                uint32 `json:"gid"`
+	EnvironmentEntries int    `json:"environmentEntries"`
 }
 
 type protectedCgroupProbeReadResult struct {
@@ -158,9 +159,11 @@ func buildProtectedCgroupPreflightReport(ctx context.Context, cfg Config) (*Prot
 }
 
 func runProtectedCgroupLiveProbe(ctx context.Context, cfg Config) (*ProtectedCgroupPreflightReport, error) {
+	workerIncarnation := probeWorkerIncarnation(cfg)
 	fence := ProtectedCgroupFence{
+		ExecutionID:       uuid.NewSHA1(workerIncarnation, []byte("synara-protected-cgroup-preflight")),
 		Generation:        time.Now().UTC().UnixNano(),
-		WorkerIncarnation: probeWorkerIncarnation(cfg),
+		WorkerIncarnation: workerIncarnation,
 	}
 	pipes, err := openProtectedCgroupProbePipes()
 	if err != nil {
@@ -182,6 +185,10 @@ func runProtectedCgroupLiveProbe(ctx context.Context, cfg Config) (*ProtectedCgr
 		CgroupV2Root:              cfg.CgroupV2Root,
 		ProtectedProviderIdentity: cfg.CgroupV2ProviderIdentity,
 		ContainmentFence:          fence,
+		SupervisorInstance:        uuid.New(),
+		RuntimeInstance:           uuid.New(),
+		ProtectedRootLease:        protectedCgroupRootLeaseFromContext(ctx),
+		ProtectedDiagnostic:       true,
 	})
 	if err != nil {
 		return nil, err
@@ -231,6 +238,12 @@ func runProtectedCgroupLiveProbe(ctx context.Context, cfg Config) (*ProtectedCgr
 			cfg.CgroupV2ProviderIdentity.GID,
 		), terminateAndWait())
 	}
+	if identity.EnvironmentEntries != 0 {
+		return nil, errors.Join(fmt.Errorf(
+			"protected cgroup probe helper inherited %d environment entries",
+			identity.EnvironmentEntries,
+		), terminateAndWait())
+	}
 	if err := terminateAndWait(); err != nil {
 		return nil, err
 	}
@@ -251,7 +264,7 @@ func defaultProtectedCgroupProbeCommand(reportWrite, readyWrite, sentinelWrite *
 		return nil, fmt.Errorf("resolve protected cgroup probe executable: %w", err)
 	}
 	command := exec.Command(executable, protectedCgroupProbeHelperCommand)
-	command.Env = os.Environ()
+	command.Env = []string{}
 	command.ExtraFiles = []*os.File{reportWrite, readyWrite, sentinelWrite}
 	return command, nil
 }
@@ -313,7 +326,7 @@ func readProtectedCgroupProbeReadySignal(reader io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("read protected cgroup probe ready signal: %w", err)
 	}
-	if strings.TrimSpace(line) != "ready" {
+	if strings.TrimSpace(line) != "ready environmentEntries=0" {
 		return errors.New("protected cgroup probe returned an invalid readiness signal")
 	}
 	return nil
@@ -327,8 +340,9 @@ func runProtectedCgroupProbeHelper() error {
 	defer readyWriter.Close()
 	defer sentinelWriter.Close()
 	identity := protectedCgroupProbeIdentityReport{
-		UID: uint32(os.Geteuid()),
-		GID: uint32(os.Getegid()),
+		UID:                uint32(os.Geteuid()),
+		GID:                uint32(os.Getegid()),
+		EnvironmentEntries: len(os.Environ()),
 	}
 	if err := json.NewEncoder(reportWriter).Encode(identity); err != nil {
 		return err
@@ -337,7 +351,7 @@ func runProtectedCgroupProbeHelper() error {
 		return err
 	}
 	command := exec.Command(os.Args[0], protectedCgroupProbeChildCommand)
-	command.Env = os.Environ()
+	command.Env = []string{}
 	command.ExtraFiles = []*os.File{readyWriter, sentinelWriter}
 	if err := command.Start(); err != nil {
 		return err
@@ -361,7 +375,7 @@ func runProtectedCgroupProbeChild() error {
 	if _, err := unix.Setsid(); err != nil {
 		return err
 	}
-	if _, err := io.WriteString(readyWriter, "ready\n"); err != nil {
+	if _, err := fmt.Fprintf(readyWriter, "ready environmentEntries=%d\n", len(os.Environ())); err != nil {
 		return err
 	}
 	time.Sleep(250 * time.Millisecond)

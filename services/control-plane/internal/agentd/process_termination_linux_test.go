@@ -87,14 +87,30 @@ func TestProtectedLinuxCgroupPreparesProviderCredentialAndAttachFD(t *testing.T)
 		UID: supervisorIdentity.UID + 1,
 		GID: supervisorIdentity.GID + 1,
 	}
+	fence := ProtectedCgroupFence{
+		ExecutionID: uuid.New(), Generation: 3, WorkerIncarnation: uuid.New(),
+	}
+	supervisorInstance := uuid.New()
+	runtimeInstance := uuid.New()
+	rootLease, err := AcquireProtectedCgroupRootLease(ProtectedCgroupRootLeaseConfig{
+		ParentPath: root, SupervisorIdentity: supervisorIdentity, ProviderIdentity: providerIdentity,
+		SupervisorInstance: supervisorInstance,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootLease.Close()
+	if err := rootLease.RecoverOrphans(); err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command("true")
 	tree, err := newProcessTree(command, processTreeOptions{
 		CgroupV2Root:              root,
 		ProtectedProviderIdentity: &providerIdentity,
-		ContainmentFence: ProtectedCgroupFence{
-			Generation:        3,
-			WorkerIncarnation: uuid.New(),
-		},
+		ContainmentFence:          fence,
+		SupervisorInstance:        supervisorInstance,
+		RuntimeInstance:           runtimeInstance,
+		ProtectedRootLease:        rootLease,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -113,14 +129,14 @@ func TestProtectedLinuxCgroupPreparesProviderCredentialAndAttachFD(t *testing.T)
 	if !command.SysProcAttr.UseCgroupFD || command.SysProcAttr.CgroupFD <= 0 {
 		t.Fatalf("protected process tree omitted cgroup attach fd: %#v", command.SysProcAttr)
 	}
-	entriesBefore, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entriesBefore) != 1 || !entriesBefore[0].IsDir() {
+	entriesBefore := linuxCgroupTestChildren(t, root)
+	if len(entriesBefore) != 1 {
 		t.Fatalf("protected cgroup tree was not created under %s: %#v", root, entriesBefore)
 	}
-	bundlePath := filepath.Join(root, entriesBefore[0].Name())
+	if entriesBefore[0] != protectedCgroupBundleName(fence, supervisorInstance, runtimeInstance) {
+		t.Fatalf("protected cgroup name = %q, want authoritative execution fence", entriesBefore[0])
+	}
+	bundlePath := filepath.Join(root, entriesBefore[0])
 	installProtectedCgroupControlFiles(t, bundlePath)
 	installProtectedCgroupControlFiles(t, filepath.Join(bundlePath, "agentd"))
 	installProtectedCgroupControlFiles(t, filepath.Join(bundlePath, "provider"))
@@ -130,10 +146,7 @@ func TestProtectedLinuxCgroupPreparesProviderCredentialAndAttachFD(t *testing.T)
 	if err := tree.release(); err != nil {
 		t.Fatal(err)
 	}
-	entriesAfter, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entriesAfter := linuxCgroupTestChildren(t, root)
 	if len(entriesAfter) != 0 {
 		t.Fatalf("protected cgroup tree leaked entries under %s: %#v", root, entriesAfter)
 	}
@@ -154,17 +167,17 @@ func TestProtectedLinuxCgroupRejectsProviderSharingSupervisorUID(t *testing.T) {
 			GID: supervisorIdentity.GID + 1,
 		},
 		ContainmentFence: ProtectedCgroupFence{
+			ExecutionID:       uuid.New(),
 			Generation:        1,
 			WorkerIncarnation: uuid.New(),
 		},
+		SupervisorInstance: uuid.New(),
+		RuntimeInstance:    uuid.New(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "must not share a UID") {
 		t.Fatalf("same-uid protected identity error = %v", err)
 	}
-	entries, readErr := os.ReadDir(root)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	entries := linuxCgroupTestChildren(t, root)
 	if len(entries) != 0 {
 		t.Fatalf("same-uid validation created protected cgroup entries: %#v", entries)
 	}

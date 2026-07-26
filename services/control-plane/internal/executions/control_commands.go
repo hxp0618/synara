@@ -520,7 +520,7 @@ func (s *Service) updateControlCommandDelivery(
 		switch command.CommandType {
 		case "InterruptTurn":
 			return s.acknowledgeInterruptControlCommand(
-				ctx, tx, worker, lease, execution, command, input, now, &appended,
+				ctx, tx, worker, lease, execution, command, input, now, requestID, &appended,
 			)
 		case "SteerTurn":
 			return s.acknowledgeSteerControlCommand(
@@ -532,7 +532,7 @@ func (s *Service) updateControlCommandDelivery(
 			)
 		case "CompactSession", "StartReview", "RollbackSession", "ForkSession":
 			return s.acknowledgePrimaryControlCommand(
-				ctx, tx, worker, lease, execution, command, input, now, &appended,
+				ctx, tx, worker, lease, execution, command, input, now, requestID, &appended,
 			)
 		default:
 			return ControlCommand{}, problem.New(409, "control_command_not_implemented", fmt.Sprintf("Control command %q is not implemented.", command.CommandType))
@@ -557,6 +557,7 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	command persistence.ExecutionControlCommand,
 	input ControlCommandDeliveryInput,
 	now time.Time,
+	requestID string,
 	appended *[]persistence.SessionEvent,
 ) (ControlCommand, error) {
 	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
@@ -571,8 +572,15 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
 		return ControlCommand{}, err
 	}
-	if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+	leaseDelete := tx.WithContext(ctx).Delete(&lease)
+	if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The interrupted Execution lease changed during release."); err != nil {
 		return ControlCommand{}, problem.Wrap(500, "lease_release_failed", "Failed to release the interrupted Execution lease.", err)
+	}
+	if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+		lease, now, now, workerClaimReleaseControlInterrupted,
+		workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+	)); err != nil {
+		return ControlCommand{}, err
 	}
 	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 		return ControlCommand{}, err
@@ -691,6 +699,7 @@ func (s *Service) acknowledgePrimaryControlCommand(
 	command persistence.ExecutionControlCommand,
 	input ControlCommandDeliveryInput,
 	now time.Time,
+	requestID string,
 	appended *[]persistence.SessionEvent,
 ) (ControlCommand, error) {
 	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
@@ -702,8 +711,15 @@ func (s *Service) acknowledgePrimaryControlCommand(
 	if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
 		return ControlCommand{}, err
 	}
-	if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+	leaseDelete := tx.WithContext(ctx).Delete(&lease)
+	if err := expectOne(leaseDelete, 409, "lease_release_conflict", "The completed operation lease changed during release."); err != nil {
 		return ControlCommand{}, problem.Wrap(500, "lease_release_failed", "Failed to release the completed operation lease.", err)
+	}
+	if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+		lease, now, now, workerClaimReleaseControlOperationCompleted,
+		workerClaimReleaseAuthorityWorker, worker.ID.String(), requestID,
+	)); err != nil {
+		return ControlCommand{}, err
 	}
 	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 		return ControlCommand{}, err

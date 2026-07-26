@@ -16,6 +16,7 @@ disruption_probe_window_seconds="${SYNARA_K8S_RESILIENCE_DISRUPTION_WINDOW_SECON
 partition_seconds="${SYNARA_K8S_RESILIENCE_PARTITION_SECONDS:-20}"
 node_partition_hook_timeout_seconds="${SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS:-30}"
 node_partition_start_hook_timeout_seconds="${SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS:-$node_partition_hook_timeout_seconds}"
+node_partition_verify_hook_timeout_seconds="${SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS:-$node_partition_hook_timeout_seconds}"
 node_partition_stop_hook_timeout_seconds="${SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS:-$node_partition_hook_timeout_seconds}"
 case_timeout_seconds="${SYNARA_K8S_RESILIENCE_CASE_TIMEOUT_SECONDS:-240}"
 min_worker_nodes="${SYNARA_K8S_RESILIENCE_MIN_WORKER_NODES:-3}"
@@ -23,6 +24,7 @@ max_failover_ready_failures="${SYNARA_K8S_RESILIENCE_MAX_FAILOVER_READY_FAILURES
 max_drain_ready_failures="${SYNARA_K8S_RESILIENCE_MAX_DRAIN_READY_FAILURES:-0}"
 max_partition_ready_failures="${SYNARA_K8S_RESILIENCE_MAX_PARTITION_READY_FAILURES:-2}"
 node_partition_start_hook="${SYNARA_K8S_NODE_PARTITION_START_HOOK:-}"
+node_partition_verify_hook="${SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK:-}"
 node_partition_stop_hook="${SYNARA_K8S_NODE_PARTITION_STOP_HOOK:-}"
 dry_run="${SYNARA_K8S_RESILIENCE_DRY_RUN:-0}"
 keep_resources="${SYNARA_K8S_KEEP_RESOURCES:-0}"
@@ -40,6 +42,12 @@ work_dir="$(mktemp -d)"
 permissions_file="$work_dir/permissions.jsonl"
 scenarios_file="$work_dir/scenarios.jsonl"
 soak_cycles_file="$work_dir/soak-cycles.jsonl"
+partition_verification_file="$work_dir/node-partition-verification.json"
+managed_hook_controller="${SYNARA_K8S_MANAGED_HOOK_CONTROLLER:-$script_dir/managed-hook-controller.py}"
+if [[ "$managed_hook_controller" != "$script_dir/managed-hook-controller.py" && "$context" != "managed-validation" ]]; then
+  printf 'SYNARA_K8S_MANAGED_HOOK_CONTROLLER is test-only and requires managed-validation\n' >&2
+  exit 1
+fi
 touch "$permissions_file" "$scenarios_file" "$soak_cycles_file"
 
 started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -63,6 +71,26 @@ PROBE_PID=""
 LEASE_GUARD_PID=""
 LEASE_GUARD_ROW=""
 LEASE_GUARD_APP=""
+LEASE_GUARD_POD=""
+LEASE_GUARD_POD_UID=""
+LEASE_GUARD_NONCE=""
+LEASE_GUARD_OUTPUT_FILE=""
+LEASE_GUARD_FINISH_DEADLINE=0
+LEASE_GUARD_ERROR=""
+LEASE_GUARD_CONTROLLER_PID=""
+LEASE_GUARD_WATCHDOG_PID=""
+LEASE_GUARD_COMMAND_WRITER_PID=""
+LEASE_GUARD_PID_IDENTITY=""
+LEASE_GUARD_CONTROLLER_PID_IDENTITY=""
+LEASE_GUARD_WATCHDOG_PID_IDENTITY=""
+LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+LEASE_GUARD_RUNTIME_DIR=""
+LEASE_GUARD_PSQL_FIFO=""
+LEASE_GUARD_COMMAND_FIFO=""
+LEASE_GUARD_UNLOCK_SENT=0
+LEASE_GUARD_ANCHOR_OPEN=0
+POD_DELETE_AMBIGUOUS=false
+POD_DELETE_RECONCILIATION='null'
 CORDONED_NODE=""
 PARTITION_NETWORK=""
 PARTITION_NODE=""
@@ -70,42 +98,52 @@ PARTITION_HOOK_ACTIVE=0
 PARTITION_HOOK_ATTEMPTED=0
 PARTITION_HOOK_NODE=""
 PARTITION_HOOK_TARGET_JSON='null'
+PARTITION_HOOK_CHALLENGE=""
+PARTITION_HOOK_CHALLENGE_ISSUED_EPOCH=0
 PARTITION_HOOK_START_JSON='null'
+PARTITION_HOOK_VERIFY_JSON='null'
 PARTITION_HOOK_STOP_JSON='null'
 PARTITION_HOOK_RESULT_JSON='null'
+PARTITION_HOOK_OPERATION_ID=""
+PARTITION_HOOK_CONTROLLER_PID=""
+PARTITION_HOOK_CONTROLLER_IDENTITY=""
+PARTITION_HOOK_LAST_PHASE=""
+PARTITION_HOOK_NEEDS_RECOVERY=0
 kube=()
 proxy_path=""
 
 cleanup() {
   local exit_status=$?
+  trap '' HUP INT TERM
   if [[ -n "${PROBE_PID:-}" ]]; then
     kill "$PROBE_PID" >/dev/null 2>&1 || true
     wait "$PROBE_PID" >/dev/null 2>&1 || true
     PROBE_PID=""
   fi
-  if [[ -n "${LEASE_GUARD_PID:-}" ]]; then
-    kill "$LEASE_GUARD_PID" >/dev/null 2>&1 || true
-    wait "$LEASE_GUARD_PID" >/dev/null 2>&1 || true
-    LEASE_GUARD_PID=""
-    LEASE_GUARD_APP=""
+  if [[ -n "${LEASE_GUARD_PID:-}" || -n "${LEASE_GUARD_CONTROLLER_PID:-}" \
+    || -n "${LEASE_GUARD_WATCHDOG_PID:-}" || -n "${LEASE_GUARD_COMMAND_WRITER_PID:-}" ]]; then
+    stop_reconciler_takeover_guard >/dev/null 2>&1 || true
   fi
   if [[ "$PARTITION_HOOK_ACTIVE" == "1" ]]; then
-    local cleanup_stop_json cleanup_stop_rc=0 cleanup_details_json cleanup_node cleanup_target_json cleanup_start_json
+    local cleanup_stop_json cleanup_stop_rc=0 cleanup_details_json cleanup_node cleanup_target_json cleanup_start_json cleanup_verify_json
     cleanup_node="$PARTITION_HOOK_NODE"
     cleanup_target_json="$PARTITION_HOOK_TARGET_JSON"
     cleanup_start_json="$PARTITION_HOOK_START_JSON"
+    cleanup_verify_json="$PARTITION_HOOK_VERIFY_JSON"
     if stop_managed_partition_hook "cleanup-exit"; then
       cleanup_stop_rc=0
+      cleanup_stop_json="$PARTITION_HOOK_RESULT_JSON"
     else
       cleanup_stop_rc=$?
+      cleanup_stop_json="$PARTITION_HOOK_RESULT_JSON"
     fi
-    cleanup_stop_json="$PARTITION_HOOK_RESULT_JSON"
     overall_failed=1
     if [[ -n "$ACTIVE_CASE_NAME" && "$ACTIVE_CASE_RECORDED" != "1" ]]; then
       cleanup_details_json="$(jq -nc \
         --arg node "$cleanup_node" \
         --argjson target "$cleanup_target_json" \
         --argjson startHook "$cleanup_start_json" \
+        --argjson verifyHook "$cleanup_verify_json" \
         --argjson stopHook "$cleanup_stop_json" \
         --argjson exitStatus "$exit_status" '
         {
@@ -122,6 +160,7 @@ cleanup() {
           partitionSeconds: '"$partition_seconds"',
           exitStatus: $exitStatus,
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       append_case_result "$ACTIVE_CASE_NAME" "failed" "$ACTIVE_CASE_STARTED_AT" "$(iso_now)" "$cleanup_details_json"
@@ -155,7 +194,17 @@ cleanup() {
   rm -rf "$work_dir"
   return "$exit_status"
 }
+
+handle_termination_signal() {
+  local signum="$1"
+  trap '' HUP INT TERM
+  exit "$((128 + signum))"
+}
+
 trap cleanup EXIT
+trap 'handle_termination_signal 1' HUP
+trap 'handle_termination_signal 2' INT
+trap 'handle_termination_signal 15' TERM
 
 iso_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
@@ -229,6 +278,23 @@ sanitize_progress_details() {
       postHookExitCode: ($details.postHook.exitCode // null)
     }
     | with_entries(select(.value != null))'
+}
+
+sanitize_managed_details() {
+  local case_name="$1" details_json="$2"
+  if [[ "$case_name" == "node-partition" && "$context" != kind-* ]]; then
+    jq -c '
+      walk(
+        if type == "object" then
+          del(.target, .rawTarget, .node, .nodeName, .nodeUid, .nodeUID,
+              .pod, .podName, .podUid, .podUID, .targetPod, .targetPodUid,
+              .challenge, .command, .context, .namespace, .extraSecret, .secret)
+        else . end
+      )
+    ' <<<"$details_json"
+  else
+    printf '%s\n' "$details_json"
+  fi
 }
 
 append_journal_entry() {
@@ -386,55 +452,37 @@ run_command_capture() {
   local stdout_file="$2"
   local stderr_file="$3"
   local timeout_seconds="${4:-0}"
-  local status_json exit_code=1
-  if ! status_json="$(python3 - "$command_text" "$stdout_file" "$stderr_file" "$timeout_seconds" <<'PY'
+  python3 - "$command_text" "$stdout_file" "$stderr_file" "$timeout_seconds" <<'PY'
 import json
-import os
-import signal
 import subprocess
 import sys
 
 command, stdout_path, stderr_path, timeout_text = sys.argv[1:5]
-timeout_seconds = int(timeout_text)
+timeout = int(timeout_text)
 timed_out = False
-exit_code = 0
-
 with open(stdout_path, "wb") as stdout_handle, open(stderr_path, "wb") as stderr_handle:
-    proc = None
     try:
-        proc = subprocess.Popen(
-            ["bash", "-lc", command],
-            env=os.environ.copy(),
+        completed = subprocess.run(
+            ["/bin/sh", "-c", command],
+            stdin=subprocess.DEVNULL,
             stdout=stdout_handle,
             stderr=stderr_handle,
-            start_new_session=True,
+            timeout=None if timeout <= 0 else timeout,
+            check=False,
+            close_fds=True,
         )
-        exit_code = proc.wait(timeout=None if timeout_seconds <= 0 else timeout_seconds)
+        exit_code = completed.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
         exit_code = 124
-        if proc is not None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                proc.wait()
-
-json.dump({"exitCode": exit_code, "timedOut": timed_out}, sys.stdout)
+json.dump(
+    {"exitCode": exit_code, "timedOut": timed_out, "terminationConfirmed": True},
+    sys.stdout,
+    separators=(",", ":"),
+    sort_keys=True,
+)
+raise SystemExit(exit_code)
 PY
-  )"; then
-    return 1
-  fi
-  printf '%s\n' "$status_json"
-  exit_code="$(jq -er '.exitCode' <<<"$status_json" 2>/dev/null || printf '1\n')"
-  return "$exit_code"
 }
 
 redacted_command_result() {
@@ -474,6 +522,7 @@ redacted_command_result() {
       commandDigest: $commandDigest,
       exitCode: $status.exitCode,
       timedOut: ($status.timedOut // false),
+      terminationConfirmed: ($status.terminationConfirmed // false),
       stdout: $stdout,
       stdoutDigest: $stdoutDigest,
       stdoutBytes: $stdoutBytes,
@@ -736,73 +785,722 @@ wait_for_reconciler_takeover() {
 start_reconciler_takeover_guard() {
   local lease_name="$1"
   local output_file="$2"
-  local hold_seconds="${3:-10}"
-  if [[ ! "$lease_name" =~ ^[A-Za-z0-9:._-]+$ ]] || [[ ! "$hold_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  local timeout_seconds="${3:-$case_timeout_seconds}"
+  if [[ ! "$lease_name" =~ ^[A-Za-z0-9:._-]+$ ]] || [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
     return 1
   fi
-  local deadline=$((SECONDS + 30))
-  local lease_row="" guard_held=""
+  local deadline=$((SECONDS + timeout_seconds))
+  local identity_json="" identity="" guard_state_rc=1
+  local postgres_pod="" postgres_pod_uid=""
+  local guard_nonce=""
   local guard_app="synara-leader-takeover-guard-$$-$RANDOM"
+  local runtime_dir="$work_dir/leader-takeover-guard-runtime"
+  local psql_fifo="$runtime_dir/psql.in"
+  local command_fifo="$runtime_dir/command.in"
+  local reader_open_file="$runtime_dir/reader-open"
+  local writer_open_file="$runtime_dir/writer-open"
+  local guard_pid_file="$runtime_dir/guard.pid"
+  local controller_pid_file="$runtime_dir/controller.pid"
+  local command_writer_pid_file="$runtime_dir/command-writer.pid"
+  local completion_file="$runtime_dir/completed"
+  local watchdog_file="$runtime_dir/watchdog-timeout"
+  local controller_output_file="$runtime_dir/controller.output"
   rm -f "$output_file"
   rm -f "$output_file.state"
+  rm -rf "$runtime_dir"
+  if ! mkdir -m 700 "$runtime_dir" || ! mkfifo "$psql_fifo" "$command_fifo"; then
+    LEASE_GUARD_ERROR="guard-fifo-creation-failed"
+    return 1
+  fi
+  chmod 600 "$psql_fifo" "$command_fifo"
+  guard_nonce="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')"
+  if [[ ! "$guard_nonce" =~ ^[0-9a-f]{32}$ ]]; then
+    LEASE_GUARD_ERROR="guard-nonce-generation-failed"
+    return 1
+  fi
   LEASE_GUARD_PID=""
   LEASE_GUARD_ROW=""
   LEASE_GUARD_APP="$guard_app"
+  LEASE_GUARD_POD=""
+  LEASE_GUARD_POD_UID=""
+  LEASE_GUARD_NONCE="$guard_nonce"
+  LEASE_GUARD_OUTPUT_FILE="$output_file"
+  LEASE_GUARD_FINISH_DEADLINE="$deadline"
+  LEASE_GUARD_ERROR=""
+  LEASE_GUARD_CONTROLLER_PID=""
+  LEASE_GUARD_WATCHDOG_PID=""
+  LEASE_GUARD_COMMAND_WRITER_PID=""
+  LEASE_GUARD_PID_IDENTITY=""
+  LEASE_GUARD_CONTROLLER_PID_IDENTITY=""
+  LEASE_GUARD_WATCHDOG_PID_IDENTITY=""
+  LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+  LEASE_GUARD_RUNTIME_DIR="$runtime_dir"
+  LEASE_GUARD_PSQL_FIFO="$psql_fifo"
+  LEASE_GUARD_COMMAND_FIFO="$command_fifo"
+  LEASE_GUARD_UNLOCK_SENT=0
+  LEASE_GUARD_ANCHOR_OPEN=0
+  if ! identity_json="$("${kube[@]}" -n "$namespace" get pods \
+    -l app.kubernetes.io/name=synara-stage2-postgres -o json)"; then
+    LEASE_GUARD_ERROR="postgres-pod-list-failed"
+    return 1
+  fi
+  if ! identity="$(jq -er '
+    [(.items // [])[]
+      | select(.metadata.deletionTimestamp == null)
+      | select(.status.phase == "Running")
+      | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+      | {name: .metadata.name, uid: .metadata.uid}]
+    | if length == 1 then "\(.[0].name)|\(.[0].uid)" else empty end
+  ' <<<"$identity_json")"; then
+    LEASE_GUARD_ERROR="postgres-pod-identity-not-unique"
+    return 1
+  fi
+  postgres_pod="${identity%%|*}"
+  postgres_pod_uid="${identity##*|}"
+  if [[ ! "$postgres_pod" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] \
+    || [[ ! "$postgres_pod_uid" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    LEASE_GUARD_ERROR="postgres-pod-identity-malformed"
+    return 1
+  fi
+  LEASE_GUARD_POD="$postgres_pod"
+  LEASE_GUARD_POD_UID="$postgres_pod_uid"
+
   (
-    "${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
+    exec 7>&- 3>&- 4>&- 5>&-
+    while (( SECONDS < deadline )); do
+      if [[ -f "$completion_file" ]]; then
+        exit 0
+      fi
+      sleep 0.1
+    done
+    printf 'guard-watchdog-timeout\n' >"$watchdog_file"
+    local_pid="$(cat "$controller_pid_file" 2>/dev/null || true)"
+    local_identity="$(cat "$runtime_dir/controller.identity" 2>/dev/null || true)"
+    if [[ "$local_pid" =~ ^[1-9][0-9]*$ ]] && process_identity_is_live "$local_pid" "$local_identity"; then
+      signal_owned_process "$local_pid" "$local_identity" TERM >/dev/null 2>&1 || : >"$runtime_dir/watchdog-identity-failure"
+    elif [[ "$local_pid" =~ ^[1-9][0-9]*$ ]]; then : >"$runtime_dir/watchdog-identity-failure"
+    fi
+    sleep 0.5
+    local_pid="$(cat "$command_writer_pid_file" 2>/dev/null || true)"
+    local_identity="$(cat "$runtime_dir/command-writer.identity" 2>/dev/null || true)"
+    if [[ "$local_pid" =~ ^[1-9][0-9]*$ ]] && process_identity_is_live "$local_pid" "$local_identity"; then
+      signal_owned_process "$local_pid" "$local_identity" TERM >/dev/null 2>&1 || : >"$runtime_dir/watchdog-identity-failure"
+      sleep 0.1
+      signal_owned_process "$local_pid" "$local_identity" KILL >/dev/null 2>&1 || true
+    elif [[ "$local_pid" =~ ^[1-9][0-9]*$ ]]; then : >"$runtime_dir/watchdog-identity-failure"
+    fi
+    local_pid="$(cat "$guard_pid_file" 2>/dev/null || true)"
+    local_identity="$(cat "$runtime_dir/guard.identity" 2>/dev/null || true)"
+    if [[ "$local_pid" =~ ^[1-9][0-9]*$ ]] && process_identity_is_live "$local_pid" "$local_identity"; then
+      signal_owned_process "$local_pid" "$local_identity" TERM >/dev/null 2>&1 || : >"$runtime_dir/watchdog-identity-failure"
+      sleep 0.5
+      signal_owned_process "$local_pid" "$local_identity" KILL >/dev/null 2>&1 || true
+    elif [[ "$local_pid" =~ ^[1-9][0-9]*$ ]]; then : >"$runtime_dir/watchdog-identity-failure"
+    fi
+  ) &
+  LEASE_GUARD_WATCHDOG_PID="$!"
+  LEASE_GUARD_WATCHDOG_PID_IDENTITY="$(controller_process_identity "$LEASE_GUARD_WATCHDOG_PID")" || return 1
+
+  exec 7<>"$psql_fifo"
+  LEASE_GUARD_ANCHOR_OPEN=1
+  (
+    exec 5<"$psql_fifo"
+    : >"$reader_open_file"
+    exec 7>&-
+    exec 0<&5
+    exec 5<&-
+    exec "${kube[@]}" -n "$namespace" exec -i "pod/$postgres_pod" -- \
       env PGAPPNAME="$guard_app" \
-      psql -U synara -d synara -v ON_ERROR_STOP=1 -At \
-        -c "SELECT pg_advisory_lock(hashtextextended('$lease_name', 0)); SELECT pg_sleep($hold_seconds); SELECT pg_advisory_unlock(hashtextextended('$lease_name', 0));"
+      psql -X -q -U synara -d synara -v ON_ERROR_STOP=1 -At
   ) >"$output_file" 2>&1 &
   LEASE_GUARD_PID="$!"
-  while (( SECONDS < deadline )); do
-    lease_row=""
-    guard_held="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
-      psql -U synara -d synara -v ON_ERROR_STOP=1 -At \
-        -c "SELECT EXISTS (SELECT 1 FROM pg_stat_activity AS activity JOIN pg_locks AS held_lock ON held_lock.pid = activity.pid WHERE activity.application_name = '$guard_app' AND held_lock.locktype = 'advisory' AND held_lock.granted)" \
-      2>/dev/null || true)"
-    if [[ "$guard_held" == "t" ]]; then
-      lease_row="$(read_reconciler_lease "$lease_name" 2>/dev/null || true)"
-      printf 'guardHeld=%s\nleaseRow=%s\n' "$guard_held" "$lease_row" >"$output_file.state"
-      if [[ "$lease_row" =~ ^[^|]+\|[1-9][0-9]*$ ]]; then
-        LEASE_GUARD_ROW="$lease_row"
-        return 0
-      fi
-    else
-      printf 'guardHeld=%s\nleaseRow=\n' "$guard_held" >"$output_file.state"
+  LEASE_GUARD_PID_IDENTITY="$(controller_process_identity "$LEASE_GUARD_PID")" || return 1
+  printf '%s\n' "$LEASE_GUARD_PID" >"$guard_pid_file"
+  printf '%s\n' "$LEASE_GUARD_PID_IDENTITY" >"$runtime_dir/guard.identity"
+
+  (
+    exec 3<>"$command_fifo"
+    exec 4>"$psql_fifo"
+    exec 7>&-
+    : >"$writer_open_file"
+    if ! printf '%s\n' \
+      "SELECT pg_advisory_lock(hashtextextended('$lease_name', 0));" \
+      "SELECT '__SYNARA_RECONCILER_GUARD_LEASE_V2__|$guard_nonce|' || holder_id || '|' || fencing_token::text FROM reconciler_leases WHERE lease_name = '$lease_name' AND expires_at > clock_timestamp();" \
+      "SELECT '__SYNARA_RECONCILER_GUARD_READY_V2__|$guard_nonce|$postgres_pod|$postgres_pod_uid';" >&4; then
+      exit 71
     fi
-    if ! kill -0 "$LEASE_GUARD_PID" >/dev/null 2>&1; then
-      wait "$LEASE_GUARD_PID" >/dev/null 2>&1 || true
-      LEASE_GUARD_PID=""
-      LEASE_GUARD_APP=""
+    command=""
+    if ! IFS= read -r command <&3; then
+      exit 72
+    fi
+    if [[ "$command" != "UNLOCK|$guard_nonce" ]]; then
+      exit 73
+    fi
+    if ! printf '%s\n' \
+      "SELECT '__SYNARA_RECONCILER_GUARD_UNLOCKED_V2__|$guard_nonce|' || pg_advisory_unlock(hashtextextended('$lease_name', 0))::text;" \
+      '\quit' >&4; then
+      exit 74
+    fi
+    : >"$runtime_dir/unlock-sql-written"
+    exec 4>&-
+    : >"$runtime_dir/controller-complete"
+  ) >"$controller_output_file" 2>&1 &
+  LEASE_GUARD_CONTROLLER_PID="$!"
+  LEASE_GUARD_CONTROLLER_PID_IDENTITY="$(controller_process_identity "$LEASE_GUARD_CONTROLLER_PID")" || return 1
+  printf '%s\n' "$LEASE_GUARD_CONTROLLER_PID" >"$controller_pid_file"
+  printf '%s\n' "$LEASE_GUARD_CONTROLLER_PID_IDENTITY" >"$runtime_dir/controller.identity"
+
+  while (( SECONDS < deadline )); do
+    if [[ -f "$watchdog_file" ]]; then
+      LEASE_GUARD_ERROR="guard-watchdog-timeout"
+      return 1
+    fi
+    if [[ -f "$reader_open_file" && -f "$writer_open_file" && "$LEASE_GUARD_ANCHOR_OPEN" == "1" ]]; then
+      exec 7>&-
+      LEASE_GUARD_ANCHOR_OPEN=0
+    fi
+    if parse_reconciler_takeover_guard_output "$output_file" "$guard_nonce" \
+      "$postgres_pod" "$postgres_pod_uid" 0 0; then
+      guard_state_rc=0
+    else
+      guard_state_rc=$?
+    fi
+    if (( guard_state_rc == 0 )); then
+      if [[ "$LEASE_GUARD_ANCHOR_OPEN" != "0" ]] \
+        || ! process_identity_is_live "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY" \
+        || ! process_identity_is_live "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+        LEASE_GUARD_ERROR="guard-stream-ended-before-delete"
+        return 1
+      fi
+      if ! verify_reconciler_takeover_guard_pod; then
+        LEASE_GUARD_ERROR="postgres-pod-identity-changed"
+        return 1
+      fi
+      if ! process_identity_is_live "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY" \
+        || ! process_identity_is_live "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+        LEASE_GUARD_ERROR="guard-stream-ended-before-delete"
+        return 1
+      fi
+      printf 'status=ready\nprotocol=v2\npostgresPod=%s\npostgresPodUid=%s\n' \
+        "$postgres_pod" "$postgres_pod_uid" >"$output_file.state"
+      return 0
+    fi
+    if (( guard_state_rc == 2 )); then
+      LEASE_GUARD_ERROR="guard-output-malformed"
+      printf 'status=malformed\npostgresPod=%s\npostgresPodUid=%s\n' \
+        "$postgres_pod" "$postgres_pod_uid" >"$output_file.state"
+      return 1
+    fi
+    if ! process_identity_is_live "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY" \
+      || ! process_identity_is_live "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+      if parse_reconciler_takeover_guard_output "$output_file" "$guard_nonce" \
+        "$postgres_pod" "$postgres_pod_uid" 0 1; then
+        guard_state_rc=0
+      else
+        guard_state_rc=$?
+      fi
+      if (( guard_state_rc == 2 )); then
+        LEASE_GUARD_ERROR="guard-output-malformed-at-eof"
+      else
+        LEASE_GUARD_ERROR="guard-stream-ended-before-ready"
+      fi
+      printf 'status=stream-ended\npostgresPod=%s\npostgresPodUid=%s\n' \
+        "$postgres_pod" "$postgres_pod_uid" >"$output_file.state"
       return 1
     fi
     sleep 0.1
+  done
+  LEASE_GUARD_ERROR="guard-watchdog-timeout"
+  printf 'status=timeout\npostgresPod=%s\npostgresPodUid=%s\n' \
+    "$postgres_pod" "$postgres_pod_uid" >"$output_file.state"
+  return 1
+}
+
+parse_reconciler_takeover_guard_output() {
+  local output_file="$1"
+  local expected_nonce="$2"
+  local expected_pod="$3"
+  local expected_pod_uid="$4"
+  local require_unlocked="${5:-0}"
+  local stream_ended="${6:-0}"
+  local ready_prefix="__SYNARA_RECONCILER_GUARD_READY_V2__|"
+  local lease_prefix="__SYNARA_RECONCILER_GUARD_LEASE_V2__|"
+  local unlocked_prefix="__SYNARA_RECONCILER_GUARD_UNLOCKED_V2__|"
+  local guard_prefix="__SYNARA_RECONCILER_GUARD_"
+  local line="" trailing_line="" line_complete=0 ready_count=0 lease_count=0 unlocked_count=0 malformed=0 lease_row=""
+  local payload="" stage=0
+  [[ -f "$output_file" ]] || return 1
+  while true; do
+    line=""
+    if IFS= read -r line; then
+      line_complete=1
+    else
+      line_complete=0
+    fi
+    if (( line_complete == 0 )); then
+      trailing_line="$line"
+      break
+    fi
+    case "$line" in
+      "$lease_prefix"*)
+        lease_count=$((lease_count + 1))
+        payload="${line#"$lease_prefix"}"
+        if (( stage != 0 )) || [[ "$payload" != "$expected_nonce|"* ]]; then
+          malformed=1
+        else
+          lease_row="${payload#"$expected_nonce|"}"
+          if [[ ! "$lease_row" =~ ^[^|]+\|[1-9][0-9]*$ ]]; then
+            malformed=1
+          fi
+        fi
+        stage=1
+        ;;
+      "$ready_prefix"*)
+        ready_count=$((ready_count + 1))
+        if (( stage != 1 )) \
+          || [[ "$line" != "${ready_prefix}${expected_nonce}|${expected_pod}|${expected_pod_uid}" ]]; then
+          malformed=1
+        fi
+        stage=2
+        ;;
+      "$unlocked_prefix"*)
+        unlocked_count=$((unlocked_count + 1))
+        if (( stage != 2 )) || [[ "$require_unlocked" != "1" ]] \
+          || [[ "$line" != "${unlocked_prefix}${expected_nonce}|true" ]]; then
+          malformed=1
+        fi
+        stage=3
+        ;;
+      "$guard_prefix"*)
+        malformed=1
+        ;;
+    esac
+  done <"$output_file"
+  if [[ "$stream_ended" == "1" && -n "$trailing_line" && "$trailing_line" == __SYNARA_* ]]; then
+    malformed=1
+  fi
+  if (( malformed != 0 || ready_count > 1 || lease_count > 1 || unlocked_count > 1 )); then
+    return 2
+  fi
+  if (( ready_count != 1 || lease_count != 1 )); then
+    return 1
+  fi
+  if [[ "$require_unlocked" == "1" ]] && (( unlocked_count != 1 )); then
+    return 1
+  fi
+  if [[ "$require_unlocked" != "1" ]] && (( unlocked_count != 0 )); then
+    return 2
+  fi
+  LEASE_GUARD_ROW="$lease_row"
+  return 0
+}
+
+verify_reconciler_takeover_guard_pod() {
+  local pod_json=""
+  [[ -n "$LEASE_GUARD_POD" && -n "$LEASE_GUARD_POD_UID" ]] || return 1
+  if ! pod_json="$("${kube[@]}" -n "$namespace" get "pod/$LEASE_GUARD_POD" -o json)"; then
+    return 1
+  fi
+  jq -e --arg uid "$LEASE_GUARD_POD_UID" '
+    .metadata.uid == $uid
+    and .metadata.deletionTimestamp == null
+    and .status.phase == "Running"
+    and any(.status.conditions[]?; .type == "Ready" and .status == "True")
+  ' <<<"$pod_json" >/dev/null
+}
+
+assert_reconciler_takeover_guard_active() {
+  [[ -n "$LEASE_GUARD_PID" && -n "$LEASE_GUARD_CONTROLLER_PID" ]] || {
+    LEASE_GUARD_ERROR="guard-process-missing-before-delete"
+    return 1
+  }
+  if [[ -f "$LEASE_GUARD_RUNTIME_DIR/watchdog-timeout" \
+    || -f "$LEASE_GUARD_RUNTIME_DIR/watchdog-identity-failure" \
+    || "$LEASE_GUARD_UNLOCK_SENT" != "0" ]]; then
+    LEASE_GUARD_ERROR="guard-not-in-pre-unlock-state"
+    return 1
+  fi
+  if ! parse_reconciler_takeover_guard_output "$LEASE_GUARD_OUTPUT_FILE" "$LEASE_GUARD_NONCE" \
+    "$LEASE_GUARD_POD" "$LEASE_GUARD_POD_UID" 0 0; then
+    LEASE_GUARD_ERROR="guard-output-invalid-before-delete"
+    return 1
+  fi
+  if ! process_identity_is_live "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY"; then
+    LEASE_GUARD_ERROR="guard-stream-ended-before-delete"
+    return 1
+  fi
+  if ! process_identity_is_live "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+    LEASE_GUARD_ERROR="guard-controller-ended-before-delete"
+    return 1
+  fi
+  if ! verify_reconciler_takeover_guard_pod; then
+    LEASE_GUARD_ERROR="postgres-pod-identity-changed-before-delete"
+    return 1
+  fi
+  if ! process_identity_is_live "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY" \
+    || ! process_identity_is_live "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+    LEASE_GUARD_ERROR="guard-stream-ended-before-delete"
+    return 1
+  fi
+  return 0
+}
+
+release_reconciler_takeover_guard() {
+  local deletion_json="$1"
+  local writer_pid="" writer_rc=0
+  if ! jq -e '
+    .outcome == "submitted" or .outcome == "accepted-after-read-after-write"
+  ' <<<"$deletion_json" >/dev/null 2>&1; then
+    LEASE_GUARD_ERROR="guard-unlock-without-accepted-delete"
+    return 1
+  fi
+  if ! assert_reconciler_takeover_guard_active; then
+    return 1
+  fi
+  (
+    exec 7>&- 3>&- 4>&- 5>&-
+    printf 'UNLOCK|%s\n' "$LEASE_GUARD_NONCE" >"$LEASE_GUARD_COMMAND_FIFO"
+  ) &
+  writer_pid="$!"
+  LEASE_GUARD_COMMAND_WRITER_PID="$writer_pid"
+  if ! LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY="$(controller_process_identity "$writer_pid")"; then
+    if wait "$writer_pid"; then
+      LEASE_GUARD_COMMAND_WRITER_PID=""
+      LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+      LEASE_GUARD_UNLOCK_SENT=1
+      : >"$LEASE_GUARD_RUNTIME_DIR/unlock-command-sent"
+      return 0
+    fi
+    LEASE_GUARD_ERROR="guard-unlock-writer-identity-unavailable"
+    return 1
+  fi
+  printf '%s\n' "$writer_pid" >"$LEASE_GUARD_RUNTIME_DIR/command-writer.pid"
+  printf '%s\n' "$LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY" >"$LEASE_GUARD_RUNTIME_DIR/command-writer.identity"
+  while process_identity_is_live "$writer_pid" "$LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY"; do
+    if [[ -f "$LEASE_GUARD_RUNTIME_DIR/watchdog-timeout" ]] \
+      || (( SECONDS >= LEASE_GUARD_FINISH_DEADLINE )); then
+      signal_owned_process "$writer_pid" "$LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY" TERM >/dev/null 2>&1 || true
+      wait "$writer_pid" >/dev/null 2>&1 || true
+      LEASE_GUARD_COMMAND_WRITER_PID=""
+      LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+      LEASE_GUARD_ERROR="guard-unlock-writer-timeout"
+      return 1
+    fi
+    sleep 0.05
+  done
+  if wait "$writer_pid"; then
+    writer_rc=0
+  else
+    writer_rc=$?
+  fi
+  LEASE_GUARD_COMMAND_WRITER_PID=""
+  LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+  if (( writer_rc != 0 )); then
+    LEASE_GUARD_ERROR="guard-unlock-writer-failed"
+    return 1
+  fi
+  LEASE_GUARD_UNLOCK_SENT=1
+  : >"$LEASE_GUARD_RUNTIME_DIR/unlock-command-sent"
+  return 0
+}
+
+read_reconciler_takeover_guard_diagnostic() {
+  local output_file="$1"
+  local nonce="${2:-}"
+  if [[ ! -f "$output_file" ]]; then
+    return 0
+  fi
+  if [[ -n "$nonce" ]]; then
+    sed "s/${nonce}/[redacted]/g" "$output_file" 2>/dev/null | tail -c 2000
+  else
+    tail -c 2000 "$output_file" 2>/dev/null
+  fi
+}
+
+reconcile_pod_uid_delete() {
+  local pod_name="$1"
+  local pod_uid="$2"
+  local attempts="${3:-3}"
+  local pod_json="" observed_uid="" observed_deletion="" valid_observations=0
+  POD_DELETE_OBSERVED_STATE="unresolved"
+  POD_DELETE_REPLACEMENT_UID=""
+  for ((reconcile_attempt = 1; reconcile_attempt <= attempts; reconcile_attempt += 1)); do
+    pod_json=""
+    if pod_json="$("${kube[@]}" -n "$namespace" get "pod/$pod_name" -o json --ignore-not-found 2>/dev/null)"; then
+      if [[ -z "$pod_json" ]]; then
+        POD_DELETE_OBSERVED_STATE="original-uid-absent"
+        return 0
+      fi
+      if ! observed_uid="$(jq -er '.metadata.uid' <<<"$pod_json")"; then
+        sleep 0.1
+        continue
+      fi
+      valid_observations=$((valid_observations + 1))
+      if [[ "$observed_uid" != "$pod_uid" ]]; then
+        POD_DELETE_OBSERVED_STATE="replacement-present"
+        POD_DELETE_REPLACEMENT_UID="$observed_uid"
+        return 0
+      fi
+      observed_deletion="$(jq -r '.metadata.deletionTimestamp // empty' <<<"$pod_json" 2>/dev/null || true)"
+      if [[ -n "$observed_deletion" ]]; then
+        POD_DELETE_OBSERVED_STATE="original-uid-terminating"
+        return 0
+      fi
+      POD_DELETE_OBSERVED_STATE="same-uid-active"
+    fi
+    if (( reconcile_attempt < attempts )); then
+      sleep 0.1
+    fi
+  done
+  if (( valid_observations > 0 )) && [[ "$POD_DELETE_OBSERVED_STATE" == "same-uid-active" ]]; then
+    return 1
+  fi
+  POD_DELETE_OBSERVED_STATE="unresolved"
+  return 2
+}
+
+classify_pod_delete_response() {
+  local output_file="$1"
+  local bounded_response=""
+  bounded_response="$(tail -c 2000 "$output_file" 2>/dev/null || true)"
+  if grep -qi 'unexpected EOF' <<<"$bounded_response"; then
+    printf 'unexpected-eof\n'
+  elif grep -qi 'conflict\|precondition' <<<"$bounded_response"; then
+    printf 'precondition-conflict\n'
+  elif grep -qi 'not[ -]*found' <<<"$bounded_response"; then
+    printf 'not-found\n'
+  else
+    printf 'nonzero-exit\n'
+  fi
+}
+
+delete_pod_uid_preconditioned() {
+  local pod_name="$1"
+  local pod_uid="$2"
+  local output_file="$3"
+  local raw_uri="/api/v1/namespaces/$namespace/pods/$pod_name"
+  local delete_options="" response_class="" reconcile_rc=0 delete_rc=0
+  local max_attempts=3 attempt=0
+  POD_DELETE_AMBIGUOUS=false
+  POD_DELETE_RECONCILIATION='null'
+  POD_DELETE_OBSERVED_STATE="not-checked"
+  POD_DELETE_REPLACEMENT_UID=""
+  if [[ ! "$pod_name" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] \
+    || [[ ! "$pod_uid" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    POD_DELETE_RECONCILIATION='{"outcome":"invalid-identity","attempts":0,"ambiguous":false}'
+    return 1
+  fi
+  delete_options="$(jq -nc --arg uid "$pod_uid" \
+    '{apiVersion:"v1",kind:"DeleteOptions",propagationPolicy:"Background",preconditions:{uid:$uid}}')"
+  : >"$output_file"
+  for ((attempt = 1; attempt <= max_attempts; attempt += 1)); do
+    if ! assert_reconciler_takeover_guard_active; then
+      POD_DELETE_RECONCILIATION="$(jq -nc --arg outcome "guard-invalid-before-retry" \
+        --arg observedState "$POD_DELETE_OBSERVED_STATE" --argjson attempts "$((attempt - 1))" \
+        '{outcome:$outcome,attempts:$attempts,ambiguous:true,observedState:$observedState,responseRedacted:true,responseMaxBytes:2000}')"
+      return 1
+    fi
+    if printf '%s' "$delete_options" | "${kube[@]}" delete --raw "$raw_uri" -f - >"$output_file" 2>&1; then
+      POD_DELETE_RECONCILIATION="$(jq -nc --arg outcome "submitted" --argjson attempts "$attempt" \
+        --argjson ambiguous "$POD_DELETE_AMBIGUOUS" --arg responseClass "$response_class" \
+        --arg observedState "$POD_DELETE_OBSERVED_STATE" '
+        {outcome:$outcome,attempts:$attempts,ambiguous:$ambiguous,
+         priorResponseClass:(if $ambiguous then $responseClass else null end),
+         priorObservedState:(if $ambiguous then $observedState else null end),
+         responseRedacted:true,responseMaxBytes:2000}')"
+      return 0
+    else
+      delete_rc=$?
+    fi
+    POD_DELETE_AMBIGUOUS=true
+    response_class="$(classify_pod_delete_response "$output_file")"
+    if reconcile_pod_uid_delete "$pod_name" "$pod_uid" 3; then
+      reconcile_rc=0
+    else
+      reconcile_rc=$?
+    fi
+    if (( reconcile_rc == 0 )); then
+      POD_DELETE_RECONCILIATION="$(jq -nc --arg outcome "accepted-after-read-after-write" \
+        --arg observedState "$POD_DELETE_OBSERVED_STATE" --arg replacementUid "$POD_DELETE_REPLACEMENT_UID" \
+        --arg responseClass "$response_class" --argjson attempts "$attempt" --argjson deleteExitCode "$delete_rc" \
+        '{outcome:$outcome,attempts:$attempts,ambiguous:true,deleteExitCode:$deleteExitCode,
+          observedState:$observedState,replacementUid:(if $replacementUid == "" then null else $replacementUid end),
+          responseClass:$responseClass,responseRedacted:true,responseMaxBytes:2000}')"
+      return 0
+    fi
+    if (( reconcile_rc == 2 )); then
+      POD_DELETE_RECONCILIATION="$(jq -nc --arg outcome "reconciliation-unresolved" \
+        --arg responseClass "$response_class" --argjson attempts "$attempt" --argjson deleteExitCode "$delete_rc" \
+        '{outcome:$outcome,attempts:$attempts,ambiguous:true,deleteExitCode:$deleteExitCode,
+          observedState:"unresolved",responseClass:$responseClass,responseRedacted:true,responseMaxBytes:2000}')"
+      return 1
+    fi
+    if (( attempt < max_attempts )); then
+      sleep 0.1
+    fi
+  done
+  POD_DELETE_RECONCILIATION="$(jq -nc --arg outcome "same-uid-still-active" \
+    --arg responseClass "$response_class" --argjson attempts "$max_attempts" --argjson deleteExitCode "$delete_rc" \
+    '{outcome:$outcome,attempts:$attempts,ambiguous:true,deleteExitCode:$deleteExitCode,
+      observedState:"same-uid-active",responseClass:$responseClass,responseRedacted:true,responseMaxBytes:2000}')"
+  return 1
+}
+
+wait_for_pod_uid_absent() {
+  local pod_name="$1"
+  local pod_uid="$2"
+  local timeout_seconds="${3:-$case_timeout_seconds}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local pod_json="" observed_uid=""
+  while (( SECONDS < deadline )); do
+    pod_json=""
+    if pod_json="$("${kube[@]}" -n "$namespace" get "pod/$pod_name" -o json --ignore-not-found 2>/dev/null)"; then
+      if [[ -z "$pod_json" ]]; then
+        return 0
+      fi
+      if observed_uid="$(jq -er '.metadata.uid' <<<"$pod_json" 2>/dev/null)" \
+        && [[ "$observed_uid" != "$pod_uid" ]]; then
+        return 0
+      fi
+    fi
+    sleep 0.2
   done
   return 1
 }
 
 finish_reconciler_takeover_guard() {
-  if [[ -z "$LEASE_GUARD_PID" ]]; then
-    return 0
+  if [[ -z "$LEASE_GUARD_PID" || -z "$LEASE_GUARD_CONTROLLER_PID" \
+    || "$LEASE_GUARD_UNLOCK_SENT" != "1" ]]; then
+    LEASE_GUARD_ERROR="guard-process-missing-at-finish"
+    return 1
   fi
   local guard_pid="$LEASE_GUARD_PID"
+  local controller_pid="$LEASE_GUARD_CONTROLLER_PID"
+  local guard_rc=0 controller_rc=0 parse_rc=0 current_watchdog_identity="" guard_live=0 controller_live=0
+  while true; do
+    guard_live=0
+    controller_live=0
+    if process_identity_is_live "$guard_pid" "$LEASE_GUARD_PID_IDENTITY"; then
+      guard_live=1
+    elif kill -0 "$guard_pid" >/dev/null 2>&1 && ! process_is_terminal_state "$guard_pid"; then
+      LEASE_GUARD_ERROR="guard-stream-identity-changed-at-finish"
+      return 1
+    fi
+    if process_identity_is_live "$controller_pid" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY"; then
+      controller_live=1
+    elif kill -0 "$controller_pid" >/dev/null 2>&1 && ! process_is_terminal_state "$controller_pid"; then
+      LEASE_GUARD_ERROR="guard-controller-identity-changed-at-finish"
+      return 1
+    fi
+    (( guard_live == 0 && controller_live == 0 )) && break
+    if [[ -f "$LEASE_GUARD_RUNTIME_DIR/watchdog-timeout" ]] \
+      || (( SECONDS >= LEASE_GUARD_FINISH_DEADLINE )); then
+      LEASE_GUARD_ERROR="guard-final-wait-timeout"
+      return 1
+    fi
+    sleep 0.1
+  done
+  if wait "$controller_pid"; then
+    controller_rc=0
+  else
+    controller_rc=$?
+  fi
+  LEASE_GUARD_CONTROLLER_PID=""
+  LEASE_GUARD_CONTROLLER_PID_IDENTITY=""
+  if wait "$guard_pid"; then
+    guard_rc=0
+  else
+    guard_rc=$?
+  fi
   LEASE_GUARD_PID=""
-  LEASE_GUARD_APP=""
-  wait "$guard_pid"
+  LEASE_GUARD_PID_IDENTITY=""
+  if (( controller_rc != 0 )); then
+    LEASE_GUARD_ERROR="guard-controller-exit-nonzero"
+    return 1
+  fi
+  if (( guard_rc != 0 )); then
+    LEASE_GUARD_ERROR="guard-stream-exit-nonzero"
+    return 1
+  fi
+  if parse_reconciler_takeover_guard_output "$LEASE_GUARD_OUTPUT_FILE" "$LEASE_GUARD_NONCE" \
+    "$LEASE_GUARD_POD" "$LEASE_GUARD_POD_UID" 1 1; then
+    parse_rc=0
+  else
+    parse_rc=$?
+  fi
+  if (( parse_rc != 0 )); then
+    LEASE_GUARD_ERROR="$([[ "$parse_rc" == "2" ]] && printf guard-final-output-malformed || printf guard-unlock-sentinel-missing)"
+    return 1
+  fi
+  if ! verify_reconciler_takeover_guard_pod; then
+    LEASE_GUARD_ERROR="postgres-pod-identity-changed-before-unlock"
+    return 1
+  fi
+  if [[ ! -f "$LEASE_GUARD_RUNTIME_DIR/unlock-command-sent" \
+    || ! -f "$LEASE_GUARD_RUNTIME_DIR/unlock-sql-written" \
+    || ! -f "$LEASE_GUARD_RUNTIME_DIR/controller-complete" ]]; then
+    LEASE_GUARD_ERROR="guard-unlock-sequence-incomplete"
+    return 1
+  fi
+  : >"$LEASE_GUARD_RUNTIME_DIR/completed"
+  if [[ -n "$LEASE_GUARD_WATCHDOG_PID" ]]; then
+    if kill -0 "$LEASE_GUARD_WATCHDOG_PID" >/dev/null 2>&1; then
+      current_watchdog_identity="$(controller_process_identity "$LEASE_GUARD_WATCHDOG_PID" 2>/dev/null || true)"
+      if process_identity_is_live "$LEASE_GUARD_WATCHDOG_PID" "$LEASE_GUARD_WATCHDOG_PID_IDENTITY"; then
+        signal_owned_process "$LEASE_GUARD_WATCHDOG_PID" "$LEASE_GUARD_WATCHDOG_PID_IDENTITY" TERM >/dev/null 2>&1 || true
+      elif ! process_is_terminal_state "$LEASE_GUARD_WATCHDOG_PID" \
+        && kill -0 "$LEASE_GUARD_WATCHDOG_PID" >/dev/null 2>&1 \
+        && [[ "$current_watchdog_identity" != "$LEASE_GUARD_WATCHDOG_PID_IDENTITY" ]]; then
+        LEASE_GUARD_ERROR="guard-watchdog-identity-changed"
+        return 1
+      fi
+    fi
+    wait "$LEASE_GUARD_WATCHDOG_PID" >/dev/null 2>&1 || true
+    LEASE_GUARD_WATCHDOG_PID=""
+    LEASE_GUARD_WATCHDOG_PID_IDENTITY=""
+  fi
+  rm -rf "$LEASE_GUARD_RUNTIME_DIR"
+  return 0
+}
+
+stop_owned_child() {
+  local pid="$1" identity="$2" grace_seconds="${3:-1}" deadline
+  [[ -n "$pid" ]] || return 0
+  if process_identity_is_live "$pid" "$identity"; then
+    signal_owned_process "$pid" "$identity" TERM >/dev/null 2>&1 || return 1
+    deadline=$((SECONDS + grace_seconds))
+    while process_identity_is_live "$pid" "$identity" && (( SECONDS < deadline )); do sleep 0.05; done
+    if process_identity_is_live "$pid" "$identity"; then
+      signal_owned_process "$pid" "$identity" KILL >/dev/null 2>&1 || return 1
+    fi
+  elif kill -0 "$pid" >/dev/null 2>&1 && ! process_is_terminal_state "$pid"; then
+    return 1
+  fi
+  wait "$pid" >/dev/null 2>&1 || true
+  return 0
 }
 
 stop_reconciler_takeover_guard() {
-  if [[ -z "$LEASE_GUARD_PID" ]]; then
-    return 0
+  local cleanup_failed=0
+  if [[ "$LEASE_GUARD_ANCHOR_OPEN" == "1" ]]; then
+    exec 7>&-
+    LEASE_GUARD_ANCHOR_OPEN=0
   fi
-  local guard_pid="$LEASE_GUARD_PID"
+  stop_owned_child "$LEASE_GUARD_COMMAND_WRITER_PID" "$LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY" 1 || cleanup_failed=1
+  LEASE_GUARD_COMMAND_WRITER_PID=""
+  LEASE_GUARD_COMMAND_WRITER_PID_IDENTITY=""
+  stop_owned_child "$LEASE_GUARD_CONTROLLER_PID" "$LEASE_GUARD_CONTROLLER_PID_IDENTITY" 1 || cleanup_failed=1
+  LEASE_GUARD_CONTROLLER_PID=""
+  LEASE_GUARD_CONTROLLER_PID_IDENTITY=""
+  stop_owned_child "$LEASE_GUARD_PID" "$LEASE_GUARD_PID_IDENTITY" 1 || cleanup_failed=1
   LEASE_GUARD_PID=""
-  LEASE_GUARD_APP=""
-  kill "$guard_pid" >/dev/null 2>&1 || true
-  wait "$guard_pid" >/dev/null 2>&1 || true
+  LEASE_GUARD_PID_IDENTITY=""
+  stop_owned_child "$LEASE_GUARD_WATCHDOG_PID" "$LEASE_GUARD_WATCHDOG_PID_IDENTITY" 1 || cleanup_failed=1
+  LEASE_GUARD_WATCHDOG_PID=""
+  LEASE_GUARD_WATCHDOG_PID_IDENTITY=""
+  if [[ -n "$LEASE_GUARD_RUNTIME_DIR" ]]; then rm -rf "$LEASE_GUARD_RUNTIME_DIR"; fi
+  (( cleanup_failed == 0 ))
 }
-
 get_pdb_json() {
   local json
   if json="$("${kube[@]}" -n "$namespace" get poddisruptionbudget synara-control-plane -o json 2>/dev/null)"; then
@@ -886,7 +1584,7 @@ select_safe_control_plane_target() {
     --argjson allPods "$all_pods_json" '
     [
       ($controlPlanePods.items // [])[]
-      | {node: .spec.nodeName, pod: .metadata.name}
+      | {node: .spec.nodeName, pod: .metadata.name, podUid: .metadata.uid}
     ] as $controlPlanePlacements
     | [
         ($allPods.items // [])[]
@@ -914,7 +1612,7 @@ select_safe_control_plane_target() {
         end
       ) as $target
     | select($target != null)
-    | {node: $target.node, pod: $target.pod, colocatedDependencyPods: []}'
+    | {node: $target.node, pod: $target.pod, podUid: $target.podUid, colocatedDependencyPods: []}'
 }
 
 run_hook() {
@@ -953,6 +1651,308 @@ clear_partition_hook_state() {
   PARTITION_HOOK_ATTEMPTED=0
   PARTITION_HOOK_NODE=""
   PARTITION_HOOK_TARGET_JSON='null'
+  PARTITION_HOOK_CHALLENGE=""
+  PARTITION_HOOK_CHALLENGE_ISSUED_EPOCH=0
+  PARTITION_HOOK_VERIFY_JSON='null'
+  PARTITION_HOOK_OPERATION_ID=""
+  PARTITION_HOOK_CONTROLLER_PID=""
+  PARTITION_HOOK_CONTROLLER_IDENTITY=""
+  PARTITION_HOOK_LAST_PHASE=""
+  PARTITION_HOOK_NEEDS_RECOVERY=0
+}
+
+managed_hook_backend() {
+  if [[ "$context" == "managed-validation" ]]; then
+    printf 'process-group-test\n'
+  else
+    printf 'systemd-user\n'
+  fi
+}
+
+controller_process_identity() {
+  python3 - "$1" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+pid = int(sys.argv[1])
+if sys.platform.startswith("linux"):
+    try:
+        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        close = data.rfind(")")
+        fields = data[close + 2 :].split()
+        print(f"linux-proc-start:{fields[19]}")
+    except (OSError, IndexError, ValueError):
+        raise SystemExit(1)
+elif sys.platform == "darwin":
+    completed = subprocess.run(
+        ["ps", "-o", "lstart=", "-o", "ppid=", "-o", "pgid=", "-o", "comm=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=2,
+    )
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or not value:
+        raise SystemExit(1)
+    print(f"darwin-ps-identity:{' '.join(value.split())}")
+else:
+    raise SystemExit(1)
+PY
+}
+
+process_identity_is_live() {
+  local pid="$1" expected="$2"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$expected" ]] || return 1
+  python3 - "$pid" "$expected" <<'PY'
+import pathlib, subprocess, sys
+pid, expected = int(sys.argv[1]), sys.argv[2]
+try:
+    if sys.platform.startswith("linux"):
+        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        close = data.rfind(")")
+        fields = data[close + 2:].split()
+        state, identity = fields[0], f"linux-proc-start:{fields[19]}"
+    elif sys.platform == "darwin":
+        state_run = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
+        identity_run = subprocess.run(["ps", "-o", "lstart=", "-o", "ppid=", "-o", "pgid=", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
+        if state_run.returncode != 0 or identity_run.returncode != 0 or not state_run.stdout.strip() or not identity_run.stdout.strip():
+            raise ValueError
+        state = state_run.stdout.strip()[0]
+        identity = f"darwin-ps-identity:{' '.join(identity_run.stdout.strip().split())}"
+    else:
+        raise ValueError
+except (OSError, IndexError, ValueError, subprocess.SubprocessError):
+    raise SystemExit(1)
+raise SystemExit(0 if identity == expected and state not in {"Z", "X", "x"} else 1)
+PY
+}
+
+process_is_terminal_state() {
+  python3 - "$1" <<'PY'
+import pathlib, subprocess, sys
+pid = int(sys.argv[1])
+try:
+    if sys.platform.startswith("linux"):
+        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        state = data[data.rfind(")") + 2:].split()[0]
+    else:
+        result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
+        state = result.stdout.strip()[0]
+except (OSError, IndexError, subprocess.SubprocessError):
+    raise SystemExit(1)
+raise SystemExit(0 if state in {"Z", "X", "x"} else 1)
+PY
+}
+
+signal_owned_process() {
+  local pid="$1" identity="$2" signal_name="${3:-TERM}"
+  process_identity_is_live "$pid" "$identity" || return 1
+  kill -s "$signal_name" "$pid"
+}
+
+run_managed_controller() {
+  local request_file="$1"
+  local result_file="$2"
+  local controller_pid controller_identity ready_file release_file ready_json ready_pid rc=0 deadline
+  ready_file="$work_dir/managed-controller-ready-${RANDOM}-$(date +%s%N 2>/dev/null || date +%s)"
+  release_file="${ready_file}.release"
+  rm -f "$ready_file" "$release_file"
+  python3 - "$request_file" "$ready_file" "$release_file" "$managed_hook_controller" <<'PY' >"$result_file" &
+import json, os, pathlib, subprocess, sys, time
+request_path, ready_path, release_path, controller_path = sys.argv[1:5]
+pid = os.getpid()
+try:
+    if sys.platform.startswith("linux"):
+        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = data[data.rfind(")") + 2:].split()
+        identity = f"linux-proc-start:{fields[19]}"
+    elif sys.platform == "darwin":
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-o", "ppid=", "-o", "pgid=", "-o", "comm=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError
+        identity = f"darwin-ps-identity:{' '.join(result.stdout.strip().split())}"
+    else:
+        raise RuntimeError
+    failure_file = os.environ.get("SYNARA_K8S_TEST_CONTROLLER_IDENTITY_FAILURE_FILE")
+    if failure_file:
+        try:
+            marker = os.open(failure_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(marker)
+            identity += "-injected-drift"
+        except FileExistsError:
+            pass
+    descriptor = os.open(ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump({"pid": pid, "identity": identity}, handle, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    deadline = time.monotonic() + 5
+    while not os.path.exists(release_path):
+        if time.monotonic() >= deadline:
+            raise SystemExit(125)
+        time.sleep(0.01)
+    request_fd = os.open(request_path, os.O_RDONLY)
+    os.dup2(request_fd, 0)
+    os.close(request_fd)
+    os.execv(sys.executable, [sys.executable, controller_path])
+except (OSError, RuntimeError, subprocess.SubprocessError):
+    raise SystemExit(125)
+PY
+  controller_pid="$!"
+  PARTITION_HOOK_CONTROLLER_PID="$controller_pid"
+  deadline=$((SECONDS + 6))
+  while [[ ! -s "$ready_file" ]]; do
+    if ! kill -0 "$controller_pid" >/dev/null 2>&1 || (( SECONDS >= deadline )); then
+      wait "$controller_pid" >/dev/null 2>&1 || true
+      PARTITION_HOOK_CONTROLLER_PID=""
+      PARTITION_HOOK_CONTROLLER_IDENTITY=""
+      rm -f "$ready_file" "$release_file"
+      return 125
+    fi
+    sleep 0.01
+  done
+  ready_json="$(cat "$ready_file" 2>/dev/null || true)"
+  ready_pid="$(jq -r '.pid // empty' <<<"$ready_json" 2>/dev/null || true)"
+  controller_identity="$(jq -r '.identity // empty' <<<"$ready_json" 2>/dev/null || true)"
+  if [[ "$ready_pid" != "$controller_pid" ]] ||
+    ! process_identity_is_live "$controller_pid" "$controller_identity"; then
+    wait "$controller_pid" >/dev/null 2>&1 || true
+    PARTITION_HOOK_CONTROLLER_PID=""
+    PARTITION_HOOK_CONTROLLER_IDENTITY=""
+    rm -f "$ready_file" "$release_file"
+    return 125
+  fi
+  PARTITION_HOOK_CONTROLLER_IDENTITY="$controller_identity"
+  : >"$release_file"
+  if wait "$controller_pid"; then rc=0; else rc=$?; fi
+  rm -f "$ready_file" "$release_file"
+  return "$rc"
+}
+
+interrupt_managed_controller() {
+  local pid="$PARTITION_HOOK_CONTROLLER_PID" identity="$PARTITION_HOOK_CONTROLLER_IDENTITY"
+  [[ -n "$pid" ]] || return 0
+  if process_identity_is_live "$pid" "$identity"; then
+    signal_owned_process "$pid" "$identity" TERM >/dev/null 2>&1 || return 1
+  elif kill -0 "$pid" >/dev/null 2>&1 && ! process_is_terminal_state "$pid"; then
+    return 1
+  fi
+  wait "$pid" >/dev/null 2>&1 || true
+  PARTITION_HOOK_CONTROLLER_PID=""
+  PARTITION_HOOK_CONTROLLER_IDENTITY=""
+  return 0
+}
+recover_managed_partition_phase() {
+  local phase="$1"
+  local backend security_boundary request_file result_file rc=0 operation_digest unit_seed unit_name unit_digest
+  [[ -n "$PARTITION_HOOK_OPERATION_ID" ]] || return 125
+  backend="$(managed_hook_backend)"
+  security_boundary=true
+  [[ "$backend" == "process-group-test" ]] && security_boundary=false
+  request_file="$work_dir/managed-recover-$phase-request.json"
+  result_file="$work_dir/managed-recover-$phase-result.json"
+  jq -nc \
+    --arg operationId "$PARTITION_HOOK_OPERATION_ID" \
+    --arg phase "$phase" \
+    --arg backend "$backend" \
+    --argjson securityBoundary "$security_boundary" '
+    {
+      schemaVersion: "synara.managed-hook-controller.request.v1",
+      action: "recover",
+      operationId: $operationId,
+      phase: $phase,
+      backend: $backend,
+      securityBoundary: $securityBoundary
+    }' >"$request_file"
+  chmod 600 "$request_file"
+  if run_managed_controller "$request_file" "$result_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  operation_digest="$(sha256_text "$PARTITION_HOOK_OPERATION_ID")"
+  unit_seed="$(jq -nc --arg operationId "$PARTITION_HOOK_OPERATION_ID" --arg phase "$phase" '{operationId:$operationId,phase:$phase}')"
+  unit_name="synara-managed-hook-$phase-$(sha256_json "$unit_seed" | cut -c1-32).service"
+  unit_digest="$(sha256_text "$unit_name")"
+  (( rc == 0 )) && jq -e \
+    --arg operationDigest "$operation_digest" --arg unitDigest "$unit_digest" \
+    --arg phase "$phase" --arg backend "$backend" --argjson boundary "$security_boundary" '
+    (keys | sort) == (["backend","cancelled","expectedTransition","hookExitCode","members","operationIdDigest","phase","reason","schemaVersion","scopeDigest","securityBoundary","status","terminationConfirmed","timedOut","unitFound","unitNameDigest"] | sort)
+    and .schemaVersion == "synara.managed-hook-controller.result.v1"
+    and .status == "recovered" and .reason == "unit-terminal"
+    and .operationIdDigest == $operationDigest and .unitNameDigest == $unitDigest
+    and .phase == $phase and .backend == $backend and .securityBoundary == $boundary
+    and .scopeDigest == null and .expectedTransition == null
+    and .hookExitCode == null and .timedOut == false and .cancelled == false
+    and (.unitFound | type == "boolean") and .terminationConfirmed == true
+    and (.members | keys | sort) == (["deadLower","deadUpper","executable","unreadable","zombie"] | sort)
+    and ([.members[]] | all(type == "number" and . >= 0))
+  ' "$result_file" >/dev/null 2>&1
+}
+
+project_execute_controller_result() {
+  local result_file="$1" phase="$2" backend="$3" boundary="$4" rc="$5" target_json="$6"
+  local operation_digest scope_json scope_digest unit_seed unit_name unit_digest transition
+  operation_digest="$(sha256_text "$PARTITION_HOOK_OPERATION_ID")"
+  scope_json="$(jq -nc --arg context "$context" --arg namespace "$namespace" \
+    --arg node "$(jq -r '.node' <<<"$target_json")" --arg nodeUid "$(jq -r '.nodeUid' <<<"$target_json")" \
+    --arg pod "$(jq -r '.pod' <<<"$target_json")" --arg podUid "$(jq -r '.podUid' <<<"$target_json")" \
+    --arg challenge "$PARTITION_HOOK_CHALLENGE" \
+    '{challenge:$challenge,context:$context,namespace:$namespace,node:$node,nodeUid:$nodeUid,pod:$pod,podUid:$podUid}')"
+  scope_digest="$(sha256_json "$scope_json")"
+  unit_seed="$(jq -nc --arg operationId "$PARTITION_HOOK_OPERATION_ID" --arg phase "$phase" '{operationId:$operationId,phase:$phase}')"
+  unit_name="synara-managed-hook-$phase-$(sha256_json "$unit_seed" | cut -c1-32).service"
+  unit_digest="$(sha256_text "$unit_name")"
+  case "$phase" in start) transition=terminal-applied ;; verify) transition=applied ;; stop) transition=terminal-healed ;; *) return 1 ;; esac
+  jq -ec --arg operationDigest "$operation_digest" --arg scopeDigest "$scope_digest" \
+    --arg unitDigest "$unit_digest" --arg phase "$phase" --arg backend "$backend" \
+    --arg transition "$transition" --argjson boundary "$boundary" --argjson rc "$rc" '
+    def base_ok:
+      .schemaVersion == "synara.managed-hook-controller.result.v1"
+      and .operationIdDigest == $operationDigest and .scopeDigest == $scopeDigest
+      and .unitNameDigest == $unitDigest and .phase == $phase and .backend == $backend
+      and .securityBoundary == $boundary and .expectedTransition == $transition
+      and (.status | type == "string") and (.reason | type == "string");
+    def members_ok:
+      (.members | keys | sort) == (["deadLower","deadUpper","executable","unreadable","zombie"] | sort)
+      and ([.members[]] | all(type == "number" and . >= 0));
+    def outcome_keys:
+      (["backend","cancelled","expectedTransition","hookExitCode","members","operationIdDigest","phase","reason","schemaVersion","scopeDigest","securityBoundary","status","terminationConfirmed","timedOut","unitFound","unitNameDigest"] | sort);
+    def success_keys:
+      (outcome_keys + ["artifactDigest","checkCount","evidenceDigests"] | sort);
+    . as $result |
+    if $rc == 0 then
+      (keys | sort) == success_keys and base_ok
+      and .status == "passed" and .reason == "transition-proved"
+      and .hookExitCode == 0 and .timedOut == false and .cancelled == false
+      and (.unitFound | type == "boolean") and .terminationConfirmed == true and members_ok
+      and (.artifactDigest | test("^[0-9a-f]{64}$"))
+      and (.evidenceDigests | type == "array" and length > 0 and all(test("^[0-9a-f]{64}$")))
+      and (.checkCount | type == "number") and .checkCount == (.evidenceDigests | length)
+    else
+      (keys | sort) == outcome_keys and base_ok and members_ok
+      and (.status == "failed" or .status == "cancelled" or .status == "unsupported")
+      and .reason != "transition-proved"
+      and (.hookExitCode == null or (.hookExitCode | type == "number"))
+      and (.timedOut | type == "boolean") and (.cancelled | type == "boolean")
+      and (.unitFound | type == "boolean") and (.terminationConfirmed | type == "boolean")
+      and (if .status == "cancelled" then .cancelled == true and .timedOut == false else .cancelled == false end)
+      and (if .timedOut then .status == "failed" and .reason == "hook-timed-out" else true end)
+      and (if .reason == "hook-exit-nonzero" then (.hookExitCode | type == "number") and .hookExitCode != 0 else true end)
+    end
+    | select(.)
+    | $result
+    | {
+        schemaVersion,status,reason,securityBoundary,operationIdDigest,phase,backend,
+        unitNameDigest,scopeDigest,expectedTransition,hookExitCode,timedOut,cancelled,
+        unitFound,terminationConfirmed,members,
+        artifactDigest:(.artifactDigest // null),evidenceDigests:(.evidenceDigests // []),checkCount:(.checkCount // 0)
+      }
+  ' "$result_file"
 }
 
 run_partition_hook() {
@@ -962,97 +1962,195 @@ run_partition_hook() {
   local target_json="${4:-null}"
   local reason="${5:-}"
   local timeout_seconds="$6"
-  local stdout_file="$work_dir/node-partition-hook-${phase}.stdout"
-  local stderr_file="$work_dir/node-partition-hook-${phase}.stderr"
-  local target_pod="" rc=0 status_json result_json extra_json
-  if [[ -n "$target_json" && "$target_json" != "null" ]]; then
-    target_pod="$(jq -r '.pod // empty' <<<"$target_json" 2>/dev/null || true)"
+  local target_pod target_pod_uid node_uid backend security_boundary test_only
+  local artifact_file request_file result_file controller_json recovery_json='null'
+  local rc=0 recovery_rc=0 identity_digest
+  target_pod="$(jq -r '.pod // empty' <<<"$target_json")"
+  target_pod_uid="$(jq -r '.podUid // empty' <<<"$target_json")"
+  node_uid="$(jq -r '.nodeUid // empty' <<<"$target_json")"
+  backend="$(managed_hook_backend)"
+  security_boundary=true
+  test_only=false
+  if [[ "$backend" == "process-group-test" ]]; then
+    security_boundary=false
+    test_only=true
   fi
-  rm -f "$stdout_file" "$stderr_file"
-  if status_json="$(
-    SYNARA_K8S_CONTEXT="$context" \
-    SYNARA_K8S_NAMESPACE="$namespace" \
-    SYNARA_K8S_EVIDENCE_FILE="$evidence_file" \
-    SYNARA_K8S_HOOK_PHASE="node-partition-$phase" \
-    SYNARA_K8S_NODE_PARTITION_PHASE="$phase" \
-    SYNARA_K8S_NODE_PARTITION_CASE="node-partition" \
-    SYNARA_K8S_NODE_PARTITION_CONTEXT="$context" \
-    SYNARA_K8S_NODE_PARTITION_NAMESPACE="$namespace" \
-    SYNARA_K8S_NODE_PARTITION_NODE="$node" \
-    SYNARA_K8S_NODE_PARTITION_TARGET_POD="$target_pod" \
-    SYNARA_K8S_NODE_PARTITION_TARGET_JSON="$target_json" \
-    SYNARA_K8S_NODE_PARTITION_SECONDS="$partition_seconds" \
-    SYNARA_K8S_NODE_PARTITION_TIMEOUT_SECONDS="$timeout_seconds" \
-    SYNARA_K8S_NODE_PARTITION_RUNNER_PID="$$" \
-    SYNARA_K8S_NODE_PARTITION_REASON="$reason" \
-    SYNARA_K8S_NODE_PARTITION_EVIDENCE_FILE="$evidence_file" \
-    SYNARA_K8S_NODE_PARTITION_JOURNAL_FILE="$journal_file" \
-    SYNARA_K8S_NODE_PARTITION_PARTIAL_FILE="$partial_file" \
-      run_command_capture "$command_text" "$stdout_file" "$stderr_file" "$timeout_seconds"
-  )"; then
+  artifact_file="$work_dir/managed-transition-${PARTITION_HOOK_OPERATION_ID}-$phase-${RANDOM}-$(date +%s).json"
+  request_file="$work_dir/managed-$phase-request.json"
+  result_file="$work_dir/managed-$phase-result.json"
+  rm -f "$artifact_file" "$result_file"
+  jq -nc \
+    --arg operationId "$PARTITION_HOOK_OPERATION_ID" \
+    --arg phase "$phase" \
+    --arg backend "$backend" \
+    --arg context "$context" \
+    --arg namespace "$namespace" \
+    --arg node "$node" \
+    --arg nodeUid "$node_uid" \
+    --arg pod "$target_pod" \
+    --arg podUid "$target_pod_uid" \
+    --arg challenge "$PARTITION_HOOK_CHALLENGE" \
+    --arg command "$command_text" \
+    --arg artifactPath "$artifact_file" \
+    --argjson securityBoundary "$security_boundary" \
+    --argjson timeoutSeconds "$timeout_seconds" '
+    {
+      schemaVersion: "synara.managed-hook-controller.request.v1",
+      action: "execute",
+      operationId: $operationId,
+      phase: $phase,
+      backend: $backend,
+      securityBoundary: $securityBoundary,
+      scope: {
+        context: $context,
+        namespace: $namespace,
+        node: $node,
+        nodeUid: $nodeUid,
+        pod: $pod,
+        podUid: $podUid,
+        challenge: $challenge
+      },
+      command: ["/bin/sh", "-c", $command],
+      artifactPath: $artifactPath,
+      timeoutSeconds: $timeoutSeconds,
+      stopTimeoutSeconds: 5,
+      freshnessSeconds: 60
+    }' >"$request_file"
+  chmod 600 "$request_file"
+  PARTITION_HOOK_LAST_PHASE="$phase"
+  PARTITION_HOOK_NEEDS_RECOVERY=1
+  if run_managed_controller "$request_file" "$result_file"; then
     rc=0
   else
     rc=$?
   fi
-  if [[ -z "$status_json" ]]; then
-    status_json='{"exitCode":1,"timedOut":false}'
-    rc=1
+  if [[ -s "$result_file" ]] && controller_json="$(project_execute_controller_result \
+    "$result_file" "$phase" "$backend" "$security_boundary" "$rc" "$target_json")"; then
+    if (( rc == 0 )); then PARTITION_HOOK_NEEDS_RECOVERY=0; fi
+  else
+    controller_json='{"schemaVersion":"synara.managed-hook-controller.result.v1","status":"failed","reason":"invalid-controller-result","terminationConfirmed":false}'
+    rc=125
   fi
-  extra_json="$(jq -nc \
-    --arg backend "managed-hook" \
-    --arg node "$node" \
+  if (( rc != 0 )); then
+    if recover_managed_partition_phase "$phase"; then
+      recovery_rc=0
+      recovery_json='{"status":"recovered","terminationConfirmed":true}'
+      PARTITION_HOOK_NEEDS_RECOVERY=0
+    else
+      recovery_rc=$?
+      recovery_json="$(jq -nc --argjson exitCode "$recovery_rc" '{status:"failed",terminationConfirmed:false,exitCode:$exitCode}')"
+    fi
+  fi
+  identity_digest="$(printf '%s' "$PARTITION_HOOK_CONTROLLER_IDENTITY" | shasum -a 256 | awk '{print $1}')"
+  PARTITION_HOOK_RESULT_JSON="$(jq -nc \
+    --arg backend "$backend" \
     --arg reason "$reason" \
-    --argjson target "$target_json" \
-    --argjson timeoutSeconds "$timeout_seconds" '
+    --arg identityDigest "$identity_digest" \
+    --argjson testOnly "$test_only" \
+    --arg targetDigest "$(sha256_json "$target_json")" \
+    --argjson timeoutSeconds "$timeout_seconds" \
+    --argjson exitCode "$rc" \
+    --argjson controller "$controller_json" \
+    --argjson recovery "$recovery_json" '
     {
       backend: $backend,
-      node: $node,
-      target: $target,
+      testOnly: $testOnly,
+      securityBoundary: $controller.securityBoundary,
+      targetDigest: $targetDigest,
       timeoutSeconds: $timeoutSeconds,
-      reason: (if $reason == "" then null else $reason end)
+      reason: (if $reason == "" then null else $reason end),
+      exitCode: $exitCode,
+      timedOut: ($controller.timedOut // false),
+      terminationConfirmed: ($controller.terminationConfirmed // false),
+      controllerIdentityDigest: $identityDigest,
+      controller: $controller,
+      recovery: $recovery
     }
     | with_entries(select(.value != null))')"
-  result_json="$(redacted_command_result "$phase" "$command_text" "$status_json" "$stdout_file" "$stderr_file" "$extra_json")"
-  printf '%s\n' "$result_json"
+  if (( recovery_rc != 0 )); then
+    return 125
+  fi
   return "$rc"
 }
 
 start_managed_partition_hook() {
   local node="$1"
   local target_json="$2"
-  local start_json rc=0
+  local start_json challenge operation_id rc=0
   PARTITION_HOOK_NODE="$node"
   PARTITION_HOOK_TARGET_JSON="$target_json"
   PARTITION_HOOK_ATTEMPTED=1
+  PARTITION_HOOK_ACTIVE=1
+  if ! challenge="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" ||
+    ! operation_id="$(python3 -c 'import secrets; print("managed-" + secrets.token_hex(24))')" ||
+    [[ ! "$challenge" =~ ^[0-9a-f]{64}$ ]] ||
+    [[ ! "$operation_id" =~ ^managed-[0-9a-f]{48}$ ]]; then
+    PARTITION_HOOK_RESULT_JSON='{"error":"managed node partition operation identity generation failed","exitCode":125}'
+    PARTITION_HOOK_START_JSON="$PARTITION_HOOK_RESULT_JSON"
+    return 125
+  fi
+  PARTITION_HOOK_CHALLENGE="$challenge"
+  PARTITION_HOOK_OPERATION_ID="$operation_id"
+  PARTITION_HOOK_CHALLENGE_ISSUED_EPOCH="$(date +%s)"
   PARTITION_HOOK_START_JSON='null'
+  PARTITION_HOOK_VERIFY_JSON='null'
   PARTITION_HOOK_STOP_JSON='null'
   PARTITION_HOOK_RESULT_JSON='null'
-  PARTITION_HOOK_ACTIVE=1
-  if start_json="$(run_partition_hook start "$node_partition_start_hook" "$node" "$target_json" "case-start" "$node_partition_start_hook_timeout_seconds")"; then
+  if run_partition_hook start "$node_partition_start_hook" "$node" "$target_json" "case-start" "$node_partition_start_hook_timeout_seconds"; then
     rc=0
   else
     rc=$?
   fi
+  start_json="$PARTITION_HOOK_RESULT_JSON"
   PARTITION_HOOK_RESULT_JSON="$start_json"
   PARTITION_HOOK_START_JSON="$start_json"
   return "$rc"
 }
 
+run_managed_partition_verification() {
+  local node="$1"
+  local target_json="$2"
+  local verify_json rc=0
+  if run_partition_hook verify "$node_partition_verify_hook" "$node" "$target_json" "observe-isolation" "$node_partition_verify_hook_timeout_seconds"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  verify_json="$PARTITION_HOOK_RESULT_JSON"
+  PARTITION_HOOK_VERIFY_JSON="$verify_json"
+  PARTITION_HOOK_RESULT_JSON="$verify_json"
+  return "$rc"
+}
+
 stop_managed_partition_hook() {
   local reason="${1:-case-complete}"
-  local stop_json rc=0
+  local stop_json rc=0 recovery_failed=0
   if [[ "$PARTITION_HOOK_ACTIVE" != "1" ]]; then
     PARTITION_HOOK_RESULT_JSON='null'
     printf 'null\n'
     return 0
   fi
-  if stop_json="$(run_partition_hook stop "$node_partition_stop_hook" "$PARTITION_HOOK_NODE" "$PARTITION_HOOK_TARGET_JSON" "$reason" "$node_partition_stop_hook_timeout_seconds")"; then
+  if ! interrupt_managed_controller; then
+    recovery_failed=1
+  fi
+  if [[ "$PARTITION_HOOK_NEEDS_RECOVERY" == "1" && -n "$PARTITION_HOOK_LAST_PHASE" ]]; then
+    if recover_managed_partition_phase "$PARTITION_HOOK_LAST_PHASE"; then
+      PARTITION_HOOK_NEEDS_RECOVERY=0
+    else
+      recovery_failed=1
+    fi
+  fi
+  if run_partition_hook stop "$node_partition_stop_hook" "$PARTITION_HOOK_NODE" "$PARTITION_HOOK_TARGET_JSON" "$reason" "$node_partition_stop_hook_timeout_seconds"; then
     rc=0
   else
     rc=$?
   fi
+  stop_json="$PARTITION_HOOK_RESULT_JSON"
   PARTITION_HOOK_RESULT_JSON="$stop_json"
   PARTITION_HOOK_STOP_JSON="$stop_json"
+  if (( recovery_failed != 0 )); then
+    return 125
+  fi
   if (( rc == 0 )); then
     clear_partition_hook_state
   fi
@@ -1066,6 +2164,7 @@ append_case_result() {
   local finished_case_at="$4"
   local details_json="$5"
   local progress_json
+  details_json="$(sanitize_managed_details "$case_name" "$details_json")"
   jq -nc \
     --arg name "$case_name" \
     --arg status "$status" \
@@ -1190,27 +2289,35 @@ case_topology() {
 
 case_leader_takeover() {
   local lease_name="synara:kubernetes-execution-reconciler"
-  local before_lease before_holder before_token before_pod before_json
+  local before_lease before_holder before_token before_pod before_pod_uid before_json
   local after_lease after_holder after_token after_pod after_json
   local failures_file="$work_dir/leader-takeover-probe-failures"
   local probe_stop_file="$work_dir/leader-takeover-probe-stop"
   local lease_guard_file="$work_dir/leader-takeover-lease-guard"
-  local takeover_rc failures guard_app guard_state guard_output current_lease
+  local delete_output_file="$work_dir/leader-takeover-delete-output"
+  local takeover_rc failures guard_app guard_state guard_output current_lease guard_error guard_pod guard_pod_uid
+  local deletion_json='null'
 
   start_continuous_probe "$probe_stop_file" "$failures_file"
-  if ! start_reconciler_takeover_guard "$lease_name" "$lease_guard_file" 30; then
+  if ! start_reconciler_takeover_guard "$lease_name" "$lease_guard_file" "$case_timeout_seconds"; then
     guard_app="$LEASE_GUARD_APP"
+    guard_error="$LEASE_GUARD_ERROR"
+    guard_pod="$LEASE_GUARD_POD"
+    guard_pod_uid="$LEASE_GUARD_POD_UID"
     stop_reconciler_takeover_guard
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
     guard_state="$(cat "$lease_guard_file.state" 2>/dev/null || true)"
-    guard_output="$(tail -c 2000 "$lease_guard_file" 2>/dev/null || true)"
+    guard_output="$(read_reconciler_takeover_guard_diagnostic "$lease_guard_file" "$LEASE_GUARD_NONCE" || true)"
     current_lease="$(read_reconciler_lease "$lease_name" 2>/dev/null || true)"
     CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg guardApp "$guard_app" \
       --arg guardState "$guard_state" --arg guardOutput "$guard_output" --arg currentLease "$current_lease" \
+      --arg guardFailure "$guard_error" --arg postgresPod "$guard_pod" --arg postgresPodUid "$guard_pod_uid" \
       --argjson failures "$failures" '
       {error: "active reconciler lease could not be guarded", leaseName: $lease,
        guardApplicationName: $guardApp, guardState: $guardState, guardOutput: $guardOutput,
+       guardFailure: $guardFailure, postgresPod: $postgresPod, postgresPodUid: $postgresPodUid,
+       guardOutputRedacted: true, guardOutputMaxBytes: 2000,
        currentLease: $currentLease, readyProbeFailures: $failures}')"
     return 1
   fi
@@ -1228,14 +2335,15 @@ case_leader_takeover() {
        before: {holderId: $holder, fencingToken: $token}, readyProbeFailures: $failures}')"
     return 1
   fi
-  if ! jq -e --arg pod "$before_pod" '
-    any(.items[]?;
-      .metadata.name == $pod
-      and .metadata.deletionTimestamp == null
-      and .status.phase == "Running"
-      and any(.status.conditions[]?; .type == "Ready" and .status == "True")
-    )
-  ' <<<"$before_json" >/dev/null; then
+  if ! before_pod_uid="$(jq -er --arg pod "$before_pod" '
+    [(.items // [])[]
+      | select(.metadata.name == $pod)
+      | select(.metadata.deletionTimestamp == null)
+      | select(.status.phase == "Running")
+      | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+      | .metadata.uid]
+    | if length == 1 and (.[0] | type == "string") and (.[0] | length > 0) then .[0] else empty end
+  ' <<<"$before_json")"; then
     stop_reconciler_takeover_guard
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
@@ -1245,28 +2353,76 @@ case_leader_takeover() {
     return 1
   fi
 
-  if ! "${kube[@]}" -n "$namespace" delete pod "$before_pod" --wait=false >/dev/null; then
+  if ! assert_reconciler_takeover_guard_active; then
+    guard_error="$LEASE_GUARD_ERROR"
+    guard_output="$(read_reconciler_takeover_guard_diagnostic "$lease_guard_file" "$LEASE_GUARD_NONCE" || true)"
     stop_reconciler_takeover_guard
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" '
-      {error: "reconciler leader Pod deletion failed", leaseName: $lease, deletedPod: $pod}')"
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$before_holder" --argjson token "$before_token" \
+      --arg guardFailure "$guard_error" --arg guardOutput "$guard_output" \
+      --arg postgresPod "$LEASE_GUARD_POD" --arg postgresPodUid "$LEASE_GUARD_POD_UID" \
+      --argjson failures "$failures" '
+      {error: "reconciler takeover guard was not active immediately before leader deletion", leaseName: $lease,
+       before: {holderId: $holder, fencingToken: $token}, guardFailure: $guardFailure,
+       postgresPod: $postgresPod, postgresPodUid: $postgresPodUid,
+       guardOutput: $guardOutput, guardOutputRedacted: true, guardOutputMaxBytes: 2000,
+       readyProbeFailures: $failures}')"
+    return 1
+  fi
+
+  if ! delete_pod_uid_preconditioned "$before_pod" "$before_pod_uid" "$delete_output_file"; then
+    deletion_json="$POD_DELETE_RECONCILIATION"
+    stop_reconciler_takeover_guard
+    finish_continuous_probe "$probe_stop_file" || true
+    failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson failures "$failures" '
+      {error: "reconciler leader Pod deletion could not be reconciled", leaseName: $lease,
+       deletedPod: $pod, deletedPodUID: $podUid, deletion: $deletion, readyProbeFailures: $failures}')"
+    return 1
+  fi
+  deletion_json="$POD_DELETE_RECONCILIATION"
+  if ! release_reconciler_takeover_guard "$deletion_json"; then
+    guard_error="$LEASE_GUARD_ERROR"
+    guard_output="$(read_reconciler_takeover_guard_diagnostic "$lease_guard_file" "$LEASE_GUARD_NONCE" || true)"
+    stop_reconciler_takeover_guard
+    finish_continuous_probe "$probe_stop_file" || true
+    failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --arg guardFailure "$guard_error" --arg guardOutput "$guard_output" \
+      --arg postgresPod "$LEASE_GUARD_POD" --arg postgresPodUid "$LEASE_GUARD_POD_UID" --argjson failures "$failures" '
+      {error: "reconciler takeover guard explicit unlock failed", leaseName: $lease,
+       deletedPod: $pod, deletedPodUID: $podUid, deletion: $deletion, guardFailure: $guardFailure,
+       postgresPod: $postgresPod, postgresPodUid: $postgresPodUid,
+       guardOutput: $guardOutput, guardOutputRedacted: true, guardOutputMaxBytes: 2000,
+       readyProbeFailures: $failures}')"
     return 1
   fi
   if ! finish_reconciler_takeover_guard; then
+    guard_error="$LEASE_GUARD_ERROR"
+    guard_output="$(read_reconciler_takeover_guard_diagnostic "$lease_guard_file" "$LEASE_GUARD_NONCE" || true)"
+    stop_reconciler_takeover_guard
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --argjson failures "$failures" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --arg guardFailure "$guard_error" \
+      --arg guardOutput "$guard_output" --arg postgresPod "$LEASE_GUARD_POD" --arg postgresPodUid "$LEASE_GUARD_POD_UID" \
+      --argjson failures "$failures" '
       {error: "reconciler takeover guard failed after leader deletion was submitted", leaseName: $lease,
-       deletedPod: $pod, readyProbeFailures: $failures}')"
+       deletedPod: $pod, deletedPodUID: $podUid, deletion: $deletion, guardFailure: $guardFailure,
+       postgresPod: $postgresPod, postgresPodUid: $postgresPodUid,
+       guardOutput: $guardOutput, guardOutputRedacted: true, guardOutputMaxBytes: 2000,
+       readyProbeFailures: $failures}')"
     return 1
   fi
-  if ! "${kube[@]}" -n "$namespace" wait --for=delete "pod/$before_pod" --timeout="${case_timeout_seconds}s" >/dev/null; then
+  if ! wait_for_pod_uid_absent "$before_pod" "$before_pod_uid" "$case_timeout_seconds"; then
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --argjson failures "$failures" '
-      {error: "reconciler leader Pod did not terminate", leaseName: $lease, deletedPod: $pod,
-       readyProbeFailures: $failures}')"
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson failures "$failures" '
+      {error: "original reconciler leader Pod UID did not disappear", leaseName: $lease,
+       deletedPod: $pod, deletedPodUID: $podUid, deletion: $deletion, readyProbeFailures: $failures}')"
     return 1
   fi
 
@@ -1278,10 +2434,12 @@ case_leader_takeover() {
   if (( takeover_rc != 0 )); then
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$before_holder" --argjson token "$before_token" \
-      --argjson failures "$failures" --argjson skipped "$([[ "$takeover_rc" == "2" ]] && printf true || printf false)" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$before_holder" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson token "$before_token" --argjson failures "$failures" \
+      --argjson skipped "$([[ "$takeover_rc" == "2" ]] && printf true || printf false)" '
       {error: (if $skipped then "reconciler fencing token skipped an epoch" else "reconciler lease did not transfer" end),
-       leaseName: $lease, before: {holderId: $holder, fencingToken: $token},
+       leaseName: $lease, deletedPodUID: $podUid, deletion: $deletion,
+       before: {holderId: $holder, fencingToken: $token},
        readyProbeFailures: $failures}')"
     return 1
   fi
@@ -1291,19 +2449,21 @@ case_leader_takeover() {
   if ! wait_for_control_plane_ready; then
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(cat "$failures_file" 2>/dev/null || printf 0)"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" \
-      --arg holder "$after_holder" --argjson token "$after_token" --argjson failures "$failures" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg pod "$before_pod" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --arg holder "$after_holder" --argjson token "$after_token" --argjson failures "$failures" '
       {error: "control plane did not become ready after leader takeover", leaseName: $lease,
-       deletedPod: $pod, after: {holderId: $holder, fencingToken: $token},
+       deletedPod: $pod, deletedPodUID: $podUid, deletion: $deletion,
+       after: {holderId: $holder, fencingToken: $token},
        readyProbeFailures: $failures}')"
     return 1
   fi
   if ! after_json="$(get_control_plane_pods_json)"; then
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(read_probe_failures "$failures_file")"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --argjson token "$after_token" \
-      --argjson failures "$failures" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson token "$after_token" --argjson failures "$failures" '
       {error: "failed to list control plane Pods after leader takeover", leaseName: $lease,
+       deletedPodUID: $podUid, deletion: $deletion,
        after: {holderId: $holder, fencingToken: $token}, readyProbeFailures: $failures}')"
     return 1
   fi
@@ -1317,34 +2477,41 @@ case_leader_takeover() {
   ' <<<"$after_json" >/dev/null; then
     finish_continuous_probe "$probe_stop_file" || true
     failures="$(read_probe_failures "$failures_file")"
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --argjson token "$after_token" \
-      --argjson failures "$failures" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson token "$after_token" --argjson failures "$failures" '
       {error: "new reconciler lease holder is not a Ready Control Plane Pod", leaseName: $lease,
+       deletedPodUID: $podUid, deletion: $deletion,
        after: {holderId: $holder, fencingToken: $token}, readyProbeFailures: $failures}')"
     return 1
   fi
   if ! finish_continuous_probe "$probe_stop_file"; then
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --argjson token "$after_token" '
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg holder "$after_holder" --arg podUid "$before_pod_uid" \
+      --argjson deletion "$deletion_json" --argjson token "$after_token" '
       {error: "continuous readiness probe failed during leader takeover", leaseName: $lease,
+       deletedPodUID: $podUid, deletion: $deletion,
        after: {holderId: $holder, fencingToken: $token}}')"
     return 1
   fi
   failures="$(read_probe_failures "$failures_file")"
   if (( failures > max_failover_ready_failures )); then
-    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg beforeHolder "$before_holder" \
+    CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg beforeHolder "$before_holder" --arg deletedPodUID "$before_pod_uid" \
       --arg afterHolder "$after_holder" --arg beforePod "$before_pod" --arg afterPod "$after_pod" \
-      --argjson beforeToken "$before_token" --argjson afterToken "$after_token" --argjson failures "$failures" '
+      --argjson deletion "$deletion_json" --argjson beforeToken "$before_token" --argjson afterToken "$after_token" --argjson failures "$failures" '
       {error: "readiness probe failures exceeded leader takeover threshold", leaseName: $lease,
-       before: {holderId: $beforeHolder, pod: $beforePod, fencingToken: $beforeToken},
+       deletedPodUID: $deletedPodUID, deletion: $deletion,
+       before: {holderId: $beforeHolder, pod: $beforePod, podUID: $deletedPodUID, fencingToken: $beforeToken},
        after: {holderId: $afterHolder, pod: $afterPod, fencingToken: $afterToken},
        readyProbeFailures: $failures}')"
     return 1
   fi
-  CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg beforeHolder "$before_holder" \
+  CASE_DETAILS_JSON="$(jq -nc --arg lease "$lease_name" --arg beforeHolder "$before_holder" --arg deletedPodUID "$before_pod_uid" \
+    --arg postgresPod "$LEASE_GUARD_POD" --arg postgresPodUid "$LEASE_GUARD_POD_UID" \
     --arg afterHolder "$after_holder" --arg beforePod "$before_pod" --arg afterPod "$after_pod" \
-    --argjson beforeToken "$before_token" --argjson afterToken "$after_token" --argjson failures "$failures" '
+    --argjson deletion "$deletion_json" --argjson beforeToken "$before_token" --argjson afterToken "$after_token" --argjson failures "$failures" '
     {leaseName: $lease,
-     before: {holderId: $beforeHolder, pod: $beforePod, fencingToken: $beforeToken},
+     guardProtocol: "v2", guardPostgresPod: $postgresPod, guardPostgresPodUID: $postgresPodUid,
+     deletedPodUID: $deletedPodUID, deletion: $deletion,
+     before: {holderId: $beforeHolder, pod: $beforePod, podUID: $deletedPodUID, fencingToken: $beforeToken},
      after: {holderId: $afterHolder, pod: $afterPod, fencingToken: $afterToken},
      readyProbeFailures: $failures}')"
 }
@@ -1578,9 +2745,10 @@ case_node_drain() {
 }
 
 case_node_partition() {
-  local target_json node network before_ready_json after_ready_json
+  local target_json node node_uid pod_uid network before_ready_json after_ready_json
   local failures_file="$work_dir/partition-probe-failures"
-  local probe_pid partition_failures managed_probe_window_seconds start_hook_json stop_hook_json start_hook_rc stop_hook_rc
+  local probe_pid partition_failures managed_probe_window_seconds start_hook_json verify_hook_json stop_hook_json
+  local start_hook_rc verify_hook_rc stop_hook_rc
   if ! target_json="$(select_safe_control_plane_target "${SYNARA_K8S_RESILIENCE_PARTITION_NODE:-}")"; then
     CASE_DETAILS_JSON='{"reason":"no safe single-control-plane node without stage2 dependencies was available for node partition simulation"}'
     return 2
@@ -1594,24 +2762,32 @@ case_node_partition() {
     CASE_DETAILS_JSON="$(jq -nc --arg node "$node" '{error: "failed to read node state before partition", node: $node}')"
     return 1
   fi
+  if ! node_uid="$(jq -er '.metadata.uid | select(type == "string" and length > 0 and length <= 128)' <<<"$before_ready_json")" ||
+    ! pod_uid="$(jq -er '.podUid | select(type == "string" and length > 0 and length <= 128)' <<<"$target_json")"; then
+    CASE_DETAILS_JSON="$(jq -nc --arg node "$node" '{error: "partition target omitted immutable Node or Pod UID", node: $node}')"
+    return 1
+  fi
+  target_json="$(jq -nc --argjson target "$target_json" --arg nodeUid "$node_uid" '$target + {nodeUid: $nodeUid}')"
   if [[ "$context" != kind-* ]]; then
-    if [[ -z "$node_partition_start_hook" && -z "$node_partition_stop_hook" ]]; then
-      CASE_DETAILS_JSON='{"reason":"node partition for non-Kind contexts requires explicit SYNARA_K8S_NODE_PARTITION_START_HOOK and SYNARA_K8S_NODE_PARTITION_STOP_HOOK commands"}'
+    if [[ -z "$node_partition_start_hook" && -z "$node_partition_verify_hook" && -z "$node_partition_stop_hook" ]]; then
+      CASE_DETAILS_JSON='{"reason":"node partition for non-Kind contexts requires explicit start, verify, and stop hooks"}'
       return 2
     fi
-    if [[ -z "$node_partition_start_hook" || -z "$node_partition_stop_hook" ]]; then
+    if [[ -z "$node_partition_start_hook" || -z "$node_partition_verify_hook" || -z "$node_partition_stop_hook" ]]; then
       CASE_DETAILS_JSON="$(jq -nc \
         --argjson startConfigured "$([[ -n "$node_partition_start_hook" ]] && printf true || printf false)" \
+        --argjson verifyConfigured "$([[ -n "$node_partition_verify_hook" ]] && printf true || printf false)" \
         --argjson stopConfigured "$([[ -n "$node_partition_stop_hook" ]] && printf true || printf false)" '
         {
-          error: "managed node partition hooks must configure both start and stop commands",
+          error: "managed node partition hooks must configure start, verify, and stop commands",
           backend: "managed-hook",
           startHookConfigured: $startConfigured,
+          verifyHookConfigured: $verifyConfigured,
           stopHookConfigured: $stopConfigured
         }')"
       return 1
     fi
-    managed_probe_window_seconds=$((partition_seconds + disruption_probe_window_seconds + node_partition_start_hook_timeout_seconds + node_partition_stop_hook_timeout_seconds))
+    managed_probe_window_seconds=$((partition_seconds + disruption_probe_window_seconds + node_partition_start_hook_timeout_seconds + node_partition_verify_hook_timeout_seconds + node_partition_stop_hook_timeout_seconds))
     start_probe_window "$managed_probe_window_seconds" "$failures_file"
     probe_pid="$PROBE_PID"
     if start_managed_partition_hook "$node" "$target_json"; then
@@ -1646,6 +2822,43 @@ case_node_partition() {
           target: $target,
           startHook: $startHook,
           stopHook: $stopHook
+      }')"
+      return 1
+    fi
+    if run_managed_partition_verification "$node" "$target_json"; then
+      verify_hook_rc=0
+    else
+      verify_hook_rc=$?
+    fi
+    verify_hook_json="$PARTITION_HOOK_VERIFY_JSON"
+    if (( verify_hook_rc != 0 )); then
+      if stop_managed_partition_hook "verify-failed"; then
+        stop_hook_rc=0
+      else
+        stop_hook_rc=$?
+      fi
+      stop_hook_json="$PARTITION_HOOK_RESULT_JSON"
+      stop_probe_window
+      CASE_DETAILS_JSON="$(jq -nc \
+        --arg node "$node" \
+        --argjson target "$target_json" \
+        --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
+        --argjson stopHook "$stop_hook_json" '
+        {
+          error: (
+            if ($stopHook.exitCode // 1) == 0 then
+              "managed node partition verification failed after cleanup heal"
+            else
+              "managed node partition verification failed and cleanup heal also failed"
+            end
+          ),
+          backend: "managed-hook",
+          node: $node,
+          target: $target,
+          startHook: $startHook,
+          verifyHook: $verifyHook,
+          stopHook: $stopHook
         }')"
       return 1
     fi
@@ -1662,6 +2875,7 @@ case_node_partition() {
         --arg node "$node" \
         --argjson target "$target_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" '
         {
           error: "managed node partition stop hook failed",
@@ -1670,6 +2884,7 @@ case_node_partition() {
           target: $target,
           partitionSeconds: '"$partition_seconds"',
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1680,6 +2895,7 @@ case_node_partition() {
         --arg node "$node" \
         --argjson target "$target_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" \
         --argjson failures "$(read_probe_failures "$failures_file")" '
         {
@@ -1690,6 +2906,7 @@ case_node_partition() {
           partitionSeconds: '"$partition_seconds"',
           readyProbeFailures: $failures,
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1700,6 +2917,7 @@ case_node_partition() {
         --arg node "$node" \
         --argjson target "$target_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" '
         {
           error: "readiness probe process failed during managed node partition",
@@ -1707,6 +2925,7 @@ case_node_partition() {
           node: $node,
           target: $target,
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1717,6 +2936,7 @@ case_node_partition() {
         --arg node "$node" \
         --argjson target "$target_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" \
         --argjson failures "$(read_probe_failures "$failures_file")" '
         {
@@ -1726,6 +2946,7 @@ case_node_partition() {
           target: $target,
           readyProbeFailures: $failures,
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1735,6 +2956,7 @@ case_node_partition() {
         --arg node "$node" \
         --argjson target "$target_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" \
         --argjson failures "$(read_probe_failures "$failures_file")" '
         {
@@ -1744,6 +2966,7 @@ case_node_partition() {
           target: $target,
           readyProbeFailures: $failures,
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1757,6 +2980,7 @@ case_node_partition() {
         --argjson beforeNode "$before_ready_json" \
         --argjson afterNode "$after_ready_json" \
         --argjson startHook "$start_hook_json" \
+        --argjson verifyHook "$verify_hook_json" \
         --argjson stopHook "$stop_hook_json" '
         {
           error: "readiness probe failures exceeded partition threshold",
@@ -1768,6 +2992,7 @@ case_node_partition() {
           nodeReadyBefore: [($beforeNode.status.conditions // [])[] | select(.type == "Ready")][0],
           nodeReadyAfter: [($afterNode.status.conditions // [])[] | select(.type == "Ready")][0],
           startHook: $startHook,
+          verifyHook: $verifyHook,
           stopHook: $stopHook
         }')"
       return 1
@@ -1779,6 +3004,7 @@ case_node_partition() {
       --argjson beforeNode "$before_ready_json" \
       --argjson afterNode "$after_ready_json" \
       --argjson startHook "$start_hook_json" \
+      --argjson verifyHook "$verify_hook_json" \
       --argjson stopHook "$stop_hook_json" '
       {
         backend: "managed-hook",
@@ -1789,6 +3015,7 @@ case_node_partition() {
         nodeReadyBefore: [($beforeNode.status.conditions // [])[] | select(.type == "Ready")][0],
         nodeReadyAfter: [($afterNode.status.conditions // [])[] | select(.type == "Ready")][0],
         startHook: $startHook,
+        verifyHook: $verifyHook,
         stopHook: $stopHook
       }')"
     return 0
@@ -1903,6 +3130,7 @@ case_may_skip() {
   local candidate="$1"
   local -a allowed_cases=()
   local raw_case case_name
+  [[ -n "$allow_skipped_cases_csv" ]] || return 1
   IFS=',' read -r -a allowed_cases <<<"$allow_skipped_cases_csv"
   for raw_case in "${allowed_cases[@]}"; do
     case_name="${raw_case//[[:space:]]/}"
@@ -1986,6 +3214,7 @@ run_soak() {
     else
       cycle_rc=$?
     fi
+    CASE_DETAILS_JSON="$(sanitize_managed_details "$case_name" "$CASE_DETAILS_JSON")"
     status="passed"
     if (( cycle_rc == 2 )); then
       status="skipped"
@@ -2127,9 +3356,11 @@ emit_final_report() {
         allowNonDisposableOverride: "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
         nodePartitionManagedHookOverride: {
           startHookEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+          verifyHookEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
           stopHookEnvVar: "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
           timeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
           startTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+          verifyTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
           stopTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
         }
       },
@@ -2195,6 +3426,7 @@ require_positive_int "$disruption_probe_window_seconds" "SYNARA_K8S_RESILIENCE_D
 require_positive_int "$partition_seconds" "SYNARA_K8S_RESILIENCE_PARTITION_SECONDS"
 require_positive_int "$node_partition_hook_timeout_seconds" "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS"
 require_positive_int "$node_partition_start_hook_timeout_seconds" "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS"
+require_positive_int "$node_partition_verify_hook_timeout_seconds" "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS"
 require_positive_int "$node_partition_stop_hook_timeout_seconds" "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
 require_positive_int "$case_timeout_seconds" "SYNARA_K8S_RESILIENCE_CASE_TIMEOUT_SECONDS"
 require_positive_int "$min_worker_nodes" "SYNARA_K8S_RESILIENCE_MIN_WORKER_NODES"
@@ -2247,9 +3479,11 @@ if [[ "$dry_run" == "1" ]]; then
         allowNonDisposableOverride: "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
         nodePartitionManagedHookOverride: {
           startHookEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+          verifyHookEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
           stopHookEnvVar: "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
           timeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
           startTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+          verifyTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
           stopTimeoutEnvVar: "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
         }
       },

@@ -185,6 +185,13 @@ func assertExpiredInteractionRecovery(t *testing.T, fixture expiredInteractionFi
 	if leases != 0 {
 		t.Fatalf("expired interaction retained %d Worker leases", leases)
 	}
+	_, release := loadExecutionClaimReleaseFactForTest(
+		t, fixture.db, fixture.execution.ExecutionID, fixture.leaseInput.Generation,
+	)
+	if release.ReleaseReason != workerClaimReleaseInteractionExpired ||
+		!release.ReleasedAt.Equal(interaction.ExpiresAt) || !release.RecordedAt.Equal(fixture.now) {
+		t.Fatalf("interaction-expiry release fact = %#v", release)
+	}
 
 	var recoveryEvents []persistence.SessionEvent
 	if err := fixture.db.Where(

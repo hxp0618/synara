@@ -63,6 +63,13 @@ Each Target has one versioned placement policy:
   - `balanced`: balanced, then default.
   - `low-latency`: low-latency, then balanced, then default.
 
+The ordered list is also the cold-fallback order. Placement remembers the first active candidate, then scans active
+warm candidates in that same order for a fresh `worker_pool_warm_capacity` observation with
+`warmSupported=true` and `readyIdleUnits>0`. The first such candidate is preferred. If none exists, placement returns
+the remembered first active candidate unchanged, so missing, expired, unsupported, or zero-capacity observations do
+not turn a valid cold launch into an admission failure. The observation is a soft hint and is never decremented or
+reserved by placement.
+
 Policy updates use compare-and-swap on `version`. The selected Pool ID, capacity class, and policy version are frozen
 on the queued Execution before an Outbox dispatch becomes visible. Claim-time recomputation is forbidden.
 
@@ -86,6 +93,27 @@ For Kubernetes, Worker mode and Pool identity come from the TokenReview-authenti
 Worker JSON cannot elevate or change them. A legacy managed Pod that has an Execution label but no mode label is
 treated as `execution-pinned`; an unlabelled unassigned Kubernetes Pod is not treated as warm capacity.
 
+## Tenant equal-share v1
+
+Shared-Target service order uses one common `fairqueue` algorithm. For each Target, `leased`, `running`, and
+`waiting-for-approval` each consume one active Tenant service unit. `queued` and `recovering` are candidates;
+`suspended` and terminal Executions consume neither an active nor queued service unit.
+
+General and warm-pool Worker Claim first applies every existing lifetime, Pool, release, Provider-manifest, capability,
+and Worker-mode eligibility fence. Among the remaining candidates it selects the Tenant with the fewest active service
+units. General workers retain FIFO by `queuedAt, executionId`. Warm workers retain the existing
+`low-latency -> balanced -> default` preference only after equal-share count, then FIFO. Execution-pinned Workers have
+one exact assigned candidate and therefore cannot bypass or distort another Tenant's general queue.
+
+Every Claim transaction already locks the Target before selecting work. A successful first Claim is therefore visible
+as an active service unit before the next Claim for that Target chooses a Tenant. The Kubernetes batch reconciler uses
+the same active-status set; after each selected candidate it increments a transaction-local Tenant unit before choosing
+the next Pod, preventing one backlog from consuming an entire reconcile batch.
+
+This is equal weight and one Execution equals one service unit. v1 does not claim weighted fair queuing, CPU/memory/GPU
+dominant-resource fairness, per-Tenant queue caps, priority preemption, or a starvation SLO. Those require an explicit
+resource-profile and policy authority rather than inference from arbitrary scheduling-template JSON.
+
 ## Warm Pod Safety
 
 The v1 Kubernetes warm primitive is **prewarm once, execute once, terminate**. It is not a reusable user container.
@@ -101,11 +129,18 @@ After Claim, the Worker ID, incarnation, Pod name, and Pod UID are frozen into t
 continues to require the exact kubelet-authored terminal proof. A successful or failed attempt does not return the Pod
 to the idle pool; the reconciler backfills a new spare.
 
-Scale-down and release replacement may delete only an unleased warm Pod. A Claim and a drain decision serialize on the
-exact Worker incarnation row and recheck Execution/Cleanup Leases so exactly one wins. A successful Kubernetes DELETE
-records only `draining`; kubelet `Succeeded`/`Failed`, or a later successful target Pod list that confirms the exact UID
-is missing, records physical termination. Deletion-pending Pods continue to count against capacity during that reconcile
-cycle.
+Scale-down and release replacement may delete only an unleased warm Pod. Before any external DELETE, the Reconciler and
+Worker registration serialize on one target/namespace/Pod-name logical-identity lock. The deletion transaction locks the
+exact Worker incarnation, rechecks every Execution Lease and active Workspace-cleanup delivery, writes an immutable
+target/namespace/Pod-name/Pod-UID fence, and moves the Worker to `draining`. It commits before sending a Kubernetes DELETE
+with the exact UID precondition. The fence remains authoritative if the API call fails.
+
+The fenced UID cannot register, authenticate, heartbeat, claim, or return to `online/active`; agentd treats the fence as
+terminal. A same-name replacement with a different UID is not fenced by the old decision. A stale-UID precondition
+conflict therefore preserves the old fence without deleting or marking the replacement unhealthy. A successful
+Kubernetes DELETE records only `draining`; kubelet `Succeeded`/`Failed`, or a later successful target Pod list that
+confirms the exact UID is missing, records physical termination. Deletion-pending Pods continue to count against capacity
+during that reconcile cycle.
 
 ## Live warm-capacity authority
 
@@ -150,6 +185,15 @@ The first implementation exports durable trailing-30-day Generation outcomes, wa
 dispatch-to-Provider-ready P50/P95/P99 gauges. Worker-incarnation gauges expose retained runtime, active/idle seconds,
 and requested CPU/memory/ephemeral-storage seconds. They deliberately contain no Tenant, Execution, Worker, or Pod ID
 labels.
+
+The live authority adds `synara_worker_pool_warm_capacity_authorities{capacity_class,freshness,warm_supported}` and
+`synara_worker_pool_warm_capacity_units{capacity_class,kind}`. `kind` is limited to `desired_total`, `claimed`, and
+`ready_idle`; unit sums include only fresh observations. Unknown capacity classes collapse to `other`, and no
+Tenant/Target/Pool identifier is exposed as a label.
+
+Durable queue pressure adds `synara_execution_queue_depth{target_kind,capacity_class}` and
+`synara_execution_queue_oldest_age_seconds{target_kind,capacity_class}`. Both combine `queued | recovering`, bound
+unknown label values to `unknown | other`, and omit Tenant, Target, Pool, Session, and Execution identifiers.
 
 ## Rollout Order
 

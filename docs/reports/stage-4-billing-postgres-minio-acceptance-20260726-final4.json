@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "synara.billing-postgres-minio-acceptance.v1",
+  "runID": "20260725183018-62576-9880",
+  "startedAt": "2026-07-25T18:30:18Z",
+  "finishedAt": "2026-07-25T18:30:23Z",
+  "status": "failed",
+  "exitCode": 2,
+  "phase": "wait-runtime",
+  "failure": "acceptance failed during wait-runtime",
+  "test": {
+    "name": "TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay",
+    "status": "not-run",
+    "exitCode": 0
+  },
+  "checks": {
+    "detailProduced": false,
+    "detailValidJSON": false,
+    "detailWithin65536Bytes": false,
+    "detailContainsNoCredentials": false,
+    "detailAssertionsAllowlistedBooleans": false,
+    "integrationAssertions": {}
+  },
+  "detail": {
+    "bytes": 0,
+    "sha256": null
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true
+  },
+  "runtime": {
+    "metadataStore": "disposable-postgresql",
+    "objectStore": "disposable-versioned-minio-s3-compatible",
+    "exactObjectVersionPinned": false,
+    "cloudWorkloadIdentityVerified": false
+  },
+  "images": {
+    "postgres": {
+      "reference": "postgres:17-alpine",
+      "id": "sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f",
+      "version": ""
+    },
+    "minio": {
+      "reference": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+      "id": "sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d"
+    },
+    "mc": {
+      "reference": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+      "id": "sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71"
+    },
+    "testRuntime": {
+      "reference": "golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669",
+      "id": "sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86",
+      "architecture": "arm64"
+    }
+  },
+  "cleanup": {
+    "status": "corrected-after-run"
+  },
+  "safety": {
+    "disposableRuntimeRemoved": false,
+    "credentialsPersistedAfterCleanup": null,
+    "objectContentsPersistedAfterCleanup": null
+  },
+  "postRunRemediation": {
+    "performedAt": "2026-07-25T18:31:35Z",
+    "reason": "anonymous Docker volumes were not removed by the original container cleanup",
+    "removedExactVolumeIDs": [
+      "515ecb54b94a924f185e2685d5f77e7260058a5e6a20b4402da8fde2b10cb8f3",
+      "27721e31b8bdf995250bdca9e001cfe874eca76e6bdd5256eff40c23122f3092"
+    ],
+    "currentDisposableRuntimeRemoved": true
+  }
+}

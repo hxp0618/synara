@@ -15,6 +15,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/warmcapacity"
 )
 
 const (
@@ -113,6 +114,8 @@ func ApplySelection(execution *persistence.AgentExecution, selection Selection) 
 	execution.WorkerPoolVersion = &poolVersion
 	execution.CapacityClass = &capacityClass
 	execution.PlacementPolicyVersion = &policyVersion
+	execution.PlacementRegion = selection.Pool.Region
+	execution.PlacementClusterID = selection.Pool.ClusterID
 }
 
 type Service struct {
@@ -403,7 +406,7 @@ func (s *Service) SelectExecution(
 	if err != nil {
 		return Selection{}, err
 	}
-	return selectExecutionFromPolicy(policy, models, warmPoolMode)
+	return s.selectExecutionFromPolicy(ctx, nonNilDB(tx, s.db), target, policy, models, warmPoolMode)
 }
 
 func (s *Service) PreviewExecution(
@@ -425,7 +428,7 @@ func (s *Service) PreviewExecution(
 		Where("execution_target_id = ?", target.ID).
 		Take(&policy).Error
 	if err == nil {
-		return selectExecutionFromPolicy(policy, models, mode)
+		return s.selectExecutionFromPolicy(ctx, nonNilDB(tx, s.db), target, policy, models, mode)
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return Selection{}, problem.Wrap(500, "execution_placement_policy_load_failed", "Execution placement policy could not be loaded.", err)
@@ -439,7 +442,10 @@ func (s *Service) PreviewExecution(
 	return Selection{Pool: selected, CapacityClass: selected.CapacityClass, PolicyVersion: 1}, nil
 }
 
-func selectExecutionFromPolicy(
+func (s *Service) selectExecutionFromPolicy(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
 	policy persistence.ExecutionPlacementPolicy,
 	models []persistence.WorkerPool,
 	warmPoolMode string,
@@ -471,6 +477,12 @@ func selectExecutionFromPolicy(
 		candidates = append(candidates, policy.DefaultPoolID)
 	}
 	seen := make(map[uuid.UUID]struct{}, len(candidates))
+	var coldFallback *persistence.WorkerPool
+	var capacity *warmcapacity.Service
+	if target.TenantID != nil {
+		capacity = warmcapacity.NewService(db)
+	}
+	now := s.now()
 	for _, candidateID := range candidates {
 		if _, exists := seen[candidateID]; exists {
 			continue
@@ -480,10 +492,36 @@ func selectExecutionFromPolicy(
 		if !ok || pool.Status != PoolStatusActive {
 			continue
 		}
-		selected := toPool(pool)
-		return Selection{Pool: selected, CapacityClass: selected.CapacityClass, PolicyVersion: policy.Version}, nil
+		if coldFallback == nil {
+			candidate := pool
+			coldFallback = &candidate
+		}
+		if capacity == nil || pool.Mode != PoolModeWarm {
+			continue
+		}
+		observation, err := capacity.GetFresh(ctx, warmcapacity.FreshLookup{
+			TenantID:          *target.TenantID,
+			ExecutionTargetID: target.ID,
+			WorkerPoolID:      pool.ID,
+			WorkerPoolVersion: pool.Version,
+			Now:               now,
+		})
+		if err != nil {
+			return Selection{}, err
+		}
+		if observation != nil && observation.WarmSupported && observation.ReadyIdleUnits > 0 {
+			return selectionForPool(pool, policy.Version), nil
+		}
+	}
+	if coldFallback != nil {
+		return selectionForPool(*coldFallback, policy.Version), nil
 	}
 	return Selection{}, problem.New(409, "execution_placement_policy_invalid", "Execution placement policy does not resolve to an active Worker pool.")
+}
+
+func selectionForPool(pool persistence.WorkerPool, policyVersion int64) Selection {
+	selected := toPool(pool)
+	return Selection{Pool: selected, CapacityClass: selected.CapacityClass, PolicyVersion: policyVersion}
 }
 
 func previewDefaultPool(

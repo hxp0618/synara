@@ -146,6 +146,12 @@ func (s *Service) expireValidatedLeasePendingInteraction(
 	); err != nil {
 		return false, persistence.SessionEvent{}, err
 	}
+	if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+		lease, interaction.ExpiresAt, expiredAt, workerClaimReleaseInteractionExpired,
+		workerClaimReleaseAuthorityControlPlane, interaction.ID.String(), "",
+	)); err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
 	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, expiredAt); err != nil {
 		return false, persistence.SessionEvent{}, err
 	}
@@ -240,6 +246,12 @@ func (s *Service) expirePendingInteractionCandidate(
 				).
 				Delete(&persistence.WorkerLease{})
 			if err := expectOne(leaseDelete, 409, "interaction_expiry_lease_release_conflict", "The interaction lease changed during expiry."); err != nil {
+				return err
+			}
+			if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+				lease, interaction.ExpiresAt, expiredAt, workerClaimReleaseInteractionExpired,
+				workerClaimReleaseAuthorityControlPlane, interaction.ID.String(), "",
+			)); err != nil {
 				return err
 			}
 			if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, expiredAt); err != nil {

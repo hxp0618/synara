@@ -80,6 +80,11 @@ func TestEnforceResourceLifecycleCancelsAbsoluteExpiredLeasedExecution(t *testin
 	if leases != 0 {
 		t.Fatalf("absolute-expiry controller left %d Worker leases behind", leases)
 	}
+	_, release := loadExecutionClaimReleaseFactForTest(t, db, fixture.ExecutionID, lease.Generation)
+	if release.ReleaseReason != workerClaimReleaseSessionAbsoluteExpired ||
+		!release.ReleasedAt.Equal(absoluteExpiry) || !release.RecordedAt.Equal(enforcedAt) {
+		t.Fatalf("absolute-expiry release fact = %#v", release)
+	}
 	var delivered persistence.ExecutionInteraction
 	if err := db.Where(
 		"tenant_id = ? AND execution_id = ? AND request_id = ?",

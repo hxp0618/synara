@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -66,7 +68,7 @@ func TestProviderHostAbortTerminatesDescendants(t *testing.T) {
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
-	process, err := runner.startProviderHostV2(context.Background(), nil)
+	process, err := runner.startProviderHostV2(context.Background(), nil, uuid.New(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +88,7 @@ func TestProviderHostBlockedStdinHonorsContext(t *testing.T) {
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
-	process, err := runner.startProviderHostV2(context.Background(), nil)
+	process, err := runner.startProviderHostV2(context.Background(), nil, uuid.New(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +121,7 @@ func TestProviderHostControlTerminalWaitHonorsContext(t *testing.T) {
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
-	process, err := runner.startProviderHostV2(context.Background(), nil)
+	process, err := runner.startProviderHostV2(context.Background(), nil, uuid.New(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +179,7 @@ func TestProviderHostDoesNotWriteBeforeDeliveredPersistence(t *testing.T) {
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
-	process, err := runner.startProviderHostV2(context.Background(), nil)
+	process, err := runner.startProviderHostV2(context.Background(), nil, uuid.New(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +215,7 @@ func TestProviderHostCrashDuringDeliveredPersistenceDoesNotDoubleResolve(t *test
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
-	process, err := runner.startProviderHostV2(context.Background(), nil)
+	process, err := runner.startProviderHostV2(context.Background(), nil, uuid.New(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}

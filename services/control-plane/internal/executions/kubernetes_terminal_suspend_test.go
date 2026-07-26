@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -61,6 +62,7 @@ func TestKubernetesPodTerminalProofFinalizesSuspend(t *testing.T) {
 	assertExecutionStatus(t, db, fixture, "waiting-for-approval")
 
 	observedAt := current.Add(time.Second)
+	current = observedAt
 	proof := KubernetesPodTerminalProof{
 		ExecutionTargetID: fixture.TargetID, ExecutionID: fixture.ExecutionID,
 		Generation: leaseInput.Generation, Namespace: worker.Namespace, PodName: worker.PodName,
@@ -76,6 +78,12 @@ func TestKubernetesPodTerminalProofFinalizesSuspend(t *testing.T) {
 		Where("tenant_id = ? AND execution_id = ?", fixture.TenantID, fixture.ExecutionID).
 		Count(&leaseCount).Error; err != nil || leaseCount != 0 {
 		t.Fatalf("lease count = %d, %v", leaseCount, err)
+	}
+	_, release := loadExecutionClaimReleaseFactForTest(t, db, fixture.ExecutionID, leaseInput.Generation)
+	if release.ReleaseReason != workerClaimReleaseResourceSuspendedPodTerminal ||
+		!release.ReleasedAt.Equal(observedAt) || release.AuthorityKind != workerClaimReleaseAuthorityKubernetes ||
+		release.AuthorityID == nil || *release.AuthorityID != worker.InstanceUID {
+		t.Fatalf("Pod-terminal release fact = %#v", release)
 	}
 	var attempt persistence.ExecutionSuspendAttempt
 	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, directive.SuspendAttemptID).
@@ -138,10 +146,12 @@ func TestKubernetesPodTerminalProofRecoversWhenInteractionResolvedDuringExit(t *
 	}
 	assertExecutionStatus(t, db, fixture, "waiting-for-approval")
 
+	observedAt := current.Add(time.Second)
+	current = observedAt
 	finalized, err := service.FinalizeKubernetesResourceSuspend(ctx, KubernetesPodTerminalProof{
 		ExecutionTargetID: fixture.TargetID, ExecutionID: fixture.ExecutionID,
 		Generation: leaseInput.Generation, Namespace: worker.Namespace, PodName: worker.PodName,
-		PodUID: worker.InstanceUID, Phase: "Succeeded", ObservedAt: current.Add(time.Second),
+		PodUID: worker.InstanceUID, Phase: "Succeeded", ObservedAt: observedAt,
 	})
 	if err != nil || !finalized {
 		t.Fatalf("race terminal proof = %v, %v", finalized, err)
@@ -193,10 +203,12 @@ func TestKubernetesPodTerminalProofSurvivesLogicalWorkerReregistration(t *testin
 		t.Fatalf("logical Worker replacement = %#v", replacement.Worker)
 	}
 
+	observedAt := current.Add(time.Second)
+	current = observedAt
 	finalized, err := service.FinalizeKubernetesResourceSuspend(ctx, KubernetesPodTerminalProof{
 		ExecutionTargetID: fixture.TargetID, ExecutionID: fixture.ExecutionID,
 		Generation: leaseInput.Generation, Namespace: worker.Namespace, PodName: worker.PodName,
-		PodUID: worker.InstanceUID, Phase: "Succeeded", ObservedAt: current.Add(time.Second),
+		PodUID: worker.InstanceUID, Phase: "Succeeded", ObservedAt: observedAt,
 	})
 	if err != nil || !finalized {
 		t.Fatalf("frozen old Pod proof after replacement = %v, %v", finalized, err)
@@ -220,6 +232,193 @@ func TestPodBoundKubernetesRegistrationIsOneShotPerPhysicalPodUID(t *testing.T) 
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != "kubernetes_worker_instance_already_registered" {
 		t.Fatalf("Pod-bound registration replay error = %v", err)
+	}
+}
+
+func TestPodBoundKubernetesRegistrationRejectsDeletedPodUIDButAllowsReplacementUID(t *testing.T) {
+	db, service, fixture := setupSQLiteRecoveryService(t)
+	podName := "deletion-fenced-" + uuid.NewString()
+	deletedPodUID := uuid.NewString()
+	if err := db.Create(&persistence.KubernetesPodDeletionFence{
+		ExecutionTargetID: fixture.TargetID,
+		Namespace:         "default",
+		PodName:           podName,
+		PodUID:            deletedPodUID,
+		RequestedAt:       time.Now().UTC(),
+		Reason:            "registration-race-test",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	input := RegisterWorkerInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: "kubernetes", InstanceUID: deletedPodUID,
+		ClusterID: "kubernetes", Namespace: "default", PodName: podName,
+		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion,
+		Capabilities: workerManifestTestCapabilities(), LeaseSupported: true, FencingSupported: true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+	}
+	_, err := service.Register(context.Background(), input)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "kubernetes_pod_deletion_fenced" {
+		t.Fatalf("deletion-fenced Pod registration error = %v", err)
+	}
+
+	input.InstanceUID = uuid.NewString()
+	registered, err := service.Register(context.Background(), input)
+	if err != nil {
+		t.Fatalf("replacement Pod UID registration failed: %v", err)
+	}
+	if registered.Worker.InstanceUID != input.InstanceUID {
+		t.Fatalf("replacement registration = %#v", registered.Worker)
+	}
+}
+
+func TestDeletionFencedKubernetesWorkerCannotHeartbeatOnlineOrClaim(t *testing.T) {
+	ctx := context.Background()
+	db, service, fixture := setupSQLiteRecoveryService(t)
+	worker := registerPodBoundKubernetesTestWorker(t, service, fixture.TargetID, "deletion-fenced-runtime")
+	fencedAt := time.Now().UTC().Truncate(time.Millisecond)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.KubernetesPodDeletionFence{
+			ExecutionTargetID: worker.ExecutionTargetID,
+			Namespace:         worker.Namespace,
+			PodName:           worker.PodName,
+			PodUID:            worker.InstanceUID,
+			RequestedAt:       fencedAt,
+			Reason:            "runtime-reactivation-test",
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).Updates(map[string]any{
+			"status": "draining", "draining_at": fencedAt,
+		}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	draining := false
+	_, err := service.Heartbeat(ctx, worker, HeartbeatInput{
+		ProtocolVersion: WorkerProtocolVersion,
+		Draining:        &draining,
+	})
+	assertKubernetesPodDeletionFenced(t, err, "heartbeat")
+	_, err = service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID,
+		TargetKind:        "kubernetes",
+	}, "deletion-fenced-claim-"+uuid.NewString())
+	assertKubernetesPodDeletionFenced(t, err, "claim")
+
+	var stored persistence.WorkerInstance
+	if err := db.Where("id = ?", worker.ID).Take(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "draining" || stored.AdministrativeStatus != "active" || stored.DrainingAt == nil {
+		t.Fatalf("fenced Worker escaped draining state: %#v", stored)
+	}
+	if err := db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Updates(map[string]any{"status": "online", "draining_at": nil}).Error; err == nil {
+		t.Fatal("SQLite allowed a direct fenced Worker reactivation")
+	}
+}
+
+func TestDeletedPodUIDFenceAllowsSameNameReplacementToRegisterAndClaim(t *testing.T) {
+	ctx := context.Background()
+	db, service, fixture := setupSQLiteRecoveryService(t)
+	oldWorker := registerPodBoundKubernetesTestWorker(t, service, fixture.TargetID, "replacement-after-delete")
+	fencedAt := time.Now().UTC().Truncate(time.Millisecond)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.KubernetesPodDeletionFence{
+			ExecutionTargetID: oldWorker.ExecutionTargetID,
+			Namespace:         oldWorker.Namespace,
+			PodName:           oldWorker.PodName,
+			PodUID:            oldWorker.InstanceUID,
+			RequestedAt:       fencedAt,
+			Reason:            "replacement-after-delete-test",
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkerInstance{}).Where("id = ?", oldWorker.ID).Updates(map[string]any{
+			"status": "draining", "draining_at": fencedAt,
+		}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replacementUID := uuid.NewString()
+	registered, err := service.Register(ctx, RegisterWorkerInput{
+		ExecutionTargetID:     oldWorker.ExecutionTargetID,
+		TargetKind:            "kubernetes",
+		WorkerMode:            oldWorker.WorkerMode,
+		InstanceUID:           replacementUID,
+		ClusterID:             oldWorker.ClusterID,
+		Namespace:             oldWorker.Namespace,
+		PodName:               oldWorker.PodName,
+		Version:               oldWorker.Version,
+		ProtocolVersion:       WorkerProtocolVersion,
+		Capabilities:          workerManifestTestCapabilities(),
+		LeaseSupported:        true,
+		FencingSupported:      true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+	})
+	if err != nil {
+		t.Fatalf("replacement Pod registration failed: %v", err)
+	}
+	replacement, err := service.Authenticate(ctx, registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.InstanceUID != replacementUID || replacement.Status != "online" || replacement.AdministrativeStatus != "active" {
+		t.Fatalf("replacement Worker retained old physical lifecycle state: %#v", replacement)
+	}
+	claim, err := service.Claim(ctx, replacement, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID,
+		TargetKind:        "kubernetes",
+	}, "replacement-after-delete-claim-"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("replacement Pod could not claim: %v", err)
+	}
+	if claim.Value.Lease == nil || claim.Value.Execution == nil {
+		t.Fatalf("replacement Pod claim = %#v", claim.Value)
+	}
+}
+
+func TestPodReplacementDoesNotClearOperatorAdministrativeDrain(t *testing.T) {
+	ctx := context.Background()
+	db, service, fixture := setupSQLiteRecoveryService(t)
+	worker := registerPodBoundKubernetesTestWorker(t, service, fixture.TargetID, "operator-drained-replacement")
+	if err := db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("administrative_status", "draining").Error; err != nil {
+		t.Fatal(err)
+	}
+	registered, err := service.Register(ctx, RegisterWorkerInput{
+		ExecutionTargetID:     worker.ExecutionTargetID,
+		TargetKind:            "kubernetes",
+		WorkerMode:            worker.WorkerMode,
+		InstanceUID:           uuid.NewString(),
+		ClusterID:             worker.ClusterID,
+		Namespace:             worker.Namespace,
+		PodName:               worker.PodName,
+		Version:               worker.Version,
+		ProtocolVersion:       WorkerProtocolVersion,
+		Capabilities:          workerManifestTestCapabilities(),
+		LeaseSupported:        true,
+		FencingSupported:      true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := service.Authenticate(ctx, registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.AdministrativeStatus != "draining" {
+		t.Fatalf("replacement cleared operator administrative drain: %#v", replacement)
+	}
+}
+
+func assertKubernetesPodDeletionFenced(t *testing.T, err error, operation string) {
+	t.Helper()
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "kubernetes_pod_deletion_fenced" {
+		t.Fatalf("%s error = %v, want kubernetes_pod_deletion_fenced", operation, err)
 	}
 }
 

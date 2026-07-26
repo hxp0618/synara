@@ -31,11 +31,12 @@ import (
 )
 
 type SSHProvisioningConfig struct {
-	AgentdBinaryPath      string
-	RegistrationToken     string
-	PublicControlPlaneURL string
-	WorkerLeaseTTL        time.Duration
-	Timeout               time.Duration
+	AgentdBinaryPath       string
+	RegistrationToken      string
+	PublicControlPlaneURL  string
+	WorkerLeaseTTL         time.Duration
+	WorkerHeartbeatTimeout time.Duration
+	Timeout                time.Duration
 }
 
 type SSHProvisionResult struct {
@@ -44,6 +45,22 @@ type SSHProvisionResult struct {
 	Status       string    `json:"status"`
 	ServiceName  string    `json:"serviceName"`
 	BinarySHA256 string    `json:"binarySha256,omitempty"`
+}
+
+type SSHWorkerAuthorityRevoker func(
+	context.Context,
+	*gorm.DB,
+	identity.Principal,
+	persistence.ExecutionTarget,
+	int64,
+	string,
+	string,
+	string,
+) (func(), error)
+
+type sshTargetOperationFence struct {
+	Generation int64
+	Kind       string
 }
 
 type sshTargetConfiguration struct {
@@ -107,13 +124,31 @@ type sshDialer interface {
 }
 
 type SSHProvisioner struct {
-	targets *Service
-	config  SSHProvisioningConfig
-	dialer  sshDialer
+	targets          *Service
+	config           SSHProvisioningConfig
+	dialer           sshDialer
+	awaitWorkerReady func(context.Context, persistence.ExecutionTarget, sshTargetConfiguration, string) error
+	checkWorkerReady func(context.Context, *gorm.DB, persistence.ExecutionTarget, sshTargetConfiguration, string) (bool, string, error)
+	lockWorkerReady  func(context.Context, *gorm.DB, uuid.UUID, string) error
+	revokeWorkers    SSHWorkerAuthorityRevoker
+	readinessPoll    time.Duration
+	now              func() time.Time
+}
+
+func (p *SSHProvisioner) SetWorkerAuthorityRevoker(revoker SSHWorkerAuthorityRevoker) {
+	p.revokeWorkers = revoker
 }
 
 func NewSSHProvisioner(targets *Service, config SSHProvisioningConfig) *SSHProvisioner {
-	return &SSHProvisioner{targets: targets, config: config, dialer: realSSHDialer{}}
+	provisioner := &SSHProvisioner{
+		targets: targets, config: config, dialer: realSSHDialer{},
+		readinessPoll: 250 * time.Millisecond,
+		now:           func() time.Time { return time.Now().UTC() },
+	}
+	provisioner.awaitWorkerReady = provisioner.waitForSSHWorkerReady
+	provisioner.checkWorkerReady = provisioner.sshWorkerReadyWithDB
+	provisioner.lockWorkerReady = lockExactSSHWorkerReadiness
+	return provisioner
 }
 
 func (p *SSHProvisioner) Install(
@@ -140,21 +175,31 @@ func (p *SSHProvisioner) Revoke(
 	tenantID, targetID uuid.UUID,
 	requestID, ipAddress string,
 ) (SSHProvisionResult, error) {
-	target, configuration, err := p.load(ctx, principal, tenantID, targetID)
+	target, err := p.loadTargetMetadata(ctx, principal, tenantID, targetID)
 	if err != nil {
 		return SSHProvisionResult{}, err
+	}
+	if p.revokeWorkers == nil {
+		return SSHProvisionResult{}, problem.New(503, "ssh_worker_revocation_unavailable", "SSH Worker authority revocation is not configured.")
+	}
+	fence, err := p.beginSSHRevokeOperation(ctx, target, principal, requestID, ipAddress)
+	if err != nil {
+		return SSHProvisionResult{}, err
+	}
+	fail := func(primary error) error {
+		return errors.Join(primary, p.failSSHOperation(ctx, target, principal.UserID, fence, requestID, ipAddress))
+	}
+	configuration, err := decryptSSHConfiguration(p.targets, target.ConfigurationEncrypted)
+	if err != nil {
+		return SSHProvisionResult{}, fail(err)
 	}
 	configuration, paths, err := p.normalize(target, configuration)
 	if err != nil {
-		return SSHProvisionResult{}, err
-	}
-	if err := p.recordOperation(ctx, target, principal.UserID, "revoke", "started", "offline", requestID, ipAddress); err != nil {
-		return SSHProvisionResult{}, err
+		return SSHProvisionResult{}, fail(err)
 	}
 	remote, err := p.connect(ctx, configuration)
 	if err != nil {
-		p.recordFailure(ctx, target, principal.UserID, "revoke", requestID, ipAddress)
-		return SSHProvisionResult{}, err
+		return SSHProvisionResult{}, fail(err)
 	}
 	defer remote.Close()
 	operationContext, cancel := context.WithTimeout(ctx, p.timeout())
@@ -166,11 +211,10 @@ func (p *SSHProvisioner) Revoke(
 		"systemctl reset-failed " + shellQuote(paths.serviceName) + " >/dev/null 2>&1 || true",
 	}, " && "))
 	if err := remote.Run(operationContext, command); err != nil {
-		p.recordFailure(ctx, target, principal.UserID, "revoke", requestID, ipAddress)
-		return SSHProvisionResult{}, problem.Wrap(502, "ssh_revoke_failed", "SSH Worker revocation failed.", err)
+		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_revoke_failed", "SSH Worker revocation failed.", err))
 	}
-	if err := p.recordOperation(ctx, target, principal.UserID, "revoke", "completed", "disabled", requestID, ipAddress); err != nil {
-		return SSHProvisionResult{}, err
+	if err := p.finishSSHOperation(ctx, target, principal.UserID, fence, "completed", "disabled", requestID, ipAddress); err != nil {
+		return SSHProvisionResult{}, fail(err)
 	}
 	return SSHProvisionResult{
 		TargetID: target.ID, Operation: "revoke", Status: "disabled", ServiceName: paths.serviceName,
@@ -199,65 +243,64 @@ func (p *SSHProvisioner) apply(
 		return SSHProvisionResult{}, problem.Wrap(503, "agentd_binary_unavailable", "The synara-agentd binary is unavailable.", err)
 	}
 	defer binary.Close()
-	if err := p.recordOperation(ctx, target, principal.UserID, operation, "started", "offline", requestID, ipAddress); err != nil {
+	workerInstanceUID := uuid.New()
+	fence, err := p.beginSSHOperation(
+		ctx, target, principal.UserID, operation, &workerInstanceUID, requestID, ipAddress,
+	)
+	if err != nil {
 		return SSHProvisionResult{}, err
+	}
+	fail := func(primary error) error {
+		return errors.Join(primary, p.failSSHOperation(ctx, target, principal.UserID, fence, requestID, ipAddress))
 	}
 	remote, err := p.connect(ctx, configuration)
 	if err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, err
+		return SSHProvisionResult{}, fail(err)
 	}
 	defer remote.Close()
 	operationContext, cancel := context.WithTimeout(ctx, p.timeout())
 	defer cancel()
 	if operation == "install" {
 		if err := ensureSSHInstallPathsAvailable(operationContext, remote, paths); err != nil {
-			p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
 			if !errors.Is(err, errSSHInstallConflict) {
-				return SSHProvisionResult{}, problem.Wrap(
+				return SSHProvisionResult{}, fail(problem.Wrap(
 					502,
 					"ssh_install_preflight_failed",
 					"SSH Worker installation preflight failed.",
 					err,
-				)
+				))
 			}
-			return SSHProvisionResult{}, problem.Wrap(
+			return SSHProvisionResult{}, fail(problem.Wrap(
 				409,
 				"ssh_install_conflict",
 				"SSH Worker installation refused existing target-scoped paths.",
 				err,
-			)
+			))
 		}
 		if err := ensureSSHInstallProtectedCgroupPaths(operationContext, remote, paths, configuration); err != nil {
-			p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-			return SSHProvisionResult{}, problem.Wrap(
+			return SSHProvisionResult{}, fail(problem.Wrap(
 				502,
 				"ssh_install_preflight_failed",
 				"SSH Worker installation preflight failed.",
 				err,
-			)
+			))
 		}
 	}
 	defer cleanupSSHTemporaryFiles(remote, paths)
 	hash := sha256.New()
 	if err := remote.Upload(operationContext, paths.temporaryBinaryPath, 0o700, io.TeeReader(binary, hash)); err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "synara-agentd could not be uploaded.", err)
+		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_agentd_upload_failed", "synara-agentd could not be uploaded.", err))
 	}
-	workerInstanceUID := uuid.NewString()
-	environment, err := p.environmentFile(target, configuration, paths, workerInstanceUID)
+	environment, err := p.environmentFile(target, configuration, paths, workerInstanceUID.String(), fence.Generation)
 	if err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, err
+		return SSHProvisionResult{}, fail(err)
 	}
 	if err := remote.Upload(operationContext, paths.temporaryEnvPath, 0o600, bytes.NewReader(environment)); err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd environment could not be uploaded.", err)
+		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd environment could not be uploaded.", err))
 	}
 	unit := []byte(systemdUnitWithDelegate(paths, configuration.ServiceUser, configuration.protectedCgroupEnabled()))
 	if err := remote.Upload(operationContext, paths.temporaryUnitPath, 0o600, bytes.NewReader(unit)); err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd service unit could not be uploaded.", err)
+		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd service unit could not be uploaded.", err))
 	}
 	commands := append(sshInstallDirectoryCommands(paths, configuration),
 		"install -m 0755 "+shellQuote(paths.temporaryBinaryPath)+" "+shellQuote(paths.binaryPath),
@@ -278,11 +321,27 @@ func (p *SSHProvisioner) apply(
 	}
 	command := paths.prefix + "sh -c " + shellQuote(strings.Join(commands, " && "))
 	if err := remote.Run(operationContext, command); err != nil {
-		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
-		return SSHProvisionResult{}, problem.Wrap(502, "ssh_provision_failed", "SSH Worker provisioning failed.", err)
+		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_provision_failed", "SSH Worker provisioning failed.", err))
 	}
-	if err := p.recordOperation(ctx, target, principal.UserID, operation, "completed", "active", requestID, ipAddress); err != nil {
-		return SSHProvisionResult{}, err
+	if err := p.awaitWorkerReady(operationContext, target, configuration, workerInstanceUID.String()); err != nil {
+		return SSHProvisionResult{}, fail(problem.Wrap(
+			502,
+			"ssh_worker_readiness_failed",
+			"SSH Worker did not establish its exact registered runtime readiness.",
+			err,
+		))
+	}
+	if err := p.activateReadySSHWorker(
+		ctx,
+		target,
+		configuration,
+		workerInstanceUID.String(),
+		fence,
+		principal.UserID,
+		requestID,
+		ipAddress,
+	); err != nil {
+		return SSHProvisionResult{}, fail(err)
 	}
 	return SSHProvisionResult{
 		TargetID: target.ID, Operation: operation, Status: "active", ServiceName: paths.serviceName,
@@ -383,27 +442,39 @@ func (p *SSHProvisioner) load(
 	principal identity.Principal,
 	tenantID, targetID uuid.UUID,
 ) (persistence.ExecutionTarget, sshTargetConfiguration, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
-		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, err
-	}
-	if _, err := p.targets.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
-		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, err
-	}
-	target, err := p.targets.loadAccessible(ctx, tenantID, targetID, false)
+	target, err := p.loadTargetMetadata(ctx, principal, tenantID, targetID)
 	if err != nil {
 		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, err
-	}
-	if target.Kind != "ssh" {
-		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, problem.New(409, "execution_target_kind_mismatch", "SSH provisioning requires an SSH execution target.")
-	}
-	if target.TenantID == nil || *target.TenantID != tenantID {
-		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, problem.New(404, "execution_target_not_found", "Execution target not found.")
 	}
 	configuration, err := decryptSSHConfiguration(p.targets, target.ConfigurationEncrypted)
 	if err != nil {
 		return persistence.ExecutionTarget{}, sshTargetConfiguration{}, err
 	}
 	return target, configuration, nil
+}
+
+func (p *SSHProvisioner) loadTargetMetadata(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, targetID uuid.UUID,
+) (persistence.ExecutionTarget, error) {
+	if err := requireActiveTenant(principal, tenantID); err != nil {
+		return persistence.ExecutionTarget{}, err
+	}
+	if _, err := p.targets.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
+		return persistence.ExecutionTarget{}, err
+	}
+	target, err := p.targets.loadAccessible(ctx, tenantID, targetID, false)
+	if err != nil {
+		return persistence.ExecutionTarget{}, err
+	}
+	if target.Kind != "ssh" {
+		return persistence.ExecutionTarget{}, problem.New(409, "execution_target_kind_mismatch", "SSH provisioning requires an SSH execution target.")
+	}
+	if target.TenantID == nil || *target.TenantID != tenantID {
+		return persistence.ExecutionTarget{}, problem.New(404, "execution_target_not_found", "Execution target not found.")
+	}
+	return target, nil
 }
 
 func decryptSSHConfiguration(service *Service, encrypted []byte) (sshTargetConfiguration, error) {
@@ -578,10 +649,14 @@ func (p *SSHProvisioner) environmentFile(
 	configuration sshTargetConfiguration,
 	paths sshProvisionPaths,
 	workerInstanceUID string,
+	bootstrapGeneration int64,
 ) ([]byte, error) {
 	parsedWorkerInstanceUID, err := uuid.Parse(strings.TrimSpace(workerInstanceUID))
 	if err != nil || parsedWorkerInstanceUID == uuid.Nil {
 		return nil, problem.New(500, "ssh_worker_instance_uid_invalid", "SSH Worker instance identity could not be generated.")
+	}
+	if bootstrapGeneration <= 0 {
+		return nil, problem.New(500, "ssh_bootstrap_generation_invalid", "SSH Worker bootstrap generation could not be generated.")
 	}
 	runnerCommand, err := json.Marshal(configuration.RunnerCommand)
 	if err != nil {
@@ -600,6 +675,7 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_NAMESPACE", "default"},
 		{"SYNARA_AGENTD_INSTANCE_ID", "ssh-" + target.ID.String()},
 		{"SYNARA_AGENTD_INSTANCE_UID", parsedWorkerInstanceUID.String()},
+		{"SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION", strconv.FormatInt(bootstrapGeneration, 10)},
 		{"SYNARA_AGENTD_VERSION", envDefaultString(configuration.AgentdVersion, "managed")},
 		{"SYNARA_AGENTD_CAPABILITIES_JSON", string(capabilities)},
 		{"SYNARA_AGENTD_RUNNER_COMMAND_JSON", string(runnerCommand)},
@@ -669,37 +745,407 @@ func systemdUnitWithDelegate(paths sshProvisionPaths, serviceUser string, delega
 	return strings.Join(lines, "\n")
 }
 
-func (p *SSHProvisioner) recordOperation(
+func (p *SSHProvisioner) beginSSHOperation(
 	ctx context.Context,
 	target persistence.ExecutionTarget,
 	actorID uuid.UUID,
-	operation, phase, status, requestID, ipAddress string,
+	operation string,
+	expectedInstanceUID *uuid.UUID,
+	requestID, ipAddress string,
+) (sshTargetOperationFence, error) {
+	if (operation == "install" || operation == "upgrade") &&
+		(expectedInstanceUID == nil || *expectedInstanceUID == uuid.Nil) {
+		return sshTargetOperationFence{}, problem.New(500, "ssh_bootstrap_authority_missing", "SSH Worker bootstrap authority is missing its expected instance UID.")
+	}
+	if operation == "revoke" {
+		expectedInstanceUID = nil
+	}
+	fence := sshTargetOperationFence{}
+	err := persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
+		started, _, err := p.beginSSHOperationLocked(
+			ctx, tx, target, actorID, operation, expectedInstanceUID, requestID, ipAddress,
+		)
+		fence = started
+		return err
+	})
+	return fence, err
+}
+
+func (p *SSHProvisioner) beginSSHRevokeOperation(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	principal identity.Principal,
+	requestID, ipAddress string,
+) (sshTargetOperationFence, error) {
+	fence := sshTargetOperationFence{}
+	var postCommit func()
+	err := persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
+		started, current, err := p.beginSSHOperationLocked(
+			ctx, tx, target, principal.UserID, "revoke", nil, requestID, ipAddress,
+		)
+		if err != nil {
+			return err
+		}
+		fence = started
+		reason := fmt.Sprintf("SSH Target revoke generation %d", fence.Generation)
+		callback, err := p.revokeWorkers(
+			ctx, tx, principal, current, fence.Generation, reason, requestID, ipAddress,
+		)
+		postCommit = callback
+		return err
+	})
+	if err != nil {
+		return sshTargetOperationFence{}, err
+	}
+	if postCommit != nil {
+		postCommit()
+	}
+	return fence, nil
+}
+
+func (p *SSHProvisioner) beginSSHOperationLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	actorID uuid.UUID,
+	operation string,
+	expectedInstanceUID *uuid.UUID,
+	requestID, ipAddress string,
+) (sshTargetOperationFence, persistence.ExecutionTarget, error) {
+	var current persistence.ExecutionTarget
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("id = ? AND kind = ? AND tenant_id = ?", target.ID, "ssh", *target.TenantID).
+		Take(&current).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.New(404, "execution_target_not_found", "SSH execution target not found.")
+	} else if err != nil {
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.Wrap(500, "ssh_operation_target_lookup_failed", "SSH Target operation could not be started.", err)
+	}
+	if operation == "revoke" && current.Status == "offline" && current.SSHOperationKind != nil &&
+		*current.SSHOperationKind == "revoke" && current.SSHOperationStartedAt != nil &&
+		current.SSHExpectedInstanceUID == nil {
+		return sshTargetOperationFence{Generation: current.SSHOperationGeneration, Kind: operation}, current, nil
+	}
+	now := p.now()
+	if current.SSHOperationKind != nil && current.SSHOperationStartedAt != nil &&
+		current.SSHOperationStartedAt.Add(p.timeout()+30*time.Second).After(now) {
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.New(409, "ssh_operation_in_progress", "Another SSH Target operation is already in progress.")
+	}
+	fence := sshTargetOperationFence{Generation: current.SSHOperationGeneration + 1, Kind: operation}
+	result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
+		Where("id = ? AND kind = ? AND ssh_operation_generation = ?", target.ID, "ssh", current.SSHOperationGeneration).
+		Updates(map[string]any{
+			"status": "offline", "ssh_operation_generation": fence.Generation,
+			"ssh_operation_kind": operation, "ssh_operation_started_at": now,
+			"ssh_expected_instance_uid": expectedInstanceUID, "updated_at": now,
+		})
+	if result.Error != nil || result.RowsAffected != 1 {
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.Wrap(409, "ssh_operation_start_conflict", "SSH Target operation changed concurrently.", result.Error)
+	}
+	current.Status = "offline"
+	current.SSHOperationGeneration = fence.Generation
+	current.SSHOperationKind = &operation
+	current.SSHOperationStartedAt = &now
+	current.SSHExpectedInstanceUID = expectedInstanceUID
+	current.UpdatedAt = now
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
+		Action:       "execution_target.ssh_" + operation + "_started",
+		ResourceType: "execution_target", ResourceID: &target.ID,
+		OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
+		Metadata: map[string]any{
+			"kind": "ssh", "operation": operation, "status": "offline", "operationGeneration": fence.Generation,
+		},
+	}); err != nil {
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, err
+	}
+	return fence, current, nil
+}
+
+func (p *SSHProvisioner) finishSSHOperation(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	actorID uuid.UUID,
+	fence sshTargetOperationFence,
+	phase string,
+	status string,
+	requestID string,
+	ipAddress string,
 ) error {
 	return persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
+		now := p.now()
 		result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
-			Where("id = ? AND kind = ?", target.ID, "ssh").Update("status", status)
-		if result.Error != nil || result.RowsAffected != 1 {
-			return problem.Wrap(409, "execution_target_status_update_failed", "Execution target status could not be updated.", result.Error)
+			Where(
+				"id = ? AND kind = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ?",
+				target.ID, "ssh", fence.Generation, fence.Kind,
+			).
+			Updates(map[string]any{
+				"status": status, "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
+				"ssh_expected_instance_uid": nil, "updated_at": now,
+			})
+		if result.Error != nil {
+			return problem.Wrap(500, "ssh_operation_finish_failed", "SSH Target operation status could not be persisted.", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return problem.New(409, "ssh_operation_superseded", "SSH Target operation was superseded and cannot change Target status.")
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
-			Action:       "execution_target.ssh_" + operation + "_" + phase,
+			Action:       "execution_target.ssh_" + fence.Kind + "_" + phase,
 			ResourceType: "execution_target", ResourceID: &target.ID,
 			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"kind": "ssh", "operation": operation, "status": status},
+			Metadata: map[string]any{
+				"kind": "ssh", "operation": fence.Kind, "status": status, "operationGeneration": fence.Generation,
+			},
 		})
 	})
 }
 
-func (p *SSHProvisioner) recordFailure(
+func (p *SSHProvisioner) failSSHOperation(
 	ctx context.Context,
 	target persistence.ExecutionTarget,
 	actorID uuid.UUID,
-	operation, requestID, ipAddress string,
-) {
+	fence sshTargetOperationFence,
+	requestID string,
+	ipAddress string,
+) error {
 	failureContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	_ = p.recordOperation(failureContext, target, actorID, operation, "failed", "offline", requestID, ipAddress)
+	return p.finishSSHOperation(failureContext, target, actorID, fence, "failed", "offline", requestID, ipAddress)
+}
+
+func (p *SSHProvisioner) waitForSSHWorkerReady(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	configuration sshTargetConfiguration,
+	instanceUID string,
+) error {
+	pollInterval := p.readinessPoll
+	if pollInterval <= 0 {
+		pollInterval = 250 * time.Millisecond
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	lastState := "exact Worker instance has not registered"
+	for {
+		ready, state, err := p.checkWorkerReady(ctx, p.targets.db, target, configuration, instanceUID)
+		if err != nil {
+			return err
+		}
+		lastState = state
+		if ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for exact SSH Worker instance readiness: %w (%s)", ctx.Err(), lastState)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *SSHProvisioner) sshWorkerReady(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	configuration sshTargetConfiguration,
+	instanceUID string,
+) (bool, string, error) {
+	return p.sshWorkerReadyWithDB(ctx, p.targets.db, target, configuration, instanceUID)
+}
+
+func (p *SSHProvisioner) sshWorkerReadyWithDB(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	configuration sshTargetConfiguration,
+	instanceUID string,
+) (bool, string, error) {
+	var worker persistence.WorkerInstance
+	err := db.WithContext(ctx).
+		Where(
+			"execution_target_id = ? AND target_kind = ? AND instance_uid = ? AND administrative_status = ?",
+			target.ID,
+			"ssh",
+			instanceUID,
+			"active",
+		).
+		Order("registered_at DESC").
+		Take(&worker).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, "exact Worker instance has not registered", nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("load exact SSH Worker instance readiness: %w", err)
+	}
+	if worker.Status != "online" {
+		return false, "exact Worker instance is not online", nil
+	}
+	if worker.ProtocolVersion != 2 || !worker.LeaseSupported || !worker.FencingSupported {
+		return false, "", errors.New("exact SSH Worker instance did not register the required remote Worker protocol")
+	}
+	if worker.CompatibilityStatus != "compatible" {
+		if worker.CompatibilityStatus == "unknown" || strings.TrimSpace(worker.CompatibilityStatus) == "" {
+			return false, "exact Worker compatibility is not resolved", nil
+		}
+		return false, "", fmt.Errorf("exact SSH Worker instance is not compatible: %s", worker.CompatibilityStatus)
+	}
+	if worker.CurrentManifestID == nil {
+		return false, "exact Worker has not persisted its current Manifest", nil
+	}
+	now := p.now()
+	if worker.LastHeartbeatAt.IsZero() || !worker.LastHeartbeatAt.After(worker.RegisteredAt) {
+		return false, "exact Worker has not completed a post-registration heartbeat", nil
+	}
+	if worker.LastHeartbeatAt.After(now) {
+		return false, "", errors.New("exact Worker heartbeat timestamp is in the future")
+	}
+	if now.Sub(worker.LastHeartbeatAt) > p.workerHeartbeatTimeout() {
+		return false, "exact Worker heartbeat is stale", nil
+	}
+	var manifest persistence.WorkerManifest
+	if err := db.WithContext(ctx).Where("id = ?", *worker.CurrentManifestID).Take(&manifest).Error; err != nil {
+		return false, "", fmt.Errorf("load exact SSH Worker Manifest readiness: %w", err)
+	}
+	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err != nil {
+		return false, "", err
+	}
+	return true, "exact Worker runtime is ready", nil
+}
+
+func (p *SSHProvisioner) activateReadySSHWorker(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	configuration sshTargetConfiguration,
+	instanceUID string,
+	fence sshTargetOperationFence,
+	actorID uuid.UUID,
+	requestID string,
+	ipAddress string,
+) error {
+	return persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
+		var currentTarget persistence.ExecutionTarget
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where(
+				"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
+				target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
+			).
+			Take(&currentTarget).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(409, "ssh_worker_activation_conflict", "SSH Target status changed before Worker readiness could be committed.")
+		} else if err != nil {
+			return problem.Wrap(500, "ssh_worker_activation_lookup_failed", "SSH Target readiness could not be committed.", err)
+		}
+		if err := p.lockWorkerReady(ctx, tx, currentTarget.ID, instanceUID); err != nil {
+			return err
+		}
+		ready, state, err := p.checkWorkerReady(ctx, tx, currentTarget, configuration, instanceUID)
+		if err != nil {
+			return problem.Wrap(409, "ssh_worker_readiness_changed", "SSH Worker readiness changed before Target activation.", err)
+		}
+		if !ready {
+			return problem.New(409, "ssh_worker_readiness_changed", "SSH Worker readiness changed before Target activation: "+state+".")
+		}
+		result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
+			Where(
+				"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
+				target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
+			).
+			Updates(map[string]any{
+				"status": "active", "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
+				"ssh_expected_instance_uid": nil, "updated_at": p.now(),
+			})
+		if result.Error != nil || result.RowsAffected != 1 {
+			return problem.Wrap(409, "ssh_worker_activation_conflict", "SSH Target status changed before Worker readiness could be committed.", result.Error)
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
+			Action:       "execution_target.ssh_" + fence.Kind + "_completed",
+			ResourceType: "execution_target", ResourceID: &target.ID,
+			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"kind": "ssh", "operation": fence.Kind, "status": "active", "operationGeneration": fence.Generation,
+			},
+		})
+	})
+}
+
+func lockExactSSHWorkerReadiness(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+	instanceUID string,
+) error {
+	var worker persistence.WorkerInstance
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where(
+			"execution_target_id = ? AND target_kind = ? AND instance_uid = ? AND administrative_status = ?",
+			targetID,
+			"ssh",
+			instanceUID,
+			"active",
+		).
+		Order("registered_at DESC").
+		Take(&worker).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(409, "ssh_worker_readiness_changed", "Exact SSH Worker registration disappeared before Target activation.")
+	} else if err != nil {
+		return problem.Wrap(500, "ssh_worker_readiness_lock_failed", "Exact SSH Worker readiness could not be locked.", err)
+	}
+	return nil
+}
+
+func validateSSHWorkerManifestReadiness(
+	target persistence.ExecutionTarget,
+	configuration sshTargetConfiguration,
+	manifest persistence.WorkerManifest,
+) error {
+	expectedVersion := envDefaultString(configuration.AgentdVersion, "managed")
+	if manifest.WorkerBuildVersion != expectedVersion {
+		return errors.New("exact SSH Worker Manifest build version does not match provisioning configuration")
+	}
+	if optionalSSHWorkerManifestValue(manifest.WorkerBuildGitSHA) != configuration.AgentdBuildGitSHA {
+		return errors.New("exact SSH Worker Manifest git SHA does not match provisioning configuration")
+	}
+	if optionalSSHWorkerManifestValue(manifest.ImageDigest) != configuration.AgentdImageDigest {
+		return errors.New("exact SSH Worker Manifest image digest does not match provisioning configuration")
+	}
+	if manifest.WorkerProtocolMinimum > 2 || manifest.WorkerProtocolMaximum < 2 {
+		return errors.New("exact SSH Worker Manifest does not support Worker Protocol v2")
+	}
+	if !configuration.protectedCgroupEnabled() {
+		return nil
+	}
+	if !sshWorkerManifestHasStrictCgroupV2Containment(manifest) ||
+		manifest.ProcessContainmentTrustMode != ProcessContainmentTrustSignedV1 ||
+		manifest.ProcessContainmentAttestationKeyID == nil ||
+		manifest.ProcessContainmentAttestationKeySHA256 == nil {
+		return errors.New("exact SSH Worker Manifest protected-cgroup trustState is not verified")
+	}
+	policy, err := ParseProcessContainmentPolicy(target.Capabilities)
+	if err != nil {
+		return fmt.Errorf("load exact SSH Worker process-containment policy: %w", err)
+	}
+	if policy.TrustMode != ProcessContainmentTrustSignedV1 ||
+		policy.KeyID != *manifest.ProcessContainmentAttestationKeyID ||
+		policy.PublicKeySHA256 != *manifest.ProcessContainmentAttestationKeySHA256 {
+		return errors.New("exact SSH Worker Manifest protected-cgroup trustState is not verified")
+	}
+	return nil
+}
+
+func sshWorkerManifestHasStrictCgroupV2Containment(manifest persistence.WorkerManifest) bool {
+	return WorkerManifestHasSupportedStrictCgroupV2Containment(manifest)
+}
+
+func optionalSSHWorkerManifestValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func (p *SSHProvisioner) workerHeartbeatTimeout() time.Duration {
+	if p.config.WorkerHeartbeatTimeout > 0 {
+		return p.config.WorkerHeartbeatTimeout
+	}
+	return 45 * time.Second
 }
 
 func (p *SSHProvisioner) timeout() time.Duration {

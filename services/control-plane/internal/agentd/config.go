@@ -33,6 +33,7 @@ type Config struct {
 	Namespace                    string
 	PodName                      string
 	InstanceUID                  string
+	SSHBootstrapGeneration       *int64
 	Version                      string
 	BuildGitSHA                  string
 	ImageDigest                  string
@@ -71,6 +72,17 @@ func LoadConfig() (Config, error) {
 	targetKind, err := platform.ParseExecutionTargetKind(os.Getenv("SYNARA_EXECUTION_TARGET_KIND"))
 	if err != nil {
 		return Config{}, fmt.Errorf("SYNARA_EXECUTION_TARGET_KIND: %w", err)
+	}
+	var sshBootstrapGeneration *int64
+	rawSSHBootstrapGeneration := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION"))
+	if targetKind == platform.TargetSSH {
+		value, parseErr := strconv.ParseInt(rawSSHBootstrapGeneration, 10, 64)
+		if parseErr != nil || value <= 0 {
+			return Config{}, errors.New("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION must be a positive integer for SSH workers")
+		}
+		sshBootstrapGeneration = &value
+	} else if rawSSHBootstrapGeneration != "" {
+		return Config{}, errors.New("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION is only valid for SSH workers")
 	}
 	runnerCommand, err := validation.CommandJSON(os.Getenv("SYNARA_AGENTD_RUNNER_COMMAND_JSON"))
 	if err != nil {
@@ -178,7 +190,8 @@ func LoadConfig() (Config, error) {
 		ControlPlaneURL: parsedURL, RegistrationToken: registrationToken,
 		RegistrationTokenFile: registrationTokenFile,
 		ExecutionTargetID:     targetID, TargetKind: targetKind,
-		ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
+		SSHBootstrapGeneration: sshBootstrapGeneration,
+		ClusterID:              envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), InstanceUID: instanceUID,
 		Version: version, BuildGitSHA: buildGitSHA,
 		ImageDigest:         strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),

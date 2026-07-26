@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -96,94 +97,11 @@ func (s *Service) RevokeWorker(
 			}
 			return WorkerRevocation{}, conflict
 		}
-		if worker.AdministrativeStatus == "revoked" {
-			if worker.RevocationReason == nil || *worker.RevocationReason != reason {
-				return WorkerRevocation{}, problem.New(409, "worker_revocation_conflict", "The Worker was already revoked with a different reason.")
-			}
-			return WorkerRevocation{Worker: toManagedWorker(worker)}, nil
-		}
-		if worker.AdministrativeStatus != "active" && worker.AdministrativeStatus != "draining" {
-			return WorkerRevocation{}, problem.New(409, "worker_administrative_state_invalid", "The Worker cannot be revoked from its current administrative state.")
-		}
-
-		revocation := WorkerRevocation{}
-		executionEvents, executionCounts, err := s.revokeWorkerExecutionLeasesLocked(ctx, tx, worker, reason)
-		if err != nil {
-			return WorkerRevocation{}, err
-		}
-		appended = append(appended, executionEvents...)
-		revocation.ReleasedExecutionLeases = executionCounts.releasedLeases
-		revocation.RecoveringExecutions = executionCounts.recovering
-		revocation.OutcomeUnknownExecutions = executionCounts.outcomeUnknown
-		revocation.CheckpointUnconfirmedExecutions = executionCounts.checkpointUnconfirmed
-
-		requeuedCleanups, err := s.requeueWorkerWorkspaceCleanupLeasesLocked(ctx, tx, worker, reason)
-		if err != nil {
-			return WorkerRevocation{}, err
-		}
-		revocation.RequeuedWorkspaceCleanups = requeuedCleanups
-
-		now := s.now()
-		updated := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-			Where("id = ? AND incarnation = ? AND administrative_status IN ?",
-				worker.ID, worker.Incarnation, []string{"active", "draining"}).
-			Updates(map[string]any{
-				"administrative_status": "revoked",
-				"revoked_at":            now,
-				"revoked_by":            principal.UserID,
-				"revocation_reason":     reason,
-			})
-		if err := expectOne(updated, 409, "worker_revocation_conflict", "The Worker could not be revoked from its current incarnation."); err != nil {
-			return WorkerRevocation{}, err
-		}
-		worker.AdministrativeStatus = "revoked"
-		worker.RevokedAt = &now
-		worker.RevokedBy = &principal.UserID
-		worker.RevocationReason = &reason
-		if err := transitionWorkerIncarnationFactLocked(
-			ctx, tx, worker, now, workerFactStateDraining, false, "",
-		); err != nil {
-			return WorkerRevocation{}, err
-		}
-		revocation.Worker = toManagedWorker(worker)
-
-		metadata := map[string]any{
-			"reason": reason, "incarnation": worker.Incarnation,
-			"executionTargetId": worker.ExecutionTargetID,
-			"clusterId":         worker.ClusterID, "namespace": worker.Namespace, "podName": worker.PodName,
-			"releasedExecutionLeases":         revocation.ReleasedExecutionLeases,
-			"recoveringExecutions":            revocation.RecoveringExecutions,
-			"outcomeUnknownExecutions":        revocation.OutcomeUnknownExecutions,
-			"checkpointUnconfirmedExecutions": revocation.CheckpointUnconfirmedExecutions,
-			"requeuedWorkspaceCleanups":       revocation.RequeuedWorkspaceCleanups,
-		}
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action: "worker.revoked", ResourceType: "worker", ResourceID: &worker.ID,
-			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: metadata,
-		}); err != nil {
-			return WorkerRevocation{}, problem.Wrap(500, "worker_revocation_audit_failed", "The Worker revocation audit record could not be persisted.", err)
-		}
-		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
-			TenantID: &tenantID, Topic: "worker.revoked",
-			MessageKey: worker.ID.String() + ":" + formatGeneration(worker.Incarnation),
-			Payload: map[string]any{
-				"tenantId": tenantID, "organizationId": target.OrganizationID,
-				"workerId": worker.ID, "incarnation": worker.Incarnation,
-				"executionTargetId":    worker.ExecutionTargetID,
-				"administrativeStatus": worker.AdministrativeStatus,
-				"revokedAt":            now, "revokedBy": principal.UserID, "reason": reason,
-				"releasedExecutionLeases":         revocation.ReleasedExecutionLeases,
-				"recoveringExecutions":            revocation.RecoveringExecutions,
-				"outcomeUnknownExecutions":        revocation.OutcomeUnknownExecutions,
-				"checkpointUnconfirmedExecutions": revocation.CheckpointUnconfirmedExecutions,
-				"requeuedWorkspaceCleanups":       revocation.RequeuedWorkspaceCleanups,
-			},
-		}); err != nil {
-			return WorkerRevocation{}, problem.Wrap(500, "worker_revocation_outbox_failed", "The Worker revocation event could not be queued.", err)
-		}
-		return revocation, nil
+		revocation, events, err := s.revokeWorkerAuthorityLocked(
+			ctx, tx, principal, tenantID, worker, target, reason, requestID, ipAddress,
+		)
+		appended = append(appended, events...)
+		return revocation, err
 	})
 	if err != nil {
 		return OperationResult[WorkerRevocation]{}, err
@@ -198,6 +116,213 @@ func (s *Service) RevokeWorker(
 	}, nil
 }
 
+// RevokeExecutionTargetWorkers withdraws every live Worker authority for one
+// SSH Target in the same transaction as lease recovery and cleanup requeueing.
+// The Target row is locked before Worker rows so claims and Target lifecycle
+// transitions observe one authoritative order.
+func (s *Service) RevokeExecutionTargetWorkers(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, targetID uuid.UUID,
+	expectedOperationGeneration int64,
+	reason, requestID, ipAddress string,
+) error {
+	if err := requireWorkerTenant(principal, tenantID); err != nil {
+		return err
+	}
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
+		return err
+	}
+	if targetID == uuid.Nil {
+		return problem.New(400, "invalid_execution_target", "executionTargetId is required.")
+	}
+	if expectedOperationGeneration <= 0 {
+		return problem.New(400, "invalid_ssh_operation_generation", "SSH operation generation must be greater than zero.")
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) == 0 || len(reason) > 2000 {
+		return problem.New(400, "invalid_worker_revocation_reason", "reason must contain between 1 and 2000 characters.")
+	}
+
+	var postCommit func()
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var target persistence.ExecutionTarget
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where(
+				"id = ? AND tenant_id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ?",
+				targetID, tenantID, "ssh", "offline", expectedOperationGeneration, "revoke",
+			).
+			Take(&target).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(409, "ssh_operation_superseded", "SSH Target revoke was superseded before Worker authority could be withdrawn.")
+		} else if err != nil {
+			return problem.Wrap(500, "execution_target_lock_failed", "SSH execution target could not be locked for Worker revocation.", err)
+		}
+		callback, err := s.RevokeExecutionTargetWorkersInTransaction(
+			ctx, tx, principal, target, expectedOperationGeneration, reason, requestID, ipAddress,
+		)
+		postCommit = callback
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if postCommit != nil {
+		postCommit()
+	}
+	return nil
+}
+
+// RevokeExecutionTargetWorkersInTransaction assumes the caller already
+// authorized the principal and holds the supplied SSH Target FOR UPDATE in tx.
+// It returns a publisher that must run only after the outer transaction commits.
+func (s *Service) RevokeExecutionTargetWorkersInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	principal identity.Principal,
+	target persistence.ExecutionTarget,
+	expectedOperationGeneration int64,
+	reason, requestID, ipAddress string,
+) (func(), error) {
+	if target.TenantID == nil {
+		return nil, problem.New(404, "execution_target_not_found", "SSH execution target not found.")
+	}
+	tenantID := *target.TenantID
+	if expectedOperationGeneration <= 0 || target.Kind != "ssh" || target.Status != "offline" ||
+		target.SSHOperationGeneration != expectedOperationGeneration || target.SSHOperationKind == nil ||
+		*target.SSHOperationKind != "revoke" || target.SSHExpectedInstanceUID != nil {
+		return nil, problem.New(409, "ssh_operation_superseded", "SSH Target revoke was superseded before Worker authority could be withdrawn.")
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) == 0 || len(reason) > 2000 {
+		return nil, problem.New(400, "invalid_worker_revocation_reason", "reason must contain between 1 and 2000 characters.")
+	}
+
+	workers := make([]persistence.WorkerInstance, 0)
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("execution_target_id = ? AND administrative_status IN ?", target.ID, []string{"active", "draining"}).
+		Order("id").
+		Find(&workers).Error; err != nil {
+		return nil, problem.Wrap(500, "worker_lock_failed", "SSH Target Workers could not be locked for revocation.", err)
+	}
+	appended := make([]persistence.SessionEvent, 0)
+	for _, worker := range workers {
+		_, events, err := s.revokeWorkerAuthorityLocked(
+			ctx, tx, principal, tenantID, worker, target, reason, requestID, ipAddress,
+		)
+		if err != nil {
+			return nil, err
+		}
+		appended = append(appended, events...)
+	}
+	return func() {
+		for _, event := range appended {
+			s.sessions.PublishInternalEvent(event)
+		}
+	}, nil
+}
+
+func (s *Service) revokeWorkerAuthorityLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	principal identity.Principal,
+	tenantID uuid.UUID,
+	worker persistence.WorkerInstance,
+	target persistence.ExecutionTarget,
+	reason, requestID, ipAddress string,
+) (WorkerRevocation, []persistence.SessionEvent, error) {
+	if worker.AdministrativeStatus == "revoked" {
+		if worker.RevocationReason == nil || *worker.RevocationReason != reason {
+			return WorkerRevocation{}, nil, problem.New(409, "worker_revocation_conflict", "The Worker was already revoked with a different reason.")
+		}
+		return WorkerRevocation{Worker: toManagedWorker(worker)}, nil, nil
+	}
+	if worker.AdministrativeStatus != "active" && worker.AdministrativeStatus != "draining" {
+		return WorkerRevocation{}, nil, problem.New(409, "worker_administrative_state_invalid", "The Worker cannot be revoked from its current administrative state.")
+	}
+
+	now := s.now()
+	revocation := WorkerRevocation{}
+	executionEvents, executionCounts, err := s.revokeWorkerExecutionLeasesLocked(
+		ctx, tx, worker, reason, now, principal.UserID, requestID,
+	)
+	if err != nil {
+		return WorkerRevocation{}, nil, err
+	}
+	revocation.ReleasedExecutionLeases = executionCounts.releasedLeases
+	revocation.RecoveringExecutions = executionCounts.recovering
+	revocation.OutcomeUnknownExecutions = executionCounts.outcomeUnknown
+	revocation.CheckpointUnconfirmedExecutions = executionCounts.checkpointUnconfirmed
+
+	requeuedCleanups, err := s.requeueWorkerWorkspaceCleanupLeasesLocked(
+		ctx, tx, worker, reason, now, principal.UserID, requestID,
+	)
+	if err != nil {
+		return WorkerRevocation{}, nil, err
+	}
+	revocation.RequeuedWorkspaceCleanups = requeuedCleanups
+
+	updated := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+		Where("id = ? AND incarnation = ? AND administrative_status IN ?",
+			worker.ID, worker.Incarnation, []string{"active", "draining"}).
+		Updates(map[string]any{
+			"administrative_status": "revoked",
+			"revoked_at":            now,
+			"revoked_by":            principal.UserID,
+			"revocation_reason":     reason,
+		})
+	if err := expectOne(updated, 409, "worker_revocation_conflict", "The Worker could not be revoked from its current incarnation."); err != nil {
+		return WorkerRevocation{}, nil, err
+	}
+	worker.AdministrativeStatus = "revoked"
+	worker.RevokedAt = &now
+	worker.RevokedBy = &principal.UserID
+	worker.RevocationReason = &reason
+	if err := transitionWorkerIncarnationFactLocked(
+		ctx, tx, worker, now, workerFactStateDraining, false, "",
+	); err != nil {
+		return WorkerRevocation{}, nil, err
+	}
+	revocation.Worker = toManagedWorker(worker)
+
+	metadata := map[string]any{
+		"reason": reason, "incarnation": worker.Incarnation,
+		"executionTargetId": worker.ExecutionTargetID,
+		"clusterId":         worker.ClusterID, "namespace": worker.Namespace, "podName": worker.PodName,
+		"releasedExecutionLeases":         revocation.ReleasedExecutionLeases,
+		"recoveringExecutions":            revocation.RecoveringExecutions,
+		"outcomeUnknownExecutions":        revocation.OutcomeUnknownExecutions,
+		"checkpointUnconfirmedExecutions": revocation.CheckpointUnconfirmedExecutions,
+		"requeuedWorkspaceCleanups":       revocation.RequeuedWorkspaceCleanups,
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+		Action: "worker.revoked", ResourceType: "worker", ResourceID: &worker.ID,
+		OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
+		Metadata: metadata,
+	}); err != nil {
+		return WorkerRevocation{}, nil, problem.Wrap(500, "worker_revocation_audit_failed", "The Worker revocation audit record could not be persisted.", err)
+	}
+	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &tenantID, Topic: "worker.revoked",
+		MessageKey: worker.ID.String() + ":" + formatGeneration(worker.Incarnation),
+		Payload: map[string]any{
+			"tenantId": tenantID, "organizationId": target.OrganizationID,
+			"workerId": worker.ID, "incarnation": worker.Incarnation,
+			"executionTargetId":    worker.ExecutionTargetID,
+			"administrativeStatus": worker.AdministrativeStatus,
+			"revokedAt":            now, "revokedBy": principal.UserID, "reason": reason,
+			"releasedExecutionLeases":         revocation.ReleasedExecutionLeases,
+			"recoveringExecutions":            revocation.RecoveringExecutions,
+			"outcomeUnknownExecutions":        revocation.OutcomeUnknownExecutions,
+			"checkpointUnconfirmedExecutions": revocation.CheckpointUnconfirmedExecutions,
+			"requeuedWorkspaceCleanups":       revocation.RequeuedWorkspaceCleanups,
+		},
+	}); err != nil {
+		return WorkerRevocation{}, nil, problem.Wrap(500, "worker_revocation_outbox_failed", "The Worker revocation event could not be queued.", err)
+	}
+	return revocation, executionEvents, nil
+}
+
 type workerRevocationExecutionCounts struct {
 	releasedLeases        int
 	recovering            int
@@ -210,6 +335,9 @@ func (s *Service) revokeWorkerExecutionLeasesLocked(
 	tx *gorm.DB,
 	worker persistence.WorkerInstance,
 	reason string,
+	now time.Time,
+	authorityID uuid.UUID,
+	requestID string,
 ) ([]persistence.SessionEvent, workerRevocationExecutionCounts, error) {
 	leases := make([]persistence.WorkerLease, 0)
 	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -238,7 +366,13 @@ func (s *Service) revokeWorkerExecutionLeasesLocked(
 		if deleted.RowsAffected == 0 {
 			continue
 		}
-		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, s.now()); err != nil {
+		if err := recordWorkerClaimReleaseFact(ctx, tx, executionClaimReleaseInput(
+			lease, now, now, workerClaimReleaseWorkerRevoked,
+			workerClaimReleaseAuthorityUser, authorityID.String(), requestID,
+		)); err != nil {
+			return nil, counts, err
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
 			return nil, counts, err
 		}
 		counts.releasedLeases++
@@ -276,6 +410,9 @@ func (s *Service) requeueWorkerWorkspaceCleanupLeasesLocked(
 	tx *gorm.DB,
 	worker persistence.WorkerInstance,
 	reason string,
+	now time.Time,
+	authorityID uuid.UUID,
+	requestID string,
 ) (int, error) {
 	commands := make([]persistence.WorkspaceCleanupCommand, 0)
 	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -287,9 +424,13 @@ func (s *Service) requeueWorkerWorkspaceCleanupLeasesLocked(
 	requeued := 0
 	for _, command := range commands {
 		recovered, err := s.recoverWorkspaceCleanupCommandLocked(
-			ctx, tx, command, s.now(),
+			ctx, tx, command, now,
 			"workspace_cleanup_worker_revoked",
 			"The Workspace cleanup Worker was administratively revoked. Revocation reason: "+reason,
+			workerClaimReleaseCleanupWorkerRevoked,
+			workerClaimReleaseAuthorityUser,
+			authorityID.String(),
+			requestID,
 		)
 		if err != nil {
 			return 0, err

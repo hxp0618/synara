@@ -121,41 +121,48 @@ type WorkerRevocation struct {
 }
 
 type Execution struct {
-	ID                         uuid.UUID  `json:"id"`
-	TenantID                   uuid.UUID  `json:"tenantId"`
-	SessionID                  uuid.UUID  `json:"sessionId"`
-	TurnID                     uuid.UUID  `json:"turnId"`
-	Attempt                    int        `json:"attempt"`
-	Status                     string     `json:"status"`
-	ExecutionTargetID          uuid.UUID  `json:"executionTargetId"`
-	TargetKind                 string     `json:"targetKind"`
-	WorkerPoolID               *uuid.UUID `json:"workerPoolId,omitempty"`
-	WorkerPoolVersion          *int64     `json:"workerPoolVersion,omitempty"`
-	CapacityClass              *string    `json:"capacityClass,omitempty"`
-	PlacementPolicyVersion     *int64     `json:"placementPolicyVersion,omitempty"`
-	TargetGroupID              *uuid.UUID `json:"targetGroupId,omitempty"`
-	TargetGroupVersion         *int64     `json:"targetGroupVersion,omitempty"`
-	TargetGroupMemberVersion   *int64     `json:"targetGroupMemberVersion,omitempty"`
-	SelectedRegion             *string    `json:"selectedRegion,omitempty"`
-	SelectedClusterID          *string    `json:"selectedClusterId,omitempty"`
-	RoutingReason              *string    `json:"routingReason,omitempty"`
-	PredecessorExecutionID     *uuid.UUID `json:"predecessorExecutionId,omitempty"`
-	Provider                   *string    `json:"provider,omitempty"`
-	WorkerID                   *uuid.UUID `json:"workerId"`
-	WorkerManifestID           *uuid.UUID `json:"workerManifestId,omitempty"`
-	WorkerReleaseRevisionID    *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
-	WorkerReleaseChannel       *string    `json:"workerReleaseChannel,omitempty"`
-	ProviderRuntimeBindingID   *uuid.UUID `json:"providerRuntimeBindingId,omitempty"`
-	RemoteWorkspaceID          *uuid.UUID `json:"remoteWorkspaceId,omitempty"`
-	WorkspaceMaterializationID *uuid.UUID `json:"workspaceMaterializationId,omitempty"`
-	RestoreCheckpointID        *uuid.UUID `json:"restoreCheckpointId,omitempty"`
-	Generation                 int64      `json:"generation"`
-	RequestedBy                uuid.UUID  `json:"requestedBy"`
-	QueuedAt                   time.Time  `json:"queuedAt"`
-	StartedAt                  *time.Time `json:"startedAt"`
-	FinishedAt                 *time.Time `json:"finishedAt"`
-	FailureCode                *string    `json:"failureCode"`
-	FailureMessage             *string    `json:"failureMessage"`
+	ID                                  uuid.UUID  `json:"id"`
+	TenantID                            uuid.UUID  `json:"tenantId"`
+	SessionID                           uuid.UUID  `json:"sessionId"`
+	TurnID                              uuid.UUID  `json:"turnId"`
+	Attempt                             int        `json:"attempt"`
+	Status                              string     `json:"status"`
+	ExecutionTargetID                   uuid.UUID  `json:"executionTargetId"`
+	TargetKind                          string     `json:"targetKind"`
+	WorkerPoolID                        *uuid.UUID `json:"workerPoolId,omitempty"`
+	WorkerPoolVersion                   *int64     `json:"workerPoolVersion,omitempty"`
+	CapacityClass                       *string    `json:"capacityClass,omitempty"`
+	PlacementPolicyVersion              *int64     `json:"placementPolicyVersion,omitempty"`
+	PlacementRegion                     string     `json:"placementRegion"`
+	PlacementClusterID                  string     `json:"placementClusterId"`
+	TenantSchedulingPolicyVersion       int64      `json:"tenantSchedulingPolicyVersion"`
+	TenantSchedulingPolicyDigest        string     `json:"tenantSchedulingPolicyDigest"`
+	OrganizationSchedulingPolicyVersion int64      `json:"organizationSchedulingPolicyVersion"`
+	OrganizationSchedulingPolicyDigest  string     `json:"organizationSchedulingPolicyDigest"`
+	TargetGroupID                       *uuid.UUID `json:"targetGroupId,omitempty"`
+	TargetGroupVersion                  *int64     `json:"targetGroupVersion,omitempty"`
+	TargetGroupMemberVersion            *int64     `json:"targetGroupMemberVersion,omitempty"`
+	SelectedRegion                      *string    `json:"selectedRegion,omitempty"`
+	SelectedClusterID                   *string    `json:"selectedClusterId,omitempty"`
+	RoutingReason                       *string    `json:"routingReason,omitempty"`
+	SchedulingDecisionID                *uuid.UUID `json:"schedulingDecisionId,omitempty"`
+	PredecessorExecutionID              *uuid.UUID `json:"predecessorExecutionId,omitempty"`
+	Provider                            *string    `json:"provider,omitempty"`
+	WorkerID                            *uuid.UUID `json:"workerId"`
+	WorkerManifestID                    *uuid.UUID `json:"workerManifestId,omitempty"`
+	WorkerReleaseRevisionID             *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
+	WorkerReleaseChannel                *string    `json:"workerReleaseChannel,omitempty"`
+	ProviderRuntimeBindingID            *uuid.UUID `json:"providerRuntimeBindingId,omitempty"`
+	RemoteWorkspaceID                   *uuid.UUID `json:"remoteWorkspaceId,omitempty"`
+	WorkspaceMaterializationID          *uuid.UUID `json:"workspaceMaterializationId,omitempty"`
+	RestoreCheckpointID                 *uuid.UUID `json:"restoreCheckpointId,omitempty"`
+	Generation                          int64      `json:"generation"`
+	RequestedBy                         uuid.UUID  `json:"requestedBy"`
+	QueuedAt                            time.Time  `json:"queuedAt"`
+	StartedAt                           *time.Time `json:"startedAt"`
+	FinishedAt                          *time.Time `json:"finishedAt"`
+	FailureCode                         *string    `json:"failureCode"`
+	FailureMessage                      *string    `json:"failureMessage"`
 }
 
 type Lease struct {
@@ -302,26 +309,33 @@ type RecoveryBundle struct {
 }
 
 type RecoveryExecutionSnapshot struct {
-	ExecutionTargetID          uuid.UUID  `json:"executionTargetId"`
-	TargetKind                 string     `json:"targetKind"`
-	TargetGroupID              *uuid.UUID `json:"targetGroupId,omitempty"`
-	TargetGroupVersion         *int64     `json:"targetGroupVersion,omitempty"`
-	TargetGroupMemberVersion   *int64     `json:"targetGroupMemberVersion,omitempty"`
-	SelectedRegion             *string    `json:"selectedRegion,omitempty"`
-	SelectedClusterID          *string    `json:"selectedClusterId,omitempty"`
-	RoutingReason              *string    `json:"routingReason,omitempty"`
-	PredecessorExecutionID     *uuid.UUID `json:"predecessorExecutionId,omitempty"`
-	WorkerManifestID           *uuid.UUID `json:"workerManifestId,omitempty"`
-	WorkerReleaseRevisionID    *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
-	WorkerReleaseChannel       *string    `json:"workerReleaseChannel,omitempty"`
-	Provider                   *string    `json:"provider,omitempty"`
-	ProviderRuntimeBindingID   *uuid.UUID `json:"providerRuntimeBindingId,omitempty"`
-	ProviderCredentialID       *uuid.UUID `json:"providerCredentialId,omitempty"`
-	ProviderCredentialVersion  *int       `json:"providerCredentialVersion,omitempty"`
-	ProviderResumeStrategy     string     `json:"providerResumeStrategy"`
-	RemoteWorkspaceID          *uuid.UUID `json:"remoteWorkspaceId,omitempty"`
-	WorkspaceMaterializationID *uuid.UUID `json:"workspaceMaterializationId,omitempty"`
-	RestoreCheckpointID        *uuid.UUID `json:"restoreCheckpointId,omitempty"`
+	ExecutionTargetID                   uuid.UUID  `json:"executionTargetId"`
+	TargetKind                          string     `json:"targetKind"`
+	PlacementRegion                     string     `json:"placementRegion,omitempty"`
+	PlacementClusterID                  string     `json:"placementClusterId,omitempty"`
+	TenantSchedulingPolicyVersion       int64      `json:"tenantSchedulingPolicyVersion,omitempty"`
+	TenantSchedulingPolicyDigest        string     `json:"tenantSchedulingPolicyDigest,omitempty"`
+	OrganizationSchedulingPolicyVersion int64      `json:"organizationSchedulingPolicyVersion,omitempty"`
+	OrganizationSchedulingPolicyDigest  string     `json:"organizationSchedulingPolicyDigest,omitempty"`
+	TargetGroupID                       *uuid.UUID `json:"targetGroupId,omitempty"`
+	TargetGroupVersion                  *int64     `json:"targetGroupVersion,omitempty"`
+	TargetGroupMemberVersion            *int64     `json:"targetGroupMemberVersion,omitempty"`
+	SelectedRegion                      *string    `json:"selectedRegion,omitempty"`
+	SelectedClusterID                   *string    `json:"selectedClusterId,omitempty"`
+	RoutingReason                       *string    `json:"routingReason,omitempty"`
+	SchedulingDecisionID                *uuid.UUID `json:"schedulingDecisionId,omitempty"`
+	PredecessorExecutionID              *uuid.UUID `json:"predecessorExecutionId,omitempty"`
+	WorkerManifestID                    *uuid.UUID `json:"workerManifestId,omitempty"`
+	WorkerReleaseRevisionID             *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
+	WorkerReleaseChannel                *string    `json:"workerReleaseChannel,omitempty"`
+	Provider                            *string    `json:"provider,omitempty"`
+	ProviderRuntimeBindingID            *uuid.UUID `json:"providerRuntimeBindingId,omitempty"`
+	ProviderCredentialID                *uuid.UUID `json:"providerCredentialId,omitempty"`
+	ProviderCredentialVersion           *int       `json:"providerCredentialVersion,omitempty"`
+	ProviderResumeStrategy              string     `json:"providerResumeStrategy"`
+	RemoteWorkspaceID                   *uuid.UUID `json:"remoteWorkspaceId,omitempty"`
+	WorkspaceMaterializationID          *uuid.UUID `json:"workspaceMaterializationId,omitempty"`
+	RestoreCheckpointID                 *uuid.UUID `json:"restoreCheckpointId,omitempty"`
 }
 
 type RecoveryMemoryReference struct {
@@ -515,22 +529,23 @@ type OperationResult[T any] struct {
 }
 
 type RegisterWorkerInput struct {
-	ExecutionTargetID   uuid.UUID      `json:"executionTargetId"`
-	TargetKind          string         `json:"targetKind"`
-	WorkerMode          string         `json:"workerMode"`
-	AssignedExecutionID *uuid.UUID     `json:"assignedExecutionId,omitempty"`
-	WorkerPoolID        *uuid.UUID     `json:"workerPoolId,omitempty"`
-	WorkerPoolVersion   *int64         `json:"workerPoolVersion,omitempty"`
-	CapacityClass       *string        `json:"capacityClass,omitempty"`
-	InstanceUID         string         `json:"instanceUid"`
-	ClusterID           string         `json:"clusterId"`
-	Namespace           string         `json:"namespace"`
-	PodName             string         `json:"podName"`
-	Version             string         `json:"version"`
-	ProtocolVersion     int            `json:"protocolVersion"`
-	Capabilities        map[string]any `json:"capabilities"`
-	LeaseSupported      bool           `json:"leaseSupported"`
-	FencingSupported    bool           `json:"fencingSupported"`
+	ExecutionTargetID      uuid.UUID      `json:"executionTargetId"`
+	TargetKind             string         `json:"targetKind"`
+	WorkerMode             string         `json:"workerMode"`
+	AssignedExecutionID    *uuid.UUID     `json:"assignedExecutionId,omitempty"`
+	WorkerPoolID           *uuid.UUID     `json:"workerPoolId,omitempty"`
+	WorkerPoolVersion      *int64         `json:"workerPoolVersion,omitempty"`
+	CapacityClass          *string        `json:"capacityClass,omitempty"`
+	InstanceUID            string         `json:"instanceUid"`
+	SSHBootstrapGeneration *int64         `json:"sshBootstrapGeneration,omitempty"`
+	ClusterID              string         `json:"clusterId"`
+	Namespace              string         `json:"namespace"`
+	PodName                string         `json:"podName"`
+	Version                string         `json:"version"`
+	ProtocolVersion        int            `json:"protocolVersion"`
+	Capabilities           map[string]any `json:"capabilities"`
+	LeaseSupported         bool           `json:"leaseSupported"`
+	FencingSupported       bool           `json:"fencingSupported"`
 	// Requested resources are injected only from the authenticated Kubernetes
 	// Pod spec. Worker JSON cannot self-report cost/accounting values.
 	RequestedCPUMillicores         *int64 `json:"-"`
@@ -542,10 +557,11 @@ type RegisterWorkerInput struct {
 }
 
 type HeartbeatInput struct {
-	Version         string         `json:"version"`
-	ProtocolVersion int            `json:"protocolVersion"`
-	Capabilities    map[string]any `json:"capabilities"`
-	Draining        *bool          `json:"draining"`
+	Version                string         `json:"version"`
+	ProtocolVersion        int            `json:"protocolVersion"`
+	SSHBootstrapGeneration *int64         `json:"sshBootstrapGeneration,omitempty"`
+	Capabilities           map[string]any `json:"capabilities"`
+	Draining               *bool          `json:"draining"`
 }
 
 type ClaimExecutionInput struct {
@@ -993,9 +1009,15 @@ func toExecution(model persistence.AgentExecution) Execution {
 		TargetKind: model.TargetKind, WorkerPoolID: model.WorkerPoolID,
 		WorkerPoolVersion: model.WorkerPoolVersion,
 		CapacityClass:     model.CapacityClass, PlacementPolicyVersion: model.PlacementPolicyVersion,
-		TargetGroupID: model.TargetGroupID, TargetGroupVersion: model.TargetGroupVersion,
+		PlacementRegion: model.PlacementRegion, PlacementClusterID: model.PlacementClusterID,
+		TenantSchedulingPolicyVersion:       model.TenantSchedulingPolicyVersion,
+		TenantSchedulingPolicyDigest:        model.TenantSchedulingPolicyDigest,
+		OrganizationSchedulingPolicyVersion: model.OrganizationSchedulingPolicyVersion,
+		OrganizationSchedulingPolicyDigest:  model.OrganizationSchedulingPolicyDigest,
+		TargetGroupID:                       model.TargetGroupID, TargetGroupVersion: model.TargetGroupVersion,
 		TargetGroupMemberVersion: model.TargetGroupMemberVersion, SelectedRegion: model.SelectedRegion,
 		SelectedClusterID: model.SelectedClusterID, RoutingReason: model.RoutingReason,
+		SchedulingDecisionID:   model.SchedulingDecisionID,
 		PredecessorExecutionID: model.PredecessorExecutionID,
 		Provider:               model.Provider,
 		WorkerID:               model.WorkerID, WorkerManifestID: model.WorkerManifestID,

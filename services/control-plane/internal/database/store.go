@@ -709,6 +709,14 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 ON execution_generation_facts (target_kind, recovery_reason, warm_pool_mode, warm_pool_result)`,
 		`CREATE INDEX IF NOT EXISTS idx_execution_generation_facts_terminal
 		 ON execution_generation_facts (terminal_outcome, terminal_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_generation_facts_pod_provisioning
+		 ON execution_generation_facts (
+		   target_kind, pod_provisioning_started_at, pod_running_at, pod_pending_since_at
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_generation_pod_failure_metrics
+		 ON execution_generation_pod_failure_facts (
+		   failure_class, first_observed_at, execution_target_id
+		 )`,
 		`DROP TRIGGER IF EXISTS trg_execution_generation_facts_insert`,
 		`CREATE TRIGGER trg_execution_generation_facts_insert
 		 BEFORE INSERT ON execution_generation_facts
@@ -721,6 +729,18 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		      OR (NEW.terminal_outcome IS NOT NULL AND NEW.terminal_outcome NOT IN (
 		        'completed', 'failed', 'cancelled', 'interrupted', 'recovering'
 		      ))
+		      OR (NEW.pod_provisioning_started_at IS NOT NULL AND NEW.dispatch_requested_at IS NOT NULL
+		        AND NEW.pod_provisioning_started_at < NEW.dispatch_requested_at)
+		      OR (NEW.pod_pending_since_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		        AND NEW.pod_pending_since_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_running_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		        AND NEW.pod_running_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		        AND NEW.pod_last_observed_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_pending_since_at IS NOT NULL
+		        AND NEW.pod_last_observed_at < NEW.pod_pending_since_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_running_at IS NOT NULL
+		        AND NEW.pod_last_observed_at < NEW.pod_running_at)
 		      OR NOT EXISTS (
 		        SELECT 1 FROM agent_executions AS execution
 		        WHERE execution.tenant_id = NEW.tenant_id AND execution.id = NEW.execution_id
@@ -754,6 +774,24 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		     OR NEW.terminal_at IS NOT OLD.terminal_at
 		   );
 
+		   SELECT RAISE(ABORT, 'Execution generation Pod provisioning start is immutable')
+		   WHERE OLD.pod_provisioning_started_at IS NOT NULL
+		     AND NEW.pod_provisioning_started_at IS NOT OLD.pod_provisioning_started_at;
+
+		   SELECT RAISE(ABORT, 'Execution generation Pod Pending start is immutable')
+		   WHERE OLD.pod_pending_since_at IS NOT NULL
+		     AND NEW.pod_pending_since_at IS NOT OLD.pod_pending_since_at;
+
+		   SELECT RAISE(ABORT, 'Execution generation Pod Running time is immutable')
+		   WHERE OLD.pod_running_at IS NOT NULL
+		     AND NEW.pod_running_at IS NOT OLD.pod_running_at;
+
+		   SELECT RAISE(ABORT, 'Execution generation Pod observation time cannot move backwards')
+		   WHERE OLD.pod_last_observed_at IS NOT NULL AND (
+		     NEW.pod_last_observed_at IS NULL
+		     OR NEW.pod_last_observed_at < OLD.pod_last_observed_at
+		   );
+
 		   SELECT RAISE(ABORT, 'Execution generation fact timeline is invalid')
 		   WHERE (NEW.dispatch_requested_at IS NOT NULL AND NEW.leased_at IS NOT NULL
 		       AND NEW.dispatch_requested_at > NEW.leased_at)
@@ -762,13 +800,77 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		      OR (NEW.execution_started_at IS NOT NULL AND NEW.provider_ready_at IS NOT NULL
 		       AND NEW.execution_started_at > NEW.provider_ready_at)
 		      OR (NEW.dispatch_requested_at IS NOT NULL AND NEW.terminal_at IS NOT NULL
-		       AND NEW.dispatch_requested_at > NEW.terminal_at);
+		       AND NEW.dispatch_requested_at > NEW.terminal_at)
+		      OR (NEW.pod_provisioning_started_at IS NOT NULL AND NEW.dispatch_requested_at IS NOT NULL
+		       AND NEW.pod_provisioning_started_at < NEW.dispatch_requested_at)
+		      OR (NEW.pod_pending_since_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		       AND NEW.pod_pending_since_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_running_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		       AND NEW.pod_running_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_provisioning_started_at IS NOT NULL
+		       AND NEW.pod_last_observed_at < NEW.pod_provisioning_started_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_pending_since_at IS NOT NULL
+		       AND NEW.pod_last_observed_at < NEW.pod_pending_since_at)
+		      OR (NEW.pod_last_observed_at IS NOT NULL AND NEW.pod_running_at IS NOT NULL
+		       AND NEW.pod_last_observed_at < NEW.pod_running_at);
 		 END`,
 		`DROP TRIGGER IF EXISTS trg_execution_generation_facts_delete`,
 		`CREATE TRIGGER trg_execution_generation_facts_delete
 		 BEFORE DELETE ON execution_generation_facts
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Execution generation facts cannot be deleted');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_generation_pod_failure_facts_insert`,
+		`CREATE TRIGGER trg_execution_generation_pod_failure_facts_insert
+		 BEFORE INSERT ON execution_generation_pod_failure_facts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Execution generation Pod failure fact')
+		   WHERE NEW.generation <= 0
+		      OR NEW.failure_class IS NULL
+		      OR NEW.failure_class NOT IN (
+		        'pod-apply-failed', 'pending-timeout', 'unschedulable', 'image-pull',
+		        'container-start', 'evicted', 'oom-killed', 'pod-failed'
+		      )
+		      OR NEW.namespace IS NULL OR length(NEW.namespace) NOT BETWEEN 1 AND 253
+		      OR NEW.pod_name IS NULL OR length(NEW.pod_name) NOT BETWEEN 1 AND 253
+		      OR (NEW.pod_uid IS NOT NULL AND length(NEW.pod_uid) NOT BETWEEN 1 AND 160)
+		      OR NEW.reason_code IS NULL OR length(NEW.reason_code) NOT BETWEEN 1 AND 160
+		      OR (NEW.failure_class = 'pod-apply-failed' AND NEW.pod_uid IS NOT NULL)
+		      OR (NEW.failure_class <> 'pod-apply-failed' AND NEW.pod_uid IS NULL)
+		      OR NEW.first_observed_at IS NULL OR NEW.last_observed_at IS NULL
+		      OR NEW.last_observed_at < NEW.first_observed_at
+		      OR NOT EXISTS (
+		        SELECT 1 FROM execution_generation_facts AS generation
+		        WHERE generation.tenant_id = NEW.tenant_id
+		          AND generation.execution_id = NEW.execution_id
+		          AND generation.generation = NEW.generation
+		          AND generation.execution_target_id = NEW.execution_target_id
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_generation_pod_failure_facts_update`,
+		`CREATE TRIGGER trg_execution_generation_pod_failure_facts_update
+		 BEFORE UPDATE ON execution_generation_pod_failure_facts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution generation Pod failure fact identity is immutable')
+		   WHERE NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.execution_id IS NOT OLD.execution_id
+		      OR NEW.generation IS NOT OLD.generation
+		      OR NEW.failure_class IS NOT OLD.failure_class
+		      OR NEW.execution_target_id IS NOT OLD.execution_target_id
+		      OR NEW.namespace IS NOT OLD.namespace
+		      OR NEW.pod_name IS NOT OLD.pod_name
+		      OR NEW.pod_uid IS NOT OLD.pod_uid
+		      OR NEW.reason_code IS NOT OLD.reason_code
+		      OR NEW.first_observed_at IS NOT OLD.first_observed_at;
+
+		   SELECT RAISE(ABORT, 'Execution generation Pod failure observation cannot move backwards')
+		   WHERE NEW.last_observed_at IS NULL OR NEW.last_observed_at < OLD.last_observed_at;
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_generation_pod_failure_facts_delete`,
+		`CREATE TRIGGER trg_execution_generation_pod_failure_facts_delete
+		 BEFORE DELETE ON execution_generation_pod_failure_facts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution generation Pod failure facts cannot be deleted');
 		 END`,
 		`INSERT OR IGNORE INTO worker_incarnation_facts (
 		   worker_id, worker_incarnation, tenant_id, execution_target_id,
@@ -2952,6 +3054,9 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	if err := migrateWorkerRevocationSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateKubernetesPodDeletionFenceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateCredentialBindingsSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
@@ -2964,10 +3069,268 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	if err := migrateWorkerClaimFactsSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateWorkerClaimReleaseFactsSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateSharedCostAllocationSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateRoutingSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateExecutionSchedulingPolicySQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateExecutionSchedulingDecisionsSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	return migrateWorkerReleaseSQLiteSafety(ctx, db)
+}
+
+func migrateExecutionSchedulingPolicySQLiteSafety(ctx context.Context, db *gorm.DB) error {
+	statements := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_scheduling_policy_head_scope
+		 ON execution_scheduling_policy_heads (tenant_id, scope_kind, scope_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_scheduling_policy_revision_number
+		 ON execution_scheduling_policy_revisions (tenant_id, policy_head_id, revision_number)`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_heads_insert`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_heads_insert
+		 BEFORE INSERT ON execution_scheduling_policy_heads
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Head scope is invalid')
+		   WHERE NEW.scope_kind NOT IN ('tenant', 'organization')
+		      OR NEW.version <> 0 OR NEW.current_revision_id IS NOT NULL
+		      OR (NEW.scope_kind = 'tenant' AND (NEW.scope_id IS NOT NEW.tenant_id OR NEW.organization_id IS NOT NULL))
+		      OR (NEW.scope_kind = 'organization' AND (NEW.scope_id IS NOT NEW.organization_id OR NEW.organization_id IS NULL));
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Organization is outside the Tenant')
+		   WHERE NEW.scope_kind = 'organization' AND NOT EXISTS (
+		     SELECT 1 FROM organizations o WHERE o.tenant_id = NEW.tenant_id AND o.id = NEW.organization_id
+		   );
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy updater is unavailable')
+		   WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.updated_by);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_revisions_insert`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_revisions_insert
+		 BEFORE INSERT ON execution_scheduling_policy_revisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Revision shape is invalid')
+		   WHERE NEW.revision_number <= 0 OR length(NEW.sha256) <> 64 OR NEW.sha256 GLOB '*[^0-9a-f]*';
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Revision must advance its Head by one')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_heads h
+		     WHERE h.tenant_id = NEW.tenant_id AND h.id = NEW.policy_head_id
+		       AND NEW.revision_number = h.version + 1
+		   );
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy creator is unavailable')
+		   WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.created_by);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rules_insert`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rules_insert
+		 BEFORE INSERT ON execution_scheduling_policy_rules
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy rule is invalid')
+		   WHERE NEW.dimension NOT IN ('target', 'region', 'cluster', 'provider', 'capacity_class')
+		      OR NEW.mode NOT IN ('any', 'allow');
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy rule is outside the next unpublished Revision')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_revisions r
+		     JOIN execution_scheduling_policy_heads h ON h.tenant_id = r.tenant_id AND h.id = r.policy_head_id
+		     WHERE r.tenant_id = NEW.tenant_id AND r.id = NEW.revision_id
+		       AND r.revision_number = h.version + 1
+		   );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rule_values_insert`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rule_values_insert
+		 BEFORE INSERT ON execution_scheduling_policy_rule_values
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy rule value is invalid')
+		   WHERE length(NEW.value) < 1 OR length(NEW.value) > 200 OR trim(NEW.value) IS NOT NEW.value;
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy any rule cannot contain values')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_rules r
+		     JOIN execution_scheduling_policy_revisions revision
+		       ON revision.tenant_id = r.tenant_id AND revision.id = r.revision_id
+		     JOIN execution_scheduling_policy_heads h
+		       ON h.tenant_id = revision.tenant_id AND h.id = revision.policy_head_id
+		     WHERE r.tenant_id = NEW.tenant_id AND r.revision_id = NEW.revision_id
+		       AND r.dimension = NEW.dimension AND r.mode = 'allow'
+		       AND revision.revision_number = h.version + 1
+		   );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_heads_update`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_heads_update
+		 BEFORE UPDATE ON execution_scheduling_policy_heads
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Head identity is immutable')
+		   WHERE NEW.id IS NOT OLD.id OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.scope_id IS NOT OLD.scope_id
+		      OR NEW.organization_id IS NOT OLD.organization_id OR NEW.created_at IS NOT OLD.created_at;
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy Head must publish exactly one complete Revision')
+		   WHERE NEW.current_revision_id IS OLD.current_revision_id OR NEW.version <> OLD.version + 1
+		      OR NOT EXISTS (
+		        SELECT 1 FROM execution_scheduling_policy_revisions r
+		        WHERE r.tenant_id = NEW.tenant_id AND r.id = NEW.current_revision_id
+		          AND r.policy_head_id = NEW.id AND r.revision_number = NEW.version
+		      )
+		      OR (SELECT count(*) FROM execution_scheduling_policy_rules r
+		          WHERE r.tenant_id = NEW.tenant_id AND r.revision_id = NEW.current_revision_id) <> 5;
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy updater is unavailable')
+		   WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.updated_by);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_revisions_update`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_revisions_update BEFORE UPDATE ON execution_scheduling_policy_revisions
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy Revisions are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_revisions_delete`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_revisions_delete BEFORE DELETE ON execution_scheduling_policy_revisions
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy Revisions are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rules_update`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rules_update BEFORE UPDATE ON execution_scheduling_policy_rules
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy rules are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rules_delete`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rules_delete BEFORE DELETE ON execution_scheduling_policy_rules
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy rules are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rule_values_update`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rule_values_update BEFORE UPDATE ON execution_scheduling_policy_rule_values
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy rule values are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_execution_scheduling_policy_rule_values_delete`,
+		`CREATE TRIGGER trg_execution_scheduling_policy_rule_values_delete BEFORE DELETE ON execution_scheduling_policy_rule_values
+		 BEGIN SELECT RAISE(ABORT, 'Execution Scheduling Policy rule values are immutable'); END`,
+		`DROP TRIGGER IF EXISTS trg_organizations_execution_scheduling_policy_protected`,
+		`CREATE TRIGGER trg_organizations_execution_scheduling_policy_protected
+		 BEFORE DELETE ON organizations
+		 WHEN EXISTS (
+		   SELECT 1 FROM execution_scheduling_policy_heads h
+		   WHERE h.tenant_id = OLD.tenant_id AND h.scope_kind = 'organization' AND h.scope_id = OLD.id
+		 )
+		 BEGIN SELECT RAISE(ABORT, 'Organization is protected by its Execution Scheduling Policy'); END`,
+		`DROP TRIGGER IF EXISTS trg_tenants_execution_scheduling_policy_protected`,
+		`CREATE TRIGGER trg_tenants_execution_scheduling_policy_protected
+		 BEFORE DELETE ON tenants
+		 WHEN EXISTS (
+		   SELECT 1 FROM execution_scheduling_policy_heads h WHERE h.tenant_id = OLD.id
+		 )
+		 BEGIN SELECT RAISE(ABORT, 'Tenant is protected by its Execution Scheduling Policy'); END`,
+	}
+	for _, statement := range statements {
+		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
+			return fmt.Errorf("apply sqlite Execution Scheduling Policy safety migration: %w", err)
+		}
+	}
+	if db.Migrator().HasColumn(&persistence.AgentExecution{}, "tenant_scheduling_policy_version") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "tenant_scheduling_policy_digest") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "organization_scheduling_policy_version") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "organization_scheduling_policy_digest") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "placement_region") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "placement_cluster_id") {
+		if err := db.WithContext(ctx).Exec(`DROP TRIGGER IF EXISTS trg_agent_executions_scheduling_policy_snapshot_insert`).Error; err != nil {
+			return fmt.Errorf("drop sqlite Execution Scheduling Policy snapshot insert trigger: %w", err)
+		}
+		if err := db.WithContext(ctx).Exec(`CREATE TRIGGER trg_agent_executions_scheduling_policy_snapshot_insert
+		 BEFORE INSERT ON agent_executions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy snapshot is invalid')
+		   WHERE NEW.tenant_scheduling_policy_version < 0
+		      OR length(NEW.tenant_scheduling_policy_digest) <> 64
+		      OR NEW.tenant_scheduling_policy_digest GLOB '*[^0-9a-f]*'
+		      OR NEW.organization_scheduling_policy_version < 0
+		      OR length(NEW.organization_scheduling_policy_digest) <> 64
+		      OR NEW.organization_scheduling_policy_digest GLOB '*[^0-9a-f]*'
+		      OR length(NEW.placement_region) > 120 OR trim(NEW.placement_region) IS NOT NEW.placement_region
+		      OR length(NEW.placement_cluster_id) > 200 OR trim(NEW.placement_cluster_id) IS NOT NEW.placement_cluster_id;
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy snapshot Session is outside the Tenant')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM agent_sessions s WHERE s.tenant_id = NEW.tenant_id AND s.id = NEW.session_id
+		   );
+		   SELECT RAISE(ABORT, 'Execution Tenant Scheduling Policy Head is corrupt')
+		   WHERE EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_heads h
+		     WHERE h.tenant_id = NEW.tenant_id AND h.scope_kind = 'tenant' AND h.scope_id = NEW.tenant_id
+		   ) AND NOT EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_heads h
+		     JOIN execution_scheduling_policy_revisions r
+		       ON r.tenant_id = h.tenant_id AND r.id = h.current_revision_id
+		      AND r.policy_head_id = h.id AND r.revision_number = h.version
+		     WHERE h.tenant_id = NEW.tenant_id AND h.scope_kind = 'tenant' AND h.scope_id = NEW.tenant_id
+		   );
+		   SELECT RAISE(ABORT, 'Execution Tenant Scheduling Policy snapshot is stale')
+		   WHERE NEW.tenant_scheduling_policy_version IS NOT COALESCE((
+		       SELECT h.version FROM execution_scheduling_policy_heads h
+		       WHERE h.tenant_id = NEW.tenant_id AND h.scope_kind = 'tenant' AND h.scope_id = NEW.tenant_id
+		     ), 0)
+		      OR NEW.tenant_scheduling_policy_digest IS NOT COALESCE((
+		       SELECT r.sha256 FROM execution_scheduling_policy_heads h
+		       JOIN execution_scheduling_policy_revisions r
+		         ON r.tenant_id = h.tenant_id AND r.id = h.current_revision_id
+		        AND r.policy_head_id = h.id AND r.revision_number = h.version
+		       WHERE h.tenant_id = NEW.tenant_id AND h.scope_kind = 'tenant' AND h.scope_id = NEW.tenant_id
+		     ), '48646d468c45b8a2257c2080fce3ef0697f7ec181ca7e085eb49a194a92a90b2');
+		   SELECT RAISE(ABORT, 'Execution Organization Scheduling Policy Head is corrupt')
+		   WHERE EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_heads h
+		     JOIN agent_sessions s ON s.tenant_id = h.tenant_id AND s.organization_id = h.scope_id
+		     WHERE s.tenant_id = NEW.tenant_id AND s.id = NEW.session_id AND h.scope_kind = 'organization'
+		   ) AND NOT EXISTS (
+		     SELECT 1 FROM execution_scheduling_policy_heads h
+		     JOIN agent_sessions s ON s.tenant_id = h.tenant_id AND s.organization_id = h.scope_id
+		     JOIN execution_scheduling_policy_revisions r
+		       ON r.tenant_id = h.tenant_id AND r.id = h.current_revision_id
+		      AND r.policy_head_id = h.id AND r.revision_number = h.version
+		     WHERE s.tenant_id = NEW.tenant_id AND s.id = NEW.session_id AND h.scope_kind = 'organization'
+		   );
+		   SELECT RAISE(ABORT, 'Execution Organization Scheduling Policy snapshot is stale')
+		   WHERE NEW.organization_scheduling_policy_version IS NOT COALESCE((
+		       SELECT h.version FROM execution_scheduling_policy_heads h
+		       JOIN agent_sessions s ON s.tenant_id = h.tenant_id AND s.organization_id = h.scope_id
+		       WHERE s.tenant_id = NEW.tenant_id AND s.id = NEW.session_id AND h.scope_kind = 'organization'
+		     ), 0)
+		      OR NEW.organization_scheduling_policy_digest IS NOT COALESCE((
+		       SELECT r.sha256 FROM execution_scheduling_policy_heads h
+		       JOIN agent_sessions s ON s.tenant_id = h.tenant_id AND s.organization_id = h.scope_id
+		       JOIN execution_scheduling_policy_revisions r
+		         ON r.tenant_id = h.tenant_id AND r.id = h.current_revision_id
+		        AND r.policy_head_id = h.id AND r.revision_number = h.version
+		       WHERE s.tenant_id = NEW.tenant_id AND s.id = NEW.session_id AND h.scope_kind = 'organization'
+		     ), '48646d468c45b8a2257c2080fce3ef0697f7ec181ca7e085eb49a194a92a90b2');
+		   SELECT RAISE(ABORT, 'Execution placement location Worker Pool is unavailable for the Target')
+		   WHERE NEW.worker_pool_id IS NOT NULL AND NOT EXISTS (
+		     SELECT 1 FROM worker_pools p WHERE p.id = NEW.worker_pool_id AND p.execution_target_id = NEW.execution_target_id
+		   );
+		   SELECT RAISE(ABORT, 'Execution routed placement location does not match its Member and Worker Pool authority')
+		   WHERE NEW.target_group_id IS NOT NULL AND (
+		     NEW.selected_region IS NULL OR NEW.selected_cluster_id IS NULL
+		     OR EXISTS (SELECT 1 FROM worker_pools p WHERE p.id = NEW.worker_pool_id AND p.region <> '' AND p.region IS NOT NEW.selected_region)
+		     OR EXISTS (SELECT 1 FROM worker_pools p WHERE p.id = NEW.worker_pool_id AND p.cluster_id <> '' AND p.cluster_id IS NOT NEW.selected_cluster_id)
+		     OR NEW.placement_region IS NOT COALESCE((SELECT NULLIF(p.region, '') FROM worker_pools p WHERE p.id = NEW.worker_pool_id), NEW.selected_region)
+		     OR NEW.placement_cluster_id IS NOT COALESCE((SELECT NULLIF(p.cluster_id, '') FROM worker_pools p WHERE p.id = NEW.worker_pool_id), NEW.selected_cluster_id)
+		   );
+		   SELECT RAISE(ABORT, 'Execution fixed-Target placement location does not match its Worker Pool authority')
+		   WHERE NEW.target_group_id IS NULL AND (
+		     NEW.placement_region IS NOT COALESCE((SELECT p.region FROM worker_pools p WHERE p.id = NEW.worker_pool_id), '')
+		     OR NEW.placement_cluster_id IS NOT COALESCE((SELECT p.cluster_id FROM worker_pools p WHERE p.id = NEW.worker_pool_id), '')
+		   );
+		 END`).Error; err != nil {
+			return fmt.Errorf("create sqlite Execution Scheduling Policy snapshot insert trigger: %w", err)
+		}
+		if err := db.WithContext(ctx).Exec(`DROP TRIGGER IF EXISTS trg_agent_executions_scheduling_policy_snapshot_immutable`).Error; err != nil {
+			return fmt.Errorf("drop sqlite Execution Scheduling Policy snapshot trigger: %w", err)
+		}
+		if err := db.WithContext(ctx).Exec(`CREATE TRIGGER trg_agent_executions_scheduling_policy_snapshot_immutable
+		 BEFORE UPDATE OF tenant_scheduling_policy_version, tenant_scheduling_policy_digest,
+		   organization_scheduling_policy_version, organization_scheduling_policy_digest,
+		   placement_region, placement_cluster_id ON agent_executions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Scheduling Policy snapshot is immutable')
+		   WHERE NEW.tenant_scheduling_policy_version IS NOT OLD.tenant_scheduling_policy_version
+		      OR NEW.tenant_scheduling_policy_digest IS NOT OLD.tenant_scheduling_policy_digest
+		      OR NEW.organization_scheduling_policy_version IS NOT OLD.organization_scheduling_policy_version
+		      OR NEW.organization_scheduling_policy_digest IS NOT OLD.organization_scheduling_policy_digest
+		      OR NEW.placement_region IS NOT OLD.placement_region
+		      OR NEW.placement_cluster_id IS NOT OLD.placement_cluster_id;
+		 END`).Error; err != nil {
+			return fmt.Errorf("create sqlite Execution Scheduling Policy snapshot trigger: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *store) Close() error {

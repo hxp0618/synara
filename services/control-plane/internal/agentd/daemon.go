@@ -96,7 +96,21 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	rootLease, err := acquireProtectedCgroupDaemonRootLease(d.config, d.runner.supervisorInstance)
+	if err != nil {
+		return fmt.Errorf("acquire protected cgroup daemon root lease: %w", err)
+	}
+	if rootLease != nil {
+		d.runner.protectedRootLease = rootLease
+		defer func() {
+			d.runner.protectedRootLease = nil
+			if closeErr := rootLease.Close(); closeErr != nil {
+				d.logger.Error("release protected cgroup daemon root lease", "error", closeErr)
+			}
+		}()
+	}
 	containmentProbeContext, cancelContainmentProbe := protectedCgroupPreflightContext(ctx, d.config)
+	containmentProbeContext = withProtectedCgroupRootLease(containmentProbeContext, rootLease)
 	processContainmentReport, err := protectedCgroupProbeHook(containmentProbeContext, d.config)
 	if err != nil {
 		cancelContainmentProbe()

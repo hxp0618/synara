@@ -190,11 +190,33 @@ derived from the target-scoped systemd service; if supplied, it must equal that 
 
 Provisioning uploads `synara-agentd`, a root-readable EnvironmentFile, and a target-specific systemd
 unit through the verified SSH connection. It never places SSH keys or Worker registration tokens in
-remote command arguments, browser responses, logs, or Audit metadata. Each install/upgrade writes a stable
-physical Worker instance UUID into that EnvironmentFile. Install/upgrade temporarily mark the target offline and
-activate it only after systemd restart succeeds; protected mode additionally proves the active unit and delegated
-ControlGroup. Revoke stops and disables the
-unit, removes binary/configuration files, preserves the workspace, and marks the target disabled.
+remote command arguments, browser responses, logs, or Audit metadata. Each install/upgrade writes a stable physical
+Worker instance UUID and the current SSH operation generation into that EnvironmentFile. Install/upgrade keep the
+Target offline after the systemd and delegated-ControlGroup checks. That offline SSH Target grants bootstrap
+registration/heartbeat authority only while the locked Target still has the exact current install/upgrade generation
+and expected instance UUID; revoke, an offline Target without an operation, a stale generation, or a foreign instance
+fails closed. Routing, Execution claim, and Workspace-cleanup claim continue to require an active Target. The
+provisioner waits for the exact Target/kind/instance UUID and persisted Worker bootstrap generation to become online
+with a post-registration non-future fresh heartbeat, Protocol v2
+lease/fencing compatibility, and a current Manifest matching the configured version/git SHA/image digest. Protected
+cgroup mode additionally requires the Manifest to resolve against the current Target policy as `trustState=verified`.
+Activation locks the offline Target and exact Worker rows, rechecks all readiness in the same transaction, then updates
+the Target to active and appends the completion Audit row. Timeout, stale/foreign instance, incompatible build, or
+unverified containment leaves the Target offline. After activation, agentd restart may re-register only the same
+logical Worker with the same instance UUID and persisted bootstrap generation while the Worker is neither revoked nor
+terminated; the new incarnation rotates the Worker token and cannot create a second active SSH identity. Legacy active
+Workers with no persisted generation may re-register only with another absent generation and cannot downgrade a
+generation-bound Worker.
+
+Revoke first performs one local database transaction in Target-to-Worker lock order: it writes the offline revoke
+generation, clears bootstrap authority, revokes every Worker token and Execution/cleanup lease, recovers affected
+Executions, requeues cleanup, and persists Audit/outbox/Session events. Only after that commit may it decrypt the SSH
+configuration or contact the host. A KMS, configuration, process, or network failure therefore cannot leave old local
+authority live; a retry reuses the committed revoke generation and continues remote cleanup. Successful remote cleanup
+stops and disables the unit, removes binary/configuration files, preserves the workspace, and marks the Target disabled.
+Migrations `000071`–`000073` persist the operation generation, expected instance UUID, Worker bootstrap generation,
+and PostgreSQL trigger-level exact-authority checks.
+
 The default roots are `/var/lib/synara/targets/<target>/workspaces` and
 `/var/lib/synara/targets/<target>/git-cache`. Provisioning creates and assigns both roots to the service user;
 they must be separate absolute paths.
@@ -243,8 +265,12 @@ The registry Secret is referenced only through Pod `imagePullSecrets` and is not
 creates one
 execution-pinned Pod for each queued or recovering Execution up to `maxActivePods`. Pod names and
 labels encode the expected next Generation plus selected Release Revision/Channel. A release-pinned Execution uses
-the exact immutable Manifest Digest instead of the mutable Target image. Terminal, stale-generation, and no-longer-owned Pods are
-deleted, while PostgreSQL remains the authority for Session, Event, Lease, and recovery state.
+the exact immutable Manifest Digest instead of the mutable Target image. Terminal, stale-generation, and no-longer-owned
+Pods are deleted only after PostgreSQL records an immutable exact-UID deletion fence under the same logical-identity lock
+used by Worker registration. The transaction rechecks both Execution Leases and active Workspace-cleanup delivery before
+draining the Worker; the subsequent Kubernetes DELETE carries a Pod UID precondition. The old fenced UID cannot register
+or resume Worker activity, while a same-name Pod with a new UID remains a distinct valid incarnation. PostgreSQL remains
+the authority for Session, Event, Lease, recovery state, and deletion intent.
 
 Worker Pods run as UID/GID 10001 with a read-only root filesystem, RuntimeDefault seccomp, no Linux
 capabilities, no privilege escalation, no ServiceAccount token, bounded EmptyDir workspace/tmp/home,

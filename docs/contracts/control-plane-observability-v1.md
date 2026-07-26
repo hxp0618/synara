@@ -33,6 +33,7 @@ Metrics may use only bounded labels:
   Provider name for validated runtime fallback;
 - physical Worker target kind, Pool mode, capacity class, and lifecycle state;
 - Execution Target health/capacity state and immutable failover status/reason;
+- Worker Pool warm-capacity class, fresh/expired state, warm-supported state, and bounded counter kind;
 - bounded Reconciler controller name and active/expired lease state;
 - cloud provider, currency, charge kind, and bounded reconciliation state;
 - Worker Lease expiration state;
@@ -67,6 +68,9 @@ The endpoint includes:
   memory byte-seconds, and ephemeral-storage byte-seconds. Requested-resource seconds are cost proxies, not currency;
 - expiring Target health/capacity inventory, immutable cross-Target failover attempts, and bounded durable Reconciler
   leadership state;
+- expiring per-Pool warm-capacity authority as
+  `synara_worker_pool_warm_capacity_authorities{capacity_class,freshness,warm_supported}` and fresh desired/claimed/
+  ready-idle unit sums as `synara_worker_pool_warm_capacity_units{capacity_class,kind}`;
 - tariff-rated `synara_cloud_cost_estimated_micros`, imported `synara_cloud_cost_actual_micros`, and
   `synara_cloud_cost_reconciliation_variance_micros`. Estimates remain explicitly distinct from actual invoice truth;
 - bounded `execution.leased` resume decisions and strictly validated native-cursor runtime fallback reasons;
@@ -98,6 +102,7 @@ observations, and authenticated Pod resource requests. Their scrape cost still g
 history, so rolling pre-aggregation remains required for unlimited retention. Configured `warm_pool_mode` remains demand
 inventory; `synara_warm_pool_acquisitions_30d` is the separate observed hit/fallback truth. Requested-resource seconds
 must not be described as cloud invoice or currency cost until an authoritative tariff/billing source exists.
+Live warm-capacity metrics are Reconciler observations with a bounded TTL, not reservations or execution quota.
 
 SSE connection leases are PostgreSQL rows with a crash-expiring TTL. Connection acquisition locks one
 Tenant row in a short transaction before checking Tenant and User limits, so multiple replicas cannot

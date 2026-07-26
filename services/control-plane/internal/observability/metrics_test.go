@@ -26,7 +26,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		&persistence.ExecutionRecoveryBundle{}, &persistence.ExecutionSuspendAttempt{}, &persistence.SessionEvent{},
 		&persistence.ProviderCredential{}, &persistence.ExecutionProviderCredentialGrant{},
 		&persistence.ExecutionTargetHealth{}, &persistence.ExecutionFailoverAttempt{}, &persistence.ReconcilerLease{},
-		&persistence.WorkerIncarnationFact{}, &persistence.BillingProviderTariff{},
+		&persistence.WorkerIncarnationFact{}, &persistence.WorkerPoolWarmCapacity{}, &persistence.BillingProviderTariff{},
 		&persistence.BillingEstimatedUsageCharge{}, &persistence.BillingActualInvoiceImport{},
 		&persistence.BillingActualInvoiceLine{},
 	}
@@ -316,9 +316,17 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 }
 
-func TestBoundedReconcilerLeaseNameIncludesBillingImportScheduler(t *testing.T) {
-	if got := boundedReconcilerLeaseName("synara:billing-import-scheduler"); got != "billing-import" {
-		t.Fatalf("billing import scheduler lease label = %q, want billing-import", got)
+func TestBoundedReconcilerLeaseNameIncludesBillingSchedulers(t *testing.T) {
+	for _, test := range []struct {
+		lease string
+		want  string
+	}{
+		{lease: "synara:billing-import-scheduler", want: "billing-import"},
+		{lease: "synara:billing-shared-allocation-scheduler", want: "billing-shared-allocation"},
+	} {
+		if got := boundedReconcilerLeaseName(test.lease); got != test.want {
+			t.Fatalf("billing scheduler lease label = %q, want %q", got, test.want)
+		}
 	}
 }
 

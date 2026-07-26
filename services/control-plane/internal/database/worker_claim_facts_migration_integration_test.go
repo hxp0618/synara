@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -37,6 +38,33 @@ func TestPostgresWorkerClaimFactsRejectScopeAndMutation(t *testing.T) {
 	if err := db.Create(&cleanupClaim).Error; err != nil {
 		t.Fatalf("create valid cleanup worker claim fact: %v", err)
 	}
+	tooEarlyRelease := validWorkerClaimReleaseFact(executionClaim, "execution_completed", fixture.executionClaimAt.Add(-time.Second))
+	assertStage4MigrationRejected(t, db.Create(&tooEarlyRelease).Error, "chk_worker_claim_release_facts_scope")
+	invalidTimeline := validWorkerClaimReleaseFact(executionClaim, "execution_completed", fixture.executionClaimAt.Add(time.Minute))
+	invalidTimeline.RecordedAt = invalidTimeline.ReleasedAt.Add(-time.Second)
+	assertStage4MigrationRejected(t, db.Create(&invalidTimeline).Error, "chk_worker_claim_release_facts_timeline")
+	executionRelease := validWorkerClaimReleaseFact(executionClaim, "execution_completed", fixture.executionClaimAt.Add(time.Minute))
+	if err := db.Create(&executionRelease).Error; err != nil {
+		t.Fatalf("create valid execution worker claim release fact: %v", err)
+	}
+	cleanupRelease := validWorkerClaimReleaseFact(cleanupClaim, "cleanup_acknowledged", fixture.cleanupClaimAt.Add(time.Minute))
+	if err := db.Create(&cleanupRelease).Error; err != nil {
+		t.Fatalf("create valid cleanup worker claim release fact: %v", err)
+	}
+	invalidRelease := validWorkerClaimReleaseFact(persistence.WorkerClaimFact{ID: uuid.New()}, "not_stable", fixture.cleanupClaimAt.Add(time.Minute))
+	assertStage4MigrationRejected(t, db.Create(&invalidRelease).Error, "chk_worker_claim_release_facts_reason")
+	assertStage4MigrationRejected(
+		t,
+		db.Model(&persistence.WorkerClaimReleaseFact{}).
+			Where("claim_fact_id = ?", executionClaim.ID).
+			Update("release_reason", "execution_failed").Error,
+		"chk_worker_claim_release_facts_immutable",
+	)
+	assertStage4MigrationRejected(
+		t,
+		db.Delete(&persistence.WorkerClaimReleaseFact{}, "claim_fact_id = ?", cleanupClaim.ID).Error,
+		"chk_worker_claim_release_facts_immutable",
+	)
 	duplicateExecutionSource := executionClaim
 	duplicateExecutionSource.ID = uuid.New()
 	duplicateExecutionSource.RequestID = "postgres-worker-claim-execution-duplicate-source"

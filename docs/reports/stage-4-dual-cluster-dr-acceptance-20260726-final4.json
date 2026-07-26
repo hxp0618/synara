@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "synara.kubernetes-dual-cluster-acceptance.v1",
+  "runID": "20260725223446-18106-3826",
+  "startedAt": "2026-07-25T22:34:46Z",
+  "finishedAt": "2026-07-25T22:37:21Z",
+  "status": "passed",
+  "exitCode": 0,
+  "phase": "test-complete",
+  "failure": null,
+  "contexts": {
+    "primary": {
+      "name": "orbstack",
+      "kubernetesVersion": "v1.34.8+orb1",
+      "nodeCount": 1
+    },
+    "secondary": {
+      "name": "kind-synara-dr-20260725223446-18106-3826",
+      "kubernetesVersion": "v1.33.1",
+      "nodeCount": 1
+    }
+  },
+  "test": {
+    "name": "TestStage4DualClusterDisasterRecoveryAgainstRealAPIServers",
+    "status": "passed",
+    "exitCode": 0
+  },
+  "checks": {
+    "currentContextUnchanged": true,
+    "detailProduced": true,
+    "detailValidJSON": true,
+    "detailWithin65536Bytes": true,
+    "detailContainsNoConnectionMaterial": true,
+    "detailAssertionsAllowlistedBooleans": true,
+    "integrationAssertions": {
+      "exactReadinessAccepted": true,
+      "missingReadinessFailedClosed": true,
+      "obsoletePrimaryPodAbsent": true,
+      "podBoundWorkloadIdentityVerified": true,
+      "recoveryBundleIntegrityVerified": true,
+      "singleSuccessor": true,
+      "sourcePlacementImmutable": true,
+      "sourceRuntimeReady": true,
+      "successorLineagePersisted": true,
+      "successorRuntimeReady": true
+    }
+  },
+  "detail": {
+    "bytes": 2244,
+    "sha256": "1200e4796052bd9cf9ab7212a2384e6cffd21c5196ddf1fa3ba553d6e8a9c442"
+  },
+  "source": {
+    "gitSHA": "59d1d7b8c28bccd305f6e0b23c191facfba5f14f",
+    "worktreeDirty": true
+  },
+  "workerImage": {
+    "tag": "synara-worker:dual-cluster-20260725223446-18106-3826",
+    "configID": "sha256:e0a45e4cc90cd1478d2db72230b1d8b543ac9c6d68617d14eec94962d1d8b8b7",
+    "manifestDigest": "sha256:e0a45e4cc90cd1478d2db72230b1d8b543ac9c6d68617d14eec94962d1d8b8b7",
+    "acceptanceBoundary": {
+      "workerAPI": "bounded-stub-with-production-kubernetes-identity-verifier",
+      "podBoundWorkloadIdentityVerified": true,
+      "fullWorkerRegistrationPersistenceVerified": false
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "tokenRequestCredentialsPersisted": false,
+    "touchedSynaraSystem": false,
+    "kindKubeconfigIsolated": true
+  }
+}

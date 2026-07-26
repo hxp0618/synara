@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -245,6 +246,9 @@ func TestResourceSuspendRequiresStrictProcessContainmentCapability(t *testing.T)
 		{mode: "job-object", operatingSystem: "windows"},
 	} {
 		supervisorVersion := "supervisor-test"
+		if testCase.mode == "cgroup-v2" {
+			supervisorVersion = executiontargets.ProtectedCgroupSupervisorVersionV2
+		}
 		probeVersion := 1
 		probeSHA256 := strings.Repeat("a", 64)
 		supervisorIdentity := "supervisor"
@@ -258,6 +262,19 @@ func TestResourceSuspendRequiresStrictProcessContainmentCapability(t *testing.T)
 		}) {
 			t.Fatalf("strict process containment mode %q was rejected", testCase.mode)
 		}
+	}
+	legacySupervisor := "agentd-protected-cgroup-supervisor-v1"
+	probeVersion := 1
+	probeSHA256 := strings.Repeat("a", 64)
+	supervisorIdentity, providerIdentity := "supervisor", "provider"
+	if workerManifestSupportsStrictResourceSuspendContainment(persistence.WorkerManifest{
+		OperatingSystem: "linux", ProcessContainmentMode: "cgroup-v2",
+		ProcessContainmentSupervisorVersion: &legacySupervisor,
+		ProcessContainmentProbeVersion:      &probeVersion, ProcessContainmentProbeSHA256: &probeSHA256,
+		ProcessContainmentSupervisorIdentity: &supervisorIdentity,
+		ProcessContainmentProviderIdentity:   &providerIdentity,
+	}) {
+		t.Fatal("persisted signed v1 cgroup supervisor retained resource-suspend authority")
 	}
 }
 

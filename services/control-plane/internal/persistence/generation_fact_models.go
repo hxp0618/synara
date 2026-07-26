@@ -23,6 +23,10 @@ type ExecutionGenerationFact struct {
 	LeasedAt                           *time.Time `gorm:"column:leased_at"`
 	ExecutionStartedAt                 *time.Time `gorm:"column:execution_started_at"`
 	ProviderReadyAt                    *time.Time `gorm:"column:provider_ready_at"`
+	PodProvisioningStartedAt           *time.Time `gorm:"column:pod_provisioning_started_at"`
+	PodPendingSinceAt                  *time.Time `gorm:"column:pod_pending_since_at"`
+	PodRunningAt                       *time.Time `gorm:"column:pod_running_at"`
+	PodLastObservedAt                  *time.Time `gorm:"column:pod_last_observed_at"`
 	TerminalAt                         *time.Time `gorm:"column:terminal_at"`
 	TerminalOutcome                    *string    `gorm:"column:terminal_outcome"`
 	ProviderResumeStrategy             string     `gorm:"column:provider_resume_strategy;default:authoritative-history"`
@@ -38,3 +42,23 @@ type ExecutionGenerationFact struct {
 }
 
 func (ExecutionGenerationFact) TableName() string { return "execution_generation_facts" }
+
+type ExecutionGenerationPodFailureFact struct {
+	TenantID          uuid.UUID `gorm:"column:tenant_id;type:uuid;primaryKey"`
+	ExecutionID       uuid.UUID `gorm:"column:execution_id;type:uuid;primaryKey"`
+	Generation        int64     `gorm:"column:generation;primaryKey"`
+	FailureClass      string    `gorm:"column:failure_class;primaryKey"`
+	ExecutionTargetID uuid.UUID `gorm:"column:execution_target_id;type:uuid"`
+	Namespace         string    `gorm:"column:namespace"`
+	PodName           string    `gorm:"column:pod_name"`
+	PodUID            *string   `gorm:"column:pod_uid"`
+	ReasonCode        string    `gorm:"column:reason_code"`
+	FirstObservedAt   time.Time `gorm:"column:first_observed_at"`
+	LastObservedAt    time.Time `gorm:"column:last_observed_at"`
+	CreatedAt         time.Time `gorm:"column:created_at"`
+	UpdatedAt         time.Time `gorm:"column:updated_at"`
+}
+
+func (ExecutionGenerationPodFailureFact) TableName() string {
+	return "execution_generation_pod_failure_facts"
+}

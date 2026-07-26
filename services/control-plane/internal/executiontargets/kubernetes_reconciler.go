@@ -23,8 +23,10 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
+	"github.com/synara-ai/synara/services/control-plane/internal/fairqueue"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
+	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
@@ -42,7 +44,20 @@ const (
 	kubernetesWorkloadIdentityVolume    = "workload-identity"
 	kubernetesWorkloadIdentityTokenPath = "/var/run/secrets/synara.io/workload-identity/token"
 	kubernetesLocalClusterID            = "kubernetes"
+	kubernetesWorkerProtocolVersion     = 2
+	kubernetesPodBoundRegistrationTrust = "kubernetes-pod-bound-v1"
+
+	KubernetesPodFailureApplyFailed    = "pod-apply-failed"
+	KubernetesPodFailurePendingTimeout = "pending-timeout"
+	KubernetesPodFailureUnschedulable  = "unschedulable"
+	KubernetesPodFailureImagePull      = "image-pull"
+	KubernetesPodFailureContainerStart = "container-start"
+	KubernetesPodFailureEvicted        = "evicted"
+	KubernetesPodFailureOOMKilled      = "oom-killed"
+	KubernetesPodFailureGeneric        = "pod-failed"
 )
+
+var errKubernetesPodUIDPreconditionFailed = errors.New("Kubernetes Pod UID precondition failed")
 
 type KubernetesWorkerPodObservation struct {
 	ExecutionTargetID uuid.UUID
@@ -56,15 +71,37 @@ type KubernetesWorkerPodObservation struct {
 
 type KubernetesWorkerPodObserver func(context.Context, KubernetesWorkerPodObservation) error
 
+type KubernetesExecutionPodObservation struct {
+	TenantID                uuid.UUID
+	ExecutionTargetID       uuid.UUID
+	ExecutionID             uuid.UUID
+	Generation              int64
+	Namespace               string
+	PodName                 string
+	PodUID                  string
+	Phase                   string
+	FailureClass            string
+	FailureReasonCode       string
+	PendingFailureThreshold time.Duration
+	PodCreatedAt            time.Time
+	ObservedAt              time.Time
+}
+
+type KubernetesExecutionPodObserver func(context.Context, KubernetesExecutionPodObservation) error
+
 type KubernetesReconcilerConfig struct {
 	PublicControlPlaneURL              string
 	WorkerLeaseTTL                     time.Duration
+	WorkerHeartbeatTimeout             time.Duration
 	Interval                           time.Duration
 	RecoverExpired                     func(context.Context, int) error
 	ReconcileEphemeralWorkspaceCleanup func(context.Context, uuid.UUID, []string, time.Time) (int, error)
 	FinalizeResourceSuspend            func(context.Context, KubernetesPodTerminalObservation) (bool, error)
 	ObserveWorkerPod                   KubernetesWorkerPodObserver
+	ObserveExecutionPod                KubernetesExecutionPodObserver
+	PodPendingFailureThreshold         time.Duration
 	PublishRoutingHealth               ManagedKubernetesRoutingHealthObserver
+	PublishWarmCapacity                ManagedKubernetesWarmCapacityObserver
 	Observer                           BackgroundObserver
 	ResolveImagePull                   ImagePullCredentialResolver
 }
@@ -108,15 +145,27 @@ type kubernetesPod struct {
 	Name        string
 	UID         string
 	Phase       string
+	Reason      string
+	CreatedAt   time.Time
 	Labels      map[string]string
 	Annotations map[string]string
+	Conditions  []kubernetesPodCondition
 	Containers  []kubernetesContainerStatus
 }
 
+type kubernetesPodCondition struct {
+	Type   string
+	Status string
+	Reason string
+}
+
 type kubernetesContainerStatus struct {
-	Name       string
-	Terminated bool
-	ExitCode   int
+	Name                 string
+	WaitingReason        string
+	Terminated           bool
+	TerminatedReason     string
+	LastTerminatedReason string
+	ExitCode             int
 }
 
 type KubernetesPodTerminalObservation struct {
@@ -227,6 +276,7 @@ type kubernetesExecution struct {
 	AbsoluteExpiresAt        *time.Time `gorm:"column:absolute_expires_at"`
 	Status                   string     `gorm:"column:status"`
 	Generation               int64      `gorm:"column:generation"`
+	QueuedAt                 time.Time  `gorm:"column:queued_at"`
 	WorkerReleaseRevisionID  *uuid.UUID `gorm:"column:worker_release_revision_id"`
 	WorkerReleaseChannel     *string    `gorm:"column:worker_release_channel"`
 	WorkerReleaseImageDigest *string    `gorm:"column:worker_release_image_digest"`
@@ -266,9 +316,22 @@ type kubernetesWarmWorkerState struct {
 	CapacityClass           *string    `gorm:"column:capacity_class"`
 	WorkerReleaseRevisionID *uuid.UUID `gorm:"column:worker_release_revision_id"`
 	WorkerReleaseChannel    *string    `gorm:"column:worker_release_channel"`
+	WorkerReleaseStatus     string     `gorm:"column:worker_release_status"`
+	RegistrationTrustMode   string     `gorm:"column:registration_trust_mode"`
+	ProtocolVersion         int        `gorm:"column:protocol_version"`
+	CurrentManifestID       *uuid.UUID `gorm:"column:current_manifest_id"`
+	CompatibilityStatus     string     `gorm:"column:compatibility_status"`
+	LeaseSupported          bool       `gorm:"column:lease_supported"`
+	FencingSupported        bool       `gorm:"column:fencing_supported"`
 	Status                  string     `gorm:"column:status"`
 	AdministrativeStatus    string     `gorm:"column:administrative_status"`
+	LastHeartbeatAt         time.Time  `gorm:"column:last_heartbeat_at"`
 	HasLease                bool       `gorm:"column:has_lease"`
+}
+
+type kubernetesWarmWorkerIdentity struct {
+	PodName     string
+	InstanceUID string
 }
 
 type kubernetesWorkerPodState struct {
@@ -298,6 +361,11 @@ type kubernetesObservedWarmPod struct {
 	State         *kubernetesWarmWorkerState
 }
 
+type kubernetesWarmDemandEvictionCandidate struct {
+	Observed kubernetesObservedWarmPod
+	Key      kubernetesWarmCapacityKey
+}
+
 func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persistence.ExecutionTarget) (err error) {
 	healthObservation := ManagedKubernetesRoutingHealthObservation{
 		ExecutionTargetID: target.ID,
@@ -305,16 +373,25 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		Status:            routing.HealthUnknown,
 		CapacityStatus:    routing.CapacityUnknown,
 	}
+	var warmCapacityObservations []ManagedKubernetesWarmCapacityObservation
 	defer func() {
-		if r.config.PublishRoutingHealth == nil || ctx.Err() != nil || target.TenantID == nil {
+		if ctx.Err() != nil || target.TenantID == nil {
 			return
 		}
-		healthObservation.ObservedAt = r.now()
-		if publishErr := r.config.PublishRoutingHealth(ctx, healthObservation); publishErr != nil {
-			if err == nil {
-				err = publishErr
-			} else {
+		reconcileSucceeded := err == nil
+		observedAt := r.now()
+		if r.config.PublishRoutingHealth != nil {
+			healthObservation.ObservedAt = observedAt
+			if publishErr := r.config.PublishRoutingHealth(ctx, healthObservation); publishErr != nil {
 				err = errors.Join(err, publishErr)
+			}
+		}
+		if reconcileSucceeded && r.config.PublishWarmCapacity != nil {
+			for _, observation := range warmCapacityObservations {
+				observation.ObservedAt = observedAt
+				if publishErr := r.config.PublishWarmCapacity(ctx, observation); publishErr != nil {
+					err = errors.Join(err, publishErr)
+				}
 			}
 		}
 	}()
@@ -461,9 +538,9 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	for _, execution := range executions {
 		active[execution.ID] = execution
 	}
-	warmWorkerStateByPodName := make(map[string]kubernetesWarmWorkerState, len(warmWorkerStates))
+	warmWorkerStatesByIdentity := make(map[kubernetesWarmWorkerIdentity]kubernetesWarmWorkerState, len(warmWorkerStates))
 	for _, state := range warmWorkerStates {
-		warmWorkerStateByPodName[state.PodName] = state
+		warmWorkerStatesByIdentity[kubernetesWarmWorkerIdentityKey(state.PodName, state.InstanceUID)] = state
 	}
 	existing := make(map[string]kubernetesPod, len(pods))
 	warmClaimedCounts := make(map[uuid.UUID]int)
@@ -471,7 +548,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	created, deleted := 0, 0
 	for _, pod := range pods {
 		if strings.TrimSpace(pod.Labels[kubernetesWorkerModeLabel]) == kubernetesWorkerModeWarmPool {
-			state, matchedState := kubernetesWarmWorkerStateForPod(warmWorkerStateByPodName, pod)
+			state, matchedState := kubernetesWarmWorkerStateForPod(warmWorkerStatesByIdentity, pod)
 			if matchedState && state.HasLease {
 				if state.WorkerPoolID != nil {
 					warmClaimedCounts[*state.WorkerPoolID]++
@@ -481,26 +558,23 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 			poolID, poolVersion, capacityClass, slot, parseErr := kubernetesWarmPodIdentity(pod)
 			if parseErr != nil {
-				var statePtr *kubernetesWarmWorkerState
-				if matchedState {
-					stateCopy := state
-					statePtr = &stateCopy
-				}
-				deletedPod, retainedLease, err := r.deleteObservedWarmPod(
-					ctx, client, target.ID, configuration.Namespace, pod, statePtr, "warm-pool-invalid-identity",
+				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+					ctx, client, target.ID, configuration.Namespace, pod, "warm-pool-invalid-identity",
 				)
 				if err != nil {
 					return err
 				}
-				if retainedLease {
-					if state.WorkerPoolID != nil {
-						warmClaimedCounts[*state.WorkerPoolID]++
+				if retainedWorker != nil {
+					if retainedWorker.WorkerPoolID != nil {
+						warmClaimedCounts[*retainedWorker.WorkerPoolID]++
 					}
 					existing[pod.Name] = pod
 					continue
 				}
 				if deletedPod {
 					deleted++
+				} else {
+					existing[pod.Name] = pod
 				}
 				continue
 			}
@@ -516,10 +590,17 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		executionID, parseErr := uuid.Parse(pod.Labels[kubernetesExecutionLabel])
 		if parseErr != nil {
-			if err := r.deleteObservedPod(ctx, client, target.ID, configuration.Namespace, pod, "execution-pod-invalid-identity"); err != nil {
+			deletedPod, _, err := r.deleteObservedPodSafely(
+				ctx, client, target.ID, configuration.Namespace, pod, "execution-pod-invalid-identity",
+			)
+			if err != nil {
 				return err
 			}
-			deleted++
+			if deletedPod {
+				deleted++
+			} else {
+				existing[pod.Name] = pod
+			}
 			continue
 		}
 		execution, found := active[executionID]
@@ -536,15 +617,33 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 		}
 		terminalPod := pod.Phase == "Succeeded" || pod.Phase == "Failed"
-		if found && pod.Name == expectedName && pod.Annotations[kubernetesConfigAnnotation] == expectedHash &&
-			pod.Phase == "Succeeded" && kubernetesPodCompletedSuccessfully(pod) {
-			if err := r.observeTerminalExecutionPod(ctx, target.ID, configuration.Namespace, pod); err != nil {
+		exactExecutionPod := found && pod.Name == expectedName &&
+			pod.Annotations[kubernetesConfigAnnotation] == expectedHash
+		generation := int64(0)
+		if exactExecutionPod {
+			generation, err = kubernetesObservedExecutionPodGeneration(execution, pod)
+			if err != nil {
 				return err
 			}
-			generation, generationErr := strconv.ParseInt(strings.TrimSpace(pod.Labels[kubernetesGenerationLabel]), 10, 64)
-			if generationErr != nil || generation <= 0 {
-				return problem.New(502, "kubernetes_pod_generation_invalid", "A terminal Kubernetes Worker Pod omitted its canonical Generation label.")
+			failureClass, failureReasonCode := classifyKubernetesExecutionPodFailure(pod)
+			if err := r.observeExecutionPod(ctx, KubernetesExecutionPodObservation{
+				TenantID: execution.TenantID, ExecutionTargetID: target.ID,
+				ExecutionID: executionID, Generation: generation,
+				Namespace: configuration.Namespace, PodName: pod.Name, PodUID: pod.UID,
+				Phase: pod.Phase, FailureClass: failureClass, FailureReasonCode: failureReasonCode,
+				PendingFailureThreshold: r.podPendingFailureThreshold(), PodCreatedAt: pod.CreatedAt,
+				ObservedAt: r.now(),
+			}); err != nil {
+				return err
 			}
+			if terminalPod {
+				if err := r.observeTerminalExecutionPod(ctx, target.ID, configuration.Namespace, pod); err != nil {
+					return err
+				}
+			}
+		}
+		if exactExecutionPod &&
+			pod.Phase == "Succeeded" && kubernetesPodCompletedSuccessfully(pod) {
 			if r.config.FinalizeResourceSuspend == nil {
 				return problem.New(503, "kubernetes_suspend_finalizer_unavailable", "Kubernetes Pod-terminal suspension finalization is not configured.")
 			}
@@ -565,15 +664,22 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				continue
 			}
 		}
-		if !found || pod.Name != expectedName || pod.Annotations[kubernetesConfigAnnotation] != expectedHash || terminalPod {
+		if !exactExecutionPod || terminalPod {
 			reason := "execution-pod-obsolete"
 			if terminalPod {
 				reason = "execution-pod-terminal"
 			}
-			if err := r.deleteObservedPod(ctx, client, target.ID, configuration.Namespace, pod, reason); err != nil {
+			deletedPod, _, err := r.deleteObservedPodSafely(
+				ctx, client, target.ID, configuration.Namespace, pod, reason,
+			)
+			if err != nil {
 				return err
 			}
-			deleted++
+			if deletedPod {
+				deleted++
+			} else {
+				existing[pod.Name] = pod
+			}
 			continue
 		}
 		existing[pod.Name] = pod
@@ -586,6 +692,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	}
 	_ = validationWarmPlans
 	readyWarmCapacity := make(map[kubernetesWarmCapacityKey]int)
+	warmDemandEvictionCandidates := make([]kubernetesWarmDemandEvictionCandidate, 0)
 	for _, observed := range unleasedWarmPods {
 		plan, found := validationWarmPlansByName[observed.Pod.Name]
 		terminalPod := observed.Pod.Phase == "Succeeded" || observed.Pod.Phase == "Failed"
@@ -602,15 +709,15 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			} else if terminalPod {
 				reason = "warm-pool-terminal"
 			}
-			deletedPod, retainedLease, err := r.deleteObservedWarmPod(
-				ctx, client, target.ID, configuration.Namespace, observed.Pod, observed.State, reason,
+			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				ctx, client, target.ID, configuration.Namespace, observed.Pod, reason,
 			)
 			if err != nil {
 				return err
 			}
-			if retainedLease {
-				if observed.State != nil && observed.State.WorkerPoolID != nil {
-					warmClaimedCounts[*observed.State.WorkerPoolID]++
+			if retainedWorker != nil {
+				if retainedWorker.WorkerPoolID != nil {
+					warmClaimedCounts[*retainedWorker.WorkerPoolID]++
 				}
 				existing[observed.Pod.Name] = observed.Pod
 				continue
@@ -624,32 +731,147 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		if observed.State == nil {
 			existing[observed.Pod.Name] = observed.Pod
+			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok {
+				warmDemandEvictionCandidates = append(warmDemandEvictionCandidates, kubernetesWarmDemandEvictionCandidate{
+					Observed: observed,
+					Key:      key,
+				})
+			}
 			continue
 		}
-		if !kubernetesWarmWorkerStateReadyIdle(*observed.State) {
-			deletedPod, retainedLease, err := r.deleteObservedWarmPod(
-				ctx, client, target.ID, configuration.Namespace, observed.Pod, observed.State, "warm-pool-not-ready",
-			)
-			if err != nil {
-				return err
-			}
-			if retainedLease {
-				if observed.State.WorkerPoolID != nil {
-					warmClaimedCounts[*observed.State.WorkerPoolID]++
+		readinessObservedAt := r.now()
+		if !kubernetesWarmWorkerStateReadyIdle(
+			*observed.State,
+			observed.Pod,
+			plan,
+			readinessObservedAt,
+			r.config.WorkerHeartbeatTimeout,
+		) {
+			if kubernetesWarmWorkerStateShouldRecycle(
+				*observed.State,
+				observed.Pod,
+				readinessObservedAt,
+				r.config.WorkerHeartbeatTimeout,
+			) {
+				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+					ctx, client, target.ID, configuration.Namespace, observed.Pod, "warm-pool-not-ready",
+				)
+				if err != nil {
+					return err
 				}
-				existing[observed.Pod.Name] = observed.Pod
-				continue
-			}
-			if deletedPod {
-				deleted++
-				continue
+				if retainedWorker != nil {
+					if retainedWorker.WorkerPoolID != nil {
+						warmClaimedCounts[*retainedWorker.WorkerPoolID]++
+					}
+					existing[observed.Pod.Name] = observed.Pod
+					continue
+				}
+				if deletedPod {
+					deleted++
+					continue
+				}
 			}
 			existing[observed.Pod.Name] = observed.Pod
+			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok {
+				warmDemandEvictionCandidates = append(warmDemandEvictionCandidates, kubernetesWarmDemandEvictionCandidate{
+					Observed: observed,
+					Key:      key,
+				})
+			}
 			continue
 		}
 		existing[observed.Pod.Name] = observed.Pod
 		if key, ok := kubernetesWarmCapacityKeyForState(*observed.State); ok {
 			readyWarmCapacity[key]++
+		}
+	}
+	readyForDemand := make(map[kubernetesWarmCapacityKey]int, len(readyWarmCapacity))
+	for key, units := range readyWarmCapacity {
+		readyForDemand[key] = units
+	}
+	coldNeeded := 0
+	unmetWarmDemand := make(map[kubernetesWarmCapacityKey]int)
+	for _, execution := range executions {
+		if execution.Status != "queued" && execution.Status != "recovering" {
+			continue
+		}
+		if !kubernetesExecutionWithinAbsoluteLifetime(execution, r.now()) {
+			continue
+		}
+		if _, found := existing[kubernetesPodName(execution)]; found {
+			continue
+		}
+		if key, ok := kubernetesWarmCapacityKeyForExecution(execution); ok {
+			if readyForDemand[key] > 0 {
+				readyForDemand[key]--
+				continue
+			}
+			unmetWarmDemand[key]++
+		}
+		coldNeeded++
+	}
+	freeSlots := configuration.MaxActivePods - (len(existing) + deleted)
+	if freeSlots < 0 {
+		freeSlots = 0
+	}
+	demandEvictionsNeeded := coldNeeded - freeSlots
+	if demandEvictionsNeeded > 0 {
+		attempted := make(map[int]struct{}, len(warmDemandEvictionCandidates))
+		evictCandidate := func(index int) error {
+			attempted[index] = struct{}{}
+			candidate := warmDemandEvictionCandidates[index]
+			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				ctx,
+				client,
+				target.ID,
+				configuration.Namespace,
+				candidate.Observed.Pod,
+				"warm-pool-demand-fallback",
+			)
+			if err != nil {
+				return err
+			}
+			if retainedWorker != nil {
+				if retainedWorker.WorkerPoolID != nil {
+					warmClaimedCounts[*retainedWorker.WorkerPoolID]++
+				}
+				return nil
+			}
+			if deletedPod {
+				delete(existing, candidate.Observed.Pod.Name)
+				deleted++
+				demandEvictionsNeeded--
+				if unmetWarmDemand[candidate.Key] > 0 {
+					unmetWarmDemand[candidate.Key]--
+				}
+			}
+			return nil
+		}
+		// Prefer evicting a not-ready Pod whose exact warm pool/release key
+		// cannot satisfy queued demand. If the remaining cold demand is for a
+		// general or different-pool Execution, any not-ready warm slot can still
+		// be released because maxActivePods is target-wide.
+		for index, candidate := range warmDemandEvictionCandidates {
+			if demandEvictionsNeeded <= 0 {
+				break
+			}
+			if unmetWarmDemand[candidate.Key] <= 0 {
+				continue
+			}
+			if err := evictCandidate(index); err != nil {
+				return err
+			}
+		}
+		for index := range warmDemandEvictionCandidates {
+			if demandEvictionsNeeded <= 0 {
+				break
+			}
+			if _, found := attempted[index]; found {
+				continue
+			}
+			if err := evictCandidate(index); err != nil {
+				return err
+			}
 		}
 	}
 	desiredWarmPlans, _, err := kubernetesWarmPodPlans(
@@ -693,8 +915,30 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			continue
 		}
 		path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
-		if err := client.Apply(ctx, path, pod); err != nil {
-			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err)
+		applyStartedAt := r.now()
+		applyErr := client.Apply(ctx, path, pod)
+		observation := KubernetesExecutionPodObservation{
+			TenantID: execution.TenantID, ExecutionTargetID: target.ID,
+			ExecutionID: execution.ID, Generation: execution.Generation + 1,
+			Namespace: configuration.Namespace, PodName: name, Phase: "Applied",
+			PendingFailureThreshold: r.podPendingFailureThreshold(), ObservedAt: applyStartedAt,
+		}
+		if applyErr != nil {
+			observation.Phase = "ApplyFailed"
+			observation.FailureClass = KubernetesPodFailureApplyFailed
+			observation.FailureReasonCode = classifyKubernetesPodApplyFailure(applyErr)
+		}
+		if err := r.observeExecutionPod(ctx, observation); err != nil {
+			if applyErr != nil {
+				return errors.Join(
+					problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr),
+					err,
+				)
+			}
+			return err
+		}
+		if applyErr != nil {
+			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr)
 		}
 		created++
 		scheduled++
@@ -733,7 +977,68 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			"Managed Kubernetes scheduled pod capacity is fully allocated.",
 		)
 	}
+	warmCapacityObservations = managedKubernetesWarmCapacityObservations(
+		*target.TenantID,
+		target.ID,
+		warmPools,
+		warmPoolsSupported,
+		warmClaimedCounts,
+		readyWarmCapacity,
+		warmRelease,
+	)
 	return nil
+}
+
+func managedKubernetesWarmCapacityObservations(
+	tenantID uuid.UUID,
+	executionTargetID uuid.UUID,
+	warmPools []kubernetesWarmPool,
+	warmPoolsSupported bool,
+	warmClaimedCounts map[uuid.UUID]int,
+	readyWarmCapacity map[kubernetesWarmCapacityKey]int,
+	warmRelease kubernetesWarmReleaseSelection,
+) []ManagedKubernetesWarmCapacityObservation {
+	observations := make([]ManagedKubernetesWarmCapacityObservation, 0, len(warmPools))
+	for _, pool := range warmPools {
+		if pool.Status != placement.PoolStatusActive {
+			continue
+		}
+		claimed := warmClaimedCounts[pool.ID]
+		if claimed < 0 {
+			claimed = 0
+		}
+		observation := ManagedKubernetesWarmCapacityObservation{
+			TenantID:          tenantID,
+			ExecutionTargetID: executionTargetID,
+			WorkerPoolID:      pool.ID,
+			WorkerPoolVersion: pool.Version,
+			WarmSupported:     warmPoolsSupported,
+			ClaimedUnits:      claimed,
+		}
+		if !warmPoolsSupported {
+			observation.Reason = managedKubernetesRoutingReasonPointer(
+				"Managed Kubernetes warm capacity is unavailable while a canary Worker release is active.",
+			)
+			observations = append(observations, observation)
+			continue
+		}
+		observation.WorkerReleaseRevisionID = warmRelease.RevisionID
+		observation.WorkerReleaseChannel = warmRelease.Channel
+		observation.DesiredTotalUnits = pool.DesiredIdleUnits + claimed
+		if observation.DesiredTotalUnits > pool.MaxActiveUnits {
+			observation.DesiredTotalUnits = pool.MaxActiveUnits
+		}
+		key := kubernetesWarmCapacityKey{
+			PoolID:          pool.ID,
+			PoolVersion:     pool.Version,
+			CapacityClass:   pool.CapacityClass,
+			ReleaseRevision: optionalUUIDString(warmRelease.RevisionID),
+			ReleaseChannel:  stringValue(warmRelease.Channel),
+		}
+		observation.ReadyIdleUnits = readyWarmCapacity[key]
+		observations = append(observations, observation)
+	}
+	return observations
 }
 
 func kubernetesPodCompletedSuccessfully(pod kubernetesPod) bool {
@@ -742,6 +1047,105 @@ func kubernetesPodCompletedSuccessfully(pod kubernetesPod) bool {
 	}
 	container := pod.Containers[0]
 	return container.Name == "agentd" && container.Terminated && container.ExitCode == 0
+}
+
+func kubernetesObservedExecutionPodGeneration(
+	execution kubernetesExecution,
+	pod kubernetesPod,
+) (int64, error) {
+	expected := execution.Generation
+	if execution.Status == "queued" || execution.Status == "recovering" {
+		expected++
+	}
+	generation, err := strconv.ParseInt(strings.TrimSpace(pod.Labels[kubernetesGenerationLabel]), 10, 64)
+	if err != nil || generation <= 0 || generation != expected {
+		return 0, problem.New(
+			502,
+			"kubernetes_pod_generation_invalid",
+			"A Kubernetes Worker Pod did not carry the expected canonical Generation label.",
+		)
+	}
+	return generation, nil
+}
+
+func classifyKubernetesExecutionPodFailure(pod kubernetesPod) (string, string) {
+	if strings.EqualFold(strings.TrimSpace(pod.Reason), "Evicted") {
+		return KubernetesPodFailureEvicted, "evicted"
+	}
+	for _, container := range pod.Containers {
+		if strings.EqualFold(strings.TrimSpace(container.TerminatedReason), "OOMKilled") ||
+			strings.EqualFold(strings.TrimSpace(container.LastTerminatedReason), "OOMKilled") {
+			return KubernetesPodFailureOOMKilled, "oom-killed"
+		}
+	}
+	for _, container := range pod.Containers {
+		switch strings.TrimSpace(container.WaitingReason) {
+		case "ImagePullBackOff":
+			return KubernetesPodFailureImagePull, "image-pull-backoff"
+		case "ErrImagePull":
+			return KubernetesPodFailureImagePull, "err-image-pull"
+		case "ErrImageNeverPull":
+			return KubernetesPodFailureImagePull, "err-image-never-pull"
+		case "InvalidImageName":
+			return KubernetesPodFailureImagePull, "invalid-image-name"
+		case "RegistryUnavailable":
+			return KubernetesPodFailureImagePull, "registry-unavailable"
+		}
+	}
+	for _, condition := range pod.Conditions {
+		if strings.TrimSpace(condition.Type) == "PodScheduled" &&
+			strings.EqualFold(strings.TrimSpace(condition.Status), "False") &&
+			strings.EqualFold(strings.TrimSpace(condition.Reason), "Unschedulable") {
+			return KubernetesPodFailureUnschedulable, "unschedulable"
+		}
+	}
+	for _, container := range pod.Containers {
+		switch strings.TrimSpace(container.WaitingReason) {
+		case "CreateContainerConfigError":
+			return KubernetesPodFailureContainerStart, "create-container-config-error"
+		case "CreateContainerError":
+			return KubernetesPodFailureContainerStart, "create-container-error"
+		case "RunContainerError":
+			return KubernetesPodFailureContainerStart, "run-container-error"
+		case "StartError":
+			return KubernetesPodFailureContainerStart, "start-error"
+		case "CrashLoopBackOff":
+			return KubernetesPodFailureContainerStart, "crash-loop-backoff"
+		}
+	}
+	if strings.TrimSpace(pod.Phase) != "Failed" {
+		return "", ""
+	}
+	switch strings.TrimSpace(pod.Reason) {
+	case "NodeLost":
+		return KubernetesPodFailureGeneric, "node-lost"
+	case "Shutdown":
+		return KubernetesPodFailureGeneric, "node-shutdown"
+	case "DeadlineExceeded":
+		return KubernetesPodFailureGeneric, "deadline-exceeded"
+	case "UnexpectedAdmissionError":
+		return KubernetesPodFailureGeneric, "unexpected-admission-error"
+	default:
+		return KubernetesPodFailureGeneric, "phase-failed"
+	}
+}
+
+func classifyKubernetesPodApplyFailure(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "api-timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "api-cancelled"
+	}
+	var statusErr *kubernetesAPIStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode > 0 {
+		return "api-status-" + strconv.Itoa(statusErr.StatusCode)
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return "api-timeout"
+	}
+	return "api-request-failed"
 }
 
 func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, targetID uuid.UUID) ([]kubernetesExecution, error) {
@@ -754,6 +1158,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 		AbsoluteExpiresAt            *time.Time `gorm:"column:absolute_expires_at"`
 		Status                       string     `gorm:"column:status"`
 		Generation                   int64      `gorm:"column:generation"`
+		QueuedAt                     time.Time  `gorm:"column:queued_at"`
 		WorkerReleaseRevisionID      *uuid.UUID `gorm:"column:worker_release_revision_id"`
 		WorkerReleaseChannel         *string    `gorm:"column:worker_release_channel"`
 		WorkerReleaseImageDigest     *string    `gorm:"column:worker_release_image_digest"`
@@ -770,7 +1175,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 	}
 	var rows []executionRow
 	err := r.targets.db.WithContext(ctx).Table("agent_executions AS e").
-		Select(`e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, s.absolute_expires_at, e.status, e.generation,
+		Select(`e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, s.absolute_expires_at, e.status, e.generation, e.queued_at,
 			e.warm_pool_mode_snapshot,
 			e.worker_pool_id, e.worker_pool_version, e.capacity_class,
 			e.worker_release_revision_id, e.worker_release_channel,
@@ -796,7 +1201,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 		item := kubernetesExecution{
 			ID: row.ID, TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
 			SessionID: row.SessionID, AbsoluteExpiresAt: row.AbsoluteExpiresAt, Status: row.Status,
-			Generation: row.Generation, WorkerReleaseRevisionID: row.WorkerReleaseRevisionID,
+			Generation: row.Generation, QueuedAt: row.QueuedAt, WorkerReleaseRevisionID: row.WorkerReleaseRevisionID,
 			WorkerReleaseChannel: row.WorkerReleaseChannel, WorkerReleaseImageDigest: row.WorkerReleaseImageDigest,
 			WarmPoolModeSnapshot: row.WarmPoolModeSnapshot,
 		}
@@ -827,7 +1232,52 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 		}
 		items = append(items, item)
 	}
+	items, err = orderKubernetesExecutionsForService(items)
+	if err != nil {
+		return nil, problem.Wrap(
+			500,
+			"kubernetes_execution_fair_queue_invalid",
+			"Kubernetes Execution fair-queue authority is invalid.",
+			err,
+		)
+	}
 	return items, nil
+}
+
+func orderKubernetesExecutionsForService(items []kubernetesExecution) ([]kubernetesExecution, error) {
+	activeServiceUnits := make(map[uuid.UUID]int64)
+	queuedCandidates := make([]fairqueue.Candidate, 0, len(items))
+	queuedByID := make(map[uuid.UUID]kubernetesExecution, len(items))
+	activeItems := make([]kubernetesExecution, 0, len(items))
+	for _, item := range items {
+		if fairqueue.IsQueuedStatus(item.Status) {
+			queuedCandidates = append(queuedCandidates, fairqueue.Candidate{
+				TenantID: item.TenantID,
+				ID:       item.ID,
+				QueuedAt: item.QueuedAt,
+			})
+			queuedByID[item.ID] = item
+		} else if fairqueue.IsActiveServiceStatus(item.Status) {
+			activeServiceUnits[item.TenantID]++
+			activeItems = append(activeItems, item)
+		} else {
+			return nil, fairqueue.ErrInvalidCandidate
+		}
+	}
+	orderedCandidates, err := fairqueue.Order(queuedCandidates, activeServiceUnits)
+	if err != nil {
+		return nil, err
+	}
+	ordered := make([]kubernetesExecution, 0, len(items))
+	ordered = append(ordered, activeItems...)
+	for _, candidate := range orderedCandidates {
+		item, ok := queuedByID[candidate.ID]
+		if !ok {
+			return nil, fairqueue.ErrInvalidCandidate
+		}
+		ordered = append(ordered, item)
+	}
+	return ordered, nil
 }
 
 func (r *KubernetesReconciler) loadKubernetesWarmPools(ctx context.Context, targetID uuid.UUID) ([]kubernetesWarmPool, error) {
@@ -881,17 +1331,25 @@ func (r *KubernetesReconciler) loadKubernetesWarmWorkerStates(ctx context.Contex
 			worker.capacity_class,
 			worker.worker_release_revision_id,
 			worker.worker_release_channel,
+			worker.worker_release_status,
+			worker.registration_trust_mode,
+			worker.protocol_version,
+			worker.current_manifest_id,
+			worker.compatibility_status,
+			worker.lease_supported,
+			worker.fencing_supported,
 			worker.status,
 			worker.administrative_status,
+			worker.last_heartbeat_at,
 			EXISTS (
 				SELECT 1
 				FROM worker_leases AS lease
 				WHERE lease.worker_id = worker.id
 				  AND lease.worker_incarnation = worker.incarnation
-				  AND lease.expires_at > ?
-			) AS has_lease`, r.now()).
-		Where("worker.execution_target_id = ? AND worker.target_kind = ? AND worker.worker_mode = ?",
-			targetID, "kubernetes", kubernetesWorkerModeWarmPool).
+			) AS has_lease`).
+		Where("worker.execution_target_id = ? AND worker.target_kind = ? AND worker.worker_mode = ? AND worker.status <> ?",
+			targetID, "kubernetes", kubernetesWorkerModeWarmPool, "terminated").
+		Order("worker.pod_name, worker.instance_uid, worker.id").
 		Scan(&items).Error
 	if err != nil {
 		return nil, problem.Wrap(500, "kubernetes_warm_workers_load_failed", "Kubernetes warm Worker state could not be loaded.", err)
@@ -953,14 +1411,18 @@ func (r *KubernetesReconciler) loadKubernetesWarmReleaseSelection(
 }
 
 func kubernetesWarmWorkerStateForPod(
-	states map[string]kubernetesWarmWorkerState,
+	states map[kubernetesWarmWorkerIdentity]kubernetesWarmWorkerState,
 	pod kubernetesPod,
 ) (kubernetesWarmWorkerState, bool) {
-	state, found := states[pod.Name]
-	if !found || strings.TrimSpace(state.InstanceUID) != strings.TrimSpace(pod.UID) {
-		return kubernetesWarmWorkerState{}, false
+	state, found := states[kubernetesWarmWorkerIdentityKey(pod.Name, pod.UID)]
+	return state, found
+}
+
+func kubernetesWarmWorkerIdentityKey(podName, instanceUID string) kubernetesWarmWorkerIdentity {
+	return kubernetesWarmWorkerIdentity{
+		PodName:     strings.TrimSpace(podName),
+		InstanceUID: strings.TrimSpace(instanceUID),
 	}
-	return state, true
 }
 
 func kubernetesWarmPodIdentity(pod kubernetesPod) (uuid.UUID, int64, string, int, error) {
@@ -1002,10 +1464,68 @@ type kubernetesWarmCapacityKey struct {
 	ReleaseChannel  string
 }
 
-func kubernetesWarmWorkerStateReadyIdle(state kubernetesWarmWorkerState) bool {
-	return !state.HasLease &&
+func kubernetesWarmWorkerStateReadyIdle(
+	state kubernetesWarmWorkerState,
+	pod kubernetesPod,
+	plan kubernetesWarmPodPlan,
+	now time.Time,
+	heartbeatTimeout time.Duration,
+) bool {
+	return kubernetesWarmWorkerIdentityKey(state.PodName, state.InstanceUID) ==
+		kubernetesWarmWorkerIdentityKey(pod.Name, pod.UID) &&
+		pod.Phase == "Running" &&
+		!state.HasLease &&
 		strings.TrimSpace(state.Status) == "online" &&
-		strings.TrimSpace(state.AdministrativeStatus) == "active"
+		strings.TrimSpace(state.AdministrativeStatus) == "active" &&
+		state.ProtocolVersion == kubernetesWorkerProtocolVersion &&
+		state.CurrentManifestID != nil &&
+		strings.TrimSpace(state.CompatibilityStatus) == "compatible" &&
+		state.LeaseSupported &&
+		state.FencingSupported &&
+		strings.TrimSpace(state.RegistrationTrustMode) == kubernetesPodBoundRegistrationTrust &&
+		kubernetesWarmWorkerHeartbeatFresh(state.LastHeartbeatAt, now, heartbeatTimeout) &&
+		kubernetesWarmWorkerStateMatchesPlan(state, plan) &&
+		kubernetesWarmWorkerReleaseReady(state, plan)
+}
+
+func kubernetesWarmWorkerStateShouldRecycle(
+	state kubernetesWarmWorkerState,
+	pod kubernetesPod,
+	now time.Time,
+	heartbeatTimeout time.Duration,
+) bool {
+	if pod.Phase == "Succeeded" || pod.Phase == "Failed" {
+		return true
+	}
+	status := strings.TrimSpace(state.Status)
+	administrativeStatus := strings.TrimSpace(state.AdministrativeStatus)
+	return status == "offline" ||
+		status == "draining" ||
+		status == "terminated" ||
+		administrativeStatus == "draining" ||
+		!kubernetesWarmWorkerHeartbeatFresh(state.LastHeartbeatAt, now, heartbeatTimeout)
+}
+
+func kubernetesWarmWorkerHeartbeatFresh(lastHeartbeatAt, now time.Time, heartbeatTimeout time.Duration) bool {
+	if heartbeatTimeout <= 0 || lastHeartbeatAt.IsZero() {
+		return false
+	}
+	return !lastHeartbeatAt.Before(now.Add(-heartbeatTimeout))
+}
+
+func kubernetesWarmWorkerReleaseReady(state kubernetesWarmWorkerState, plan kubernetesWarmPodPlan) bool {
+	planHasRevision := plan.Release.RevisionID != nil
+	planHasChannel := plan.Release.Channel != nil
+	if planHasRevision != planHasChannel ||
+		!sameOptionalUUID(state.WorkerReleaseRevisionID, plan.Release.RevisionID) ||
+		!sameOptionalString(state.WorkerReleaseChannel, plan.Release.Channel) {
+		return false
+	}
+	status := strings.TrimSpace(state.WorkerReleaseStatus)
+	if !planHasRevision {
+		return status == "" || status == "unmanaged"
+	}
+	return status == "active"
 }
 
 func kubernetesWarmCapacityKeyForState(state kubernetesWarmWorkerState) (kubernetesWarmCapacityKey, bool) {
@@ -1033,6 +1553,17 @@ func kubernetesWarmCapacityKeyForExecution(execution kubernetesExecution) (kuber
 		PoolID: execution.WorkerPool.ID, PoolVersion: execution.WorkerPool.Version, CapacityClass: execution.WorkerPool.CapacityClass,
 		ReleaseRevision: optionalUUIDString(execution.WorkerReleaseRevisionID),
 		ReleaseChannel:  stringValue(execution.WorkerReleaseChannel),
+	}, true
+}
+
+func kubernetesWarmCapacityKeyForPlan(plan kubernetesWarmPodPlan) (kubernetesWarmCapacityKey, bool) {
+	if (plan.Release.RevisionID == nil) != (plan.Release.Channel == nil) {
+		return kubernetesWarmCapacityKey{}, false
+	}
+	return kubernetesWarmCapacityKey{
+		PoolID: plan.Pool.ID, PoolVersion: plan.Pool.Version, CapacityClass: plan.Pool.CapacityClass,
+		ReleaseRevision: optionalUUIDString(plan.Release.RevisionID),
+		ReleaseChannel:  stringValue(plan.Release.Channel),
 	}, true
 }
 
@@ -1111,19 +1642,49 @@ func (r *KubernetesReconciler) observeWorkerPod(ctx context.Context, observation
 	return nil
 }
 
+func (r *KubernetesReconciler) observeExecutionPod(
+	ctx context.Context,
+	observation KubernetesExecutionPodObservation,
+) error {
+	if r.config.ObserveExecutionPod == nil {
+		return nil
+	}
+	if err := r.config.ObserveExecutionPod(ctx, observation); err != nil {
+		return problem.Wrap(
+			500,
+			"kubernetes_execution_pod_observation_failed",
+			"The Kubernetes Execution Pod provisioning observation could not be recorded.",
+			err,
+		)
+	}
+	return nil
+}
+
+func (r *KubernetesReconciler) podPendingFailureThreshold() time.Duration {
+	if r.config.PodPendingFailureThreshold > 0 {
+		return r.config.PodPendingFailureThreshold
+	}
+	return 2 * time.Minute
+}
+
 func (r *KubernetesReconciler) observeTerminalExecutionPod(
 	ctx context.Context,
 	targetID uuid.UUID,
 	namespace string,
 	pod kubernetesPod,
 ) error {
+	failureClass, _ := classifyKubernetesExecutionPodFailure(pod)
+	reason := "terminal-observation"
+	if failureClass != "" {
+		reason += ":" + failureClass
+	}
 	return r.observeWorkerPod(ctx, KubernetesWorkerPodObservation{
 		ExecutionTargetID: targetID,
 		Namespace:         namespace,
 		PodName:           pod.Name,
 		PodUID:            pod.UID,
 		Phase:             pod.Phase,
-		Reason:            "terminal-observation",
+		Reason:            reason,
 		ObservedAt:        r.now(),
 	})
 }
@@ -1151,6 +1712,9 @@ func (r *KubernetesReconciler) deleteObservedPod(
 		return err
 	}
 	if err := client.DeletePod(ctx, namespace, pod.Name, pod.UID); err != nil {
+		if errors.Is(err, errKubernetesPodUIDPreconditionFailed) {
+			return err
+		}
 		return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 	}
 	return nil
@@ -1162,58 +1726,112 @@ func (r *KubernetesReconciler) deleteObservedWarmPod(
 	targetID uuid.UUID,
 	namespace string,
 	pod kubernetesPod,
-	state *kubernetesWarmWorkerState,
 	reason string,
-) (deleted bool, retainedLease bool, err error) {
-	if state != nil {
-		deleteAllowed, retainedWithLease, err := r.prepareRegisteredWarmPodDeletion(ctx, pod, *state)
-		if err != nil {
-			return false, false, err
-		}
-		if !deleteAllowed {
-			return false, retainedWithLease, nil
-		}
-	}
-	if err := r.deleteObservedPod(ctx, client, targetID, namespace, pod, reason); err != nil {
-		return false, false, err
-	}
-	return true, false, nil
+) (deleted bool, retainedWorker *persistence.WorkerInstance, err error) {
+	return r.deleteObservedPodSafely(ctx, client, targetID, namespace, pod, reason)
 }
 
-func (r *KubernetesReconciler) prepareRegisteredWarmPodDeletion(
+func (r *KubernetesReconciler) deleteObservedPodSafely(
 	ctx context.Context,
+	client kubernetesClient,
+	targetID uuid.UUID,
+	namespace string,
 	pod kubernetesPod,
-	state kubernetesWarmWorkerState,
-) (deleteAllowed bool, retainedLease bool, err error) {
+	reason string,
+) (deleted bool, retainedWorker *persistence.WorkerInstance, err error) {
+	deleteAllowed, retainedWorker, err := r.prepareKubernetesPodDeletion(ctx, targetID, namespace, pod, reason)
+	if err != nil {
+		return false, nil, err
+	}
+	if !deleteAllowed {
+		return false, retainedWorker, nil
+	}
+	if err := r.deleteObservedPod(ctx, client, targetID, namespace, pod, reason); err != nil {
+		if errors.Is(err, errKubernetesPodUIDPreconditionFailed) {
+			// The exact observed UID no longer owns this Pod name. Keep the
+			// durable old-UID fence and let the next snapshot reconcile the
+			// replacement instead of marking the target unhealthy.
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+	return true, nil, nil
+}
+
+func (r *KubernetesReconciler) prepareKubernetesPodDeletion(
+	ctx context.Context,
+	targetID uuid.UUID,
+	namespace string,
+	pod kubernetesPod,
+	reason string,
+) (deleteAllowed bool, retainedWorker *persistence.WorkerInstance, err error) {
 	observedAt := r.now()
+	identity, identityErr := podlifecycle.NewExactPodIdentity(targetID, namespace, pod.Name, pod.UID)
+	if identityErr != nil {
+		return false, nil, problem.Wrap(
+			502,
+			"kubernetes_pod_identity_invalid",
+			"The Kubernetes Pod identity is invalid for lifecycle fencing.",
+			identityErr,
+		)
+	}
 	err = persistence.InTransaction(ctx, r.targets.db, func(tx *gorm.DB) error {
+		acquired, err := podlifecycle.TryTransactionLogicalIdentityLock(ctx, tx, identity)
+		if err != nil {
+			return problem.Wrap(500, "kubernetes_pod_lifecycle_lock_failed", "The Kubernetes Pod lifecycle lock could not be acquired.", err)
+		}
+		if !acquired {
+			return problem.New(503, "kubernetes_pod_lifecycle_lock_unavailable", "The Kubernetes Pod lifecycle is changing; retry reconciliation.")
+		}
 		var worker persistence.WorkerInstance
 		lockErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Select("id", "incarnation", "instance_uid", "status", "administrative_status").
-			Where("id = ? AND incarnation = ?", state.WorkerID, state.WorkerIncarnation).
+			Select("id", "incarnation", "instance_uid", "worker_pool_id", "status", "administrative_status").
+			Where(
+				"execution_target_id = ? AND target_kind = ? AND namespace = ? AND pod_name = ? AND instance_uid = ?",
+				identity.ExecutionTargetID,
+				"kubernetes",
+				identity.Namespace,
+				identity.PodName,
+				identity.PodUID,
+			).
 			Take(&worker).Error
-		if errors.Is(lockErr, gorm.ErrRecordNotFound) {
-			deleteAllowed = true
-			return nil
-		}
-		if lockErr != nil {
+		workerFound := lockErr == nil
+		if lockErr != nil && !errors.Is(lockErr, gorm.ErrRecordNotFound) {
 			return problem.Wrap(500, "kubernetes_warm_worker_lock_failed", "The warm Worker lifecycle could not be locked for reconciliation.", lockErr)
 		}
-		if strings.TrimSpace(worker.InstanceUID) != strings.TrimSpace(pod.UID) {
-			deleteAllowed = true
-			return nil
+		if workerFound {
+			var leaseCount int64
+			if err := tx.WithContext(ctx).Model(&persistence.WorkerLease{}).
+				Where("worker_id = ? AND worker_incarnation = ?", worker.ID, worker.Incarnation).
+				Count(&leaseCount).Error; err != nil {
+				return problem.Wrap(500, "kubernetes_warm_worker_lease_lookup_failed", "The warm Worker lease state could not be verified.", err)
+			}
+			if leaseCount > 0 {
+				workerCopy := worker
+				retainedWorker = &workerCopy
+				return nil
+			}
+			var cleanupLeaseCount int64
+			if err := tx.WithContext(ctx).Model(&persistence.WorkspaceCleanupCommand{}).
+				Where(
+					"delivery_worker_id = ? AND delivery_worker_incarnation = ? AND status IN ?",
+					worker.ID,
+					worker.Incarnation,
+					[]string{"leased", "running"},
+				).
+				Count(&cleanupLeaseCount).Error; err != nil {
+				return problem.Wrap(500, "kubernetes_warm_worker_cleanup_lease_lookup_failed", "The Worker cleanup delivery lease state could not be verified.", err)
+			}
+			if cleanupLeaseCount > 0 {
+				workerCopy := worker
+				retainedWorker = &workerCopy
+				return nil
+			}
 		}
-		var leaseCount int64
-		if err := tx.WithContext(ctx).Model(&persistence.WorkerLease{}).
-			Where("worker_id = ? AND worker_incarnation = ? AND expires_at > ?", worker.ID, worker.Incarnation, observedAt).
-			Count(&leaseCount).Error; err != nil {
-			return problem.Wrap(500, "kubernetes_warm_worker_lease_lookup_failed", "The warm Worker lease state could not be verified.", err)
+		if err := podlifecycle.EnsureDeletionFence(ctx, tx, identity, observedAt, reason); err != nil {
+			return problem.Wrap(500, "kubernetes_pod_deletion_fence_failed", "The Kubernetes Pod deletion fence could not be persisted.", err)
 		}
-		if leaseCount > 0 {
-			retainedLease = true
-			return nil
-		}
-		if worker.AdministrativeStatus == "active" && worker.Status == "online" {
+		if workerFound && worker.AdministrativeStatus == "active" && worker.Status == "online" {
 			updates := map[string]any{"status": "draining", "draining_at": observedAt}
 			result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 				Where(
@@ -1232,9 +1850,9 @@ func (r *KubernetesReconciler) prepareRegisteredWarmPodDeletion(
 		return nil
 	})
 	if err != nil {
-		return false, false, err
+		return false, nil, err
 	}
-	return deleteAllowed, retainedLease, nil
+	return deleteAllowed, retainedWorker, nil
 }
 
 func kubernetesExecutionWithinAbsoluteLifetime(execution kubernetesExecution, now time.Time) bool {
@@ -2283,20 +2901,36 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			} `json:"metadata"`
 			Items []struct {
 				Metadata struct {
-					Name        string            `json:"name"`
-					UID         string            `json:"uid"`
-					Labels      map[string]string `json:"labels"`
-					Annotations map[string]string `json:"annotations"`
+					Name              string            `json:"name"`
+					UID               string            `json:"uid"`
+					CreationTimestamp time.Time         `json:"creationTimestamp"`
+					Labels            map[string]string `json:"labels"`
+					Annotations       map[string]string `json:"annotations"`
 				} `json:"metadata"`
 				Status struct {
-					Phase             string `json:"phase"`
+					Phase      string `json:"phase"`
+					Reason     string `json:"reason"`
+					Conditions []struct {
+						Type   string `json:"type"`
+						Status string `json:"status"`
+						Reason string `json:"reason"`
+					} `json:"conditions"`
 					ContainerStatuses []struct {
 						Name  string `json:"name"`
 						State struct {
+							Waiting *struct {
+								Reason string `json:"reason"`
+							} `json:"waiting"`
 							Terminated *struct {
-								ExitCode int `json:"exitCode"`
+								ExitCode int    `json:"exitCode"`
+								Reason   string `json:"reason"`
 							} `json:"terminated"`
 						} `json:"state"`
+						LastState struct {
+							Terminated *struct {
+								Reason string `json:"reason"`
+							} `json:"terminated"`
+						} `json:"lastState"`
 					} `json:"containerStatuses"`
 				} `json:"status"`
 			} `json:"items"`
@@ -2317,18 +2951,33 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			return nil, err
 		}
 		for _, item := range response.Items {
+			conditions := make([]kubernetesPodCondition, 0, len(item.Status.Conditions))
+			for _, condition := range item.Status.Conditions {
+				conditions = append(conditions, kubernetesPodCondition{
+					Type: condition.Type, Status: condition.Status, Reason: condition.Reason,
+				})
+			}
 			containers := make([]kubernetesContainerStatus, 0, len(item.Status.ContainerStatuses))
 			for _, status := range item.Status.ContainerStatuses {
 				container := kubernetesContainerStatus{Name: status.Name}
+				if status.State.Waiting != nil {
+					container.WaitingReason = status.State.Waiting.Reason
+				}
 				if status.State.Terminated != nil {
 					container.Terminated = true
 					container.ExitCode = status.State.Terminated.ExitCode
+					container.TerminatedReason = status.State.Terminated.Reason
+				}
+				if status.LastState.Terminated != nil {
+					container.LastTerminatedReason = status.LastState.Terminated.Reason
 				}
 				containers = append(containers, container)
 			}
 			items = append(items, kubernetesPod{
 				Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase,
-				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations, Containers: containers,
+				Reason: item.Status.Reason, CreatedAt: item.Metadata.CreationTimestamp.UTC(),
+				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
+				Conditions: conditions, Containers: containers,
 			})
 		}
 		continueToken = strings.TrimSpace(response.Metadata.Continue)
@@ -2349,10 +2998,15 @@ func (c *kubernetesHTTPClient) DeletePod(ctx context.Context, namespace, name, u
 		return errors.New("Kubernetes Pod UID is required for safe deletion")
 	}
 	path := kubernetesNamespacedPath(namespace, "pods", name) + "?gracePeriodSeconds=30&propagationPolicy=Background"
-	return c.do(ctx, http.MethodDelete, path, map[string]any{
+	err := c.do(ctx, http.MethodDelete, path, map[string]any{
 		"apiVersion": "v1", "kind": "DeleteOptions",
 		"preconditions": map[string]any{"uid": uid},
 	}, nil, http.StatusOK, http.StatusAccepted, http.StatusNotFound)
+	var statusErr *kubernetesAPIStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%w: %s", errKubernetesPodUIDPreconditionFailed, statusErr.Detail)
+	}
+	return err
 }
 
 func (c *kubernetesHTTPClient) do(
@@ -2409,7 +3063,7 @@ func (c *kubernetesHTTPClient) do(
 		if detail == "" {
 			detail = http.StatusText(response.StatusCode)
 		}
-		return fmt.Errorf("Kubernetes API returned status %d: %s", response.StatusCode, detail)
+		return &kubernetesAPIStatusError{StatusCode: response.StatusCode, Detail: detail}
 	}
 	if output == nil {
 		_, _ = io.Copy(io.Discard, response.Body)

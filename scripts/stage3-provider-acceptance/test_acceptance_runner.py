@@ -7573,6 +7573,59 @@ class SSHDriverTest(unittest.TestCase):
             ssh_allow_external_host=True,
         )
 
+    def test_ready_boundary_requires_worker_bootstrap_generation_to_match_target(self) -> None:
+        driver = object.__new__(acceptance.SSHDriver)
+        with tempfile.TemporaryDirectory() as directory:
+            driver.state_dir = pathlib.Path(directory)
+            database_path = driver.state_dir / "metadata.sqlite"
+            with sqlite3.connect(database_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE execution_targets (
+                      id TEXT PRIMARY KEY,
+                      kind TEXT NOT NULL,
+                      status TEXT NOT NULL,
+                      ssh_operation_generation INTEGER NOT NULL,
+                      ssh_operation_kind TEXT,
+                      ssh_operation_started_at TEXT
+                    );
+                    CREATE TABLE worker_instances (
+                      id TEXT PRIMARY KEY,
+                      execution_target_id TEXT NOT NULL,
+                      incarnation INTEGER NOT NULL,
+                      instance_uid TEXT NOT NULL,
+                      ssh_bootstrap_generation INTEGER,
+                      status TEXT NOT NULL,
+                      administrative_status TEXT NOT NULL,
+                      compatibility_status TEXT NOT NULL,
+                      current_manifest_id TEXT,
+                      registered_at TEXT NOT NULL,
+                      last_heartbeat_at TEXT NOT NULL
+                    );
+                    INSERT INTO execution_targets VALUES (
+                      'target-id', 'ssh', 'active', 7, NULL, NULL
+                    );
+                    INSERT INTO worker_instances VALUES (
+                      'worker-id', 'target-id', 1, 'instance-id', 7,
+                      'online', 'active', 'compatible', 'manifest-id',
+                      '2026-07-26T00:00:00Z', '2026-07-26T00:00:01Z'
+                    );
+                    """
+                )
+
+            ready = driver._ssh_target_activation_state("target-id")
+            self.assertEqual(ready["operationGeneration"], 7)
+            self.assertEqual(ready["workerBootstrapGeneration"], 7)
+
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    "UPDATE worker_instances SET ssh_bootstrap_generation = 6 WHERE id = 'worker-id'"
+                )
+
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                driver._ssh_target_activation_state("target-id")
+            self.assertEqual(caught.exception.code, "runner.ssh_ready_boundary_incomplete")
+
     def test_external_host_key_source_pins_exact_endpoint_and_rejects_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -7793,7 +7846,7 @@ class SSHDriverTest(unittest.TestCase):
                         "organizationId": payload["organizationId"],
                         "kind": payload["kind"],
                         "name": payload["name"],
-                        "status": "active",
+                        "status": "offline",
                     }
                 if path.endswith(f"/{target_ids[0]}/ssh/install"):
                     raise acceptance.AcceptanceError(
@@ -7843,6 +7896,23 @@ class SSHDriverTest(unittest.TestCase):
                     "restartCount": 0,
                 }
 
+            def _ssh_target_activation_state(self, target_id: str) -> Mapping[str, Any]:
+                return {
+                    "targetStatus": "active",
+                    "operationGeneration": 1,
+                    "operationActive": False,
+                    "workerId": "worker-id",
+                    "workerIncarnation": 1,
+                    "workerInstanceUid": "instance-id",
+                    "workerBootstrapGeneration": 1,
+                    "workerStatus": "online",
+                    "workerAdministrativeStatus": "active",
+                    "compatibilityStatus": "compatible",
+                    "manifestId": "manifest-id",
+                    "postRegistrationHeartbeat": True,
+                    "targetId": target_id,
+                }
+
         redactor = acceptance.SecretRedactor()
         options = dataclasses.replace(runner_options(), target="ssh")
         driver = ProvisionDriver(pathlib.Path.cwd(), options, acceptance.Deadline(30.0), redactor)
@@ -7858,6 +7928,13 @@ class SSHDriverTest(unittest.TestCase):
         target = driver.provision_target("tenant-id", "organization-id", "codex")
 
         self.assertEqual(target["id"], target_ids[1])
+        self.assertEqual(target["status"], "active")
+        self.assertEqual(target["driverEvidence"]["readyBoundary"]["creationStatus"], "offline")
+        self.assertEqual(
+            target["driverEvidence"]["readyBoundary"]["workerBootstrapGeneration"],
+            target["driverEvidence"]["readyBoundary"]["operationGeneration"],
+        )
+        self.assertTrue(target["driverEvidence"]["readyBoundary"]["postRegistrationHeartbeat"])
         self.assertEqual(driver.absent_targets, target_ids)
         self.assertEqual(driver.client_private_key, "")
         self.assertEqual(len(api.created), 2)
@@ -8150,6 +8227,18 @@ class SSHDriverTest(unittest.TestCase):
                 del kwargs
                 events.append(f"absent:{target_id}")
 
+            def _revoked_worker_authority_state(self, target_id: str) -> Mapping[str, Any]:
+                events.append(f"authority-revoked:{target_id}")
+                return {
+                    "totalWorkers": 1,
+                    "revokedWorkers": 1,
+                    "liveWorkerAuthorities": 0,
+                    "executionLeases": 0,
+                    "workspaceCleanupLeases": 0,
+                    "targetStatus": "disabled",
+                    "operationActive": False,
+                }
+
             def _orbctl_completed(self, arguments: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 del kwargs
                 events.append("orbctl:" + " ".join(arguments))
@@ -8182,17 +8271,20 @@ class SSHDriverTest(unittest.TestCase):
         driver.target_id = "target-id"
         driver.service_name = "synara-agentd-target-id.service"
 
-        driver.cleanup()
+        evidence = driver.cleanup()
 
         revoke_index = next(index for index, event in enumerate(events) if event.endswith("/ssh/revoke"))
+        authority_index = events.index("authority-revoked:target-id")
         self.assertIn(f"timeout:{acceptance.SSH_CONTROL_PLANE_OPERATION_TIMEOUT}", events)
         relay_stop_index = events.index("stop-worker-proxy-relay")
         stop_index = events.index("stop-control-plane")
         delete = next(event for event in events if event.startswith("orbctl:delete"))
-        self.assertLess(revoke_index, stop_index)
+        self.assertLess(revoke_index, authority_index)
+        self.assertLess(authority_index, stop_index)
         self.assertLess(relay_stop_index, stop_index)
         self.assertEqual(delete, "orbctl:delete --force synara-stage3-owned")
         self.assertNotIn("--all", delete)
+        self.assertEqual(evidence["workerAuthorityRevocation"]["liveWorkerAuthorities"], 0)
 
     def test_external_cleanup_revokes_and_removes_only_owned_runtime_while_preserving_host_identity(
         self,
@@ -8228,6 +8320,18 @@ class SSHDriverTest(unittest.TestCase):
             def _assert_remote_target_absent(self, target_id: str, **kwargs: Any) -> None:
                 del kwargs
                 events.append(f"absent:{target_id}")
+
+            def _revoked_worker_authority_state(self, target_id: str) -> Mapping[str, Any]:
+                events.append(f"authority-revoked:{target_id}")
+                return {
+                    "totalWorkers": 1,
+                    "revokedWorkers": 1,
+                    "liveWorkerAuthorities": 0,
+                    "executionLeases": 0,
+                    "workspaceCleanupLeases": 0,
+                    "targetStatus": "disabled",
+                    "operationActive": False,
+                }
 
             def _remove_external_runtime(self) -> None:
                 events.append("remove-owned-runtime")
@@ -8277,9 +8381,11 @@ class SSHDriverTest(unittest.TestCase):
             self.assertTrue(identity.is_file())
 
         revoke_index = next(index for index, event in enumerate(events) if event.endswith("/ssh/revoke"))
+        authority_index = events.index("authority-revoked:target-id")
         verify_index = events.index("absent:target-id")
         runtime_index = events.index("remove-owned-runtime")
-        self.assertLess(revoke_index, verify_index)
+        self.assertLess(revoke_index, authority_index)
+        self.assertLess(authority_index, verify_index)
         self.assertLess(verify_index, runtime_index)
         self.assertIn(
             f"journal-timeout:{acceptance.SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT}",
@@ -8290,6 +8396,7 @@ class SSHDriverTest(unittest.TestCase):
         self.assertFalse(evidence["externalHostRestarted"])
         self.assertTrue(evidence["ownedRuntimeRemoved"])
         self.assertTrue(evidence["operatorIdentitySourcePreserved"])
+        self.assertEqual(evidence["workerAuthorityRevocation"]["revokedWorkers"], 1)
 
     def test_external_runtime_cleanup_requires_exact_ownership_marker(self) -> None:
         scripts: list[str] = []

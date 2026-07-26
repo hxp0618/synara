@@ -548,6 +548,13 @@ func TestWorkspaceCleanupExpiredFinalAttemptBecomesTerminal(t *testing.T) {
 	if command.Status != "failed" || command.LastErrorCode == nil || *command.LastErrorCode != "workspace_cleanup_attempts_exhausted" {
 		t.Fatalf("final expired cleanup attempt was requeued: %#v", command)
 	}
+	_, release := loadWorkspaceCleanupClaimReleaseFactForTest(
+		t, db, claimed.Value.Cleanup.CleanupID, claimed.Value.Cleanup.DispatchGeneration,
+	)
+	if release.ReleaseReason != workerClaimReleaseCleanupAttemptsExhausted ||
+		!release.ReleasedAt.Equal(claimed.Value.Cleanup.Lease.ExpiresAt) {
+		t.Fatalf("exhausted cleanup release fact = %#v", release)
+	}
 	if created, err := service.ReconcileWorkspaceCleanup(context.Background(), now.Add(2*time.Minute), 10); err != nil || created != 0 {
 		t.Fatalf("exhausted cleanup was replaced by a new command: created=%d err=%v", created, err)
 	}

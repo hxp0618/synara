@@ -104,6 +104,81 @@ func TestRecoverySnapshotIncludesCurrentTurnCompletedToolMarkers(t *testing.T) {
 	}
 }
 
+func TestDisasterRecoverySuccessorLoadsOriginalTurnContextThroughExecutionAncestry(t *testing.T) {
+	db := newResumeSnapshotHistoryTestDB(t)
+	tenantID := uuid.New()
+	sessionID := uuid.New()
+	turnID := uuid.New()
+	sourceExecutionID := uuid.New()
+	successorExecutionID := uuid.New()
+	createResumeSnapshotHistorySession(t, db, tenantID, sessionID, 3)
+	now := time.Now().UTC()
+	targetID := uuid.New()
+	provider := "codex"
+	source := persistence.AgentExecution{
+		ID: sourceExecutionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
+		Attempt: 1, Status: "interrupted", ExecutionTargetID: targetID, TargetKind: "kubernetes",
+		Provider: &provider, Generation: 1, RequestedBy: uuid.New(), QueuedAt: now,
+	}
+	successor := persistence.AgentExecution{
+		ID: successorExecutionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
+		Attempt: 2, Status: "recovering", ExecutionTargetID: uuid.New(), TargetKind: "kubernetes",
+		Provider: &provider, PredecessorExecutionID: &sourceExecutionID, Generation: 1,
+		RequestedBy: source.RequestedBy, QueuedAt: now,
+	}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&successor).Error; err != nil {
+		t.Fatal(err)
+	}
+	sha256 := strings.Repeat("a", 64)
+	artifact := persistence.Artifact{
+		ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, ExecutionID: &sourceExecutionID,
+		Kind: "generated_file", Status: "ready", Bucket: "test", ObjectKey: "source/output.txt",
+		SHA256: &sha256, CreatedByType: "worker", CreatedByID: uuid.New(), ReadyAt: &now, CreatedAt: now,
+	}
+	if err := db.Create(&artifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	events := []persistence.SessionEvent{
+		resumeSnapshotHistoryEvent(
+			tenantID, sessionID, 1, "turn.created",
+			map[string]any{"inputText": "recover this turn"}, &sourceExecutionID,
+		),
+		resumeSnapshotHistoryEvent(
+			tenantID, sessionID, 2, "content.delta",
+			map[string]any{"streamKind": "assistant_text", "delta": "source context"}, &sourceExecutionID,
+		),
+		resumeSnapshotHistoryEvent(
+			tenantID, sessionID, 3, "artifact.ready",
+			map[string]any{"artifactId": artifact.ID, "kind": artifact.Kind}, &sourceExecutionID,
+		),
+	}
+	if err := db.Create(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{now: func() time.Time { return now }}
+	snapshot, err := service.loadResumeSnapshot(context.Background(), db, successor, resumeSnapshotContext{
+		Provider: provider, RuntimeMode: "full-access", InteractionMode: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CurrentTurnSequence != 1 || snapshot.AuthoritativeHistorySequence != 3 {
+		t.Fatalf("successor recovery boundary = %#v", snapshot)
+	}
+	if len(snapshot.Messages) != 2 || snapshot.Messages[1].Role != "assistant" || snapshot.Messages[1].Text != "source context" {
+		t.Fatalf("successor omitted source context: %#v", snapshot.Messages)
+	}
+	if len(snapshot.ArtifactReferences) != 1 || snapshot.ArtifactReferences[0].ArtifactID != artifact.ID ||
+		snapshot.ArtifactReferences[0].ExecutionID == nil ||
+		*snapshot.ArtifactReferences[0].ExecutionID != sourceExecutionID {
+		t.Fatalf("successor omitted source Artifact authority: %#v", snapshot.ArtifactReferences)
+	}
+}
+
 func TestResumeSnapshotOrdersNewestRollbackChainSegmentsAndDropsRolledBackSpans(t *testing.T) {
 	db := newResumeSnapshotHistoryTestDB(t)
 	tenantID := uuid.New()
@@ -230,8 +305,10 @@ func newResumeSnapshotHistoryTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&persistence.AgentSession{},
+		&persistence.AgentExecution{},
 		&persistence.SessionEvent{},
 		&persistence.ExecutionInteraction{},
+		&persistence.Artifact{},
 	); err != nil {
 		t.Fatal(err)
 	}

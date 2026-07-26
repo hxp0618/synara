@@ -57,7 +57,7 @@ func TestSQLiteKubernetesTerminalSuspendProofSafety(t *testing.T) {
 	if err := fixture.db.Create(&persistence.WorkerInstance{
 		ID: workerID, Incarnation: 1, InstanceUID: instanceUID, ExecutionTargetID: targetID,
 		TargetKind: "kubernetes", RegistrationTrustMode: "shared-token",
-		ClusterID: "sqlite-kubernetes", Namespace: "default", PodName: "sqlite-pod-terminal",
+		ClusterID: "kubernetes", Namespace: "default", PodName: "sqlite-pod-terminal",
 		Version: "stage4", ProtocolVersion: 1, Capabilities: map[string]any{}, LeaseSupported: true,
 		FencingSupported: true, AuthTokenHash: []byte("token-" + workerID.String()), Status: "online",
 		AdministrativeStatus: "active", RegisteredAt: now, LastHeartbeatAt: now,
@@ -86,7 +86,7 @@ func TestSQLiteKubernetesTerminalSuspendProofSafety(t *testing.T) {
 		ExecutionID: executionID, WorkerID: workerID, ExecutionTargetID: targetID,
 		Generation: 1, Reason: "waiting-keepalive", Status: "checkpointing",
 		CompletionMode: "kubernetes-pod-terminal-v1", WorkerIncarnation: 1,
-		WorkerInstanceUID: instanceUID, WorkerClusterID: "sqlite-kubernetes",
+		WorkerInstanceUID: instanceUID, WorkerClusterID: "kubernetes",
 		WorkerNamespace: "default", WorkerPodName: "sqlite-pod-terminal",
 		RequestedAt: now, CheckpointDeadlineAt: now.Add(2 * time.Minute),
 	}
@@ -107,7 +107,7 @@ func TestSQLiteKubernetesTerminalSuspendProofSafety(t *testing.T) {
 		ExecutionID: executionID, WorkerID: workerID, ExecutionTargetID: targetID,
 		Generation: 1, Reason: "waiting-keepalive", Status: "checkpointing",
 		CompletionMode: "kubernetes-pod-terminal-v1", WorkerIncarnation: 1,
-		WorkerInstanceUID: instanceUID, WorkerClusterID: "sqlite-kubernetes",
+		WorkerInstanceUID: instanceUID, WorkerClusterID: "kubernetes",
 		WorkerNamespace: "default", WorkerPodName: "sqlite-pod-terminal",
 		RequestedAt: now, CheckpointDeadlineAt: now.Add(2 * time.Minute),
 	}

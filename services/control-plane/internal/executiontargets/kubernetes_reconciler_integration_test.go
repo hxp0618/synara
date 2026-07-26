@@ -107,3 +107,54 @@ func TestKubernetesReconcilerAgainstRealAPIServer(t *testing.T) {
 		}
 	}
 }
+
+func TestKubernetesPodFailureClassificationAgainstRealAPIServer(t *testing.T) {
+	apiServer := strings.TrimSpace(os.Getenv("SYNARA_KUBERNETES_INTEGRATION_API_SERVER"))
+	bearerToken := strings.TrimSpace(os.Getenv("SYNARA_KUBERNETES_INTEGRATION_TOKEN"))
+	caCertificate := strings.TrimSpace(os.Getenv("SYNARA_KUBERNETES_INTEGRATION_CA"))
+	namespace := strings.TrimSpace(os.Getenv("SYNARA_KUBERNETES_FAILURE_INTEGRATION_NAMESPACE"))
+	targetID, err := uuid.Parse(strings.TrimSpace(os.Getenv("SYNARA_KUBERNETES_FAILURE_INTEGRATION_TARGET_ID")))
+	if apiServer == "" || bearerToken == "" || caCertificate == "" || namespace == "" || err != nil {
+		t.Skip("set the Kubernetes integration API, token, CA, failure namespace, and failure Target ID")
+	}
+	client, err := kubernetesHTTPFactory{}.Open(kubernetesTargetConfiguration{
+		APIServer: apiServer, BearerToken: bearerToken, CACertificate: caCertificate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"unschedulable": KubernetesPodFailureUnschedulable,
+		"image-pull":    KubernetesPodFailureImagePull,
+		"evicted":       KubernetesPodFailureEvicted,
+		"oom-killed":    KubernetesPodFailureOOMKilled,
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	var lastPods []kubernetesPod
+	for time.Now().Before(deadline) {
+		lastPods, err = client.ListPods(context.Background(), namespace, targetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed := make(map[string]string)
+		for _, pod := range lastPods {
+			fixture := strings.TrimSpace(pod.Labels["synara.io/failure-fixture"])
+			failureClass, _ := classifyKubernetesExecutionPodFailure(pod)
+			if fixture != "" && failureClass != "" {
+				observed[fixture] = failureClass
+			}
+		}
+		complete := true
+		for fixture, expected := range want {
+			if observed[fixture] != expected {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("real Kubernetes failure classifications did not converge: pods=%#v", lastPods)
+}
