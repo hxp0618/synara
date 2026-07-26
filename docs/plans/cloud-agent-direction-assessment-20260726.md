@@ -55,6 +55,10 @@
    "为自动化和批处理任务建立独立 Queue/Priority/Class"。计费侧已有 requested-resource-seconds
    与 warm hit/fallback 事实，可直接为两 lane 定价。
 
+> 上述建议已具体化为可评审的契约形状草案：
+> [`fast-provision-runtime-proposal-v0`](fast-provision-runtime-proposal-v0.md)（含三层供给层级、
+> `microvm-snapshot-v1` completion mode、cache-first 放行条件、双 lane 与落地顺序）。
+
 ## 三、排序建议
 
 Stage 4 剩余开放项中，建议把"冷启动硬上限 + 保证池"提到"多集群混沌/生产 soak"之前：后者验证

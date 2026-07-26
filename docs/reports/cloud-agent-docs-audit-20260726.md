@@ -157,6 +157,17 @@
   contracts 中 droid 存在）。引用文件（CONTRIBUTING/截图/external-mcp）齐全。
 - hxp0618 提交文档范围（148 个 .md）至此全部审核完毕。
 
+## 三点六、需要操作人裁决的上游分歧
+
+主检出的未提交 TODO.md 在某轮修改中**删除了 Roadmap-wide rules 末尾的 4 条工程规则**（迁移号
+跨分支唯一、`docs/reports` 证据不可变 + `.oxfmtrc` ignore 维护、sweep 唯一不节流权威、根
+`package.json` overrides 优先级陷阱），且未移动到任何其他文档。这些规则事实核查为真
+（`.oxfmtrc.json:11` 确实 ignore `docs/reports`；sweep 规则与 state-machine 契约的 throttle 段落
+删除相互印证——规则是"原则"，契约删的是"过时实现描述"）。**worktree 保留这 4 条**，不采纳
+删除；若主检出的删除是有意的，请操作人在合并时裁决。
+
+裁决结果（已合并）：操作人裁定**保留这 4 条规则**。`worker-control-pull` 合并进本分支时，TODO.md 是唯一冲突文件，冲突已按该裁决解决——4 条规则全部保留，同时保留本分支在文件中部新增的内容。主检出未提交的删除未被采纳。
+
 ## 三点七、方向评估（重构准备的战略输入）
 
 操作人确认产品北极星为 E2B 式"秒级远端 agent"。对照该目标的偏差分析、有效地基清单与按杠杆
