@@ -239,6 +239,35 @@ SLO 草案（目标值待评审，度量来源全部已存在）：
 注：延迟目标沿用 fast-provision 提案 §0，补充排队与命中率拆解；outcome-unknown 预算把 fail-closed
 的代价显式化——它是安全边界的成本，不得为清零而放宽不可重放约束。
 
+### 环境模型建议（U2/U4 的具体化，市场模式蒸馏）
+
+三家产品的环境配置 UX 已收敛到同一形态：**环境 = 基础镜像 + setup script + 环境变量与 secrets +
+网络等级**，与 repo 关联、可快照缓存、团队可共享。差异只在细节：Codex 是 per-repo 环境 + setup/
+maintenance 双脚本 + 12h 容器缓存（setup/env/secret 任一变更即失效）；Claude 是命名环境（网络等级、
+env vars、约 5 分钟预算的 setup script）+ 成功后文件系统快照约 7 天 + org 共享环境；Cursor 是
+`.cursor/environment.json`（repo→个人→团队优先级）+ snapshot/Dockerfile 双模式 + "agent 代配环境后
+存快照"；Jules 用"Run and Snapshot"做环境验证动作。三家共同的坑与缺口：Codex 团队共享缓存因 secret
+轮换全队冷重建；setup 与 agent 阶段环境分离导致 `export` 不持久；Claude 不支持自定义基础镜像被抱怨；
+devcontainer 摄取三家都没有。
+
+映射到本方案：所需底座几乎全部已有——Worker Manifest/Release 冻结镜像与 build 身份，Workspace v1
+管 git 物化与 checkpoint，三层 lifecycle policy + Session 冻结 snapshot 恰好就是"org 共享环境"的
+既有形状。缺的只是用户侧 **Environment** 实体。建议形状（与既有模式同构，不新增领域概念类型）：
+
+- Project 级实体，版本化 append-only revision；Session 创建时冻结 environment revision 进
+  Recovery Bundle——与现有"冻结 effective policy"完全同构。
+- 字段：引用现有 Worker Release 作基础（首版不开放任意 Dockerfile，保住供应链纪律；Claude 同样
+  不支持自定义镜像）、幂等 setupScript（显式超时预算，Cursor 的幂等要求 + Claude 的预算制）、非密
+  env vars + secret 引用（走既有 credential/secret 域，不落明文——对齐 S6/凭证优势，避开 Claude
+  明文可见的缺陷）、环境级网络等级（None/Trusted/Custom，即 S6 的落地面）。
+- 快照缓存：setup 成功后的文件系统/volume 快照即 fast-provision cache-first（阶段 A 第 3 步）的
+  自然载体；缓存键 =（environment revision, Worker Release, 仓库基点），失效显式可见且按环境隔离
+  （S5 设计输入，直接规避 Codex 团队级失效痛点）。
+- 显式不做：任意 Dockerfile（后续按需评估）、devcontainer 摄取（市场空位，列为 U8 之后的机会项）。
+
+结论：环境模型是 B 阶段体感收益最大的单件——它同时落地 U2（缓存）、U4 前置（自动化需要稳定环境
+引用）、S5（失效语义）与 S6 入口（网络等级），而实现上只是既有 policy/Bundle 模式的一次复用。
+
 ## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
@@ -269,3 +298,6 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
   与 fast-provision 提案 §6 落地顺序合并，并为各步标注市场参照与反面教材。
 - 2026-07-27 r4：第六节新增"可度量定义：SLO 草案 v0"——区分契约不变式与分位 SLO，六项 SLI 全部
   映射到既有 trailing-30d 度量，目标值沿用 fast-provision §0 并补排队/warm 命中率拆解。
+- 2026-07-27 r5：第六节新增"环境模型建议"——蒸馏三家环境配置 UX 收敛形态与公开痛点，给出 Project
+  级版本化 Environment 实体形状（复用 Worker Release/policy 冻结/Recovery Bundle 既有模式），并
+  接到 U2/U4/S5/S6 与 fast-provision cache-first。
