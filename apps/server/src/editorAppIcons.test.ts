@@ -5,7 +5,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { clearEditorIconInFlightCache, resolveCachedEditorIcon } from "./editorAppIcons";
-import { clearWindowsStorePackageDiscoveryCache } from "./editorAppDiscovery";
+import {
+  clearWindowsStorePackageDiscoveryCache,
+  getEditorWindowsStorePackages,
+  resolveWindowsStorePackageInstallLocation,
+} from "./editorAppDiscovery";
+import { EDITORS } from "@synara/contracts";
 
 const tempDirs: string[] = [];
 
@@ -84,21 +89,6 @@ function writeFakeWindowsStorePackageIcon(input: {
   fs.writeFileSync(path.join(assetsDir, input.iconFileName), input.bytes);
 }
 
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function writeFakePowerShellAppxRegistration(input: {
-  readonly binDir: string;
-  readonly installLocation: string;
-}): void {
-  fs.mkdirSync(input.binDir, { recursive: true });
-  const script = `#!/bin/sh\nprintf '%s\\n' ${shellSingleQuote(input.installLocation)}\n`;
-  const scriptPath = path.join(input.binDir, "powershell.exe");
-  fs.writeFileSync(scriptPath, script);
-  fs.chmodSync(scriptPath, 0o755);
-}
-
 describe("resolveCachedEditorIcon", () => {
   it("copies a macOS app PNG icon into the cache", async () => {
     const homeDir = makeTempDir("synara-editor-icon-home-");
@@ -166,7 +156,6 @@ describe("resolveCachedEditorIcon", () => {
       iconFileName: "Square44x44Logo.targetsize-256_altform-unplated.png",
       bytes,
     });
-    writeFakePowerShellAppxRegistration({ binDir: powershellBinDir, installLocation });
     fs.mkdirSync(
       path.join(
         localAppData,
@@ -177,18 +166,35 @@ describe("resolveCachedEditorIcon", () => {
       { recursive: true },
     );
 
+    const env = {
+      LOCALAPPDATA: localAppData,
+      PATH: powershellBinDir,
+      PATHEXT: ".EXE",
+      ProgramFiles: programFilesDir,
+      ProgramW6432: "",
+      SystemDrive: "",
+    };
+    // Seed the AppX registration through the injectable exec seam under the
+    // key the icon resolver derives, instead of spawning a powershell stub.
+    // The lookup allows a real subprocess only 1.5s, which made this test
+    // flake when the full suite runs in parallel.
+    const vscode = EDITORS.find((candidate) => candidate.id === "vscode");
+    expect(vscode).toBeDefined();
+    expect(
+      resolveWindowsStorePackageInstallLocation(
+        getEditorWindowsStorePackages(vscode!),
+        "win32",
+        env,
+        () => installLocation,
+        { useCache: true },
+      ),
+    ).toBe(installLocation);
+
     const icon = await resolveCachedEditorIcon({
       editorId: "vscode",
       cacheDir,
       platform: "win32",
-      env: {
-        LOCALAPPDATA: localAppData,
-        PATH: powershellBinDir,
-        PATHEXT: ".EXE",
-        ProgramFiles: programFilesDir,
-        ProgramW6432: "",
-        SystemDrive: "",
-      },
+      env,
     });
 
     expect(icon?.contentType).toBe("image/png");
