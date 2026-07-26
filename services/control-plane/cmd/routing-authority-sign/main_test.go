@@ -34,6 +34,12 @@ func TestRunSignsCanonicalPublicationAndPrintsPublicKey(t *testing.T) {
 		Health: &routing.PlatformAuthorityHealth{
 			Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
 			AllocatedCapacityUnits: 1, TTLSeconds: 60,
+			ReservationAuthority: &routing.ReservationAuthorityObservation{
+				Mode: routing.ReservationAuthorityExactActiveV1,
+				Acknowledgements: []routing.ReservationIdentity{{
+					ExecutionID: uuid.New(), Generation: 2,
+				}},
+			},
 		},
 	}
 	encoded, err := json.Marshal(unsigned)

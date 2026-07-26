@@ -347,6 +347,8 @@ func (s *Service) FailoverExecution(
 			"leaderFencingToken":                  leaderFence.FencingToken, "reason": reason,
 			"sourceDrDomain": failoverAuthority.SourceDRDomain,
 		}
+		eventPayload = scheduled.MergeSchedulingEvidencePayload(eventPayload)
+		outboxPayload = scheduled.MergeSchedulingEvidencePayload(outboxPayload)
 		if !failoverAuthority.ReplicatedThroughAt.IsZero() {
 			eventPayload["replicatedThroughAt"] = failoverAuthority.ReplicatedThroughAt
 			outboxPayload["replicatedThroughAt"] = failoverAuthority.ReplicatedThroughAt
