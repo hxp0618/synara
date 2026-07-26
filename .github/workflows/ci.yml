@@ -239,3 +239,12 @@ jobs:
       # rather than leaving the other 50 packages unguarded to save 16 seconds.
       - name: Race test
         run: go test ./... -race -count=1
+
+      # Two reachable advisories reached this module before anyone was checking:
+      # a SAML signature bypass in goxmldsig that enterprise SSO login went
+      # through, and SQL injection in pgx. Both were only found by running this
+      # by hand, so it runs on every change now. It reports only advisories that
+      # are actually reachable from called code, not every module in go.sum.
+      - name: Vulnerability scan
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
