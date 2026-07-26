@@ -418,3 +418,14 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
       与各包的直接依赖一起核对。过期的 override 会静默压过 `^x.y.z`，症状是装出低版本、改 lockfile 条目后
       被重新生成回旧版、`bun update` 也"无效"，极易被误判为镜像元数据陈旧或缓存问题。判定方法是先查
       `overrides`，而不是先查 registry。同理适用于 `resolutions` 与 workspace `catalog`。
+- [ ] 真实 PostgreSQL 门禁测试当前无法整套通过：以 stage-2 checklist 的调用方式（全新数据库 +
+      `go test -p 1 -count=1 ./...`）实测 **93 个失败 / 4 个包**，其中仅 2 个属于在途未提交工作，
+      其余 91 个为既有。失败集中在 `executions_integration_test.go`(25)、
+      `provider_cursor_postgres_integration_test.go`(11)、`workspace_cleanup_integration_test.go`(9)。
+      已抽样确认三类根因：(1) 多个测试共用同一个 `SYNARA_TEST_DATABASE_URL` 且不自清理，彼此撞唯一
+      约束——单测独占全新库可通过，整包同库即失败；(2) 迁移测试的 seed helper 未随后续迁移更新，缺少
+      后来被设为 NOT NULL 的列（如 `000063` 的 `requested_execution_target_id`）；(3) 迁移测试把当前
+      `bootstrap` 生产代码跑在历史 schema 上，引用尚不存在的列（如 `ssh_operation_generation`）。
+      迁移本身经核对是正确的（`000063` 用"加可空列 → 回填 → 设 NOT NULL"的安全模式），问题在测试侧。
+      CI 不运行这些门禁测试，所以长期无人察觉；修复前不应把 checklist 的
+      "真实 PostgreSQL Integration Test 通过"勾成通过。
