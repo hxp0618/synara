@@ -383,38 +383,61 @@ func (support workerControlCommandSupport) supportsExecution(
 	return true, nil
 }
 
+func normalizeControlCommandPullLimit(limit int) (int, error) {
+	if limit == 0 {
+		return defaultControlCommandPullLimit, nil
+	}
+	if limit < 1 || limit > maximumControlCommandPullLimit {
+		return 0, problem.New(400, "invalid_control_command_limit", "limit must be between 1 and 100.")
+	}
+	return limit, nil
+}
+
+// loadControlCommandDeliveries reads the deliverable Control commands for an
+// already lease-verified Execution. The caller owns the transaction and the
+// lease lock so a single pull can serve several delivery kinds.
+func (s *Service) loadControlCommandDeliveries(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	execution persistence.AgentExecution,
+	generation int64,
+	limit int,
+) ([]ControlCommandDelivery, error) {
+	models := make([]persistence.ExecutionControlCommand, 0)
+	if err := tx.WithContext(ctx).
+		Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status IN ? AND delivery_available_at <= ?",
+			execution.TenantID, execution.ID, worker.ID, generation,
+			[]string{"pending", "delivered"}, s.now()).
+		Where("command_type NOT IN ?", primaryControlCommandTypes).
+		Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
+		return nil, problem.Wrap(500, "control_commands_load_failed", "Control commands could not be loaded.", err)
+	}
+	items := make([]ControlCommandDelivery, 0, len(models))
+	for _, model := range models {
+		items = append(items, toControlCommandDelivery(model))
+	}
+	return items, nil
+}
+
 func (s *Service) PullControlCommands(
 	ctx context.Context,
 	worker persistence.WorkerInstance,
 	executionID uuid.UUID,
 	input PullControlCommandsInput,
 ) ([]ControlCommandDelivery, error) {
-	limit := input.Limit
-	if limit == 0 {
-		limit = defaultControlCommandPullLimit
-	}
-	if limit < 1 || limit > maximumControlCommandPullLimit {
-		return nil, problem.New(400, "invalid_control_command_limit", "limit must be between 1 and 100.")
+	limit, err := normalizeControlCommandPullLimit(input.Limit)
+	if err != nil {
+		return nil, err
 	}
 	items := make([]ControlCommandDelivery, 0)
-	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return err
 		}
-		models := make([]persistence.ExecutionControlCommand, 0)
-		if err := tx.WithContext(ctx).
-			Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status IN ? AND delivery_available_at <= ?",
-				execution.TenantID, execution.ID, worker.ID, input.Generation,
-				[]string{"pending", "delivered"}, s.now()).
-			Where("command_type NOT IN ?", primaryControlCommandTypes).
-			Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
-			return problem.Wrap(500, "control_commands_load_failed", "Control commands could not be loaded.", err)
-		}
-		for _, model := range models {
-			items = append(items, toControlCommandDelivery(model))
-		}
-		return nil
+		items, err = s.loadControlCommandDeliveries(ctx, tx, worker, execution, input.Generation, limit)
+		return err
 	})
 	return items, err
 }

@@ -220,3 +220,26 @@ source Execution/Generation/History Sequence still match. It does not reapply th
 native Cursor has since been replaced, quarantined or become unavailable, Control Plane returns
 `409 claim_replay_resume_cursor_unavailable` and does not return a Lease, Workload or alternate strategy. A new
 Generation performs a new policy evaluation.
+
+## Combined runner control pull
+
+A running Execution polls for Control commands and Interaction resolutions on the same sub-second interval.
+`POST /v1/workers/executions/{executionID}/control-updates/pull` answers both from one lease-verified snapshot and
+returns `{ controlCommands, interactionResolutions }`. Pulled separately the two reads cost two HTTP round trips and
+two transactions, and each transaction re-takes the same three fencing row locks (Worker incarnation, Lease,
+Execution) the other just released.
+
+The request carries the standard Lease envelope plus optional independent `controlCommandLimit` and
+`interactionResolutionLimit` bounds, each defaulting to 10 and capped at 100 — the same bounds the separate pulls
+enforce. Lease, generation, incarnation and instance-UID fencing are identical to the endpoints it replaces; a
+superseded generation or invalid Lease token is rejected, never served a partial snapshot.
+
+Delivery precedence stays with the Worker: both sets are returned, and the runner keeps preferring a Control command
+over an Interaction resolution, exactly as when it issued the two pulls in order.
+
+`control-commands/pull` and `interaction-resolutions/pull` remain supported and unchanged. The combined endpoint is
+additive and does not change `protocolVersion`, so a Worker predating it stays correct. A Worker that has it probes
+once per runner loop; a Control Plane that predates it answers a bare `404` with no problem envelope, and the Worker
+latches onto the two separate pulls for the remainder of that loop. Only a bare `404` counts as "unsupported" — a
+handled `404 execution_not_found`, or any fencing or authorization rejection, is a real answer and must surface as an
+error rather than silently downgrading the runner onto a different code path.
