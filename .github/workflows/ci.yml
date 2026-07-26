@@ -240,6 +240,19 @@ jobs:
       - name: Race test
         run: go test ./... -race -count=1
 
+      # Correctness checks only. SA covers misuse and deprecated APIs — a
+      # crypto/dsa import and two tar.TypeRegA comparisons had already accreted
+      # here — and S1/QF1 cover provably redundant code. ST* is excluded on
+      # purpose: its 296 findings are capitalized error strings, most of them
+      # user-facing problem messages where that is the house style, and U1000 is
+      # excluded because build-tagged Linux-only symbols read as unused when the
+      # analysis runs for another platform. Linux is checked separately since
+      # that is where this ships and those files are never analysed otherwise.
+      - name: Static analysis
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@latest -checks="SA*,S1*,QF1*" ./...
+          GOOS=linux go run honnef.co/go/tools/cmd/staticcheck@latest -checks="SA*,S1*,QF1*" ./...
+
       # Two reachable advisories reached this module before anyone was checking:
       # a SAML signature bypass in goxmldsig that enterprise SSO login went
       # through, and SQL injection in pgx. Both were only found by running this
