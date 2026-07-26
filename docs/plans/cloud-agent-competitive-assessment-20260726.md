@@ -297,6 +297,32 @@ devcontainer 摄取三家都没有。
 结论：S4 不需要任何新数据或新契约，是纯投影工作；其中"恢复透明卡 + 失败不计费"两项直接把第三节
 的正确性优势转译成用户可感知的稳定性，是"内部深度 → 外部体感"转化率最高的两件。
 
+### diff 审查与 PR 流建议（U6 的具体化）
+
+市场收敛形态与蒸馏原则：任务的"结果页"是**摘要 + diff**（Codex 任务列表带 diff-stat 徽章与
+running/reviewable/merged 状态；Cursor 以截图/录像 artifacts 辅助审查）；**行内评论即 steering**
+（Claude 的 diff 行内评论直接变成下一轮指令，是三家中最好的交互）；**PR 创建是显式动作、agent 永
+不自 merge**（Copilot 强制人审 + 只能推 `copilot/*` 分支，已是行业共识 guardrail）；**审查产品与
+执行 agent 分离**（Bugbot / `@codex review` / Claude Code Review 均为独立触发面与独立计费，且都
+支持 repo 内规则文件——`BUGBOT.md` / AGENTS.md `## Code Review Rules` / `REVIEW.md`）。
+
+本方案映射（git/PR 生命周期与 Artifact/Event 统一投影 Stage 3 已完成，以下为产品面组织）：
+
+- **会话结果页**：摘要 + diff + Artifact 面板（终端/长日志/生成文件已是 Artifact 引用，聚合即可），
+  取代"从聊天记录里翻结果"。
+- **行内评论 → Steer**：diff 行内评论直接生成 durable Steer Control Command——Synara 的 Steer 本就
+  是持久化命令，只差 UI 绑定；采纳 Claude 模式。
+- **agent 分支命名空间 + 显式 PR**：agent 只推 `synara/*` 前缀分支（`gitpolicy` 域已存在，加前缀
+  约束即可），PR 创建永远是用户显式动作，agent 不 merge。
+- **规则文件惯例**：审查/编码规则读 repo 内 AGENTS.md 系文件，对齐三家已建立的用户习惯，不发明
+  新约定。
+- **跨 Provider 交叉审查（差异化落点）**：同一 diff 交给第二个 Provider 审查——单 vendor 产品
+  结构上做不了这件事，而本方案的 Provider 中立（第三节优势 1）使其成为零新概念的组合功能；独立
+  计费有 Claude Code Review（约 $15–25/review）先例，可接既有 billing 地基。
+
+结论：U6 的底座（git 流、Artifact 权威、Steer 命令、gitpolicy）全部已有，工作量集中在 Web 结果页
+与评论绑定；"跨 Provider 交叉审查"是全场唯一没人能抄的审查功能，应作为审查产品化的首发卖点。
+
 ## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
@@ -333,3 +359,6 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
 - 2026-07-27 r6：第六节新增"失败呈现与恢复 UX 建议"——四条市场蒸馏原则（归因/下一步/恢复透明/
   失败不计费），五个纯投影件（失败卡片、为什么在等、恢复透明卡、失败不计费政策、边界显式化），
   全部复用既有 durable facts 与调度证据图。
+- 2026-07-27 r7：第六节新增"diff 审查与 PR 流建议"——结果页/行内评论即 steering/显式 PR 与分支
+  命名空间/规则文件惯例四条收敛形态，加"跨 Provider 交叉审查"差异化落点。至此 U2/U4/S4/S5/S6
+  入口/U6 的具体化闭环，第六节构成完整对齐手册。
