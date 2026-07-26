@@ -1183,7 +1183,9 @@ func extractPatchArchive(
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil || (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA) {
+		// archive/tar normalizes the legacy TypeRegA flag to TypeReg on read, so the
+		// deprecated constant is unreachable here.
+		if err != nil || header.Typeflag != tar.TypeReg {
 			return "", errors.New("Patch archive contains an invalid entry")
 		}
 		if header.Name == checkpointPatchEntryName {

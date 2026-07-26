@@ -323,7 +323,8 @@ func extractSnapshotArchive(
 		if err != nil {
 			return err
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		// See checkpoint_patch.go: the reader normalizes TypeRegA to TypeReg.
+		if header.Typeflag != tar.TypeReg {
 			return errors.New("Snapshot archive contains a non-regular entry")
 		}
 		clean, err := cleanArchivePath(header.Name)

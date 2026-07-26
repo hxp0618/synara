@@ -1,7 +1,6 @@
 package credentials
 
 import (
-	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
@@ -599,8 +598,8 @@ func allowedSSHKey(key ssh.PublicKey) bool {
 	switch publicKey := cryptoKey.CryptoPublicKey().(type) {
 	case *rsa.PublicKey:
 		return publicKey.N.BitLen() >= 2048
-	case *dsa.PublicKey:
-		return false
+	// DSA is rejected by the default branch below. The explicit case was dropped
+	// with the deprecated crypto/dsa import; behaviour is unchanged.
 	case *ecdsa.PublicKey:
 		return publicKey.Curve != nil
 	case ed25519.PublicKey:

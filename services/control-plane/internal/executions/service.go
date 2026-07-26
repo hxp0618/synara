@@ -151,7 +151,7 @@ func NewService(
 		cursorCipher: cursorCipher, providerCursorMaximumAge: defaultProviderCursorMaximumAge,
 		providerCredentialAccessTTL: defaultProviderCredentialAccessTTL,
 		targets:                     targetService, now: func() time.Time { return time.Now().UTC() },
-		claimRecoverySweeps:         newRecoverySweepThrottle(defaultClaimRecoverySweepInterval),
+		claimRecoverySweeps: newRecoverySweepThrottle(defaultClaimRecoverySweepInterval),
 	}
 	for _, option := range options {
 		option(service)
