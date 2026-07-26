@@ -35,3 +35,6 @@ data:
   # periods. Each item includes executionTargetId, provider, currencyCode,
   # RFC3339 period bounds, settlementDelay, and scheduleInterval.
   billing-shared-allocation-mappings-json: "[]"
+  # Public keys and exact Target/DR scope only. Publisher private keys must
+  # remain in the external probe/replication workload and never enter this ConfigMap.
+  platform-routing-publishers-json: "[]"

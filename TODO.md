@@ -163,8 +163,13 @@ Stage 3 的独立执行计划：
       Location Outage -> Health -> DR Readiness 的固定顺序锁定并复核 routing authority；stale 决策原子回滚，进入
       commit phase 后不再持锁改选第二个 Target。failover 保留 hook 后的二次复核回归。
 - [x] 为 tenant-owned managed Kubernetes Target 建立由 Reconciler 每次 fresh per-target 结论同步触发的
-      `execution_target_health` 自动发布；platform-shared/external Target 与跨域 `execution_target_dr_readiness`
-      仍保持 operator/integration-owned authority。
+      `execution_target_health` 自动发布。Migration `000083` 又为 platform-shared/external Target 和跨域
+      `execution_target_dr_readiness` 增加 Ed25519 公钥配置、精确 Target/owner/DR 域 scope、五分钟签名窗口、
+      immutable nonce receipt 与 health + 多 readiness 原子提交；租户 API 不能覆盖已配置的平台 authority，
+      tenant-owned Kubernetes health 也不能与 Reconciler 双写。真实 Target probe 与跨故障域复制仍由外部
+      operator/integration publisher 负责，并须在生产环境提供 E4 证据。本地 SQLite、OrbStack PostgreSQL
+      双连接以及两 Control Plane Pod 的 direct-replica/recreate replay E3 见
+      [`final1`](docs/reports/stage-4-platform-routing-authority-orbstack-20260726-final1.md)。
 - [x] 建立 tenant-scoped Region/Cluster evacuation authority，并让 fresh location outage 在普通路由与 lease-free
       自动 failover sweep 中都能 fail closed 地触发 `region-failover`，同时保持 source Execution placement 不可变。
 - [x] 建立可重复的本地双 Kubernetes API 跨 Cluster DR 演练：以 OrbStack 为主集群、run-unique disposable Kind
@@ -219,7 +224,10 @@ Stage 3 的独立执行计划：
       实际 601 秒/10 周期 soak 也已通过；OrbStack + disposable Kind 双真实 API 的 DR + Pod-bound TokenReview/
       Pod GET [`final4`](docs/reports/stage-4-dual-cluster-dr-acceptance-20260726-final4.md) 也已通过。非 Kind managed
       node-partition 已有严格 `systemd-user` controller 和宿主/Linux fake 矩阵，但尚无真实 systemd user manager/
-      托管集群执行；仍需托管云多可用区、云存储/负载均衡和生产时长验收）。
+      托管集群执行。新的 namespace/RBAC 隔离 runner 已在当前 schema 81 镜像上完成 OrbStack 3/3 顶层场景和
+      120 秒 6/6 disruption soak，且原 `synara-system` 保持 2/2，证据见
+      [`final2`](docs/reports/stage-4-orbstack-isolated-resilience-20260726-final2.md)；仍需托管云多可用区、云存储/
+      负载均衡和生产时长验收）。
 - [x] 将 Kubernetes Worker Registration Secret 改为 10 分钟自动轮换、Pod-bound、target-scoped audience 的
       ServiceAccount token；Control Plane 通过 TokenReview + 实时 Pod GET 校验 SA、Pod name/UID 和 ownership，
       同一物理 Pod UID 只能注册一次，terminating Pod 会拒绝注册，durable deletion fence 会阻止已决定删除的
@@ -242,7 +250,13 @@ Stage 3 的独立执行计划：
 - [ ] 增加 Outbox/Queue 堆积时的自动扩容和限流策略。
 - [x] 建立多集群 Reconciler Leader Election 和幂等 Apply/Delete；PostgreSQL lease 使用数据库时间、单调
       fencing token、controller-cycle advisory lock 和 mutation-transaction fence，SQLite profile 仍限制为单副本。
-- [ ] 增加 Worker Pod 创建失败、ImagePullBackOff、Pending、Evicted、OOMKilled 分类。
+- [x] 增加 Worker Pod 创建失败、ImagePullBackOff、Pending、Evicted、OOMKilled 分类：Migration `000078`
+      将首次 Apply、首次 Pending、首次 Running 与最后观测时间固化到 durable Generation fact；apply failure、
+      pending timeout、unschedulable、image pull、container start、evicted、OOM killed 和 generic failed 各自保留
+      一条不可删除的低基数事实，后续成功 Pod 不会覆盖历史失败。注册后的 terminal Worker 也会在安全删除前
+      立即按 Evicted/OOMKilled 精确关闭 incarnation，而不是等待 Lease 超时。本地 OrbStack API 已产生真实
+      Unschedulable/ImagePullBackOff/OOMKilled，并用隔离 Pod status subresource 验证 Evicted 解析；未使用 node drain。
+      PostgreSQL/运行时证据见 [`final1`](docs/reports/stage-4-kubernetes-pod-failure-orbstack-pg-20260726-final1.md)。
 - [x] 建立 durable Pod/Worker incarnation runtime、active/idle、requested CPU/Memory/Ephemeral Storage seconds、
       warm hit/fallback、恢复终态和端到端冷启动 P50/P95/P99 指标；requested-resource seconds 是成本代理，
       不是货币账单。
@@ -276,13 +290,42 @@ Stage 3 的独立执行计划：
       Coverage/审计、授权 sweep audit 与同一 1 Run/27 Slice replay。随后 static closed-period runtime mapping、
       settlement delay、独立 `synara:billing-shared-allocation-scheduler` lease 和 transaction fence 已接通；OrbStack
       PostgreSQL [`final3`](docs/reports/stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md) 证明 standby 不执行、
-      handoff fencing token=2、两个 epoch 各一条 system audit 且仍只有 1 Run/27 Slice。历史不完整 incarnation 仍
-      fail closed；动态账期生成和 account-level actual invoice 分摊仍保持待办。
-- [ ] 增加独立 Execution 排队时间、Pod provisioning 失败分类和长期滚动预聚合。
+      handoff fencing token=2、两个 epoch 各一条 system audit 且仍只有 1 Run/27 Slice。Migration `000080` 又加入
+      显式 `monthly-utc` anchor/可选终止边界和 per-period durable due/claim/outcome state；静态精确账期保持兼容，
+      同一 Target/provider/currency 禁止混用日历与其他 mapping。重启和 Leader handoff 不再依赖进程内 throttle，
+      PostgreSQL 两副本同时抢同一月账期只有一个执行，证据见
+      [`final1`](docs/reports/stage-4-billing-calendar-scheduler-orbstack-pg-20260726-final1.md)。历史不完整 incarnation
+      仍 fail closed。Migration `000082` 已新增 operator-owned account invoice 到 shared Target 的独立实际分摊图：
+      exact provider/currency/period/resource/kind 才能入图，跨 Target 歧义和零 estimate basis fail closed，signed
+      micros 以累计整数比例逐 line 守恒，未匹配 line/amount 保持显式。Run 只有完整图才能原子 `building -> sealed`，
+      invoice line 与 estimate slice 均只能使用一次，晚到 source/estimate 被数据库 fence；并发首次写只保留一份图
+      和一条审计。本地 SQLite + OrbStack PostgreSQL 17.10 证据见
+      [`final1`](docs/reports/stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md)；真实 provider account scope、
+      export settlement 和 workload identity 仍须 AWS/GCP/Azure E4。
+- [x] 增加独立 Execution 排队时间和 Pod provisioning 时间/失败分类；trailing-30-day 指标分别提供
+      dispatch-to-first-apply、first-apply-to-first-Running P50/P95/P99，以及每种 failure class 的 Generation 数。
+- [x] 为长期保留的 terminal Worker incarnation 增加精确日级滚动预聚合：Migration `000079` 以不可删除
+      membership/completion entry 保证每条 terminal fact 最多汇入一次，并在同一 PostgreSQL transaction advisory
+      lock 事务内递增 bucket、完成 entry。scrape 在一致快照内合并 rollup、尚未处理的 terminal raw fact 和
+      nonterminal raw fact；scheduler 延迟只增加 pending backlog，不会少算或重复计数。本地 OrbStack PostgreSQL
+      已验证历史回填、新增触发、回滚、重放、非有限值拒绝、session lock 和 transaction lock 接管，证据见
+      [`final1`](docs/reports/stage-4-worker-metric-rollup-orbstack-pg-20260726-final1.md)。
+- [x] 为 trailing-30-day Generation 冷启动、排队、Pod provisioning、outcome 和 Pod failure 增加可合并的
+      滚动预聚合：Migration `000081` 只在 terminal Generation source 封存后建立 append-only membership，Pod
+      failure 则按 immutable first proof 独立入队；固定整数直方图以不超过 2% 相对 bucket width 合并 duration，
+      不对 P50/P95/P99 本身求和。scrape 仅合并窗口内完整 UTC 日 bucket，并从 raw fact 精确读取窗口首尾两个
+      partial day、nonterminal 与 pending-rollup tail，因此 scheduler 延迟和日边界都不会造成漏计/重计。
+      本地 OrbStack PostgreSQL 双连接并发、迁移回放和 direct DB negative gate 证据见
+      [`final1`](docs/reports/stage-4-generation-metric-rollup-orbstack-pg-20260726-final1.md)。
 - [x] 增加 durable Generation start/Provider-ready outcome、Provider-ready duration、bounded resume decision
       和 validated runtime fallback reason 指标（Migration `000053`）；Migration `000059` 已把冷启动和恢复结果
-      转为 trailing 30-day durable Generation facts，Worker incarnation 长期资源事实仍需滚动预聚合。
-- [ ] 执行多副本 Control Plane、多个 K8s Cluster 的压力和混沌测试。
+      转为 trailing 30-day durable Generation facts；Worker incarnation terminal history 已由 Migration `000079`
+      转为精确日级 rollup，Generation 的可合并分位数预聚合已由 Migration `000081` 完成。
+- [ ] 执行多副本 Control Plane、多个 K8s Cluster 的压力和混沌测试。本地单 Cluster 双副本现可在独立
+      namespace/RBAC 中重复执行；schema 81 OrbStack 已完成基线 Pod/DB/MinIO 故障、3/3 顶层验收和 120 秒
+      6/6 Leader/Pod disruption soak，所有 readiness failure 为 0；schema 83 又完成签名 routing authority 在
+      两个 direct Control Plane Pod、删除后 survivor 与 replacement 上的 exact receipt replay。多个真实 Cluster
+      的并发压力与长时混沌仍未完成。
 - [ ] 编写 Cluster 接入、升级、下线、Credential 轮换和事故处理 Runbook。
 
 #### 完成条件
@@ -361,11 +404,3 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
 - [ ] 前端不直接连接 Worker，Worker 不直接访问 Control Plane 数据库。
 - [ ] PostgreSQL 保存事务状态，S3/MinIO 保存大对象，Worker 本地状态可随时丢弃。
 - [ ] 所有跨进程命令和事件都必须幂等、版本化并可审计。
-- [ ] 数据库 Migration 序号是全局单调、跨分支唯一的资源：并行分支/worktree 在合并前必须重新核对
-      `services/control-plane/migrations` 的版本号唯一性。重复版本号会让 `readMigrations` 启动时 fail closed；
-      已在任何环境应用过的 Migration 不能改号或改内容（checksum lineage 会拒绝），冲突只能由未部署的一侧改号。
-- [ ] `docs/reports/` 下的验收证据（含 JSON/JSONL 与其中记录的 SHA-256 冻结表）一经生成即视为不可变：
-      格式化工具、批量重排和后续编辑都不得触碰，否则报告内的校验和与文件本体不再匹配，证据链失效。
-      `.oxfmtrc.json` 已将 `docs/reports` 加入 ignore；新增证据目录时必须同步维护该 ignore 列表。
-- [ ] 后台恢复/对账类 sweep 必须有唯一的不节流权威（leader-elected reconciler）；散布在请求热路径上的
-      opportunistic sweep 只能作为延迟优化，必须节流且不得成为任何正确性前提。

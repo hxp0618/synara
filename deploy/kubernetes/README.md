@@ -246,6 +246,11 @@ cases without touching a cluster, and `deploy/kubernetes/validate-resilience-ass
 for static validation of the manifests and scripts.
 
 `deploy/kubernetes/acceptance.sh` defaults to Kind contexts and refuses other clusters. Running it against an
-explicitly disposable non-Kind cluster requires `SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE=1`; the script deletes
-the `synara-system` Namespace and supplied ClusterRole resources during cleanup, so never use that override on a
-shared or production cluster.
+explicitly disposable non-Kind cluster requires `SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE=1`. The default namespace
+remains `synara-system`. Set `SYNARA_K8S_NAMESPACE` to a fresh `synara-*` namespace for an isolated run; the runner
+derives a namespace-specific ClusterRole/Binding name unless `SYNARA_K8S_ACCEPTANCE_RBAC_NAME` is supplied. It refuses
+to reuse a live namespace or pre-existing selected RBAC identity. Created identities carry
+`synara.ai/acceptance-owner`; cleanup deletes each identity only when that exact label still matches the run. Namespace
+deletion is asynchronous, so the next bootstrap waits for a terminating selected namespace before creating it again.
+The override still must never be used on a shared or production cluster without operator-owned isolation and fault
+scope.

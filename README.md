@@ -15,7 +15,7 @@ It brings chats, terminals, browser previews, diffs, branches, provider sessions
 
 ## What it does
 
-- Use the AI accounts you already pay for: Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok, Kilo Code, and Pi.
+- Use the AI accounts you already pay for: Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok, Factory Droid, Kilo Code, and Pi.
 - Run parallel work across projects, threads, and isolated Git worktrees without branches stepping on each other.
 - Keep split chats, terminals, browser previews, and agent output visible in the same window.
 - Hand off a thread to another provider when you want a second model to pick up with the same context.
@@ -48,9 +48,10 @@ and `kubernetes`). Personal uses a CGO-free SQLite metadata store and determinis
 bootstrap; the server profiles retain PostgreSQL migrations, execution leases, generation fencing, and
 ordered SSE event recovery.
 
-The forward-only Control Plane schema chain currently ends at
-[`000041_diff_artifact_kind.sql`](./services/control-plane/migrations/000041_diff_artifact_kind.sql);
-the migration inventory and semantics are maintained in the
+The forward-only Control Plane schema chain lives under
+[`services/control-plane/migrations/`](./services/control-plane/migrations); the running build's
+`/ready` endpoint reports the authoritative expected version, and the migration inventory and
+semantics are maintained in the
 [`services/control-plane` README](./services/control-plane/README.md#persistence).
 
 - Personal Compose example: [`deploy/personal`](./deploy/personal)
@@ -60,7 +61,9 @@ the migration inventory and semantics are maintained in the
 
 Artifact metadata, Local/MinIO/S3 payload lifecycle, verified upload/download, reentrant Personal
 Local-to-object-storage migration, Kubernetes reconciliation, and enterprise OIDC/SAML/SCIM foundations
-are available. Productionization and the Web main-flow authority cutover remain in progress.
+are available. Control-plane productionization (Stage 2) and the Web main-flow authority cutover with
+remote Worker productization (Stage 3) are accepted and closed; the distributed execution platform and
+multi-cluster productionization (Stage 4) remain in progress — see `TODO.md`.
 
 Stage 3 Worker releases use a clean-worktree Registry gate that performs cached and no-cache
 `linux/amd64` + `linux/arm64` pushes, validates Registry-returned OCI digests, BuildKit SPDX/SLSA

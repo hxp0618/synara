@@ -4,7 +4,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 context="${SYNARA_K8S_CONTEXT:-$(kubectl config current-context 2>/dev/null || true)}"
-namespace="synara-system"
+namespace="${SYNARA_K8S_NAMESPACE:-synara-system}"
+rbac_name="${SYNARA_K8S_ACCEPTANCE_RBAC_NAME:-}"
+acceptance_owner="${SYNARA_K8S_ACCEPTANCE_OWNER:-acceptance-$(date +%s)-$$}"
 image="${SYNARA_K8S_ACCEPTANCE_IMAGE:-synara-control-plane:stage2-acceptance}"
 dependency_node_selector_key="${SYNARA_K8S_ACCEPTANCE_DEPENDENCY_NODE_SELECTOR_KEY:-}"
 dependency_node_selector_value="${SYNARA_K8S_ACCEPTANCE_DEPENDENCY_NODE_SELECTOR_VALUE:-}"
@@ -12,6 +14,8 @@ worker_protocol_version=2
 worker_version="${SYNARA_ACCEPTANCE_WORKER_VERSION:-acceptance}"
 work_dir="$(mktemp -d)"
 port_forward_pid=""
+created_namespace=0
+cleanup_rbac=0
 
 cleanup() {
   if [[ -n "$port_forward_pid" ]]; then
@@ -19,9 +23,13 @@ cleanup() {
     wait "$port_forward_pid" >/dev/null 2>&1 || true
   fi
   if [[ "${SYNARA_K8S_KEEP_RESOURCES:-0}" != "1" && -n "$context" ]]; then
-    kubectl --context "$context" delete namespace "$namespace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    kubectl --context "$context" delete clusterrolebinding synara-control-plane-reconciler --ignore-not-found >/dev/null 2>&1 || true
-    kubectl --context "$context" delete clusterrole synara-control-plane-reconciler --ignore-not-found >/dev/null 2>&1 || true
+    if [[ "$created_namespace" == "1" ]]; then
+      kubectl --context "$context" delete namespace "$namespace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    fi
+    if [[ "$cleanup_rbac" == "1" && -n "$rbac_name" ]]; then
+      kubectl --context "$context" delete clusterrolebinding "$rbac_name" --ignore-not-found >/dev/null 2>&1 || true
+      kubectl --context "$context" delete clusterrole "$rbac_name" --ignore-not-found >/dev/null 2>&1 || true
+    fi
   fi
   rm -rf "$work_dir"
 }
@@ -176,6 +184,25 @@ if [[ -z "$context" ]]; then
   printf 'A Kubernetes context is required through SYNARA_K8S_CONTEXT or current-context\n' >&2
   exit 1
 fi
+if [[ ! "$namespace" =~ ^synara-[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#namespace} > 63 )); then
+  printf 'SYNARA_K8S_NAMESPACE must be a synara-* DNS label no longer than 63 characters\n' >&2
+  exit 1
+fi
+if [[ -z "$rbac_name" ]]; then
+  if [[ "$namespace" == "synara-system" ]]; then
+    rbac_name="synara-control-plane-reconciler"
+  else
+    rbac_name="synara-control-plane-reconciler-$namespace"
+  fi
+fi
+if [[ ! "$rbac_name" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || (( ${#rbac_name} > 253 )); then
+  printf 'SYNARA_K8S_ACCEPTANCE_RBAC_NAME must be a DNS subdomain no longer than 253 characters\n' >&2
+  exit 1
+fi
+if [[ ! "$acceptance_owner" =~ ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$ ]] || (( ${#acceptance_owner} > 63 )); then
+  printf 'SYNARA_K8S_ACCEPTANCE_OWNER must be a Kubernetes label value no longer than 63 characters\n' >&2
+  exit 1
+fi
 if [[ "$context" != kind-* && "${SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE:-0}" != "1" ]]; then
   printf 'Refusing to run destructive acceptance against non-Kind context %s\n' "$context" >&2
   printf 'Set SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE=1 only for an explicitly disposable cluster\n' >&2
@@ -185,6 +212,11 @@ fi
 kube=(kubectl --context "$context")
 "${kube[@]}" cluster-info >/dev/null
 wait_for_namespace_absent 180
+if "${kube[@]}" get clusterrole "$rbac_name" >/dev/null 2>&1 ||
+  "${kube[@]}" get clusterrolebinding "$rbac_name" >/dev/null 2>&1; then
+  printf 'RBAC identity %s already exists; refusing to overwrite it\n' "$rbac_name" >&2
+  exit 1
+fi
 
 run_id="$(date +%s)-$$"
 postgres_password="stage2-postgres-$run_id-$(openssl rand -hex 8)"
@@ -194,7 +226,10 @@ worker_registration_token="stage2-worker-$run_id-$(openssl rand -hex 8)"
 provider_cursor_key="$(openssl rand -base64 32 | tr -d '\n')"
 credential_master_key="$(openssl rand -base64 32 | tr -d '\n')"
 
-"${kube[@]}" create namespace "$namespace" --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
+"${kube[@]}" create namespace "$namespace" >/dev/null
+created_namespace=1
+"${kube[@]}" label namespace "$namespace" \
+  "synara.ai/acceptance-owner=$acceptance_owner" >/dev/null
 "${kube[@]}" -n "$namespace" create secret generic synara-stage2-dependencies \
   --from-literal=POSTGRES_PASSWORD="$postgres_password" \
   --from-literal=MINIO_ROOT_USER="$minio_user" \
@@ -208,12 +243,11 @@ credential_master_key="$(openssl rand -base64 32 | tr -d '\n')"
   --from-literal=AWS_SECRET_ACCESS_KEY="$minio_password" \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 
-"${kube[@]}" apply -f - >/dev/null <<YAML
+"${kube[@]}" -n "$namespace" apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: synara-stage2-postgres
-  namespace: synara-system
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -224,7 +258,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: synara-stage2-postgres
-  namespace: synara-system
   labels:
     app.kubernetes.io/name: synara-stage2-postgres
 spec:
@@ -271,7 +304,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: synara-stage2-postgres
-  namespace: synara-system
 spec:
   selector:
     app.kubernetes.io/name: synara-stage2-postgres
@@ -284,7 +316,6 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: synara-stage2-minio
-  namespace: synara-system
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -295,7 +326,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: synara-stage2-minio
-  namespace: synara-system
   labels:
     app.kubernetes.io/name: synara-stage2-minio
 spec:
@@ -337,7 +367,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: synara-stage2-minio
-  namespace: synara-system
 spec:
   selector:
     app.kubernetes.io/name: synara-stage2-minio
@@ -348,12 +377,11 @@ spec:
 YAML
 
 apply_bucket_job() {
-  "${kube[@]}" apply -f - >/dev/null <<'YAML'
+  "${kube[@]}" -n "$namespace" apply -f - >/dev/null <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: synara-stage2-create-bucket
-  namespace: synara-system
 spec:
   backoffLimit: 6
   template:
@@ -371,7 +399,7 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              until mc alias set stage2 http://synara-stage2-minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 1; done
+              until mc alias set stage2 http://synara-stage2-minio:9000 "\$MINIO_ROOT_USER" "\$MINIO_ROOT_PASSWORD"; do sleep 1; done
               mc mb --ignore-existing stage2/synara-artifacts
 YAML
 }
@@ -395,7 +423,59 @@ database_url="postgres://synara:$postgres_password@synara-stage2-postgres.$names
   --from-literal=provider-cursor-key="$provider_cursor_key" \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 
-"${kube[@]}" apply -k "$script_dir" >/dev/null
+overlay_dir="$work_dir/kustomize"
+mkdir -p "$overlay_dir"
+cp \
+  "$script_dir/service-account.yaml" \
+  "$script_dir/rbac.yaml" \
+  "$script_dir/pod-disruption-budget.yaml" \
+  "$script_dir/deployment.yaml" \
+  "$script_dir/service.yaml" \
+  "$overlay_dir/"
+cat >"$overlay_dir/kustomization.yaml" <<YAML
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $namespace
+resources:
+  - service-account.yaml
+  - rbac.yaml
+  - pod-disruption-budget.yaml
+  - deployment.yaml
+  - service.yaml
+patches:
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRole
+      name: synara-control-plane-reconciler
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: $rbac_name
+      - op: add
+        path: /metadata/labels/synara.ai~1acceptance-owner
+        value: $acceptance_owner
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+      name: synara-control-plane-reconciler
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: $rbac_name
+      - op: replace
+        path: /roleRef/name
+        value: $rbac_name
+      - op: replace
+        path: /subjects/0/namespace
+        value: $namespace
+      - op: add
+        path: /metadata/labels/synara.ai~1acceptance-owner
+        value: $acceptance_owner
+YAML
+cleanup_rbac=1
+"${kube[@]}" create -k "$overlay_dir" >/dev/null
 "${kube[@]}" -n "$namespace" set image deployment/synara-control-plane control-plane="$image" >/dev/null
 "${kube[@]}" -n "$namespace" set env deployment/synara-control-plane \
   --from=secret/synara-control-plane-acceptance-env >/dev/null
@@ -636,5 +716,5 @@ if "${kube[@]}" auth can-i delete secrets --namespace "$namespace" \
 fi
 printf 'Kubernetes least-privilege RBAC spot audit passed\n'
 
-printf 'Kubernetes Stage 2 acceptance passed: context=%s replicas=2 worker=%s migrations=%s\n' \
-  "$context" "$worker_id" "$migration_count"
+printf 'Kubernetes Stage 2 acceptance passed: context=%s namespace=%s rbac=%s replicas=2 worker=%s migrations=%s\n' \
+  "$context" "$namespace" "$rbac_name" "$worker_id" "$migration_count"

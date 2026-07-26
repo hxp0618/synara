@@ -237,10 +237,20 @@ spec:
               value: 5s
             - name: SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD
               value: 2m
+            - name: SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: platform-routing-publishers-json
+                  optional: true
             - name: SYNARA_WORKER_AUTO_ROLLBACK_ENABLED
               value: "true"
             - name: SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL
               value: 10s
+            - name: SYNARA_METRIC_ROLLUP_INTERVAL
+              value: 1m
+            - name: SYNARA_METRIC_ROLLUP_BATCH_SIZE
+              value: "500"
             - name: SYNARA_OUTBOX_POLL_INTERVAL
               value: 500ms
             - name: SYNARA_OUTBOX_CLAIM_TTL

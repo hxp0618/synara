@@ -98,15 +98,6 @@ active for a later Turn.
 Terminal transitions use the same Lease-before-Execution lock order. Cancel/Complete races therefore
 produce exactly one legal terminal winner instead of relying on process-local synchronization.
 
-Expired-state recovery has exactly one unthrottled authority: the leader-elected reconciler cycle, which runs
-`RecoverExpired` before every Kubernetes reconcile pass. The recovery sweeps embedded in the Worker Claim and
-Workspace-cleanup Claim hot paths are opportunistic latency optimizations only — they are throttled to at most
-one sweep per scope per process interval (default 2s), and a skipped sweep delays recovery by at most that
-interval. No correctness property may depend on Claim-time sweeps firing: with many idle Workers polling Claim,
-most polls intentionally skip the sweep. The throttle is process-local, so across N Control Plane replicas up to
-N sweeps per interval can still run concurrently; sweeps therefore remain safe to execute concurrently
-(`SKIP LOCKED` scan, Lease-before-Execution lock order).
-
 ## Semantic Provider Credential access
 
 An immutable `execution_provider_credential_grants` row remains the root authority for one Execution

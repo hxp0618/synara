@@ -1,6 +1,10 @@
 # Stage 3 Drift Audit
 
-Current baseline: `codex/saas-tenancy-user` after clean commit `14f7dd2d`. The authorized external-host SSH real
+> Historical audit record. Stage 3 closed on 2026-07-24 at runtime SHA `8415efa1`; every
+> `partial` status and `000041`/`000042` migration-boundary statement below is a point-in-time
+> snapshot from the audited baseline, not the current chain.
+
+Audit baseline: `codex/saas-tenancy-user` after clean commit `14f7dd2d`. The authorized external-host SSH real
 Provider aggregate passes Codex product/failure `22 + 1 unsupported` / `16` and Claude product/failure
 `22 + 1 unsupported` / `16` with one pinned Host Key, four distinct runtime identities, exact owned-runtime cleanup,
 and a zero-finding aggregate Secret scan. See

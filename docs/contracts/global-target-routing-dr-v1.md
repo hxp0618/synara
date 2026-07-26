@@ -74,12 +74,12 @@ strategy-specific load, priority, and weight tie-breaks. Missing affinity is neu
 ineligible, and affinity cannot outrank an explicit Target/Region choice or healthier capacity. A saturated Target is
 never treated as available merely because it has a higher policy priority or Provider preference.
 
-`queue-pressure-v1` treats each durable `agent_executions` row in `queued | recovering` as one not-yet-serviced unit. For
-a positive numeric capacity ceiling, balanced load rank uses `(allocatedCapacityUnits + queuedExecutionUnits) / (ceiling
-
-- memberWeight)`; when the publisher supplies no numeric ceiling, it uses `queuedExecutionUnits / memberWeight`.
-`balanced`evaluates this effective load before priority, while`priority | latency` retain priority before effective
-  load. Terminal, leased, running, waiting-for-approval, and suspended Executions are not included in this queue count.
+`queue-pressure-v1` treats each durable `agent_executions` row in `queued | recovering` as one not-yet-serviced unit.
+For a positive numeric capacity ceiling, balanced load rank uses
+`(allocatedCapacityUnits + queuedExecutionUnits) / (ceiling * memberWeight)`; when the publisher supplies no numeric
+ceiling, it uses `queuedExecutionUnits / memberWeight`. `balanced` evaluates this effective load before priority, while
+`priority | latency` retain priority before effective load. Terminal, leased, running, waiting-for-approval, and
+suspended Executions are not included in this queue count.
 
 This is deliberately a conservative **soft ranking signal**, not hard capacity reservation. A Kubernetes Pod may already
 be included in the publisher's allocated occupancy while its Execution is still `queued`, so summing both can double
@@ -172,10 +172,46 @@ stored placement remains immutable historical truth.
 - `PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation`
 - `GET /v1/tenants/{tenantID}/location-outages`
 - `PUT /v1/tenants/{tenantID}/location-outages`
+- `PUT /v1/platform/routing-authority/execution-targets/{executionTargetID}/observations`
 
 The health-observation request may carry both Target health/capacity and a DR-readiness observation. Tenant operators
-cannot mutate a platform-shared Target's authority; a production platform publisher for shared Targets remains an
-operator integration boundary and must not reuse a tenant user's authority.
+cannot mutate a platform-shared Target's authority and cannot overwrite a health or source-DR-domain authority assigned
+to a configured Platform publisher. The Platform route does not accept a Login Session, Service Account bearer token, or
+browser heartbeat as authority. It accepts only an Ed25519-signed publication from
+`SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON`.
+
+The configuration contains public keys only. Each publisher identity has one to eight rotation keys and exact Target
+scopes. Every Target scope freezes `platform-shared` versus an exact `tenant-owned` Tenant ID, independently authorizes
+health publication, and lists exact `(sourceDrDomain, drDomain)` pairs. Overlapping health or source-domain authorities
+across publisher identities are rejected at startup. Tenant-owned Kubernetes health remains owned by the managed
+Kubernetes Reconciler; the signed integration route rejects an overlapping health write, although a separately scoped DR
+replication publisher may publish readiness for that Target.
+
+Signed schema v1 prepends `synara.platform-routing-authority.v1\n` to canonical JSON with this fixed field order:
+`schemaVersion`, `publisherIdentity`, `keyId`, `nonce`, `issuedAt`, `expiresAt`, `executionTargetId`, `observedAt`, optional
+`health`, and sorted `drReadiness`. UUIDs are canonical lowercase. Timestamps are canonical UTC RFC3339Nano. Signatures
+use canonical padded base64. A first publication has a maximum five-minute request validity window with 30 seconds of
+clock-skew tolerance; health and readiness TTL remain independently bounded to 10 seconds through one hour. DR entries
+must be unique and sorted by `sourceDrDomain`.
+
+The nested health field order is `status`, `capacityStatus`, optional `availableCapacityUnits`,
+`allocatedCapacityUnits`, optional `reason`, `ttlSeconds`. Each readiness item uses `sourceDrDomain`, `drDomain`,
+`replicatedThroughAt`, `artifactsReady`, `checkpointsReady`, `memoryReady`, optional `reason`, `ttlSeconds`. Integrations
+should use `go run ./cmd/routing-authority-sign --private-key-file /run/secrets/publisher-key.pem` rather than reproduce
+the encoder. The tool reads one unsigned JSON value on stdin, rejects unknown fields, existing signatures, symlinked or
+group/other-writable key files, and emits the signed request on stdout. `--public-key-only` emits the padded-base64 public
+key for Control Plane configuration. The private key file must contain exactly one PKCS#8 Ed25519 `PRIVATE KEY` PEM block.
+Kubernetes projected Secret keys are symlinks by construction; a publisher may explicitly add `--allow-key-symlink` only
+when that path is on its read-only kubelet-managed Secret volume. The resolved target must still be a regular file and
+must not be group/other writable.
+
+Migration `000083` stores one immutable `(publisher_identity, nonce)` receipt with request/public-key/response SHA-256
+digests. Target ownership is locked and revalidated before mutation. Health, all readiness rows, and the receipt commit in
+one transaction; one stale or invalid row rolls the entire bundle back. Repeating the exact signed request returns the
+sealed response even after the request window closes, while using the nonce for different signed content returns a
+conflict. `synara_platform_routing_publications_total` and
+`synara_platform_routing_publication_latest_timestamp_seconds` expose bounded publication progress; HTTP status metrics
+cover authenticated replay and rejection without publisher or Target labels.
 
 The location-outage API is a narrow tenant operator authority. `PUT` upserts one `(region, optional clusterId)` row with a
 fresh observation timestamp and TTL; it does not mutate any `execution_targets` row, including platform-shared Targets.
@@ -193,8 +229,10 @@ the fresh per-target Kubernetes Reconciler conclusion that writes `execution_tar
 Its initial capacity value is the configured `maxActivePods` Pod-slot ceiling and the reconcile's observed, created, and
 deletion-pending Pod occupancy; it is not a forecast of cloud node or availability-zone headroom.
 Platform-shared Targets, external Targets, and all cross-domain `execution_target_dr_readiness` publication remain
-operator/integration-owned authority. A successful routing decision does not by itself prove those external data planes
-are replicated.
+operator/integration-owned authority, but now have a signed, exact-scope, atomic Control Plane ingestion path. The
+external publisher is still responsible for measuring the Target and for reporting readiness only after the backing
+stores have actually crossed the declared failure domain. A successful publication or routing decision does not by
+itself prove those external data planes are replicated.
 
 The checked-in OrbStack-plus-disposable-Kind lane is a repeatable local cross-cluster control-path exercise. It proves two
 distinct Kubernetes API servers, source and successor Worker runtime readiness, fail-closed DR-readiness selection,

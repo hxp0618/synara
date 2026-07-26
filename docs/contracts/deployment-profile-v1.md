@@ -12,7 +12,7 @@ describes where an Agent executes; that is the independent Execution Target cont
 | Queue declaration          | in-process                      | PostgreSQL outbox              | PostgreSQL outbox or external  |
 | Replicas                   | 1                               | 1                              | 2+                             |
 | High availability          | no                              | no                             | yes                            |
-| Identity baseline          | deterministic local owner       | local/dev or future OIDC       | future OIDC/SAML/SCIM          |
+| Identity baseline          | deterministic local owner       | local/dev or OIDC              | OIDC/SAML/SCIM ([enterprise-identity-v1](enterprise-identity-v1.md)) |
 | Execution target kinds     | local, SSH, Docker, Kubernetes  | local, SSH, Docker, Kubernetes | local, SSH, Docker, Kubernetes |
 | Metadata export/import     | export                          | import                         | import                         |
 | Artifact payload migration | export Local payload references | import to MinIO/S3             | import to S3                   |

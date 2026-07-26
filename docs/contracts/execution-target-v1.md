@@ -10,7 +10,7 @@ control plane's Deployment Profile and to workspace mode.
 | `local`      | Worker runs on the control-plane/local host                     | `synara-agentd` runner and automatic supervision are implemented |
 | `ssh`        | `synara-agentd` registers from a remote host                    | managed install/upgrade/revoke is implemented                    |
 | `docker`     | registered workers execute in a container pool                  | managed pool reconciler is implemented                           |
-| `kubernetes` | one execution-pinned Worker Pod per queued/recovering execution | scheduler/reconciler and security foundation are implemented     |
+| `kubernetes` | one execution-pinned Worker Pod per queued/recovering execution | scheduler/reconciler and security foundation are implemented; Stage 4 adds `warm`/`general` pool modes ([Worker Pool/Placement v1](worker-pool-placement-v1.md)) |
 
 All kinds use `RegisterWorker`, `Heartbeat`, `ClaimExecution`, leases, generation fencing, runtime
 events, idempotent receipts, and provider resume cursors. Drivers must not write Session state directly.
@@ -263,7 +263,9 @@ For each target the reconciler server-side-applies the Namespace when requested,
 ServiceAccount, registration Secret, target-scoped registry Secret, ResourceQuota, and default-deny NetworkPolicy.
 The registry Secret is referenced only through Pod `imagePullSecrets` and is not mounted or exposed to agentd. It
 creates one
-execution-pinned Pod for each queued or recovering Execution up to `maxActivePods`. Pod names and
+execution-pinned Pod for each queued or recovering Execution up to `maxActivePods`. Stage 4's
+[Worker Pool/Placement v1](worker-pool-placement-v1.md) extends this with release-aware one-shot `warm` Pods and
+`general` pool Workers; execution-pinned remains the default mode and the description below. Pod names and
 labels encode the expected next Generation plus selected Release Revision/Channel. A release-pinned Execution uses
 the exact immutable Manifest Digest instead of the mutable Target image. Terminal, stale-generation, and no-longer-owned
 Pods are deleted only after PostgreSQL records an immutable exact-UID deletion fence under the same logical-identity lock
@@ -297,7 +299,10 @@ The operator workflow is documented in `docs/runbooks/worker-release-rollout.md`
 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; the latest deterministic managed Docker immutable
 rollout and Busy Worker fencing evidence is in `docs/reports/stage-3-worker-release-rollout-d3af9380.md`.
 
-Current deterministic Local/Docker/Kubernetes and historical SSH/Kubernetes fixture evidence proves selected shared
-orchestration and failure paths, not a real Provider release. Stage 3 remains `partial` until the same committed,
-registry-pushed immutable image passes real Codex and Claude acceptance across Local, SSH, Docker and Kubernetes,
-including canary, rollback, active-execution drain, credential revocation and long-session/production soak.
+Stage 3 closed under the narrowed acceptance boundary recorded in `TODO.md`: real Codex/Claude native-cursor and
+recovery behavior was verified across Local, SSH, Docker and Kubernetes, while the quota-consuming long
+load/soak, multi-node, and registry-pushed immutable-rollout lanes were required to pass for one representative
+API-key Provider rather than every Provider. The released runtime source is pinned at commit
+`8415efa15cebc48a23723dbdb147d3bafd7071bf`. Managed-cloud multi-AZ, production-duration soak, and the remaining
+production-scale evidence are tracked by Stage 4
+([stage-4 plan](../plans/stage-4-distributed-execution-resource-lifecycle.md)).

@@ -50,7 +50,8 @@ registry-pushed recovery/load 证据见
 ## 3. 预检
 
 1. 完成 PostgreSQL 备份，并确认 `/ready=200`。
-2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；本实现边界为 `000042`。
+2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；以 `/ready` 返回的 expectedVersion 与
+   `services/control-plane/migrations/` 当前链为准，不要依赖历史写死的迁移号。
 3. 记录 Tenant、Execution Target、Worker Manifest、Image Digest、Commit SHA 和当前 Policy Version。
 4. 从同一 clean SHA 运行 Registry supply-chain gate，确认双平台 manifest 可重复、`HIGH/CRITICAL=0`、
    Secret=0、非 EOSL、漏洞数据库未过期，并人工评审所有 `UNKNOWN` finding。

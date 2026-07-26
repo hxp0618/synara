@@ -118,6 +118,30 @@ version, size, ETag or provider checksum where available, last-modified time, an
 and chunk relationships must satisfy `cloud-cost-accounting-v1.md`. The deterministic bundle checksum in provenance,
 the durable invoice `SourceChecksum`, and scheduled-import audit metadata must agree.
 
+### Shared actual-invoice allocation
+
+When the release exposes account-level actual allocation for platform-shared Targets, each provider E4 gate must also
+exercise Migration `000082` against the same real export delivery. The operator computes
+`sourceScopeAttestationSHA256` from a canonical, secret-free manifest binding the approved cloud billing scope,
+effective workload principal digest, export definition/execution, complete immutable object provenance, normalized
+Synara mapping digest, provider/currency/period, shared Target, settlement decision, and gate run ID. A handwritten,
+random, local-fixture, or object-checksum-only digest does not satisfy this step.
+
+The gate must include at least one exact shared resource line and one deliberately unrelated account line. It proves:
+
+- the selected line matches only the intended shared Target and its complete sealed estimate-slice set;
+- signed source micros equal the sum of actual charge slices for every selected line and the whole Run;
+- the unrelated line remains in explicit unallocated count/amount rather than being assigned by inference;
+- two concurrent first requests return one sealed Run/Line/Slice graph and one mutation audit;
+- exact replay returns the retained identity, while a different scope attestation conflicts;
+- late invoice-line insertion, late matching estimate-slice insertion, incomplete seal, mutation, delete, and a
+  cross-Target ambiguous resource key all fail closed.
+
+The provider report records the allocation Run ID, algorithm, source/line-set/scope-attestation digests, selected and
+unallocated counts and signed amounts, slice count, conservation result, replay identity, audit identity, and every
+negative result. If this sub-gate is omitted, the provider may still pass basic managed-cloud invoice import, but the
+release must declare `sharedActualAllocation=false` and cannot claim managed account-level shared-cost allocation.
+
 Transforms are allowed only when they are an explicit production step. The report must then bind the native export
 delivery to the transformation job identity, immutable input snapshot/versions, transformation definition digest,
 job completion, and exact output versions. A copied or transformed object without this complete chain is synthetic
@@ -230,7 +254,8 @@ The machine-readable report uses `schemaVersion = synara.managed-cloud-billing-a
 - immutable revision, image, environment, Kubernetes, mapping, export, object-version, and run identities;
 - named results for bound success, expected-principal match, unbound refusal, static-credential absence, node/VM
   fallback refusal, exact-version reads, export provenance, durable import, checksum-identical replay, rotation,
-  revocation, old-principal recheck, and cleanup;
+  revocation, old-principal recheck, optional shared actual allocation with its explicit release capability flag, and
+  cleanup;
 - timestamps, bounded retry/propagation budgets, stable error codes, counts, SHA-256 digests, and references to
   separately retained provider audit evidence.
 
