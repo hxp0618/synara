@@ -183,6 +183,33 @@ fencing、幂等 receipt、Recovery Bundle、调度决策证据图、Grant 凭�
 （第四节劣势的投影）。P0 三项（U1/U2、S6、S7）构成"产品成立"最小集合；P1 四项（U4、U6、U9、S4）
 是"易用性齐平"集合，全部可复用既有域模型与指标，不需要新领域概念。
 
+### 对齐路线建议（与 fast-provision 提案 §6 合并排序）
+
+阶段 A——产品成立（P0，前三步即 [提案](fast-provision-runtime-proposal-v0.md) 落地顺序 1–3）：
+
+1. SLO 门禁 + `provision_tier` 度量标签（纯度量/文档，对标 U1 的验收面）。
+2. `guaranteed-warm`：min-idle 硬补齐 + Provider Host 预启动（U1 主体，无新基础设施）。
+3. Workspace cache-first + 显式 freshness（U2；S5 的设计输入在此步落地——缓存键按环境隔离、
+   失效显式可见，避免复刻 Codex 团队共享缓存失效的公开痛点）。
+4. Egress 白名单/代理层（S6）。独立子系统，不占 1–3 关键路径，可并行；市场参照取 Codex 模型
+   （默认断网 + 域名白名单 + HTTP 方法级限制）为最完整形态，Claude 的"凭证代理不进 VM"为第二层
+   目标。
+5. RuntimeClass gVisor 单 Target 原型（S7），与提案 §7 的 microVM spike 合并出数据后再定路线。
+
+阶段 B——易用性齐平（P1，全部为既有事实/域模型的产品化露出，不新增领域概念）：
+
+6. 失败与延迟归因用户可见化（S4 + U9）：把 Pod failure 分类、冷启动分位、capacity class 直接
+   投影到会话 UI；反面教材即 Codex "job was killed" 无解释。
+7. Web diff 审查 UX 与 PR 流打磨（U6），随后才是独立 PR 审查产品。
+8. 触发面第一步（U4）：GitHub webhook + cron 两种触发器复用 Automation 域模型起步；触发器矩阵
+   的完整参照是 Cursor（PR 事件/CI 完成/label/review + Slack/Linear/Sentry/PagerDuty）。
+
+阶段 C——差异化（P2，允许新原语）：移动端与通知（U5）、快照层与 best-of-N（U7，跟随提案
+`snapshot-restore` 层）、多 repo 任务（U8，市场三方分裂处）、安全响应制度与外部审计（S8）。
+
+排序原则：A 不新增领域概念且决定产品成立；B 只做露出，收益/成本比最高；C 才引入新原语。任何
+阶段不回退第三节已领先项（S1–S3）的语义。
+
 ## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
@@ -209,3 +236,5 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
 - 2026-07-26 r1：初版——三层格局、竞品速览、优势/劣势、对方向评估的确认与补充、来源。
 - 2026-07-26 r2：新增第六节"易用性与稳定性对标清单"（U1–U9 / S1–S8，含 P0/P1/P2 分级）；原
   来源节改为第七节；前言标注本文为持续修订文档。
+- 2026-07-26 r3：第六节新增"对齐路线建议"——A（产品成立）/B（易用性齐平）/C（差异化）三阶段，
+  与 fast-provision 提案 §6 落地顺序合并，并为各步标注市场参照与反面教材。
