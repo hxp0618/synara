@@ -430,8 +430,6 @@ func timePointer(value time.Time) *time.Time { return &value }
 
 func uuidPointer(value uuid.UUID) *uuid.UUID { return &value }
 
-func int64Pointer(value int64) *int64 { return &value }
-
 func stringPointer(value string) *string { return &value }
 
 func cloneInt64Pointer(value *int64) *int64 {

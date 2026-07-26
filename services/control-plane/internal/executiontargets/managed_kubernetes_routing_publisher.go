@@ -119,20 +119,6 @@ func normalizeManagedKubernetesRoutingPublisherIdentity(identity string) string 
 	return identity
 }
 
-func defaultManagedKubernetesRoutingObservationTTL(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ttl := 3 * interval
-	if ttl < 30*time.Second {
-		return 30 * time.Second
-	}
-	if ttl > time.Hour {
-		return time.Hour
-	}
-	return ttl
-}
-
 func managedKubernetesRoutingReasonPointer(reason string) *string {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {

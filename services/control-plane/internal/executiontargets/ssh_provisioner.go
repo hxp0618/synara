@@ -710,10 +710,6 @@ func (p *SSHProvisioner) environmentFile(
 	return []byte(output.String()), nil
 }
 
-func systemdUnit(paths sshProvisionPaths, serviceUser string) string {
-	return systemdUnitWithDelegate(paths, serviceUser, false)
-}
-
 func systemdUnitWithDelegate(paths sshProvisionPaths, serviceUser string, delegate bool) string {
 	lines := []string{
 		"[Unit]",

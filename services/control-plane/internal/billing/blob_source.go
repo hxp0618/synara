@@ -469,16 +469,6 @@ func gunzipBlobWithLimit(blob []byte, maxBytes int64) ([]byte, error) {
 	return decompressed, nil
 }
 
-func readBlobWithLimit(
-	ctx context.Context,
-	source BlobSource,
-	object BlobObjectRef,
-	maxBytes int64,
-) ([]byte, error) {
-	blob, _, err := readBlobWithLimitAndMetadata(ctx, source, object, maxBytes)
-	return blob, err
-}
-
 func readBlobWithLimitAndMetadata(
 	ctx context.Context,
 	source BlobSource,

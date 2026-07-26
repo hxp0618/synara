@@ -373,16 +373,3 @@ func (s *Service) runEstimateSweep(
 		RequestedBy:        requestedBy,
 	})
 }
-
-func (s *Service) loadConfiguredImport(
-	tenantID uuid.UUID,
-	provider string,
-	externalImportID string,
-) (ConfiguredImport, bool) {
-	if len(s.configuredImports) == 0 {
-		return ConfiguredImport{}, false
-	}
-	key := configuredImportKey(tenantID, provider, externalImportID)
-	configuredImport, ok := s.configuredImports[key]
-	return configuredImport, ok
-}

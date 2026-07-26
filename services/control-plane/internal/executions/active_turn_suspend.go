@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -543,11 +542,4 @@ func suspendExpectedExecutionStatus(attempt persistence.ExecutionSuspendAttempt)
 		return "running"
 	}
 	return "waiting-for-approval"
-}
-
-func activeSuspendFailureMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	return fmt.Sprintf("active-turn suspend checkpoint: %v", err)
 }

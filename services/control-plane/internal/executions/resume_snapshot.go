@@ -341,24 +341,6 @@ func resumeSourceSequenceRange(events []persistence.SessionEvent, through int64)
 	return ResumeSequenceRange{From: from, Through: through}
 }
 
-func boundedResumeSnapshotEvents(all []persistence.SessionEvent) ([]persistence.SessionEvent, bool) {
-	events := make([]persistence.SessionEvent, 0, len(all))
-	allowed := make(map[string]struct{}, len(resumeSnapshotEventTypes))
-	for _, eventType := range resumeSnapshotEventTypes {
-		allowed[eventType] = struct{}{}
-	}
-	for _, event := range all {
-		if _, ok := allowed[event.EventType]; ok {
-			events = append(events, event)
-		}
-	}
-	truncated := len(events) > resumeSnapshotEventLimit
-	if truncated {
-		events = events[len(events)-resumeSnapshotEventLimit:]
-	}
-	return events, truncated
-}
-
 func projectResumeStateMarkers(events []persistence.SessionEvent, projection *resumeSnapshotProjection) {
 	for _, event := range events {
 		switch event.EventType {
@@ -482,52 +464,6 @@ func loadCurrentTurnSequence(
 		return 0, false, problem.Wrap(500, "execution_history_cursor_load_failed", "Failed to locate the current Turn in Session history.", err)
 	}
 	return current.Sequence, true, nil
-}
-
-func loadResumeSourceSequenceRange(
-	ctx context.Context,
-	tx *gorm.DB,
-	execution persistence.AgentExecution,
-	currentSequence int64,
-) (ResumeSequenceRange, error) {
-	var row struct {
-		From    int64 `gorm:"column:sequence_from"`
-		Through int64 `gorm:"column:sequence_through"`
-	}
-	if err := tx.WithContext(ctx).Model(&persistence.SessionEvent{}).
-		Select("COALESCE(MIN(sequence), 0) AS sequence_from, COALESCE(MAX(sequence), 0) AS sequence_through").
-		Where("tenant_id = ? AND session_id = ? AND sequence < ?",
-			execution.TenantID, execution.SessionID, currentSequence).
-		Scan(&row).Error; err != nil {
-		return ResumeSequenceRange{}, problem.Wrap(500, "execution_history_range_load_failed", "Failed to load the authoritative Session history range.", err)
-	}
-	return ResumeSequenceRange{From: row.From, Through: row.Through}, nil
-}
-
-func loadResumeSnapshotEvents(
-	ctx context.Context,
-	tx *gorm.DB,
-	execution persistence.AgentExecution,
-	currentSequence int64,
-) ([]persistence.SessionEvent, bool, error) {
-	events := make([]persistence.SessionEvent, 0, resumeSnapshotEventLimit+1)
-	if err := tx.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND sequence < ? AND event_type IN ?",
-			execution.TenantID, execution.SessionID, currentSequence, resumeSnapshotEventTypes).
-		Order("sequence DESC").Limit(resumeSnapshotEventLimit + 1).Find(&events).Error; err != nil {
-		return nil, false, problem.Wrap(500, "execution_history_load_failed", "Failed to load Session resume history.", err)
-	}
-	truncated := len(events) > resumeSnapshotEventLimit
-	if truncated {
-		events = events[:resumeSnapshotEventLimit]
-	}
-	sort.Slice(events, func(left, right int) bool {
-		if events[left].Sequence == events[right].Sequence {
-			return events[left].EventID.String() < events[right].EventID.String()
-		}
-		return events[left].Sequence < events[right].Sequence
-	})
-	return events, truncated, nil
 }
 
 func projectResumeSnapshotEvents(events []persistence.SessionEvent) resumeSnapshotProjection {

@@ -21,18 +21,6 @@ const (
 	workerFactStateTerminated = workerfacts.StateTerminated
 )
 
-func ensureWorkerIncarnationFactLocked(
-	ctx context.Context,
-	tx *gorm.DB,
-	worker persistence.WorkerInstance,
-	observedAt time.Time,
-	initialState string,
-) error {
-	return ensureWorkerIncarnationFactWithResourcesLocked(
-		ctx, tx, worker, observedAt, initialState, nil, nil, nil,
-	)
-}
-
 func ensureWorkerIncarnationFactWithResourcesLocked(
 	ctx context.Context,
 	tx *gorm.DB,
