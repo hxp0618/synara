@@ -361,3 +361,11 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
 - [ ] 前端不直接连接 Worker，Worker 不直接访问 Control Plane 数据库。
 - [ ] PostgreSQL 保存事务状态，S3/MinIO 保存大对象，Worker 本地状态可随时丢弃。
 - [ ] 所有跨进程命令和事件都必须幂等、版本化并可审计。
+- [ ] 数据库 Migration 序号是全局单调、跨分支唯一的资源：并行分支/worktree 在合并前必须重新核对
+      `services/control-plane/migrations` 的版本号唯一性。重复版本号会让 `readMigrations` 启动时 fail closed；
+      已在任何环境应用过的 Migration 不能改号或改内容（checksum lineage 会拒绝），冲突只能由未部署的一侧改号。
+- [ ] `docs/reports/` 下的验收证据（含 JSON/JSONL 与其中记录的 SHA-256 冻结表）一经生成即视为不可变：
+      格式化工具、批量重排和后续编辑都不得触碰，否则报告内的校验和与文件本体不再匹配，证据链失效。
+      `.oxfmtrc.json` 已将 `docs/reports` 加入 ignore；新增证据目录时必须同步维护该 ignore 列表。
+- [ ] 后台恢复/对账类 sweep 必须有唯一的不节流权威（leader-elected reconciler）；散布在请求热路径上的
+      opportunistic sweep 只能作为延迟优化，必须节流且不得成为任何正确性前提。

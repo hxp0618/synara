@@ -345,7 +345,7 @@ Operator hard bounds
       durable fact；冷启动 P50/P95/P99 与 recovery outcome 使用 trailing 30-day gauge，不再依赖重复 Event join。
 - [x] PostgreSQL 已覆盖并发 suspend completion 单赢家和 `suspend-resume` 新 Generation lineage。
 - [x] Migration `000057`-`000060` + Worker Pool/Placement v1：显式 `execution-pinned | warm-pool |
-  general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队列时不可变选择、exact Pool/version/
+general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队列时不可变选择、exact Pool/version/
       release Claim fence，以及 Kubernetes release-aware one-shot Warm Pod。已注册、online/active、无 Lease 且
       exact release/pool 匹配的 Worker 才算 ready warm capacity；Claim 与 scale-down 通过 Worker row lock + Lease
       recheck 串行化，Claim 后会在 `maxActiveUnits` 内回补新的 idle slot。Pool/Placement 仍只负责选中 Target 内的
@@ -365,6 +365,15 @@ Operator hard bounds
       kubelet terminal phase 或成功 List 后确认 exact Pod UID missing 才关闭 `terminated_at`。指标提供 trailing
       30-day 端到端 dispatch-to-Provider-ready P50/P95/P99、warm hit/fallback、recovery outcome、Pod runtime/
       idle/active seconds 和 requested-resource-seconds；后者是成本代理，不是货币账单。
+- [x] Migration `000081` + claim 热路径性能收口：Worker Claim / Workspace-cleanup Claim 内嵌的过期恢复扫描改为
+      每进程每 scope 2 秒节流（`WithClaimRecoverySweepInterval` 可配置）；leader-elected Reconciler 的
+      `RecoverExpired` 仍是唯一不节流的恢复权威，任何正确性都不得依赖 Claim 时扫描必然执行（契约见
+      [session-execution-state-machine](../contracts/session-execution-state-machine.md)）。同时补上 fair-share
+      correlated COUNT 的 partial index 和 Kubernetes Reconciler 每周期 non-terminal Execution 载入的复合
+      partial index（PostgreSQL Migration `000081` + SQLite safety mirror），并把过期
+      `worker_request_receipts` 的逐行删除合并为单条批量删除。注意：主分支上另有未落库的
+      `000079_worker_incarnation_metric_rollups`，两条分支合并时必须重新核对迁移序号唯一性——重复版本号会在
+      `readMigrations` fail closed，序号改名则会触发 checksum lineage 冲突，只能以未部署一侧改号解决。
 - [x] `absoluteExpiresAt` server-authoritative controller：新的 execution-bearing 操作在硬到期后被拒绝；已在飞或
       suspended 的 Execution 会被权威取消并 fenced。
 - [x] Migration `000056` + Provider Host 2.2 实现 `suspendAfterIdleSeconds` active-turn Suspend/显式 Resume：

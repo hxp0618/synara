@@ -54,6 +54,7 @@ func TestOIDCConnectionEncryptsSecretAndCreatesPKCEAttempt(t *testing.T) {
 	}
 	cipher := credentialkms.NewEnvelopeCipher(wrapper)
 	service := NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), cipher)
+	service.httpClient = server.Client()
 	connection, err := service.Create(context.Background(), principal, tenantID, CreateConnectionInput{
 		Kind: "oidc", Name: "Company SSO", Issuer: issuer, ClientID: "synara-client",
 		ClientSecret: "oidc-client-secret", OIDC: OIDCConfiguration{AllowedDomains: []string{"example.com"}},
@@ -98,6 +99,7 @@ func TestOIDCCompleteValidatesProviderAndCreatesExternalSession(t *testing.T) {
 	}
 	identityService := identity.NewService(db, time.Hour, 30*time.Minute)
 	service := NewService(db, identityService, credentialkms.NewEnvelopeCipher(wrapper))
+	service.httpClient = provider.client()
 	connection, err := service.Create(context.Background(), principal, tenantID, CreateConnectionInput{
 		Kind: "oidc", Name: "Company SSO", Issuer: provider.issuer(), ClientID: provider.clientID,
 		ClientSecret: provider.clientSecret,
@@ -436,4 +438,79 @@ func setupIdentityTest(t *testing.T) (*gorm.DB, identity.Principal, uuid.UUID) {
 		}
 	}
 	return db, identity.Principal{UserID: userID, SessionID: uuid.New(), ActiveTenantID: &tenantID, Email: "owner@example.com", DisplayName: "Owner"}, tenantID
+}
+
+// OIDC discovery fetches an operator-supplied issuer server-side, so it must
+// carry the same redirect guard as SAML metadata: without one it runs on
+// http.DefaultClient with no redirect policy and an unbounded redirect chain.
+//
+// The guard's policy is scheme-based (HTTPS, or HTTP only for loopback dev
+// endpoints), so this asserts a non-loopback HTTP redirect is refused by the
+// guard itself rather than by an incidental transport error.
+func TestOIDCDiscoveryRejectsUnsafeRedirect(t *testing.T) {
+	redirectServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://169.254.169.254/latest/meta-data/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	db, principal, tenantID := setupIdentityTest(t)
+	wrapper, err := credentialkms.NewLocalKeyWrapper("identity-test-v1", bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), credentialkms.NewEnvelopeCipher(wrapper))
+	// Trusts the TLS issuer so discovery reaches the redirect instead of
+	// failing certificate verification for an unrelated reason.
+	service.httpClient = redirectServer.Client()
+	connection, err := service.Create(context.Background(), principal, tenantID, CreateConnectionInput{
+		Kind: "oidc", Name: "Unsafe redirect", Issuer: redirectServer.URL, ClientID: "synara-client",
+		ClientSecret: "oidc-client-secret", OIDC: OIDCConfiguration{AllowedDomains: []string{"example.com"}},
+	}, "identity-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Start(
+		context.Background(), connection.ID,
+		"https://synara.example.com/v1/auth/sso/callback", "/settings",
+	)
+	assertProblemCode(t, err, "oidc_discovery_failed")
+	if !strings.Contains(err.Error(), "OIDC discovery redirect") {
+		t.Fatalf("discovery did not fail through the redirect guard: %v", err)
+	}
+}
+
+// The guard is scheme-based, so its decision table is asserted directly.
+func TestRedirectGuardedClientSchemePolicy(t *testing.T) {
+	service := &Service{httpClient: &http.Client{}}
+	client := service.redirectGuardedClient("invalid_oidc_discovery_redirect", "OIDC discovery")
+	for _, testCase := range []struct {
+		target   string
+		rejected bool
+	}{
+		{"https://idp.example.com/.well-known/openid-configuration", false},
+		{"http://127.0.0.1:8080/.well-known/openid-configuration", false},
+		{"http://169.254.169.254/latest/meta-data/", true},
+		{"http://vault.internal/v1/secret", true},
+	} {
+		request, err := http.NewRequest(http.MethodGet, testCase.target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = client.CheckRedirect(request, nil)
+		if testCase.rejected && err == nil {
+			t.Fatalf("redirect to %s was allowed", testCase.target)
+		}
+		if !testCase.rejected && err != nil {
+			t.Fatalf("redirect to %s was rejected: %v", testCase.target, err)
+		}
+	}
+	// A redirect chain must terminate even when every hop is well-formed.
+	request, err := http.NewRequest(http.MethodGet, "https://idp.example.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(request, make([]*http.Request, 5)); err == nil {
+		t.Fatal("redirect chain was not bounded")
+	}
 }

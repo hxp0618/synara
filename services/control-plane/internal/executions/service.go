@@ -592,6 +592,10 @@ func (s *Service) markStaleWorkers(ctx context.Context) error {
 			Order("last_heartbeat_at, id").Limit(100).Find(&workers).Error; err != nil {
 			return err
 		}
+		// One sweep commonly marks many Workers on the same Execution Target,
+		// so the offline outbox scope is resolved once per Target instead of
+		// once per Worker.
+		targets := make(map[uuid.UUID]persistence.ExecutionTarget, len(workers))
 		for _, worker := range workers {
 			result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 				Where("id = ? AND administrative_status <> ? AND status = ? AND last_heartbeat_at = ?", worker.ID, "revoked", worker.Status, worker.LastHeartbeatAt).
@@ -608,7 +612,16 @@ func (s *Service) markStaleWorkers(ctx context.Context) error {
 			); err != nil {
 				return err
 			}
-			if err := enqueueWorkerOffline(ctx, tx, worker); err != nil {
+			target, cached := targets[worker.ExecutionTargetID]
+			if !cached {
+				loaded, err := loadWorkerOfflineTarget(ctx, tx, worker.ExecutionTargetID)
+				if err != nil {
+					return err
+				}
+				targets[worker.ExecutionTargetID] = loaded
+				target = loaded
+			}
+			if err := enqueueWorkerOfflineForTarget(ctx, tx, worker, target); err != nil {
 				return err
 			}
 		}
@@ -621,10 +634,32 @@ func (s *Service) markStaleWorkers(ctx context.Context) error {
 }
 
 func enqueueWorkerOffline(ctx context.Context, tx *gorm.DB, worker persistence.WorkerInstance) error {
-	var target persistence.ExecutionTarget
-	if err := tx.WithContext(ctx).Select("id", "tenant_id", "organization_id").Where("id = ?", worker.ExecutionTargetID).Take(&target).Error; err != nil {
+	target, err := loadWorkerOfflineTarget(ctx, tx, worker.ExecutionTargetID)
+	if err != nil {
 		return err
 	}
+	return enqueueWorkerOfflineForTarget(ctx, tx, worker, target)
+}
+
+func loadWorkerOfflineTarget(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+) (persistence.ExecutionTarget, error) {
+	var target persistence.ExecutionTarget
+	if err := tx.WithContext(ctx).Select("id", "tenant_id", "organization_id").
+		Where("id = ?", targetID).Take(&target).Error; err != nil {
+		return persistence.ExecutionTarget{}, err
+	}
+	return target, nil
+}
+
+func enqueueWorkerOfflineForTarget(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	target persistence.ExecutionTarget,
+) error {
 	return outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: target.TenantID, Topic: "worker.offline",
 		MessageKey: worker.ID.String() + ":" + worker.LastHeartbeatAt.UTC().Format(time.RFC3339Nano),

@@ -319,7 +319,7 @@ func (s *Service) Start(ctx context.Context, connectionID uuid.UUID, callbackURL
 	if err != nil {
 		return StartResult{}, err
 	}
-	provider, err := oidc.NewProvider(ctx, connection.Issuer)
+	provider, err := oidc.NewProvider(s.oidcDiscoveryContext(ctx), connection.Issuer)
 	if err != nil {
 		return StartResult{}, problem.Wrap(502, "oidc_discovery_failed", "OIDC discovery failed.", err)
 	}
@@ -367,7 +367,7 @@ func (s *Service) CompleteOIDC(ctx context.Context, connectionID uuid.UUID, stat
 	if attemptSecret.Protocol != "" && attemptSecret.Protocol != "oidc" {
 		return CallbackResult{}, problem.New(400, "oidc_attempt_invalid", "OIDC login attempt is invalid.")
 	}
-	provider, err := oidc.NewProvider(ctx, connection.Issuer)
+	provider, err := oidc.NewProvider(s.oidcDiscoveryContext(ctx), connection.Issuer)
 	if err != nil {
 		return CallbackResult{}, problem.Wrap(502, "oidc_discovery_failed", "OIDC discovery failed.", err)
 	}
@@ -505,6 +505,17 @@ func (s *Service) restoreAttemptPayload(ctx context.Context, attempt persistence
 		return attemptPayload{}, problem.Wrap(500, protocol+"_attempt_invalid", strings.ToUpper(protocol)+" login attempt is invalid.", err)
 	}
 	return result, nil
+}
+
+// oidcDiscoveryContext binds OIDC discovery to the same redirect-guarded,
+// timeout-bounded client used for SAML metadata. The issuer is operator
+// supplied, so discovery is a server-side fetch of an attacker-influenced URL;
+// without this it runs on http.DefaultClient with no redirect policy at all.
+func (s *Service) oidcDiscoveryContext(ctx context.Context) context.Context {
+	if s.httpClient == nil {
+		return ctx
+	}
+	return oidc.ClientContext(ctx, s.redirectGuardedClient("invalid_oidc_discovery_redirect", "OIDC discovery"))
 }
 
 func (s *Service) decryptConnectionSecret(ctx context.Context, connection persistence.IdentityConnection) (string, error) {
