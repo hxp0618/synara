@@ -8,8 +8,9 @@
 **证据口径。** 外部事实来自 2026-07-26 的三路并行调研（产品线约 28 个一手来源、基础设施线含
 kubernetes-sigs/agent-sandbox 仓库级核对）加一次独立模型评审；关键来源见文末。延迟/规模数字多为厂商宣称
 （vendor claim），未经独立复测的一律照此标注；社区口碑类结论标注为非受控样本。内部事实以当日
-`codex/saas-tenancy-user` 工作树为准。本文为持续修订文档，服务"把本项目 cloud agent 能力做到与成熟
-产品同级的易用与稳定"这一目标；修订历史见文末。
+`codex/saas-tenancy-user` 工作树为准。本文为持续修订文档：第一至五节是市场评估（格局、事实、
+优劣势、方向确认），第六节是对齐手册（可执行清单与设计建议），服务"把本项目 cloud agent 能力做到
+与成熟产品同级的易用与稳定"这一目标；修订历史见文末。
 
 ## 一、市场三层格局与本方案位置
 
@@ -119,10 +120,10 @@ DR、billing、audit）。这个"多 Provider + 可自托管 + 企业正确性"�
    SOC 2 + ISO 27001（Anthropic）销售。附注：截至本文时间点，主检出工作树另有一份未跟踪的
    session-authority failover 演练报告状态为 failed，Stage 4"控制面故障不丢权威状态"完成条件保持
    未勾选是正确的。
-6. **产品表面差距大，但受制于劣势 1。** 2026 年桌面筹码：移动 App、Slack/Linear/GitHub 触发、定时
-   /事件自动化（Automations/Routines）、best-of-N、CI 自动修复、PR 审查产品（Bugbot / `@codex
-review` / Claude Code Review）。本方案域模型有 Automation 概念而产品表面基本只有 Web 会话。供给
-   慢时做不出好的自动化产品，故排序在延迟之后。
+6. **产品表面差距大，但受制于劣势 1。** 2026 年桌面筹码：移动 App、Slack/Linear/GitHub 触发、
+   定时/事件自动化（Automations/Routines）、best-of-N、CI 自动修复、PR 审查产品（Bugbot、
+   `@codex review`、Claude Code Review）。本方案域模型有 Automation 概念而产品表面基本只有 Web
+   会话。供给慢时做不出好的自动化产品，故排序在延迟之后。
 7. **快照/fork 原语缺失 + 自托管窗口非永久。** live 内存快照/fork 正成为分层点（E2B fork、Morph
    Infinibranch、CodeSandbox hibernate），本方案 checkpoint-to-object-storage 为 15 秒级而非 500 毫秒
    级，best-of-N 类并行探索在此成本结构下不可行；同时产品层玩家（Cursor BYO pool、Devin
@@ -147,10 +148,12 @@ review` / Claude Code Review）。本方案域模型有 Automation 概念而产�
 fencing、幂等 receipt、Recovery Bundle、调度决策证据图、Grant 凭证模型、供应链纪律。这些是延迟问题
 修复后真正构成销售差异的部分。
 
-## 六、易用性与稳定性对标清单
+## 六、易用性与稳定性对齐手册
 
-把前文事实转成可执行的对标项，服务"与成熟产品同级的易用、稳定"目标。状态：✅ 已有并领先或齐平；
-🟡 协议/域模型已有、产品面未露出；❌ 缺失。优先级与第四节劣势排序一致（P0 = 产品成立门槛）。
+把前文事实转成可执行的对标项与设计建议。本节由对标清单（U/S 编号）与五份建议组成：对齐路线
+（A/B/C 三阶段）、SLO 草案、环境模型、失败呈现与恢复 UX、diff 审查与 PR 流。状态：✅ 已有并领先
+或齐平；🟡 协议/域模型已有、产品面未露出；❌ 缺失。优先级与第四节劣势排序一致（P0 = 产品成立
+门槛）。
 
 易用性：
 
@@ -362,3 +365,5 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
 - 2026-07-27 r7：第六节新增"diff 审查与 PR 流建议"——结果页/行内评论即 steering/显式 PR 与分支
   命名空间/规则文件惯例四条收敛形态，加"跨 Provider 交叉审查"差异化落点。至此 U2/U4/S4/S5/S6
   入口/U6 的具体化闭环，第六节构成完整对齐手册。
+- 2026-07-27 r8：编辑收敛——第六节标题改为"对齐手册"并补小节导览；前言写明"一至五评估 + 六手册"
+  两段式结构；修复劣势 6 中被硬换行拆断的代码段与缩进。无内容性变更。
