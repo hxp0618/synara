@@ -8,7 +8,8 @@
 **证据口径。** 外部事实来自 2026-07-26 的三路并行调研（产品线约 28 个一手来源、基础设施线含
 kubernetes-sigs/agent-sandbox 仓库级核对）加一次独立模型评审；关键来源见文末。延迟/规模数字多为厂商宣称
 （vendor claim），未经独立复测的一律照此标注；社区口碑类结论标注为非受控样本。内部事实以当日
-`codex/saas-tenancy-user` 工作树为准。
+`codex/saas-tenancy-user` 工作树为准。本文为持续修订文档，服务"把本项目 cloud agent 能力做到与成熟
+产品同级的易用与稳定"这一目标；修订历史见文末。
 
 ## 一、市场三层格局与本方案位置
 
@@ -146,7 +147,43 @@ review` / Claude Code Review）。本方案域模型有 Automation 概念而产�
 fencing、幂等 receipt、Recovery Bundle、调度决策证据图、Grant 凭证模型、供应链纪律。这些是延迟问题
 修复后真正构成销售差异的部分。
 
-## 六、主要外部来源
+## 六、易用性与稳定性对标清单
+
+把前文事实转成可执行的对标项，服务"与成熟产品同级的易用、稳定"目标。状态：✅ 已有并领先或齐平；
+🟡 协议/域模型已有、产品面未露出；❌ 缺失。优先级与第四节劣势排序一致（P0 = 产品成立门槛）。
+
+易用性：
+
+| #   | 对标项            | 成熟产品基线                                                                       | Synara 现状                                            | 差距动作                                     |
+| --- | ----------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------- |
+| U1  | 秒级可开始        | E2B ~150–200ms；GKE 宣称 P90 200ms；三巨头以环境缓存隐藏冷启动                     | ❌ 秒到分钟级（劣势 1）                                | P0：fast-provision 三层供给 + SLO 门禁       |
+| U2  | 环境快照/缓存     | Codex 容器缓存 12h；Claude 快照约 7 天；Cursor VM snapshot；Jules Run-and-Snapshot | ❌ 每 Turn 物化 + 网络 fetch                           | P0：cache-first + volume snapshot（提案 §3） |
+| U3  | 中途 steering     | 三巨头全支持（Web/移动/Slack 追问）                                                | ✅ Steer/Interrupt 已统一为 durable Control Command    | 保持；移动/异步面见 U5                       |
+| U4  | 触发面/自动化     | cron/webhook/GitHub/Slack/Linear；Cursor 触发器最全；Claude Routines               | ❌ 域模型有 Automation 概念，无产品化触发器            | P1（依赖 P0——供给慢做不出好自动化）          |
+| U5  | 移动端与完成通知  | Cursor iOS、ChatGPT 移动端、Claude App 均可监控/追问                               | ❌ 仅 Web                                              | P2                                           |
+| U6  | diff 审查与 PR 流 | 三家 diff→PR 一键；独立 PR 审查产品（Bugbot/`@codex review`/Claude Code Review）   | 🟡 git worktree/branch/push/PR 生命周期已有（Stage 3） | P1：Web diff 审查 UX + PR 审查产品化         |
+| U7  | best-of-N 并行    | Codex `--attempts` 1–4；市场整体稀缺                                               | ❌ Fork 语义已有，成本结构不支持并行探索               | P2，依赖快照层（劣势 7）                     |
+| U8  | 多 repo 任务      | Cursor ≤20 repo；Claude 单 repo 为头号用户抱怨                                     | ❌ 单 Session 单 Workspace                             | P2：市场三方分裂处，潜在差异化位             |
+| U9  | 资源规格透明      | 仅 Claude 公布（4 vCPU/16GB/30GB）；Codex/Cursor 不公布且被公开抱怨                | 🟡 capacity class + 全量资源事实已持久化，未向用户露出 | P1：把内部指标产品化，低成本差异化           |
+
+稳定性：
+
+| #   | 对标项              | 成熟产品基线                                              | Synara 现状                                               | 差距动作                                    |
+| --- | ------------------- | --------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- |
+| S1  | 会话跨断线/重启持久 | Claude 关浏览器任务继续；三家均为异步任务模型             | ✅ 控制面权威 Session + SSE backlog + Recovery Bundle     | 已领先，保持                                |
+| S2  | 长任务与生命周期    | Copilot 59 分钟硬顶；Cursor 宣称 25–52h；上限普遍不公布   | ✅ suspend/resume + `absoluteExpiresAt` 三层策略化        | 已领先，保持                                |
+| S3  | Worker/Pod 故障连续 | 全部黑盒，无公开语义                                      | ✅ Generation fencing + 跨 Pod 恢复（Stage 3 验收）       | 已领先；缺生产 soak（劣势 5）               |
+| S4  | 失败可解释性        | Codex "job was killed" 无解释是公开抱怨                   | 🟡 Pod failure 分类、冷启动分位已持久化，未露出给最终用户 | P1：错误与延迟归因的用户可见化              |
+| S5  | 缓存失效语义        | Codex 团队共享缓存失效（secret 轮换全队冷重建）是公开痛点 | —（尚无缓存层）                                           | P0 设计输入：缓存键按环境隔离、失效显式可见 |
+| S6  | 默认限网 + 白名单   | 四家全有；Copilot 默认开启                                | ❌ fixtures 实际 `0.0.0.0/0`（劣势 3）                    | P0：域名白名单/代理层                       |
+| S7  | 隔离深度            | microVM（Cursor/E2B 等）或 gVisor（Modal/GKE）或整 VM     | ❌ 加固容器 + cgroup supervisor（劣势 2）                 | P0：RuntimeClass 采纳 gVisor/Kata           |
+| S8  | 安全响应履历        | 两家有已披露 CVE 与修复时间线；SOC 2 为售卖门槛           | 🟡 设计强于对手履历，但无外部审计/披露流程                | P2：Stage 5 渗透测试 + 安全响应制度         |
+
+读法：✅ 集中在"执行语义/恢复"（第三节优势的产品化投影），❌ 集中在"供给速度/安全边界/产品表面"
+（第四节劣势的投影）。P0 三项（U1/U2、S6、S7）构成"产品成立"最小集合；P1 四项（U4、U6、U9、S4）
+是"易用性齐平"集合，全部可复用既有域模型与指标，不需要新领域概念。
+
+## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
 pricing/enterprise/changelog；OpenAI `learn.chatgpt.com/docs`（cloud、environments/cloud-environment、
@@ -166,3 +203,9 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
 社区/二手（已按非受控样本处理）：openai/codex discussion #2251（限额）、OpenAI 社区论坛资源上限
 投诉、forum.cursor.com（outage、SSH 回退、snapshot drift）、anthropics/claude-code issues
 #23627/#35362/#44656/#27934（单 repo）、Reddit 质量对比聚合、Answer.AI 对 Devin 的独立评测。
+
+## 修订记录
+
+- 2026-07-26 r1：初版——三层格局、竞品速览、优势/劣势、对方向评估的确认与补充、来源。
+- 2026-07-26 r2：新增第六节"易用性与稳定性对标清单"（U1–U9 / S1–S8，含 P0/P1/P2 分级）；原
+  来源节改为第七节；前言标注本文为持续修订文档。
