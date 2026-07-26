@@ -11,6 +11,16 @@ import (
 // units before applying the existing per-Tenant FIFO. Claim already retains
 // the Execution Target row lock, so sequential claims for one shared Target
 // observe the previous winner as active before selecting the next Tenant.
+//
+// The ORDER BY is a correlated subquery, so PostgreSQL evaluates it once per
+// candidate row and cannot satisfy the ordering from an index. That makes
+// `idx_agent_executions_fair_share_active` (migration 000085) load-bearing
+// rather than an optional optimization: measured on PostgreSQL 17 with 200k
+// non-terminal rows across 50 Tenants and 5 Targets, one claim took ~55ms with
+// that index and ~8.2s after dropping it — roughly 150x. At a queue depth of
+// 500 it is ~25ms. Removing the index, or widening the status set here without
+// widening the index predicate to match, silently reintroduces the 8s claim.
+
 func applyClaimFairShareOrder(tx, claimQuery *gorm.DB, warmPool bool) *gorm.DB {
 	activeServiceUnits := tx.Table("agent_executions AS fair_active").
 		Select("COUNT(*)").
