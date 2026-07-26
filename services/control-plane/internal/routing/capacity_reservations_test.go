@@ -48,6 +48,27 @@ func TestHealthReservationAuthorityFiltersStaleGenerationsAndCannotDowngrade(t *
 	if codeOf(err) != "target_reservation_authority_required" {
 		t.Fatalf("downgrade err = %v", err)
 	}
+	overflow := fixture.createCapacityExecution(t, target.ID, "queued", 0)
+	fixture.now = fixture.now.Add(time.Second)
+	_, err = fixture.service.ObserveHealth(context.Background(), HealthObservation{
+		ExecutionTargetID: target.ID, Status: HealthHealthy, CapacityStatus: CapacityAvailable,
+		AvailableCapacityUnits: intPointer(2), AllocatedCapacityUnits: 1,
+		ReservationAuthority: &ReservationAuthorityObservation{
+			Mode: ReservationAuthorityExactActiveV1,
+			Acknowledgements: []ReservationIdentity{
+				{ExecutionID: execution.ID, Generation: 0},
+				{ExecutionID: overflow.ID, Generation: 0},
+			},
+		},
+		Source: "reservation-test", ObservedAt: fixture.now, TTL: time.Minute,
+	})
+	if codeOf(err) != "target_reservation_acknowledgements_exceed_occupancy" {
+		t.Fatalf("over-acknowledged occupancy err = %v", err)
+	}
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", overflow.ID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
 
 	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", execution.ID).
 		Updates(map[string]any{"status": "recovering", "generation": 1}).Error; err != nil {

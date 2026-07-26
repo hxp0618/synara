@@ -184,16 +184,17 @@ Stage 3 的独立执行计划：
       独立 read/manage 权限、Tenant/Organization GET/PUT API、CAS + 同事务 Audit、routed/fixed hard admission、
       policy/location commit revalidation、Execution/Recovery Bundle version+digest 快照及 PostgreSQL/SQLite 防绕过
       约束均已落地。v1 的资源规格边界是结构化 Capacity Class；任意 scheduling-template JSON 不作为授权规则。
-- [ ] 在现有 Target/Region、Provider/Pool correctness filtering 上增加 live capacity、配额和 Provider affinity
+- [x] 在现有 Target/Region、Provider/Pool correctness filtering 上增加 live capacity、配额和 Provider affinity
       的统一排序决策。
       当前 Provider soft affinity、Resume/new-operation 的 Tenant quota admission，以及 Migration `000069`
       target-local fresh-ready Warm Pool 偏好、Migration `000074` Tenant/Organization hard policy 均已进入公共
-      launch coordinator。`queue-pressure-v1` 又把 durable `queued/recovering` Execution 计数纳入跨 Target 的
-      strategy-compatible 软负载排名，并在 Target commit lock 下精确重算；变化返回
-      `target_routing_selection_stale / queue-pressure-changed`，不会在持锁后换第二个 Target。该计数不能在没有
-      publisher acknowledgement watermark 时与 Pod occupancy 相加作为硬 admission，否则 queued Pod 会被双计。
-      Migration `000076` 已补 final-winner immutable Decision/Candidate；剩余项是严格 reservation authority 以及
-      rejected routing/preview/policy/capability candidate 的完整结构化轨迹。
+      launch coordinator。无 acknowledgement 的 Target 保留 `queue-pressure-v1` 兼容软排名；Migration `000084`
+      新增 generation-scoped `exact-active-v1` acknowledgement 集合和 `reservation-aware-v1`：严格使用量为
+      Pod occupancy 加未确认的 `queued/recovering` reservation，已确认 queued Pod 不再双计。Health 发布、普通/
+      failover 新 Execution、恢复重入通过 Target 锁串行；PostgreSQL 两连接已证明第二个 admission 等待并在首个
+      reservation 提交后拒绝。每个新 Execution 另有不可变 Capacity Admission 摘要和 bounded metrics，契约见
+      [`Execution Capacity Reservation Authority v1`](docs/contracts/execution-capacity-reservation-authority-v1.md)。
+      rejected routing/preview/policy/capability candidate 的完整结构化轨迹仍属于下一层解释性证据。
 - [x] 建立每个新 Execution 的原子 `selected-only` Scheduling Decision：普通 Turn、review/compact 和 failover
       successor 共用创建入口，同事务冻结 final post-lock Target/Member、Health、queue pressure、DR readiness、
       Worker Pool/Capacity Class，并写 canonical candidate/set SHA-256；Event/Outbox 只携带 Decision ID、算法、
@@ -204,8 +205,9 @@ Stage 3 的独立执行计划：
 - [ ] 实现 Worker Pool 容量上报、可调度容量和排队时间指标。
       Reconciler 已上报 per-Pool desired/claimed/ready-idle 与 fresh/expired bounded metrics；新增
       `synara_execution_queue_depth` 和 `synara_execution_queue_oldest_age_seconds`，只按 bounded
-      `target_kind/capacity_class` 聚合 durable queued/recovering 状态，不暴露 Tenant/Target/Execution ID。
-      跨 Target 可调度总量和长期滚动预聚合仍未完成。
+      `target_kind/capacity_class` 聚合 durable queued/recovering 状态；Migration `000084` 又补 exact authority、
+      acknowledged/unacknowledged reservation 和 strict-used bounded aggregates，均不暴露 Tenant/Target/Execution
+      ID。异构 CPU/Memory/GPU 向量的跨 Target 可调度总量和长期滚动预聚合仍未完成。
 - [x] 冻结每 Execution Pod、常驻 Worker Pool、Warm Pool 的适用场景与 one-shot Warm Pod 安全契约。
 - [ ] 为交互式 Agent 建立冷启动硬上限；target-local release-aware Warm Pool 与实测 P50/P95/P99 已落地，
       生产 SLO 门禁仍未完成。

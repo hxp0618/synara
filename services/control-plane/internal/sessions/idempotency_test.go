@@ -11,6 +11,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
 
 func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.T) {
@@ -61,6 +62,7 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	assertCount(t, fixture, &persistence.AgentExecution{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.ExecutionSchedulingDecision{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ExecutionSchedulingCandidate{}, "tenant_id = ?", 1, fixture.tenantID)
+	assertCount(t, fixture, &persistence.ExecutionCapacityAdmission{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.WorkspaceMaterialization{}, "session_id = ?", 1, fixture.sessionID)
@@ -83,6 +85,15 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	}
 	if decision.ID != *execution.SchedulingDecisionID || decision.EvidenceCompleteness != "selected-only" {
 		t.Fatalf("Turn Execution scheduling decision = %#v", decision)
+	}
+	var capacityAdmission persistence.ExecutionCapacityAdmission
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&capacityAdmission).Error; err != nil {
+		t.Fatal(err)
+	}
+	if capacityAdmission.AdmissionMode != routing.CapacityAdmissionFixedUnboundedV1 ||
+		capacityAdmission.SnapshotSHA256 != routing.CapacityAdmissionSHA256(capacityAdmission) {
+		t.Fatalf("Turn Execution capacity admission = %#v", capacityAdmission)
 	}
 	var workspace persistence.RemoteWorkspace
 	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
@@ -117,7 +128,9 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 		t.Fatalf("Turn modes were not captured in the authoritative Event: %#v", event.Payload)
 	}
 	if event.Payload["schedulingDecisionId"] != decision.ID.String() ||
-		event.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 {
+		event.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 ||
+		event.Payload["capacityAdmissionMode"] != capacityAdmission.AdmissionMode ||
+		event.Payload["capacityAdmissionSnapshotSha256"] != capacityAdmission.SnapshotSHA256 {
 		t.Fatalf("Turn Event omitted scheduling decision identity: %#v", event.Payload)
 	}
 	var dispatch persistence.OutboxMessage
@@ -126,7 +139,9 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 		t.Fatal(err)
 	}
 	if dispatch.Payload["schedulingDecisionId"] != decision.ID.String() ||
-		dispatch.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 {
+		dispatch.Payload["schedulingCandidateSetSha256"] != decision.CandidateSetSHA256 ||
+		dispatch.Payload["capacityAdmissionMode"] != capacityAdmission.AdmissionMode ||
+		dispatch.Payload["capacityAdmissionSnapshotSha256"] != capacityAdmission.SnapshotSHA256 {
 		t.Fatalf("Execution dispatch omitted scheduling decision identity: %#v", dispatch.Payload)
 	}
 	sourceProposedPlan, ok := event.Payload["sourceProposedPlan"].(map[string]any)

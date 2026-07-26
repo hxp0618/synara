@@ -96,7 +96,7 @@ func TestCandidateHashCoversDRReadiness(t *testing.T) {
 	}
 }
 
-func TestQueuePressureSelectedOnlyUsesMemberLocationAndAuthority(t *testing.T) {
+func TestReservationAwareSelectedOnlyUsesMemberLocationAndAuthority(t *testing.T) {
 	db := schedulingDecisionTestDB(t)
 	execution := fixedExecutionFixture()
 	groupID, memberID := uuid.New(), uuid.New()
@@ -129,13 +129,16 @@ func TestQueuePressureSelectedOnlyUsesMemberLocationAndAuthority(t *testing.T) {
 	candidate.Priority = &priority
 	candidate.Weight = &weight
 
-	input := NewSelectedOnlyInput(uuid.New(), AlgorithmQueuePressureV1, execution.QueuedAt, candidate)
+	input := NewSelectedOnlyInput(uuid.New(), AlgorithmReservationAwareV1, execution.QueuedAt, candidate)
 	decision, err := CreateExecution(context.Background(), db, &execution, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decision.SelectedRegion != selectedRegion || decision.SelectedClusterID != selectedCluster {
 		t.Fatalf("Decision selected location = %s/%s, want Member %s/%s", decision.SelectedRegion, decision.SelectedClusterID, selectedRegion, selectedCluster)
+	}
+	if decision.AlgorithmVersion != AlgorithmReservationAwareV1 {
+		t.Fatalf("Decision algorithm = %s", decision.AlgorithmVersion)
 	}
 }
 

@@ -32,6 +32,10 @@ review/compact, and disaster-recovery successor creation use one shared transact
 5. verifies the stored candidate hash, count, ordinal, selection, and aggregate hash;
 6. appends the Event and Outbox dispatch in the caller's same transaction.
 
+Migration `000084_execution_capacity_reservation_authority.sql` extends the same transaction with one immutable
+`execution_capacity_admissions` snapshot. It is a separate one-to-one graph because fixed Targets and routed Targets share
+capacity admission, while only routed selections have a Candidate/Member graph.
+
 Any later Event, Outbox, audit, or command failure rolls back the entire graph. Idempotent request replay returns the
 original graph and never creates a second Decision.
 
@@ -43,14 +47,20 @@ The selected Candidate contains only bounded scheduling authority:
 - Target Group, Member, and policy versions for routed decisions;
 - Member Region/Cluster for routed decisions, or effective placement Region/Cluster for fixed-Target decisions;
 - health version/status/capacity, observation/expiry, numeric capacity, and allocated units;
-- `queue-pressure-v1` queued units, effective load rank, Member priority, and weight;
+- `queue-pressure-v1` queued units, or `reservation-aware-v1` exact-authority effective load rank, plus Member priority
+  and weight;
 - DR readiness version, source/destination domains, replication watermark, readiness bits, and observation/expiry;
 - Worker Pool ID/version, Capacity Class, and placement-policy version;
 - eligibility, selected ordinal, and a bounded stable rejection code when complete evidence is implemented.
 
 It never copies encrypted Target configuration, Target capability maps, Pool scheduling templates, policy documents,
-Provider error details, publisher identity, or free-form health/readiness reasons. Events and Outbox messages carry only
-Decision ID, algorithm version, evidence completeness, and candidate-set digest—not the candidate body.
+Provider error details, publisher identity, or free-form health/readiness reasons. Events and Outbox messages carry the
+Decision ID, algorithm version, evidence completeness, candidate-set digest, capacity-admission mode, and
+capacity-admission digest—not either evidence body.
+
+The capacity-admission snapshot separately freezes Health version/source/timestamps, capacity ceiling and allocation,
+exact acknowledgement count/digest, active/unacknowledged reservation units, strict used units, and its canonical
+SHA-256. See [`Execution Capacity Reservation Authority v1`](execution-capacity-reservation-authority-v1.md).
 
 ## Location authority
 
@@ -74,10 +84,11 @@ DR readiness observations that were not retained on the Execution.
 ## Database invariants and lifecycle
 
 - Decision and Candidate updates are rejected.
+- Capacity Admission updates are rejected.
 - Direct Candidate deletion fails while its Decision survives.
 - Direct Decision deletion fails while its Execution survives.
-- Deleting an Execution through the existing retention or tenant-purge lifecycle removes its Decision and Candidates;
-  audit evidence does not make the parent Execution undeletable.
+- Deleting an Execution through the existing retention or tenant-purge lifecycle removes its Decision, Candidates, and
+  Capacity Admission evidence; audit evidence does not make the parent Execution undeletable.
 - PostgreSQL uses deferred tenant-scoped graph constraints so Execution and Decision can be inserted atomically in either
   direction inside one transaction.
 - SQLite retains the same ownership, shape, selection, and immutability fences. The Go writer remains its authority for

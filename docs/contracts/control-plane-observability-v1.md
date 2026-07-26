@@ -36,6 +36,8 @@ Metrics may use only bounded labels:
 - physical Worker target kind, Pool mode, capacity class, and lifecycle state;
 - Execution Target health/capacity state and immutable failover status/reason;
 - immutable signed Platform routing publication count and latest receive timestamp, with no publisher/Target label;
+- capacity-admission mode and exact reservation-authority freshness; acknowledgement identities and Target IDs are never
+  labels;
 - Worker Pool warm-capacity class, fresh/expired state, warm-supported state, and bounded counter kind;
 - bounded Reconciler controller name and active/expired lease state;
 - cloud provider, currency, charge kind, and bounded reconciliation state;
@@ -87,6 +89,9 @@ The endpoint includes:
 - immutable signed routing-ingestion progress as `synara_platform_routing_publications_total` and
   `synara_platform_routing_publication_latest_timestamp_seconds`; publisher identity, key ID, nonce, and Target ID are
   intentionally absent from metric labels and remain queryable only in the receipt table;
+- retained immutable admission evidence as `synara_execution_capacity_admission_evidence{mode}` and exact Target
+  reservation authority/acknowledged/unacknowledged/strict-used unit aggregates by bounded `freshness`; no Tenant,
+  Target, Execution, Generation, Pod, publisher, or digest identity is exposed;
 - expiring per-Pool warm-capacity authority as
   `synara_worker_pool_warm_capacity_authorities{capacity_class,freshness,warm_supported}` and fresh desired/claimed/
   ready-idle unit sums as `synara_worker_pool_warm_capacity_units{capacity_class,kind}`;

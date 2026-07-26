@@ -63,6 +63,19 @@ type sharedActualAllocationMetric struct {
 	UnallocatedAmountMicros int64  `gorm:"column:unallocated_amount_micros"`
 }
 
+type capacityAdmissionMetric struct {
+	AdmissionMode string `gorm:"column:admission_mode"`
+	Count         int64  `gorm:"column:count"`
+}
+
+type reservationAuthorityMetric struct {
+	Freshness         string `gorm:"column:freshness"`
+	TargetCount       int64  `gorm:"column:target_count"`
+	AcknowledgedUnits int64  `gorm:"column:acknowledged_units"`
+	AllocatedUnits    int64  `gorm:"column:allocated_units"`
+	Unacknowledged    int64  `gorm:"column:unacknowledged_units"`
+}
+
 func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 	ctx context.Context,
 	output *bytes.Buffer,
@@ -91,6 +104,9 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		"status", "reason", failovers,
 	)
 	if err := r.writePlatformRoutingPublicationMetrics(ctx, output); err != nil {
+		return err
+	}
+	if err := r.writeCapacityReservationMetrics(ctx, output, now); err != nil {
 		return err
 	}
 	if err := r.writeWorkerPoolWarmCapacityMetrics(ctx, output, now); err != nil {
@@ -177,6 +193,109 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		)
 	}
 	return nil
+}
+
+func (r *Registry) writeCapacityReservationMetrics(
+	ctx context.Context,
+	output *bytes.Buffer,
+	now time.Time,
+) error {
+	if !r.db.Migrator().HasTable("execution_capacity_admissions") ||
+		!r.db.Migrator().HasTable("execution_target_reservation_acknowledgements") {
+		return nil
+	}
+	var admissions []capacityAdmissionMetric
+	if err := r.db.WithContext(ctx).Table("execution_capacity_admissions").
+		Select("admission_mode, COUNT(*) AS count").
+		Group("admission_mode").Order("admission_mode").Scan(&admissions).Error; err != nil {
+		return fmt.Errorf("collect Execution capacity admission metrics: %w", err)
+	}
+	writeHelp(
+		output,
+		"synara_execution_capacity_admission_evidence",
+		"Retained immutable Execution capacity admission snapshots by bounded authority mode.",
+		"gauge",
+	)
+	for _, row := range admissions {
+		fmt.Fprintf(
+			output,
+			"synara_execution_capacity_admission_evidence%s %d\n",
+			labels(map[string]string{"mode": boundedCapacityAdmissionMode(row.AdmissionMode)}),
+			row.Count,
+		)
+	}
+
+	var authorities []reservationAuthorityMetric
+	if err := r.db.WithContext(ctx).Table("execution_target_health AS health").
+		Select(`CASE WHEN health.expires_at > ? THEN 'fresh' ELSE 'expired' END AS freshness,
+			COUNT(*) AS target_count,
+			COALESCE(SUM(health.reservation_acknowledged_units), 0) AS acknowledged_units,
+			COALESCE(SUM(health.allocated_capacity_units), 0) AS allocated_units`, now).
+		Where("health.reservation_authority_mode = ?", "exact-active-v1").
+		Group("freshness").Order("freshness").Scan(&authorities).Error; err != nil {
+		return fmt.Errorf("collect Target reservation authority metrics: %w", err)
+	}
+	type unacknowledgedMetric struct {
+		Freshness string `gorm:"column:freshness"`
+		Count     int64  `gorm:"column:count"`
+	}
+	var unacknowledged []unacknowledgedMetric
+	if err := r.db.WithContext(ctx).Table("agent_executions AS execution").
+		Select(`CASE WHEN health.expires_at > ? THEN 'fresh' ELSE 'expired' END AS freshness,
+			COUNT(*) AS count`, now).
+		Joins(`JOIN execution_target_health AS health
+			ON health.execution_target_id = execution.execution_target_id
+			AND health.reservation_authority_mode = 'exact-active-v1'`).
+		Joins(`LEFT JOIN execution_target_reservation_acknowledgements AS acknowledgement
+			ON acknowledgement.execution_target_id = execution.execution_target_id
+			AND acknowledgement.execution_id = execution.id
+			AND acknowledgement.execution_generation = execution.generation
+			AND acknowledgement.health_version = health.version`).
+		Where("execution.status IN ? AND acknowledgement.execution_id IS NULL", []string{"queued", "recovering"}).
+		Group("freshness").Order("freshness").Scan(&unacknowledged).Error; err != nil {
+		return fmt.Errorf("collect unacknowledged Target reservation metrics: %w", err)
+	}
+	unacknowledgedByFreshness := make(map[string]int64, len(unacknowledged))
+	for _, row := range unacknowledged {
+		unacknowledgedByFreshness[row.Freshness] = row.Count
+	}
+	for _, metric := range []struct {
+		name string
+		help string
+	}{
+		{"synara_execution_target_reservation_authorities", "Exact Target reservation authorities by bounded freshness state."},
+		{"synara_execution_target_reservation_acknowledged_units", "Active reservation units proven to be reflected in published Target occupancy."},
+		{"synara_execution_target_reservation_unacknowledged_units", "Active queued or recovering reservation units not reflected in the current Target occupancy authority."},
+		{"synara_execution_target_strict_capacity_used_units", "Allocated Target occupancy plus current unacknowledged reservation units."},
+	} {
+		writeHelp(output, metric.name, metric.help, "gauge")
+	}
+	for _, row := range authorities {
+		freshness := boundedFreshness(row.Freshness)
+		metricLabels := labels(map[string]string{"freshness": freshness})
+		unacknowledgedUnits := unacknowledgedByFreshness[row.Freshness]
+		fmt.Fprintf(output, "synara_execution_target_reservation_authorities%s %d\n", metricLabels, row.TargetCount)
+		fmt.Fprintf(output, "synara_execution_target_reservation_acknowledged_units%s %d\n", metricLabels, row.AcknowledgedUnits)
+		fmt.Fprintf(output, "synara_execution_target_reservation_unacknowledged_units%s %d\n", metricLabels, unacknowledgedUnits)
+		fmt.Fprintf(output, "synara_execution_target_strict_capacity_used_units%s %d\n", metricLabels, row.AllocatedUnits+unacknowledgedUnits)
+	}
+	return nil
+}
+
+func boundedCapacityAdmissionMode(value string) string {
+	switch value {
+	case "fixed-unbounded-v1", "publisher-health-v1", "exact-active-v1":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedFreshness(value string) string {
+	if value == "fresh" {
+		return "fresh"
+	}
+	return "expired"
 }
 
 func (r *Registry) writePlatformRoutingPublicationMetrics(ctx context.Context, output *bytes.Buffer) error {

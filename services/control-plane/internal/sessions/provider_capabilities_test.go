@@ -270,7 +270,7 @@ func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T
 		Take(&decision).Error; err != nil {
 		t.Fatal(err)
 	}
-	if decision.ID != *execution.SchedulingDecisionID || decision.AlgorithmVersion != "queue-pressure-v1" ||
+	if decision.ID != *execution.SchedulingDecisionID || decision.AlgorithmVersion != "reservation-aware-v1" ||
 		decision.EvidenceCompleteness != "selected-only" || decision.CandidateCount != 1 ||
 		decision.SelectedExecutionTargetID != destination.ID {
 		t.Fatalf("routed scheduling decision = %#v", decision)
@@ -296,6 +296,16 @@ func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T
 		candidate.Weight == nil || *candidate.Weight != member.Weight ||
 		candidate.WorkerPoolID == nil || *candidate.WorkerPoolID != destinationPool.ID {
 		t.Fatalf("routed scheduling candidate = %#v, member = %#v, health = %#v", candidate, member, health)
+	}
+	var capacityAdmission persistence.ExecutionCapacityAdmission
+	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).
+		Take(&capacityAdmission).Error; err != nil {
+		t.Fatal(err)
+	}
+	if capacityAdmission.AdmissionMode != routing.CapacityAdmissionExactActiveV1 ||
+		capacityAdmission.UnacknowledgedReservationUnits == nil ||
+		capacityAdmission.SnapshotSHA256 != routing.CapacityAdmissionSHA256(capacityAdmission) {
+		t.Fatalf("routed capacity admission = %#v", capacityAdmission)
 	}
 	var session persistence.AgentSession
 	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).Take(&session).Error; err != nil {
@@ -645,9 +655,13 @@ func configureCapabilityRouteGroup(
 			Status:                 routing.HealthHealthy,
 			CapacityStatus:         routing.CapacityAvailable,
 			AvailableCapacityUnits: &capacity,
-			Source:                 "provider-capability-route-test",
-			ObservedAt:             now,
-			TTL:                    time.Minute,
+			ReservationAuthority: &routing.ReservationAuthorityObservation{
+				Mode:             routing.ReservationAuthorityExactActiveV1,
+				Acknowledgements: []routing.ReservationIdentity{},
+			},
+			Source:     "provider-capability-route-test",
+			ObservedAt: now,
+			TTL:        time.Minute,
 		}); err != nil {
 			t.Fatal(err)
 		}

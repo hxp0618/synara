@@ -224,6 +224,20 @@ func TestCapacityAdmissionPostgresSerializesConcurrentReservations(t *testing.T)
 		evidence.SnapshotSHA256 != CapacityAdmissionSHA256(evidence) {
 		t.Fatalf("capacity admission evidence = %#v", evidence)
 	}
+	if err := db.Model(&evidence).Update("active_reservation_units", 9).Error; err == nil {
+		t.Fatal("PostgreSQL allowed immutable capacity admission evidence to be updated")
+	}
+	var health persistence.ExecutionTargetHealth
+	if err := db.Where("execution_target_id = ?", selection.Target.ID).Take(&health).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&persistence.ExecutionTargetReservationAcknowledgement{
+		ExecutionTargetID: selection.Target.ID, ExecutionID: firstExecution.ID,
+		ExecutionGeneration: firstExecution.Generation, HealthVersion: health.Version,
+		AcknowledgedAt: time.Now().UTC(),
+	}).Error; err == nil {
+		t.Fatal("PostgreSQL allowed a reservation acknowledgement to be inserted into the current Health version")
+	}
 }
 
 func openRoutingCommitPostgresDB(t *testing.T) *gorm.DB {

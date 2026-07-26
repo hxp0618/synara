@@ -516,11 +516,14 @@ export const TimelineWorkEntryRow = memo(function TimelineWorkEntryRow(props: {
   onOpenAutomation?: (automationId: string) => void;
   subagentToolTraceByThreadId?: ReadonlyMap<string, SubagentToolTrace>;
 }) {
+  // Defaults are applied in the body (not in the destructuring pattern): a default
+  // value inside a destructuring pattern makes React Compiler bail out on the whole
+  // component, silently dropping memoization for every tool-call row.
   const {
     workEntry,
     chatMetaFontSizePx,
-    textFontSizePx = chatMetaFontSizePx,
-    density = "default",
+    textFontSizePx: textFontSizePxProp,
+    density: densityProp,
     fileDiffStatByPath,
     markdownCwd,
     onImageExpand,
@@ -531,6 +534,8 @@ export const TimelineWorkEntryRow = memo(function TimelineWorkEntryRow(props: {
     onOpenAutomation,
     subagentToolTraceByThreadId,
   } = props;
+  const textFontSizePx = textFontSizePxProp ?? chatMetaFontSizePx;
+  const density = densityProp ?? "default";
   const compact = density === "compact";
   const isCodexStatusRow = isCodexActivityStatusWorkEntry(workEntry);
   const EntryIcon = workEntryIcon(workEntry);

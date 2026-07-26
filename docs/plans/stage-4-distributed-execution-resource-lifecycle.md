@@ -60,9 +60,11 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
   [`Execution Scheduling Policy v1`](../contracts/execution-scheduling-policy-v1.md)；Migration `000074` 已实现
   append-only revision/head、CAS + 原子 Audit、精确 Organization 交集、fixed/routed policy 和 location 提交
   复核、Execution 与 Recovery Bundle version/digest 快照，以及 PostgreSQL/SQLite insert/immutability 防绕过。
-- `queue-pressure-v1` 已将 durable `queued/recovering` Execution 作为保守软压力进入跨 Target 排名，并在
-  Target commit lock 下重算以阻止过期决策提交；它不会在缺少 publisher acknowledgement watermark 时把 queue
-  与 Pod occupancy 合并为硬容量。
+- `queue-pressure-v1` 保留无 acknowledgement publisher 的兼容软排名；Migration `000084` 已新增
+  generation-scoped `exact-active-v1` acknowledgement、`reservation-aware-v1` 排名/硬准入和不可变 Capacity
+  Admission 证据。Pod occupancy 只与未确认 reservation 相加，恢复后的新 Generation 不复用旧确认；Health、
+  新 Execution 与恢复重入通过 Target 锁串行。契约见
+  [`Execution Capacity Reservation Authority v1`](../contracts/execution-capacity-reservation-authority-v1.md)。
 - 共享 `fairqueue` 已进入 Kubernetes batch Pod 选择和通用/暖池 Worker Claim；Claim 在 Target lock 下按
   Tenant active service units equal-share，并有真实 PostgreSQL idle-Tenant 优先证明。
 - Migration `000076` 为普通 Turn、review/compact 和 failover successor 建立原子 `selected-only` Scheduling
@@ -87,7 +89,7 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
 - 跨故障域 Artifact/Checkpoint 复制与生产 Metadata 控制面切换。
 - 受保护 supervisor 的生产宿主机特权验收。
 - 托管云多可用区与生产时长 Kubernetes soak。
-- 严格 reservation authority、完整 rejected-candidate 重放轨迹和生产多租户 load/soak 证据。
+- 完整 rejected-candidate 重放轨迹和生产多租户 load/soak 证据。
 
 ### 1.2 本地验收证据（不替代托管云/生产验收）
 

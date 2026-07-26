@@ -74,18 +74,21 @@ strategy-specific load, priority, and weight tie-breaks. Missing affinity is neu
 ineligible, and affinity cannot outrank an explicit Target/Region choice or healthier capacity. A saturated Target is
 never treated as available merely because it has a higher policy priority or Provider preference.
 
-`queue-pressure-v1` treats each durable `agent_executions` row in `queued | recovering` as one not-yet-serviced unit.
-For a positive numeric capacity ceiling, balanced load rank uses
-`(allocatedCapacityUnits + queuedExecutionUnits) / (ceiling * memberWeight)`; when the publisher supplies no numeric
-ceiling, it uses `queuedExecutionUnits / memberWeight`. `balanced` evaluates this effective load before priority, while
-`priority | latency` retain priority before effective load. Terminal, leased, running, waiting-for-approval, and
-suspended Executions are not included in this queue count.
+`queue-pressure-v1` remains the compatibility path for publishers without reservation authority: it treats each durable
+`agent_executions` row in `queued | recovering` as one conservative soft-pressure unit and does not add that count to Pod
+occupancy for hard admission.
 
-This is deliberately a conservative **soft ranking signal**, not hard capacity reservation. A Kubernetes Pod may already
-be included in the publisher's allocated occupancy while its Execution is still `queued`, so summing both can double
-count. Hard eligibility continues to use only the fresh health publisher's `capacityStatus` and numeric occupancy. Strict
-reservation requires a publisher acknowledgement watermark or an equivalent authority that proves which queued units
-are already reflected in occupancy; v1 does not invent that proof.
+Migration `000084` adds the stronger `reservation-aware-v1` path. An `exact-active-v1` Health publisher atomically names
+the sorted `(executionId, generation)` set already represented in `allocatedCapacityUnits`. Hard and ranking usage become
+`allocatedCapacityUnits + unacknowledged active reservation units`; an acknowledged queued Pod is therefore not counted
+twice. A recovered Generation cannot reuse its predecessor's acknowledgement. New admission, active-state recovery, and
+Health publication serialize on the Target row. Full rules, immutable admission evidence, downgrade behavior, and
+publisher responsibilities are frozen in
+[`Execution Capacity Reservation Authority v1`](execution-capacity-reservation-authority-v1.md).
+
+`balanced` evaluates the strategy-compatible effective load before priority, while `priority | latency` retain priority
+before effective load. Terminal, leased, running, waiting-for-approval, and suspended Executions are not active
+reservations.
 
 Provider affinity is not Provider support authority. Routing eligibility first uses a read-only placement preview and a
 Provider capability check scoped to the selected Pool semantics. After final placement acquires the Target/policy locks,
@@ -182,8 +185,9 @@ browser heartbeat as authority. It accepts only an Ed25519-signed publication fr
 
 The configuration contains public keys only. Each publisher identity has one to eight rotation keys and exact Target
 scopes. Every Target scope freezes `platform-shared` versus an exact `tenant-owned` Tenant ID, independently authorizes
-health publication, and lists exact `(sourceDrDomain, drDomain)` pairs. Overlapping health or source-domain authorities
-across publisher identities are rejected at startup. Tenant-owned Kubernetes health remains owned by the managed
+health publication, optionally authorizes exact reservation publication with `publishReservations`, and lists exact
+`(sourceDrDomain, drDomain)` pairs. Reservation authority requires health authority. Overlapping health or source-domain
+authorities across publisher identities are rejected at startup. Tenant-owned Kubernetes health remains owned by the managed
 Kubernetes Reconciler; the signed integration route rejects an overlapping health write, although a separately scoped DR
 replication publisher may publish readiness for that Target.
 
@@ -195,8 +199,10 @@ clock-skew tolerance; health and readiness TTL remain independently bounded to 1
 must be unique and sorted by `sourceDrDomain`.
 
 The nested health field order is `status`, `capacityStatus`, optional `availableCapacityUnits`,
-`allocatedCapacityUnits`, optional `reason`, `ttlSeconds`. Each readiness item uses `sourceDrDomain`, `drDomain`,
-`replicatedThroughAt`, `artifactsReady`, `checkpointsReady`, `memoryReady`, optional `reason`, `ttlSeconds`. Integrations
+`allocatedCapacityUnits`, optional `reservationAuthority`, optional `reason`, `ttlSeconds`. Reservation authority uses
+`mode: exact-active-v1` and a non-null acknowledgement array sorted by `executionId` then `generation`. Each readiness
+item uses `sourceDrDomain`, `drDomain`, `replicatedThroughAt`, `artifactsReady`, `checkpointsReady`, `memoryReady`, optional
+`reason`, `ttlSeconds`. Integrations
 should use `go run ./cmd/routing-authority-sign --private-key-file /run/secrets/publisher-key.pem` rather than reproduce
 the encoder. The tool reads one unsigned JSON value on stdin, rejects unknown fields, existing signatures, symlinked or
 group/other-writable key files, and emits the signed request on stdout. `--public-key-only` emits the padded-base64 public
@@ -212,6 +218,10 @@ sealed response even after the request window closes, while using the nonce for 
 conflict. `synara_platform_routing_publications_total` and
 `synara_platform_routing_publication_latest_timestamp_seconds` expose bounded publication progress; HTTP status metrics
 cover authenticated replay and rejection without publisher or Target labels.
+
+Migration `000084` binds exact reservation acknowledgements to the same Health version, enforces count/digest and
+one-acknowledgement-per-allocated-slot bounds, and writes immutable per-Execution capacity-admission evidence. The signed
+receipt response includes the committed reservation authority summary.
 
 The location-outage API is a narrow tenant operator authority. `PUT` upserts one `(region, optional clusterId)` row with a
 fresh observation timestamp and TTL; it does not mutate any `execution_targets` row, including platform-shared Targets.

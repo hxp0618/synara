@@ -333,7 +333,10 @@ export function useProviderModelCatalog(input: {
       "opencode",
       "pi",
     ] as const) {
-      const dynamicModels = dynamicSources[provider]?.models;
+      // A disabled runtime discovery must also ignore anything a previous run
+      // left in the query cache, otherwise stale runtime models leak into the
+      // static catalog the caller asked for.
+      const dynamicModels = runtimeDiscoveryEnabled ? dynamicSources[provider]?.models : undefined;
       if (dynamicModels && dynamicModels.length > 0) {
         result[provider] = mergeDynamicModelOptions({
           provider,
@@ -356,6 +359,7 @@ export function useProviderModelCatalog(input: {
     modelHintByProvider,
     openCodeDynamicModelsQuery.data,
     piDynamicModelsQuery.data,
+    runtimeDiscoveryEnabled,
   ]);
 
   const loadingModelProviders = useMemo<Partial<Record<ProviderKind, boolean>>>(
