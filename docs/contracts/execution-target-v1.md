@@ -5,11 +5,11 @@ control plane's Deployment Profile and to workspace mode.
 
 ## Kinds
 
-| Kind         | v1 contract                                                     | Current-phase boundary                                           |
-| ------------ | --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `local`      | Worker runs on the control-plane/local host                     | `synara-agentd` runner and automatic supervision are implemented |
-| `ssh`        | `synara-agentd` registers from a remote host                    | managed install/upgrade/revoke is implemented                    |
-| `docker`     | registered workers execute in a container pool                  | managed pool reconciler is implemented                           |
+| Kind         | v1 contract                                                     | Current-phase boundary                                                                                                                                           |
+| ------------ | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local`      | Worker runs on the control-plane/local host                     | `synara-agentd` runner and automatic supervision are implemented                                                                                                 |
+| `ssh`        | `synara-agentd` registers from a remote host                    | managed install/upgrade/revoke is implemented                                                                                                                    |
+| `docker`     | registered workers execute in a container pool                  | managed pool reconciler is implemented                                                                                                                           |
 | `kubernetes` | one execution-pinned Worker Pod per queued/recovering execution | scheduler/reconciler and security foundation are implemented; Stage 4 adds `warm`/`general` pool modes ([Worker Pool/Placement v1](worker-pool-placement-v1.md)) |
 
 All kinds use `RegisterWorker`, `Heartbeat`, `ClaimExecution`, leases, generation fencing, runtime
