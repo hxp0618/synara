@@ -27,7 +27,8 @@
 | Stage 2 | Go Control Plane 收口与生产化                   | 仓库内完成 / 已验收 | Stage 1          |
 | Stage 3 | Provider Runtime 与远程 Worker 产品化           | 已完成 / 已验收     | Stage 2          |
 | Stage 4 | 分布式执行平台和 K8s 多集群生产化               | IN PROGRESS         | Stage 2、Stage 3 |
-| Stage 5 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-4        |
+| Stage 5 | Provider 沙箱与运行时隔离加固                   | TODO                | Stage 3、Stage 4 |
+| Stage 6 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-5        |
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
@@ -343,7 +344,90 @@ Stage 3 的独立执行计划：
       复制与 successor 消费、真实 readiness publisher、Workload Identity 以及权威 RTO/RPO。
 - [ ] Personal、SSH、Docker 单机部署没有因 K8s 调度模型产生回归。
 
-### Stage 5：企业 SaaS GA、运营、安全与商业化
+### Stage 5：Provider 沙箱与运行时隔离加固
+
+状态：TODO。短板审计日期 2026-07-26，证据取自当前工作树代码。
+
+审计结论：现有 protected cgroup supervisor 是**围栏（fencing）与可靠终止（termination）**机制，
+不是**约束（confinement）**机制。它的 flock 根租约、fd-relative + `O_NOFOLLOW`、孤儿回收和签名
+attestation 都是扎实实现，但设计目标是"证明进程归属并保证杀得掉"，资源限制本就不在
+[契约](docs/contracts/agentd-protected-cgroup-supervisor-v2.md)的保证集合内。真正承重的隔离边界
+是外层容器/VM，而 protected 模式是 Linux SSH/local 专属，Docker、Kubernetes、macOS 均为该契约的
+明确非目标——即产品主推的两种 Target 上，in-process 这层没有增加任何额外约束。
+
+Provider CLI 自带沙箱是主动关闭的（`apps/provider-host/src/codexAppServerRuntime.ts` 的
+`sandbox: "danger-full-access"`，`claudeAgentSdkRuntime.ts` 非交互运行的 `bypassPermissions` +
+`allowDangerouslySkipPermissions`），代码注释已说明理由是"容器才是隔离边界，且标准容器内
+bubblewrap 无法创建 user namespace"。该选择本身成立，但它把"容器边界必须足够强"变成硬前提。
+本阶段负责让这个前提在每种 Target 上真正成立，或显式声明该 Target 不是多租户面。
+
+本阶段排在企业 GA 之前：下列缺口正是 Stage 6"跨 Tenant 越权、SSRF、容器逃逸测试"必然命中的
+问题，在 GA 前修复远比在 GA 后修复便宜。
+
+#### 目标
+
+- 单个 Execution 不能因资源耗尽影响同宿主的其他 Execution 或 Worker 本身。
+- 共享 Worker 上的跨租户机密性不依赖路径不可猜测性。
+- 每种 Execution Target 的隔离强度有明确声明，弱隔离 Target 不被当作多租户面使用。
+- 出网边界不因 operator 配置疏漏而静默失效。
+
+#### TODO
+
+- [ ] 为 Provider cgroup 写入实际资源上限：`pids.max`（优先级最高，防 fork 炸弹）、`memory.max`、
+      `cpu.max`，并需先在委派父目录写 `cgroup.subtree_control` 启用控制器。当前
+      `protected_cgroup_supervisor_linux.go` 只操作 `cgroup.procs`/`cgroup.kill`/`cgroup.events`/
+      `cgroup.controllers`，全仓库不存在任何资源上限写入，Provider 可耗尽宿主 PID/内存/CPU。
+      Agent 的常规工作（`npm install`、编译、跑测试）使这成为无需恶意租户即可触发的可靠性风险。
+- [ ] 将 Kubernetes Pod 的 CPU/Memory/EphemeralStorage limits 从可选改为必填：
+      `kubernetes_pod_spec.go` 中每个字段均为 `if value != ""` 可选，`kubernetes_reconciler.go`
+      的校验只查 quantity 格式、不查是否存在，空配置会静默产生无上限 Pod。
+- [ ] 消除 general_pool Worker 的跨租户残留。当前 claim 查询没有 worker→tenant 绑定谓词，
+      `claim_fair_queue.go` 的设计就是按租户轮转；叠加执行结束后无反向 chown（整棵 workspace 树
+      留在全 daemon 唯一的静态 provider UID 名下）、无 `/tmp` 清理、非 protected 模式下 Provider
+      与 agentd 同 UID 可直读整个 workspace root 与 git cache（含其他租户克隆的私有仓库），当前
+      机密性实际依赖 UUID 路径不可猜测。方案：共享池按 `tenantIsolation: pinned | shared` 策略化，
+      多租户 SaaS 默认 pinned（Worker 生命周期内绑定单一租户）；scrub-on-release（workspace +
+      `/tmp` + 反向 chown）同时实现作为纵深防御，但不作为唯一依赖——绑定是一次写对的不变式，
+      清理是永久性的"这次有没有漏掉某个路径"问题。
+- [ ] 为生成的 Kubernetes NetworkPolicy 增加云元数据端点阻断：egress ipBlock 强制
+      `except: 169.254.169.254/32` 及 IPv6 等价地址，校验层拒绝 `0.0.0.0/0` 或要求显式 opt-in。
+      当前全仓库不存在 `169.254` 相关处理，operator 写一个宽 CIDR 就会静默放通元数据端点，使
+      SSRF 直接升级为云账号凭证失窃。
+- [ ] 收窄 NetworkPolicy 的 DNS 规则：当前 DNS egress 规则没有 `to:` 选择器，等于对任意解析器
+      开放 53 端口，是现成的隐蔽外传信道；改为仅允许集群 DNS Service。
+- [ ] 决定 Docker Target 的产品定位并执行。当前无 `CapDrop`、无 `SecurityOpt`
+      （no-new-privileges/seccomp 均未请求）、无 `ReadonlyRootfs`、无 `PidsLimit`，内存/CPU 可选，
+      user 可被 operator 改为 root，bridge 网络全互联网出网无 allowlist，且同一 Target 的每个
+      容器槽位共用同一命名卷；protected cgroup 模式在 Docker 上是契约明确非目标，容器内仅有
+      `Setpgid` + `Pdeathsig`，`setsid()` 后代可逃逸。二选一：补齐到 Kubernetes 平价，或在文档与
+      产品面显式声明为个人/开发用途、非多租户面（推荐后者，把加固预算集中在 Kubernetes 路径）。
+- [ ] 声明并收敛 SSH/local 非 protected 回退路径的隔离等级：`CgroupV2Root` 为空时仅
+      `Setpgid` + `Pdeathsig`，`setsid()` 后代可逃逸；配置了 cgroup root 但未配 provider 身份时
+      Provider 与 agentd 同 UID 且无资源上限；macOS 仅 `Setpgid`，无任何凭证隔离与 `Pdeathsig`。
+- [ ] 按隔离与延迟双轴重新论证 microVM（`snapshot-restore`）层：
+      [fast-provision 提案](docs/plans/fast-provision-runtime-proposal-v0.md)目前只按延迟立项，
+      但它同时是"托管路径缺乏真实内核边界"的答案；两条论证合并后 ROI 与单看延迟不同，其开放
+      问题"microVM 落在何处"（自管 Firecracker / Kata on K8s / 托管）应提前决策。
+- [ ] 建立每种 Execution Target 的隔离能力矩阵契约文档，并为 Provider 自带沙箱关闭
+      （`danger-full-access` / `bypassPermissions`）的前提条件加自动化测试：前提一旦被削弱
+      （例如某 Target 失去容器边界）即 fail closed，不允许静默降级。
+- [ ] 评估 spawn 期进程加固的可行增量：当前 Go 侧 spawn 路径不存在 seccomp、`no_new_privs`、
+      capability drop、`Setrlimit`、namespace 或 landlock。Kubernetes 已由 Pod securityContext
+      覆盖大部分（`drop: ALL`、`RuntimeDefault` seccomp、`allowPrivilegeEscalation: false`、
+      `readOnlyRootFilesystem`），因此本条聚焦 SSH/local protected 模式的补齐性价比，不重复
+      容器已提供的能力。
+
+#### 完成条件
+
+- [ ] 单个 Execution 无法通过 fork 炸弹、内存或 CPU 耗尽影响同宿主的其他 Execution 或 Worker，
+      并有真实触发验证而非仅配置检查。
+- [ ] 共享 Worker 上不存在跨租户可读残留，且该结论不依赖路径不可猜测性。
+- [ ] Kubernetes Execution Target 在缺少资源 limits 时无法通过校验。
+- [ ] 云元数据端点在所有 Kubernetes Worker 上不可达，并有真实验证。
+- [ ] 每种 Execution Target 的隔离等级在契约中显式声明；弱隔离 Target 不出现在多租户产品面。
+- [ ] Provider 自带沙箱关闭的前提条件有自动化守卫，削弱即失败。
+
+### Stage 6：企业 SaaS GA、运营、安全与商业化
 
 状态：TODO。当前 OIDC、SAML、SCIM、Service Account、Audit、Quota、Retention、KMS 和基础
 Observability 已存在，本阶段负责补齐企业可运营、可支持、可计费、可合规和可正式发布的能力。
@@ -427,5 +511,9 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
       后来被设为 NOT NULL 的列（如 `000063` 的 `requested_execution_target_id`）；(3) 迁移测试把当前
       `bootstrap` 生产代码跑在历史 schema 上，引用尚不存在的列（如 `ssh_operation_generation`）。
       迁移本身经核对是正确的（`000063` 用"加可空列 → 回填 → 设 NOT NULL"的安全模式），问题在测试侧。
+      已修一处：`cleanupFixture` 漏了 Migration `000078`/`000081` 新增的两个
+      `execution_generation_facts` 子表，补齐后 `internal/executions` 在全新库上从 54 个失败降到 27 个、
+      无新增失败。修复该类问题的方法是逐层跑单测看 FK/触发器报错，并用
+      `pg_constraint`/`pg_trigger` 反查真实引用关系，不要照名字猜。
       CI 不运行这些门禁测试，所以长期无人察觉；修复前不应把 checklist 的
       "真实 PostgreSQL Integration Test 通过"勾成通过。

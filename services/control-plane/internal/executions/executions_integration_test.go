@@ -2911,6 +2911,25 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 		).Error; err != nil {
 			return err
 		}
+		// Migrations 000078 and 000081 added these two children of
+		// execution_generation_facts. They have to go first or the parent delete
+		// below fails the foreign key, and both are append-only, so their
+		// immutability triggers come off exactly the way the claim facts above
+		// handle it — scoped to the delete and restored immediately.
+		for _, child := range []struct{ table, trigger string }{
+			{"execution_generation_pod_failure_facts", "trg_execution_generation_pod_failure_facts"},
+			{"execution_generation_metric_rollup_entries", "trg_execution_generation_metric_rollup_entries"},
+		} {
+			if err := tx.Exec("ALTER TABLE " + child.table + " DISABLE TRIGGER " + child.trigger).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec("DELETE FROM "+child.table+" WHERE tenant_id = ?", tenantID).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec("ALTER TABLE " + child.table + " ENABLE TRIGGER " + child.trigger).Error; err != nil {
+				return err
+			}
+		}
 		if err := tx.Exec(
 			"ALTER TABLE execution_generation_facts DISABLE TRIGGER trg_execution_generation_facts_update",
 		).Error; err != nil {
