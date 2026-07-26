@@ -319,81 +319,37 @@ func (s *Service) requestPrimaryOperation(
 			return QueuedSessionOperation{}, err
 		}
 		execution = scheduled.Execution
-		decision := scheduled.Decision
 		if err := tx.WithContext(ctx).Create(&command).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(409, "control_command_conflict", "The primary Control command conflicts with another operation.", err)
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, sessionID, sessions.InternalEventInput{
 			EventType: "turn.created", ActorType: "user", ActorID: &principal.UserID, ExecutionID: &execution.ID,
-			Payload: map[string]any{
+			Payload: scheduled.MergeSchedulingEvidencePayload(map[string]any{
 				"turnId": turn.ID, "executionId": execution.ID, "status": "queued",
 				"turnKind": request.TurnKind, "controlCommandId": command.ID,
 				"executionTargetId": target.ID, "targetKind": target.Kind,
-				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":                execution.WorkerReleaseChannel,
-				"workerPoolId":                        execution.WorkerPoolID,
-				"workerPoolVersion":                   execution.WorkerPoolVersion,
-				"capacityClass":                       execution.CapacityClass,
-				"placementPolicyVersion":              execution.PlacementPolicyVersion,
-				"placementRegion":                     execution.PlacementRegion,
-				"placementClusterId":                  execution.PlacementClusterID,
-				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
-				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
-				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
-				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
-				"targetGroupId":                       execution.TargetGroupID,
-				"targetGroupVersion":                  execution.TargetGroupVersion,
-				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
-				"selectedRegion":                      execution.SelectedRegion,
-				"selectedClusterId":                   execution.SelectedClusterID,
-				"routingReason":                       execution.RoutingReason,
-				"schedulingDecisionId":                decision.ID,
-				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
-				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
-				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
-				"workspaceMaterializationId":          resources.MaterializationID,
-				"runtimeMode":                         turn.RuntimeMode, "interactionMode": turn.InteractionMode,
+				"workspaceMaterializationId": resources.MaterializationID,
+				"runtimeMode":                turn.RuntimeMode, "interactionMode": turn.InteractionMode,
 				"operation": request.Payload,
-			},
+			}),
 		})
 		if err != nil {
 			return QueuedSessionOperation{}, err
 		}
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
-			Payload: map[string]any{
+			Payload: scheduled.MergeSchedulingEvidencePayload(map[string]any{
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "turnKind": request.TurnKind, "controlCommandId": command.ID,
 				"executionTargetId": target.ID, "targetKind": target.Kind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":                execution.WorkerReleaseChannel,
-				"workerPoolId":                        execution.WorkerPoolID,
-				"workerPoolVersion":                   execution.WorkerPoolVersion,
-				"capacityClass":                       execution.CapacityClass,
-				"placementPolicyVersion":              execution.PlacementPolicyVersion,
-				"placementRegion":                     execution.PlacementRegion,
-				"placementClusterId":                  execution.PlacementClusterID,
-				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
-				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
-				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
-				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
-				"targetGroupId":                       execution.TargetGroupID,
-				"targetGroupVersion":                  execution.TargetGroupVersion,
-				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
-				"selectedRegion":                      execution.SelectedRegion,
-				"selectedClusterId":                   execution.SelectedClusterID,
-				"routingReason":                       execution.RoutingReason,
-				"schedulingDecisionId":                decision.ID,
-				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
-				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
-				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
-				"provider":                            provider, "providerRuntimeBindingId": resources.BindingID,
+				"provider":                              provider,
+				"providerRuntimeBindingId":              resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,
 				"workspaceLayoutVersion":                resources.LayoutVersion,
 				"restoreCheckpointId":                   resources.RestoreCheckpointID,
-			}, Headers: map[string]any{"eventVersion": 1}, AvailableAt: now, CreatedAt: now,
+			}), Headers: map[string]any{"eventVersion": 1}, AvailableAt: now, CreatedAt: now,
 		}); err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(500, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}

@@ -1159,7 +1159,7 @@ func TestKubernetesWarmPodDeletionRechecksRegistrationAndLeaseAtDeleteBoundary(t
 	}
 	fixture.createWarmWorkerLease(t, worker, fixture.executionIDs[0])
 
-	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedPodSafely(
 		context.Background(),
 		client,
 		fixture.targetID,
@@ -1276,7 +1276,7 @@ func TestKubernetesPodDeletionRetainsWorkerWithActiveWorkspaceCleanupLease(t *te
 		t.Fatal(err)
 	}
 
-	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedPodSafely(
 		context.Background(), client, fixture.targetID, "synara-test", pod, "cleanup-busy-delete-test",
 	)
 	if err != nil {
@@ -1317,7 +1317,7 @@ func TestKubernetesWarmPodDeletionFenceSurvivesUnknownDeleteAndRetriesIdempotent
 	fixture.reconciler.now = func() time.Time { return firstRequestedAt }
 	client.deletePodErr = errors.New("delete outcome unknown")
 
-	deleted, retainedWorker, err := fixture.reconciler.deleteObservedWarmPod(
+	deleted, retainedWorker, err := fixture.reconciler.deleteObservedPodSafely(
 		context.Background(), client, fixture.targetID, "synara-test", warmPod, "unknown-delete-outcome",
 	)
 	if err == nil || deleted || retainedWorker != nil {
@@ -1339,7 +1339,7 @@ func TestKubernetesWarmPodDeletionFenceSurvivesUnknownDeleteAndRetriesIdempotent
 
 	client.deletePodErr = nil
 	fixture.reconciler.now = func() time.Time { return firstRequestedAt.Add(time.Minute) }
-	deleted, retainedWorker, err = fixture.reconciler.deleteObservedWarmPod(
+	deleted, retainedWorker, err = fixture.reconciler.deleteObservedPodSafely(
 		context.Background(), client, fixture.targetID, "synara-test", warmPod, "retry-delete",
 	)
 	if err != nil || !deleted || retainedWorker != nil {

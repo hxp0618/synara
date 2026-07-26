@@ -33,8 +33,10 @@ func (s *Service) Claim(
 	if err != nil {
 		return OperationResult[ClaimResult]{}, err
 	}
-	if err := s.RecoverExpired(ctx, 100); err != nil {
-		return OperationResult[ClaimResult]{}, err
+	if s.claimRecoverySweeps.acquire("execution", s.now()) {
+		if err := s.RecoverExpired(ctx, 100); err != nil {
+			return OperationResult[ClaimResult]{}, err
+		}
 	}
 	hash, err := requestHash("execution.claim", normalizedTarget)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ import (
 
 const defaultProviderCursorMaximumAge = 30 * 24 * time.Hour
 const defaultProviderCredentialAccessTTL = 5 * time.Minute
+const defaultClaimRecoverySweepInterval = 2 * time.Second
 
 type ServiceOption func(*Service)
 
@@ -64,6 +66,18 @@ func WithMemoryReferenceResolver(resolver MemoryReferenceResolver) ServiceOption
 	}
 }
 
+// WithClaimRecoverySweepInterval throttles the opportunistic expired-state
+// recovery sweeps performed on the worker claim hot paths so that at most one
+// sweep per scope runs per interval across the process. The leader-elected
+// reconciler sweep is unaffected and remains the recovery authority.
+func WithClaimRecoverySweepInterval(interval time.Duration) ServiceOption {
+	return func(service *Service) {
+		if interval > 0 {
+			service.claimRecoverySweeps = newRecoverySweepThrottle(interval)
+		}
+	}
+}
+
 func expectOne(result *gorm.DB, status int, code, message string) error {
 	if result.Error != nil {
 		return problem.Wrap(status, code, message, result.Error)
@@ -88,6 +102,39 @@ type Service struct {
 	projects                    *projects.Service
 	memoryReferences            MemoryReferenceResolver
 	now                         func() time.Time
+	claimRecoverySweeps         *recoverySweepThrottle
+}
+
+// recoverySweepThrottle rate-limits the opportunistic expired-state sweeps
+// that run on the worker claim hot paths. Every idle worker polls claim at
+// ~1s, so without a gate the fleet performs one full recovery sweep per
+// worker per second — all redundant with the leader-elected reconciler,
+// which remains the unthrottled authority for expired-state recovery.
+type recoverySweepThrottle struct {
+	interval time.Duration
+	mu       sync.Mutex
+	lastRun  map[string]time.Time
+}
+
+func newRecoverySweepThrottle(interval time.Duration) *recoverySweepThrottle {
+	return &recoverySweepThrottle{interval: interval, lastRun: make(map[string]time.Time)}
+}
+
+// acquire reports whether a sweep for the given scope should run now and, if
+// so, records the run. Skipped sweeps only delay recovery by at most the
+// interval; the reconciler backstop is never throttled.
+func (t *recoverySweepThrottle) acquire(scope string, now time.Time) bool {
+	if t == nil || t.interval <= 0 {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	last, seen := t.lastRun[scope]
+	if seen && now.Sub(last) < t.interval && !now.Before(last.Add(-t.interval)) {
+		return false
+	}
+	t.lastRun[scope] = now
+	return true
 }
 
 func NewService(
@@ -104,6 +151,7 @@ func NewService(
 		cursorCipher: cursorCipher, providerCursorMaximumAge: defaultProviderCursorMaximumAge,
 		providerCredentialAccessTTL: defaultProviderCredentialAccessTTL,
 		targets:                     targetService, now: func() time.Time { return time.Now().UTC() },
+		claimRecoverySweeps:         newRecoverySweepThrottle(defaultClaimRecoverySweepInterval),
 	}
 	for _, option := range options {
 		option(service)

@@ -558,7 +558,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 			poolID, poolVersion, capacityClass, slot, parseErr := kubernetesWarmPodIdentity(pod)
 			if parseErr != nil {
-				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 					ctx, client, target.ID, configuration.Namespace, pod, "warm-pool-invalid-identity",
 				)
 				if err != nil {
@@ -684,13 +684,12 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		existing[pod.Name] = pod
 	}
-	validationWarmPlans, validationWarmPlansByName, err := kubernetesWarmPodPlans(
+	_, validationWarmPlansByName, err := kubernetesWarmPodPlans(
 		warmPools, warmPoolsSupported, warmClaimedCounts, warmRelease, podBaseHash, configuration.Image,
 	)
 	if err != nil {
 		return err
 	}
-	_ = validationWarmPlans
 	readyWarmCapacity := make(map[kubernetesWarmCapacityKey]int)
 	warmDemandEvictionCandidates := make([]kubernetesWarmDemandEvictionCandidate, 0)
 	for _, observed := range unleasedWarmPods {
@@ -709,7 +708,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			} else if terminalPod {
 				reason = "warm-pool-terminal"
 			}
-			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+			deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 				ctx, client, target.ID, configuration.Namespace, observed.Pod, reason,
 			)
 			if err != nil {
@@ -753,7 +752,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				readinessObservedAt,
 				r.config.WorkerHeartbeatTimeout,
 			) {
-				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 					ctx, client, target.ID, configuration.Namespace, observed.Pod, "warm-pool-not-ready",
 				)
 				if err != nil {
@@ -820,7 +819,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		evictCandidate := func(index int) error {
 			attempted[index] = struct{}{}
 			candidate := warmDemandEvictionCandidates[index]
-			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+			deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 				ctx,
 				client,
 				target.ID,
@@ -1718,17 +1717,6 @@ func (r *KubernetesReconciler) deleteObservedPod(
 		return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 	}
 	return nil
-}
-
-func (r *KubernetesReconciler) deleteObservedWarmPod(
-	ctx context.Context,
-	client kubernetesClient,
-	targetID uuid.UUID,
-	namespace string,
-	pod kubernetesPod,
-	reason string,
-) (deleted bool, retainedWorker *persistence.WorkerInstance, err error) {
-	return r.deleteObservedPodSafely(ctx, client, targetID, namespace, pod, reason)
 }
 
 func (r *KubernetesReconciler) deleteObservedPodSafely(

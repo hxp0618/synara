@@ -303,8 +303,10 @@ func (s *Service) ClaimWorkspaceCleanup(
 	if err != nil {
 		return OperationResult[WorkspaceCleanupClaimResult]{}, err
 	}
-	if _, err := s.RecoverExpiredWorkspaceCleanupLeases(ctx, s.now(), 100); err != nil {
-		return OperationResult[WorkspaceCleanupClaimResult]{}, err
+	if s.claimRecoverySweeps.acquire("workspace-cleanup", s.now()) {
+		if _, err := s.RecoverExpiredWorkspaceCleanupLeases(ctx, s.now(), 100); err != nil {
+			return OperationResult[WorkspaceCleanupClaimResult]{}, err
+		}
 	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" || len(requestID) > 160 {

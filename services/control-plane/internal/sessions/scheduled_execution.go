@@ -22,6 +22,48 @@ type ScheduledExecution struct {
 	Decision  persistence.ExecutionSchedulingDecision
 }
 
+// SchedulingEvidencePayload returns the frozen scheduling evidence keys shared
+// by every `execution.queued` outbox message and `turn.created` session event.
+// Callers merge operation-specific keys on top; keeping the shared set in one
+// place prevents the payload copies from silently diverging.
+func (s ScheduledExecution) SchedulingEvidencePayload() map[string]any {
+	execution := s.Execution
+	decision := s.Decision
+	return map[string]any{
+		"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+		"workerReleaseChannel":                execution.WorkerReleaseChannel,
+		"workerPoolId":                        execution.WorkerPoolID,
+		"workerPoolVersion":                   execution.WorkerPoolVersion,
+		"capacityClass":                       execution.CapacityClass,
+		"placementPolicyVersion":              execution.PlacementPolicyVersion,
+		"placementRegion":                     execution.PlacementRegion,
+		"placementClusterId":                  execution.PlacementClusterID,
+		"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+		"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+		"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+		"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+		"targetGroupId":                       execution.TargetGroupID,
+		"targetGroupVersion":                  execution.TargetGroupVersion,
+		"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+		"selectedRegion":                      execution.SelectedRegion,
+		"selectedClusterId":                   execution.SelectedClusterID,
+		"routingReason":                       execution.RoutingReason,
+		"schedulingDecisionId":                decision.ID,
+		"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+		"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+		"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+	}
+}
+
+// MergeSchedulingEvidencePayload copies the shared scheduling evidence keys
+// into payload and returns it.
+func (s ScheduledExecution) MergeSchedulingEvidencePayload(payload map[string]any) map[string]any {
+	for key, value := range s.SchedulingEvidencePayload() {
+		payload[key] = value
+	}
+	return payload
+}
+
 func CreateScheduledExecution(
 	ctx context.Context,
 	tx *gorm.DB,

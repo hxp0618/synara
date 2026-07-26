@@ -242,14 +242,18 @@ func (s *Service) cleanupEphemeralRecords(ctx context.Context, now time.Time, li
 		}
 	}
 	var receipts []persistence.WorkerRequestReceipt
-	if err := s.db.WithContext(ctx).Where("expires_at <= ?", now).Order("expires_at").Limit(limit).Find(&receipts).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("worker_id", "request_id").
+		Where("expires_at <= ?", now).Order("expires_at").Limit(limit).Find(&receipts).Error; err != nil {
 		failures = append(failures, fmt.Errorf("load expired Worker receipts: %w", err))
-	} else {
+	} else if len(receipts) > 0 {
+		keys := make([][]any, 0, len(receipts))
 		for _, receipt := range receipts {
-			if err := s.db.WithContext(ctx).Where("worker_id = ? AND request_id = ?", receipt.WorkerID, receipt.RequestID).Delete(&persistence.WorkerRequestReceipt{}).Error; err != nil {
-				failures = append(failures, fmt.Errorf("delete expired Worker receipt: %w", err))
-				break
-			}
+			keys = append(keys, []any{receipt.WorkerID, receipt.RequestID})
+		}
+		if err := s.db.WithContext(ctx).
+			Where("(worker_id, request_id) IN ?", keys).
+			Delete(&persistence.WorkerRequestReceipt{}).Error; err != nil {
+			failures = append(failures, fmt.Errorf("delete expired Worker receipts: %w", err))
 		}
 	}
 	return errors.Join(failures...)
