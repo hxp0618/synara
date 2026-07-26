@@ -27,14 +27,6 @@ function encodeExpectedWindowsEditorUriPath(targetPath: string): string {
     .join("/");
 }
 
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function fakePowerShellAppxScript(installLocation: string): string {
-  return `#!/bin/sh\nprintf '%s\\n' ${shellSingleQuote(installLocation)}\n`;
-}
-
 it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
   it.effect("returns commands for command-based editors", () =>
     Effect.gen(function* () {
@@ -553,19 +545,33 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
       );
       yield* fs.makeDirectory(installLocation, { recursive: true });
       yield* fs.makeDirectory(binDir, { recursive: true });
-      yield* fs.writeFileString(
-        path.join(binDir, "powershell.exe"),
-        fakePowerShellAppxScript(installLocation),
-      );
-      yield* fs.chmod(path.join(binDir, "powershell.exe"), 0o755);
 
-      clearWindowsStorePackageDiscoveryCache();
-
-      const editors = resolveAvailableEditors("win32", {
+      const env = {
         PATH: binDir,
         PATHEXT: ".COM;.EXE;.BAT;.CMD",
         ProgramFiles: programFiles,
-      });
+      };
+      const editor = EDITORS.find((candidate) => candidate.id === "vscode");
+      assert.ok(editor);
+
+      // Seed the AppX lookup through the injectable exec seam under the exact
+      // key resolveAvailableEditors derives, so the assertion below exercises
+      // the real wiring without spawning powershell. Spawning here made the
+      // test flaky: the lookup gives a real process 1.5s, which a loaded CI
+      // box does not always meet.
+      clearWindowsStorePackageDiscoveryCache();
+      assert.equal(
+        resolveWindowsStorePackageInstallLocation(
+          getEditorWindowsStorePackages(editor),
+          "win32",
+          env,
+          () => installLocation,
+          { useCache: true },
+        ),
+        installLocation,
+      );
+
+      const editors = resolveAvailableEditors("win32", env);
 
       assert.equal(editors.includes("vscode"), true);
     }),
