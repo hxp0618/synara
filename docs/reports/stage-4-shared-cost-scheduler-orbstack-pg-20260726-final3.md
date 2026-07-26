@@ -148,24 +148,24 @@ with 3,600 Tenant seconds plus 3,600 platform-idle seconds.
 
 ## Source binding
 
-| Source                                                            | SHA-256                                                            |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `internal/billing/shared_management.go`                           | `4c9240cae3d650dbaefc622748f2b92e5e1c22709e367ed021a555cb2a5c0040` |
+| Source | SHA-256 |
+| --- | --- |
+| `internal/billing/shared_management.go` | `4c9240cae3d650dbaefc622748f2b92e5e1c22709e367ed021a555cb2a5c0040` |
 | `internal/billing/shared_management_postgres_integration_test.go` | `fc6390e5e0f9ecafdfcfef060124e76f0d6db3cfaf8b5b329fef3a625ca4cb7d` |
 | `internal/billing/shared_allocation_postgres_integration_test.go` | `4016f45e3a173137c6ff20495cf4898ee2c06417161507332096844f36be8395` |
-| `internal/billing/runtime.go`                                     | `0914623a34699d6c86ee3beadb353df2f046a8c3ed1d5766edceb1317bb7f1d0` |
-| `internal/billing/runtime_test.go`                                | `13e5b659483cfca4e416a416a66f6ddf35d34777f9a508a56a1fcf178be3ea0c` |
-| `internal/billing/scheduler.go`                                   | `c42dc1a0815831cc9b1da36ff85fcd1f60bd2954007710254cb3e1c5cdcbbdfe` |
-| `internal/billing/scheduler_test.go`                              | `fbcce8b223e07ffed24d04787cd7b8952523a949e657cd64fd2fb82825d39559` |
-| `internal/billing/service.go`                                     | `cd2a7d17db4905abb51f8a762102104b4abf13897e8faec36240abae83105692` |
-| `internal/config/config.go`                                       | `b0063b8d1023e6bb7f8ba6bd43849e4fb532389b831ef8eb3b53f4c5df627e49` |
-| `internal/config/config_test.go`                                  | `cd9185f8b7f0e4806eb44631cf8ef8b86a12df2f6d212eeaf234ce83cac0b841` |
-| `cmd/api/main.go`                                                 | `5c6db1311ee27315ae6a5cfa39ac942a2009333cbe60db5cf27492e5778f7a37` |
-| `internal/observability/metrics.go`                               | `968a1889b3173e99cbb694d3731f16a3ce584399fa7d2c5d3bd50a7fdcd8fa68` |
-| `internal/observability/distributed_routing_billing_metrics.go`   | `4de708dc9f5b60581dcb850cf700eb7f0d564c77ab428a26f28b75d2f6c3eddf` |
-| `deploy/kubernetes/deployment.yaml`                               | `788f86d4dd50c3a5548f27438dfa57cbfcc3fa7b39c60edeb8410583efa98a38` |
-| `deploy/kubernetes/config.example.yaml`                           | `cd87f296ba45933a0d007f51884f1e2cb91dff619191660415361762e8088d36` |
-| `docs/contracts/cloud-cost-accounting-v1.md`                      | `3031379a80222a6d4a39c8d7a18ac949da34b9737ad23d5b3608fa48022e23a9` |
+| `internal/billing/runtime.go` | `0914623a34699d6c86ee3beadb353df2f046a8c3ed1d5766edceb1317bb7f1d0` |
+| `internal/billing/runtime_test.go` | `13e5b659483cfca4e416a416a66f6ddf35d34777f9a508a56a1fcf178be3ea0c` |
+| `internal/billing/scheduler.go` | `c42dc1a0815831cc9b1da36ff85fcd1f60bd2954007710254cb3e1c5cdcbbdfe` |
+| `internal/billing/scheduler_test.go` | `fbcce8b223e07ffed24d04787cd7b8952523a949e657cd64fd2fb82825d39559` |
+| `internal/billing/service.go` | `cd2a7d17db4905abb51f8a762102104b4abf13897e8faec36240abae83105692` |
+| `internal/config/config.go` | `b0063b8d1023e6bb7f8ba6bd43849e4fb532389b831ef8eb3b53f4c5df627e49` |
+| `internal/config/config_test.go` | `cd9185f8b7f0e4806eb44631cf8ef8b86a12df2f6d212eeaf234ce83cac0b841` |
+| `cmd/api/main.go` | `5c6db1311ee27315ae6a5cfa39ac942a2009333cbe60db5cf27492e5778f7a37` |
+| `internal/observability/metrics.go` | `968a1889b3173e99cbb694d3731f16a3ce584399fa7d2c5d3bd50a7fdcd8fa68` |
+| `internal/observability/distributed_routing_billing_metrics.go` | `4de708dc9f5b60581dcb850cf700eb7f0d564c77ab428a26f28b75d2f6c3eddf` |
+| `deploy/kubernetes/deployment.yaml` | `788f86d4dd50c3a5548f27438dfa57cbfcc3fa7b39c60edeb8410583efa98a38` |
+| `deploy/kubernetes/config.example.yaml` | `cd87f296ba45933a0d007f51884f1e2cb91dff619191660415361762e8088d36` |
+| `docs/contracts/cloud-cost-accounting-v1.md` | `3031379a80222a6d4a39c8d7a18ac949da34b9737ad23d5b3608fa48022e23a9` |
 
 ## Boundaries and remaining gates
 

@@ -25,15 +25,15 @@ managed-cloud deployment.
 
 ## Frozen acceptance inputs
 
-| Asset                                             | SHA-256                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------------ |
-| `deploy/kubernetes/acceptance.sh`                 | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
-| `deploy/kubernetes/resilience-acceptance.sh`      | `613cb224360b3697c775257d3fb4c70d2955d80eac25d85e7a247965b527e047` |
-| `deploy/kubernetes/kind-acceptance.sh`            | `431bca972be151950762edbbb937d23dbbf6a02dbebb3f37dc51957135925d80` |
+| Asset | SHA-256 |
+| --- | --- |
+| `deploy/kubernetes/acceptance.sh` | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
+| `deploy/kubernetes/resilience-acceptance.sh` | `613cb224360b3697c775257d3fb4c70d2955d80eac25d85e7a247965b527e047` |
+| `deploy/kubernetes/kind-acceptance.sh` | `431bca972be151950762edbbb937d23dbbf6a02dbebb3f37dc51957135925d80` |
 | `deploy/kubernetes/kind-resilience-acceptance.sh` | `0d2d1b748b00c6909efacc2d5af890567420ab6522c192a46ac0df9278f440b0` |
-| `deploy/kubernetes/kind-multinode.yaml`           | `4127f63cd7a80bbaa85988fed9670b960d0f9ec8acbc551219fd81a3e982ceda` |
+| `deploy/kubernetes/kind-multinode.yaml` | `4127f63cd7a80bbaa85988fed9670b960d0f9ec8acbc551219fd81a3e982ceda` |
 | `deploy/kubernetes/validate-resilience-assets.py` | `01fb834d52380b2577309cec14ce089556944ec3209c6274d2130cc962b16a50` |
-| `services/control-plane/Dockerfile`               | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
 
 The hashes were captured after the proof and before exact image cleanup; the acceptance assets were unchanged during
 the run.
@@ -43,14 +43,14 @@ the run.
 The baseline passed with two Control Plane replicas and `67` applied schema migrations. All `28/28` positive and
 negative RBAC expectations matched.
 
-| Scenario                 | Status | Evidence                                                                                      |
-| ------------------------ | ------ | --------------------------------------------------------------------------------------------- |
-| `rbac`                   | pass   | Required grants present; destructive deletion and Pod update/watch denied                     |
-| `topology`               | pass   | 4 nodes, 3 Workers, 2 Control Plane Pods on distinct hosts, PDB `minAvailable=1`              |
-| `leader-takeover`        | pass   | Exact holder changed; fencing token `3 -> 4`; `0` readiness failures                          |
-| `control-plane-failover` | pass   | Replacement scheduled on another Worker; `0` readiness failures                               |
-| `node-drain`             | pass   | Pod moved off the cordoned Worker; node uncordoned; `0` readiness failures                    |
-| `node-partition`         | pass   | 20-second Docker-network partition recovered; node Ready before/after; `0` readiness failures |
+| Scenario | Status | Evidence |
+| --- | --- | --- |
+| `rbac` | pass | Required grants present; destructive deletion and Pod update/watch denied |
+| `topology` | pass | 4 nodes, 3 Workers, 2 Control Plane Pods on distinct hosts, PDB `minAvailable=1` |
+| `leader-takeover` | pass | Exact holder changed; fencing token `3 -> 4`; `0` readiness failures |
+| `control-plane-failover` | pass | Replacement scheduled on another Worker; `0` readiness failures |
+| `node-drain` | pass | Pod moved off the cordoned Worker; node uncordoned; `0` readiness failures |
+| `node-partition` | pass | 20-second Docker-network partition recovered; node Ready before/after; `0` readiness failures |
 
 PostgreSQL and MinIO were pinned to the dependency Worker. The two initial Control Plane Pods ran on distinct Workers,
 leaving two safe disruption targets. The active `synara:kubernetes-execution-reconciler` holder changed from

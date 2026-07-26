@@ -16,7 +16,13 @@
     "status": "passed",
     "durationSeconds": 72
   },
-  "plannedCases": ["rbac", "topology", "control-plane-failover", "node-drain", "node-partition"],
+  "plannedCases": [
+    "rbac",
+    "topology",
+    "control-plane-failover",
+    "node-drain",
+    "node-partition"
+  ],
   "allowedSkippedCases": [],
   "caseCounts": {
     "passed": 5,
@@ -296,29 +302,71 @@
         "clusterRoleName": "synara-control-plane-reconciler",
         "rules": [
           {
-            "apiGroups": ["authentication.k8s.io"],
-            "resources": ["tokenreviews"],
-            "verbs": ["create"]
+            "apiGroups": [
+              "authentication.k8s.io"
+            ],
+            "resources": [
+              "tokenreviews"
+            ],
+            "verbs": [
+              "create"
+            ]
           },
           {
-            "apiGroups": [""],
-            "resources": ["namespaces"],
-            "verbs": ["get", "create", "patch"]
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "namespaces"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
           },
           {
-            "apiGroups": [""],
-            "resources": ["pods"],
-            "verbs": ["get", "list", "create", "patch", "delete"]
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "pods"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "patch",
+              "delete"
+            ]
           },
           {
-            "apiGroups": [""],
-            "resources": ["secrets", "serviceaccounts", "resourcequotas"],
-            "verbs": ["get", "create", "patch"]
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "secrets",
+              "serviceaccounts",
+              "resourcequotas"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
           },
           {
-            "apiGroups": ["networking.k8s.io"],
-            "resources": ["networkpolicies"],
-            "verbs": ["get", "create", "patch"]
+            "apiGroups": [
+              "networking.k8s.io"
+            ],
+            "resources": [
+              "networkpolicies"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
           }
         ]
       }
@@ -474,7 +522,9 @@
     "finishedAt": "2026-07-25T06:47:51Z",
     "configuredDurationSeconds": 600,
     "durationSeconds": 600,
-    "plannedCases": ["control-plane-failover"],
+    "plannedCases": [
+      "control-plane-failover"
+    ],
     "idleReadyProbeFailures": 0,
     "requiredSkippedCycles": 0,
     "cycles": [

@@ -27,11 +27,11 @@ release gate, a pushed artifact, or evidence from a production SSH host.
 
 ## Frozen implementation inputs
 
-| Asset                                                   | SHA-256                                                            |
-| ------------------------------------------------------- | ------------------------------------------------------------------ |
+| Asset | SHA-256 |
+| --- | --- |
 | `internal/agentd/protected_cgroup_attestation_linux.go` | `7bacb1ac7da4953670bbe5d3e537b03154297f002997902171a3bf53e942afa8` |
-| `internal/agentd/protected_cgroup_supervisor_linux.go`  | `7fbb5bad2b43d8c3d55c6c7f62d9e50eeb6b9e6904b0e0a8ae39f8e2fef60b14` |
-| `ssh_protected_cgroup_gate.py`                          | `7d4977f72578bd4c695e82691ae282488a56e111cee161492dd4d689fb4b8cc8` |
+| `internal/agentd/protected_cgroup_supervisor_linux.go` | `7fbb5bad2b43d8c3d55c6c7f62d9e50eeb6b9e6904b0e0a8ae39f8e2fef60b14` |
+| `ssh_protected_cgroup_gate.py` | `7d4977f72578bd4c695e82691ae282488a56e111cee161492dd4d689fb4b8cc8` |
 
 ## Cleanup
 

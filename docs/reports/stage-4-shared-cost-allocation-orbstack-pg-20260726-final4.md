@@ -92,17 +92,17 @@ exact_terminal_boundary_requests = 1
 
 Charge-slice aggregate:
 
-| Allocation    | Charge            | Slices | Billable seconds | Amount micros |
-| ------------- | ----------------- | -----: | ---------------: | ------------: |
-| platform-idle | cpu               |      4 |             3600 |     5,400,000 |
-| platform-idle | ephemeral-storage |      4 |             3600 |     3,000,000 |
-| platform-idle | memory            |      4 |             3600 |     3,000,000 |
-| platform-idle | pod               |      4 |             3600 |     5,400,000 |
-| tenant-claim  | cpu               |      2 |             3600 |     5,400,000 |
-| tenant-claim  | ephemeral-storage |      2 |             3600 |     3,000,000 |
-| tenant-claim  | memory            |      2 |             3600 |     3,000,000 |
-| tenant-claim  | pod               |      2 |             3600 |     5,400,000 |
-| tenant-claim  | request           |      3 |                0 |     1,500,000 |
+| Allocation | Charge | Slices | Billable seconds | Amount micros |
+| --- | --- | ---: | ---: | ---: |
+| platform-idle | cpu | 4 | 3600 | 5,400,000 |
+| platform-idle | ephemeral-storage | 4 | 3600 | 3,000,000 |
+| platform-idle | memory | 4 | 3600 | 3,000,000 |
+| platform-idle | pod | 4 | 3600 | 5,400,000 |
+| tenant-claim | cpu | 2 | 3600 | 5,400,000 |
+| tenant-claim | ephemeral-storage | 2 | 3600 | 3,000,000 |
+| tenant-claim | memory | 2 | 3600 | 3,000,000 |
+| tenant-claim | pod | 2 | 3600 | 5,400,000 |
+| tenant-claim | request | 3 | 0 | 1,500,000 |
 
 For every time-based charge kind, Tenant plus platform-idle amounts equal the full two-tariff Worker estimate.
 Request charges are bound to the exact Claim/Tenant, have zero billable seconds, and never assign platform idle to a
@@ -117,19 +117,19 @@ synthetic Tenant.
 
 ## Source binding
 
-| Source                                                                   | SHA-256                                                            |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `migrations/000077_shared_target_cost_allocation.sql`                    | `cdcb6d0ad52bbb9695d88081cc7319f4100081f10fb9f3e786ee09c69108c250` |
-| `internal/persistence/shared_cost_allocation_models.go`                  | `effb05c4646171998ed3d1572a546331eb7cd1ef4a2565902ea647ebce61e6fc` |
-| `internal/persistence/schema.go`                                         | `47d6c336a99d2350d124aaa8cbe748c5da255f35bf85b144c0bc182cd7a68c14` |
-| `internal/database/shared_cost_allocation_sqlite.go`                     | `2285d4b8d86293bacba7be6587358a980e0258a18e99c3955f0c3108538bffbd` |
-| `internal/database/shared_cost_allocation_sqlite_test.go`                | `b994decb46a9c55b552069a911f3b1c3b72f8d4756673e2f81b6a79607001e83` |
+| Source | SHA-256 |
+| --- | --- |
+| `migrations/000077_shared_target_cost_allocation.sql` | `cdcb6d0ad52bbb9695d88081cc7319f4100081f10fb9f3e786ee09c69108c250` |
+| `internal/persistence/shared_cost_allocation_models.go` | `effb05c4646171998ed3d1572a546331eb7cd1ef4a2565902ea647ebce61e6fc` |
+| `internal/persistence/schema.go` | `47d6c336a99d2350d124aaa8cbe748c5da255f35bf85b144c0bc182cd7a68c14` |
+| `internal/database/shared_cost_allocation_sqlite.go` | `2285d4b8d86293bacba7be6587358a980e0258a18e99c3955f0c3108538bffbd` |
+| `internal/database/shared_cost_allocation_sqlite_test.go` | `b994decb46a9c55b552069a911f3b1c3b72f8d4756673e2f81b6a79607001e83` |
 | `internal/database/shared_cost_allocation_migration_integration_test.go` | `f7d1560e3b79fc218e1946da2256c9e688bb2f6daa9a0cf110922592b5f66b56` |
-| `internal/database/store.go`                                             | `8e3d2c615cd3f2b52c53cfe8987db3818b17d9e0f843c6d086abda98c294c453` |
-| `internal/billing/service.go`                                            | `007a589c275472374213dff6201f2076446d130fcb13ca36c1afed0a8ff91881` |
-| `internal/billing/shared_allocation.go`                                  | `64b832eae9811b46266d3fb3c4f2b33abcca54b68bef514f07e5ffd66b63c629` |
-| `internal/billing/shared_allocation_test.go`                             | `deaa6b5bb717c68ce986ca27da1b08badee77ff87335b54623e52c82e40db225` |
-| `internal/billing/shared_allocation_postgres_integration_test.go`        | `442f77d3d6f092791eeb3679045a1e4a24082b96ed0adc9c1a484ac4d3d5dd47` |
+| `internal/database/store.go` | `8e3d2c615cd3f2b52c53cfe8987db3818b17d9e0f843c6d086abda98c294c453` |
+| `internal/billing/service.go` | `007a589c275472374213dff6201f2076446d130fcb13ca36c1afed0a8ff91881` |
+| `internal/billing/shared_allocation.go` | `64b832eae9811b46266d3fb3c4f2b33abcca54b68bef514f07e5ffd66b63c629` |
+| `internal/billing/shared_allocation_test.go` | `deaa6b5bb717c68ce986ca27da1b08badee77ff87335b54623e52c82e40db225` |
+| `internal/billing/shared_allocation_postgres_integration_test.go` | `442f77d3d6f092791eeb3679045a1e4a24082b96ed0adc9c1a484ac4d3d5dd47` |
 
 ## Boundaries and remaining gates
 

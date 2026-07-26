@@ -112,17 +112,17 @@ shared-coverage-pg-...|stage4-pg-writer-v1|seal_audits=1
 
 Charge-slice aggregate remained identical after the authorized sweep replay:
 
-| Allocation    | Charge            | Slices | Billable seconds | Amount micros |
-| ------------- | ----------------- | -----: | ---------------: | ------------: |
-| platform-idle | cpu               |      4 |             3600 |     5,400,000 |
-| platform-idle | ephemeral-storage |      4 |             3600 |     3,000,000 |
-| platform-idle | memory            |      4 |             3600 |     3,000,000 |
-| platform-idle | pod               |      4 |             3600 |     5,400,000 |
-| tenant-claim  | cpu               |      2 |             3600 |     5,400,000 |
-| tenant-claim  | ephemeral-storage |      2 |             3600 |     3,000,000 |
-| tenant-claim  | memory            |      2 |             3600 |     3,000,000 |
-| tenant-claim  | pod               |      2 |             3600 |     5,400,000 |
-| tenant-claim  | request           |      3 |                0 |     1,500,000 |
+| Allocation | Charge | Slices | Billable seconds | Amount micros |
+| --- | --- | ---: | ---: | ---: |
+| platform-idle | cpu | 4 | 3600 | 5,400,000 |
+| platform-idle | ephemeral-storage | 4 | 3600 | 3,000,000 |
+| platform-idle | memory | 4 | 3600 | 3,000,000 |
+| platform-idle | pod | 4 | 3600 | 5,400,000 |
+| tenant-claim | cpu | 2 | 3600 | 5,400,000 |
+| tenant-claim | ephemeral-storage | 2 | 3600 | 3,000,000 |
+| tenant-claim | memory | 2 | 3600 | 3,000,000 |
+| tenant-claim | pod | 2 | 3600 | 5,400,000 |
+| tenant-claim | request | 3 | 0 | 1,500,000 |
 
 ## Repository verification
 
@@ -133,20 +133,20 @@ Charge-slice aggregate remained identical after the authorized sweep replay:
 
 ## Source binding
 
-| Source                                                            | SHA-256                                                            |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `migrations/000077_shared_target_cost_allocation.sql`             | `cdcb6d0ad52bbb9695d88081cc7319f4100081f10fb9f3e786ee09c69108c250` |
-| `internal/billing/shared_allocation.go`                           | `64b832eae9811b46266d3fb3c4f2b33abcca54b68bef514f07e5ffd66b63c629` |
+| Source | SHA-256 |
+| --- | --- |
+| `migrations/000077_shared_target_cost_allocation.sql` | `cdcb6d0ad52bbb9695d88081cc7319f4100081f10fb9f3e786ee09c69108c250` |
+| `internal/billing/shared_allocation.go` | `64b832eae9811b46266d3fb3c4f2b33abcca54b68bef514f07e5ffd66b63c629` |
 | `internal/billing/shared_allocation_postgres_integration_test.go` | `4016f45e3a173137c6ff20495cf4898ee2c06417161507332096844f36be8395` |
-| `internal/billing/shared_management.go`                           | `4c9240cae3d650dbaefc622748f2b92e5e1c22709e367ed021a555cb2a5c0040` |
-| `internal/billing/shared_management_test.go`                      | `adfe76db650db44a71c69a7fc5cec29c8177d5e597cb7c4bce38d460c8f0a73f` |
+| `internal/billing/shared_management.go` | `4c9240cae3d650dbaefc622748f2b92e5e1c22709e367ed021a555cb2a5c0040` |
+| `internal/billing/shared_management_test.go` | `adfe76db650db44a71c69a7fc5cec29c8177d5e597cb7c4bce38d460c8f0a73f` |
 | `internal/billing/shared_management_postgres_integration_test.go` | `78c828b62f8b69c383dee6a656c528e5d734f832fae5917521206809edc427f8` |
-| `internal/billing/service.go`                                     | `c2d3629bf3e47e22c0c0d851c5ba77d8f664d6de6483d0e0ce6d9d55e9ad191c` |
-| `internal/billing/management.go`                                  | `17c61a8ee4c0216c8889a762f42574a8157be65a1a7c4704e8693651b8b0425d` |
-| `internal/httpapi/billing_api.go`                                 | `8d9e9589963ffe322c537b7f382f8880e842c620df840fedad31c24a950a773d` |
-| `internal/httpapi/billing_api_test.go`                            | `36d717282453357fd7031df6e95c41609682cb40d18bdf37d8c61dee86f14882` |
-| `internal/httpapi/server.go`                                      | `1dbaf56fbabb4946f73cead6111df1ab7cedfec8f419d42d493c7ed8500c8a04` |
-| `docs/contracts/cloud-cost-accounting-v1.md`                      | `8e733bafa08bfc414f4818f82c28a97b75dd4f430a0d00169c7874f71306e90e` |
+| `internal/billing/service.go` | `c2d3629bf3e47e22c0c0d851c5ba77d8f664d6de6483d0e0ce6d9d55e9ad191c` |
+| `internal/billing/management.go` | `17c61a8ee4c0216c8889a762f42574a8157be65a1a7c4704e8693651b8b0425d` |
+| `internal/httpapi/billing_api.go` | `8d9e9589963ffe322c537b7f382f8880e842c620df840fedad31c24a950a773d` |
+| `internal/httpapi/billing_api_test.go` | `36d717282453357fd7031df6e95c41609682cb40d18bdf37d8c61dee86f14882` |
+| `internal/httpapi/server.go` | `1dbaf56fbabb4946f73cead6111df1ab7cedfec8f419d42d493c7ed8500c8a04` |
+| `docs/contracts/cloud-cost-accounting-v1.md` | `8e733bafa08bfc414f4818f82c28a97b75dd4f430a0d00169c7874f71306e90e` |
 
 ## Boundaries and remaining gates
 

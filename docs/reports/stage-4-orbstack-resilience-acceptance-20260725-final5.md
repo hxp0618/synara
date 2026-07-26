@@ -28,16 +28,16 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset                                                             | SHA-256                                                            |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `deploy/kubernetes/acceptance.sh`                                 | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
-| `deploy/kubernetes/resilience-acceptance.sh`                      | `2ac6b34b45ae6963defb9ac5a1ebd5bbc07d54770466c24b9bbd40768f8c54e5` |
-| `deploy/kubernetes/validate-resilience-assets.py`                 | `9c4b0de9ac95ee986fc49d28e803e9941d5dc01b05341dafe2b67de62dfe64f2` |
-| `services/control-plane/Dockerfile`                               | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| Asset | SHA-256 |
+| --- | --- |
+| `deploy/kubernetes/acceptance.sh` | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
+| `deploy/kubernetes/resilience-acceptance.sh` | `2ac6b34b45ae6963defb9ac5a1ebd5bbc07d54770466c24b9bbd40768f8c54e5` |
+| `deploy/kubernetes/validate-resilience-assets.py` | `9c4b0de9ac95ee986fc49d28e803e9941d5dc01b05341dafe2b67de62dfe64f2` |
+| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
 | `services/control-plane/migrations/000068_worker_claim_facts.sql` | `876614d31c087bdc1081e38d159c35cd4293324120a590578821b6be177ee09d` |
-| Final JSON evidence                                               | `46782327e1bd43ae8d4e264fb50242acc84e09fccf80fa04b6d2b58ae50e7d96` |
-| JSONL progress journal                                            | `ff11ec7a58fadbdd30f0781eafe81c9a40ce23b8553df51aea992d7739d6c68d` |
-| Atomic progress snapshot                                          | `e774f94e336eb52b72caa8612117e839333c93d526e36568924366c26c838e5a` |
+| Final JSON evidence | `46782327e1bd43ae8d4e264fb50242acc84e09fccf80fa04b6d2b58ae50e7d96` |
+| JSONL progress journal | `ff11ec7a58fadbdd30f0781eafe81c9a40ce23b8553df51aea992d7739d6c68d` |
+| Atomic progress snapshot | `e774f94e336eb52b72caa8612117e839333c93d526e36568924366c26c838e5a` |
 
 The hashes were captured after the proof and before exact test-image cleanup. The acceptance inputs were unchanged
 during the run.

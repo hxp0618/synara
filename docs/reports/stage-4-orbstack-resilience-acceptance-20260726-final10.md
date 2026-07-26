@@ -31,20 +31,20 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset                                                                         | SHA-256                                                            |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `deploy/kubernetes/acceptance.sh`                                             | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
-| `deploy/kubernetes/resilience-acceptance.sh`                                  | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
-| `deploy/kubernetes/validate-resilience-assets.py`                             | `4cb1b1d48f913ce63cc094b65880d277d5c2045dedd51bc9a59a7afd282f1d3d` |
-| `services/control-plane/Dockerfile`                                           | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
-| `services/control-plane/go.mod`                                               | `65c8f3ad8b88e3730fa2ad79b288178e057bec34f90afa1435cb7dbb0e3dde47` |
-| `services/control-plane/migrations/000069_worker_pool_warm_capacity.sql`      | `3c3563ff70e589afa3d99424aba70898528c5dd757f97b5b71aabf8676ba9812` |
+| Asset | SHA-256 |
+| --- | --- |
+| `deploy/kubernetes/acceptance.sh` | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
+| `deploy/kubernetes/resilience-acceptance.sh` | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
+| `deploy/kubernetes/validate-resilience-assets.py` | `4cb1b1d48f913ce63cc094b65880d277d5c2045dedd51bc9a59a7afd282f1d3d` |
+| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/go.mod` | `65c8f3ad8b88e3730fa2ad79b288178e057bec34f90afa1435cb7dbb0e3dde47` |
+| `services/control-plane/migrations/000069_worker_pool_warm_capacity.sql` | `3c3563ff70e589afa3d99424aba70898528c5dd757f97b5b71aabf8676ba9812` |
 | `services/control-plane/migrations/000070_kubernetes_pod_deletion_fences.sql` | `e9a936a14a481180fabaacb6fe2814caddd39dd510f8f65fc44c49dc2482dfcd` |
-| `services/control-plane/internal/podlifecycle/pod_lifecycle.go`               | `f5a58324b885a04758e5ba95faca094848c475bcc5e6172c0e1d0f9e54b1827d` |
-| `services/control-plane/internal/httpapi/server.go`                           | `a6f1b7a81e63b6d87bbdc903a0338510d01485ecb3f96f473699d9b1038be47e` |
-| Final JSON evidence                                                           | `650d0dbca8cdd72ddeb411017712a20261ec4ac99eefc3336c65524835b10d58` |
-| JSONL progress journal                                                        | `7d9aaabf2b63092b93badcfa6275342347f62ae3e77a0b24144e7e7ec1588515` |
-| Atomic progress snapshot                                                      | `621308b189c686bc587a800ea3b697960c9eeb46bde38b4dbe73f11016d4ffac` |
+| `services/control-plane/internal/podlifecycle/pod_lifecycle.go` | `f5a58324b885a04758e5ba95faca094848c475bcc5e6172c0e1d0f9e54b1827d` |
+| `services/control-plane/internal/httpapi/server.go` | `a6f1b7a81e63b6d87bbdc903a0338510d01485ecb3f96f473699d9b1038be47e` |
+| Final JSON evidence | `650d0dbca8cdd72ddeb411017712a20261ec4ac99eefc3336c65524835b10d58` |
+| JSONL progress journal | `7d9aaabf2b63092b93badcfa6275342347f62ae3e77a0b24144e7e7ec1588515` |
+| Atomic progress snapshot | `621308b189c686bc587a800ea3b697960c9eeb46bde38b4dbe73f11016d4ffac` |
 
 The hashes were captured after the proof. The exact final10 image and retained Kubernetes resources remain
 available for follow-up inspection.

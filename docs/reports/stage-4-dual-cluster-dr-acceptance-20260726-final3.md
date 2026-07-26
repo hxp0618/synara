@@ -29,10 +29,10 @@ current-context 保持不变。
 
 ## 环境与镜像
 
-| 角色   | Kubernetes context                          | Server version | Node 数 |
-| ------ | ------------------------------------------- | -------------- | ------: |
-| 主集群 | `orbstack`                                  | `v1.34.8+orb1` |       1 |
-| 副集群 | `kind-synara-dr-20260725180933-52617-31640` | `v1.33.1`      |       1 |
+| 角色 | Kubernetes context | Server version | Node 数 |
+| --- | --- | --- | ---: |
+| 主集群 | `orbstack` | `v1.34.8+orb1` | 1 |
+| 副集群 | `kind-synara-dr-20260725180933-52617-31640` | `v1.33.1` | 1 |
 
 - Worker tag：`synara-worker:dual-cluster-20260725180933-52617-31640`
 - Docker config ID：`sha256:839b848c7dd6feb36f728ef2ca888d6eb449a01b177cfd1f964321b05cdcb7ba`
@@ -57,18 +57,18 @@ Wrapper 只给控制凭证增加 `tokenreviews.create`，Pod GET 仍通过目标
 
 本次十个 allowlisted assertions 全部为 `true`：
 
-| 断言                               | 证明内容                                                                  |
-| ---------------------------------- | ------------------------------------------------------------------------- |
+| 断言 | 证明内容 |
+| --- | --- |
 | `podBoundWorkloadIdentityVerified` | 两侧生产身份验证器均完成真实 TokenReview + Pod GET，未绑定 API 凭证被拒绝 |
-| `missingReadinessFailedClosed`     | 未发布 destination readiness 时 failover mutation-free                    |
-| `exactReadinessAccepted`           | 精确 source domain、watermark 与 required backing-store readiness 放行    |
-| `sourcePlacementImmutable`         | 源 Execution 的 Target/Region/Cluster 快照未改写                          |
-| `singleSuccessor`                  | 首轮只提交一个 successor，重复 sweep 幂等                                 |
-| `successorLineagePersisted`        | predecessor Execution/Bundle、routing snapshot 与 leader fence 已持久化   |
-| `obsoletePrimaryPodAbsent`         | 原 OrbStack Pod 的精确 UID 已消失                                         |
-| `sourceRuntimeReady`               | 源 Pod/agentd Running/Ready、零重启并完成 register/heartbeat/claim        |
-| `successorRuntimeReady`            | successor Pod/agentd Running/Ready、零重启并完成 register/heartbeat/claim |
-| `recoveryBundleIntegrityVerified`  | failover 前验证 persisted Recovery Bundle SHA-256 与 envelope             |
+| `missingReadinessFailedClosed` | 未发布 destination readiness 时 failover mutation-free |
+| `exactReadinessAccepted` | 精确 source domain、watermark 与 required backing-store readiness 放行 |
+| `sourcePlacementImmutable` | 源 Execution 的 Target/Region/Cluster 快照未改写 |
+| `singleSuccessor` | 首轮只提交一个 successor，重复 sweep 幂等 |
+| `successorLineagePersisted` | predecessor Execution/Bundle、routing snapshot 与 leader fence 已持久化 |
+| `obsoletePrimaryPodAbsent` | 原 OrbStack Pod 的精确 UID 已消失 |
+| `sourceRuntimeReady` | 源 Pod/agentd Running/Ready、零重启并完成 register/heartbeat/claim |
+| `successorRuntimeReady` | successor Pod/agentd Running/Ready、零重启并完成 register/heartbeat/claim |
+| `recoveryBundleIntegrityVerified` | failover 前验证 persisted Recovery Bundle SHA-256 与 envelope |
 
 临时详细证据为 2,246 bytes，SHA-256 为
 `233707b3a95ea6209384b82be4dc1f5037da8f67e058c451289bc705f3558cab`。

@@ -21,21 +21,21 @@ This report uses the deterministic Provider Host fixture through the real Contro
 
 ## Cases
 
-| Case                                   | Status | Duration | Reason             |
-| -------------------------------------- | ------ | -------: | ------------------ |
-| `environment.target-prepare`           | pass   | 36647 ms |                    |
-| `environment.control-plane-start`      | pass   |  1572 ms |                    |
-| `identity.dev-login`                   | pass   |     3 ms |                    |
-| `runtime.worker-discovery`             | pass   | 16635 ms |                    |
-| `resources.credential-project-session` | pass   |     5 ms |                    |
-| `fixture.text-tool-usage-artifact`     | pass   |  1286 ms |                    |
-| `fixture.approval-resolution`          | pass   |  1581 ms |                    |
-| `fixture.terminal-large-log`           | pass   |  1824 ms |                    |
-| `fixture.user-input-resolution`        | pass   |  1582 ms |                    |
-| `fixture.provider-error`               | pass   |  1310 ms |                    |
-| `recovery.worker-replacement`          | fail   | 11706 ms | runner.interrupted |
-| `environment.cleanup`                  | pass   |     0 ms |                    |
-| `security.output-secret-scan`          | pass   |     3 ms |                    |
+| Case | Status | Duration | Reason |
+| --- | --- | ---: | --- |
+| `environment.target-prepare` | pass | 36647 ms |  |
+| `environment.control-plane-start` | pass | 1572 ms |  |
+| `identity.dev-login` | pass | 3 ms |  |
+| `runtime.worker-discovery` | pass | 16635 ms |  |
+| `resources.credential-project-session` | pass | 5 ms |  |
+| `fixture.text-tool-usage-artifact` | pass | 1286 ms |  |
+| `fixture.approval-resolution` | pass | 1581 ms |  |
+| `fixture.terminal-large-log` | pass | 1824 ms |  |
+| `fixture.user-input-resolution` | pass | 1582 ms |  |
+| `fixture.provider-error` | pass | 1310 ms |  |
+| `recovery.worker-replacement` | fail | 11706 ms | runner.interrupted |
+| `environment.cleanup` | pass | 0 ms |  |
+| `security.output-secret-scan` | pass | 3 ms |  |
 
 ## Evidence
 
@@ -131,7 +131,10 @@ This report uses the deterministic Provider Host fixture through the real Contro
   },
   "workerProxy": {
     "advertisedHost": "127.0.0.1",
-    "allowedPathPrefixes": ["/v1/workers/", "/v1/artifact-content/"],
+    "allowedPathPrefixes": [
+      "/v1/workers/",
+      "/v1/artifact-content/"
+    ],
     "faultInjection": "runner-owned transport close before HTTP forwarding",
     "listenAddress": "0.0.0.0",
     "port": 60196,
@@ -307,7 +310,9 @@ This report uses the deterministic Provider Host fixture through the real Contro
     "status": "ready"
   },
   "credentialEvidence": {
-    "credentialPayloadKeys": ["apiKey"],
+    "credentialPayloadKeys": [
+      "apiKey"
+    ],
     "credentialVerified": true
   },
   "eventTypes": [
@@ -513,10 +518,22 @@ Acceptance run interrupted by SIGINT.
 
 ```json
 {
-  "fileTypes": [".json", ".log", ".md", ".txt", ".yaml", ".yml"],
+  "fileTypes": [
+    ".json",
+    ".log",
+    ".md",
+    ".txt",
+    ".yaml",
+    ".yml"
+  ],
   "findings": [],
   "knownSecretCount": 11,
-  "patternNames": ["private-key-pem", "aws-access-key", "github-token", "openai-style-key"],
+  "patternNames": [
+    "private-key-pem",
+    "aws-access-key",
+    "github-token",
+    "openai-style-key"
+  ],
   "scannedBytes": 142564,
   "scannedFiles": 12,
   "scope": "acceptance JSON, Markdown, text metadata, and redacted logs; binary SQLite/Artifacts excluded"

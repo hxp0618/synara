@@ -36,23 +36,23 @@ Docker network, and the wrapper first listed the binary's tests and required bot
 
 ## Runtime and provenance
 
-| Role          | Exact runtime                                                                                                                        |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Metadata      | disposable PostgreSQL `17.10`, image ID `sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f`                    |
-| Object store  | disposable versioned MinIO, image ID `sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d`                       |
-| Object client | MinIO Client image ID `sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71`                                      |
-| Test runtime  | pinned Go 1.26 bookworm digest, resolved image ID `sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86`, `arm64` |
-| Host compiler | `go version go1.26.5 darwin/arm64`                                                                                                   |
+| Role | Exact runtime |
+| --- | --- |
+| Metadata | disposable PostgreSQL `17.10`, image ID `sha256:8ee7c900f4de054e8f0a3b42b8f5da38b8fba57c3ccd7c1a02be28cb0b06494f` |
+| Object store | disposable versioned MinIO, image ID `sha256:6c83c74c8028019d82d3f20d65cc6645fd5694b82a25dc38733df5227ffa4e8d` |
+| Object client | MinIO Client image ID `sha256:0029bb25aef96434e35c2c7d8aa39b32913ec38c4c044f0c7551489f8d0d0e71` |
+| Test runtime | pinned Go 1.26 bookworm digest, resolved image ID `sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86`, `arm64` |
+| Host compiler | `go version go1.26.5 darwin/arm64` |
 
 Because HEAD alone cannot identify uncommitted source, final11 binds the pass to these exact dirty inputs/artifact:
 
-| Asset                                                          | SHA-256                                                            |
-| -------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `deploy/billing/postgres-minio-acceptance.sh`                  | `74e9fc6282e75611610129f0e0f72e578c7412718ce3c61853c445bc73359ab7` |
-| `internal/billing/runtime_postgres_integration_test.go`        | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
+| Asset | SHA-256 |
+| --- | --- |
+| `deploy/billing/postgres-minio-acceptance.sh` | `74e9fc6282e75611610129f0e0f72e578c7412718ce3c61853c445bc73359ab7` |
+| `internal/billing/runtime_postgres_integration_test.go` | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
 | `internal/billing/invoice_import_postgres_integration_test.go` | `fc547c4026403f608be59cdb26e0141dbff1bc5d2ed2442941be39fc257e5d06` |
-| `internal/billing/service.go`                                  | `02e5a53a81aaf21215051c43ff27f6a0f798a62c0e96c6bb96b58b0612b6f646` |
-| Compiled Linux `billing.test`                                  | `ed9d48c96bd1290c0edbc31cee2554b2cb68b6b459727516a30310aa4c439690` |
+| `internal/billing/service.go` | `02e5a53a81aaf21215051c43ff27f6a0f798a62c0e96c6bb96b58b0612b6f646` |
+| Compiled Linux `billing.test` | `ed9d48c96bd1290c0edbc31cee2554b2cb68b6b459727516a30310aa4c439690` |
 
 The binary hash was recomputed after both tests and remained unchanged. This does not make the entire dirty repository
 reconstructible, but it identifies the exact executed artifact and its highest-risk source inputs more precisely than
@@ -66,15 +66,15 @@ poison latest version proves that the immutable object version was honored.
 
 All seven allowlisted runtime assertions were `true`:
 
-| Assertion                         | Evidence                                                                                                                        |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `postgresMigrationsApplied`       | real PostgreSQL bootstrap succeeded and billing migrations 64 and 68 were present                                               |
-| `exactObjectVersionRead`          | the pinned old S3-compatible `VersionId` returned the expected AWS CUR fixture after replacement                                |
-| `invoiceImported`                 | one immutable import and three normalized invoice lines were persisted with a SHA-256 source checksum                           |
-| `estimateTariffSegmentsPersisted` | one terminated Worker fact crossed two tariff versions and produced eight immutable time-based estimates                        |
-| `reconciliationPersisted`         | tagged CPU and memory invoice lines matched the exact resource-key estimates and persisted matched totals/counts                |
-| `restartReplayIdempotent`         | a fresh adapter/service replay preserved import ID/checksum, line count, and all estimate IDs                                   |
-| `scheduledAuditIdempotent`        | import and reconciliation retained exactly two audit rows with one shared non-empty scheduler correlation ID; replay added none |
+| Assertion | Evidence |
+| --- | --- |
+| `postgresMigrationsApplied` | real PostgreSQL bootstrap succeeded and billing migrations 64 and 68 were present |
+| `exactObjectVersionRead` | the pinned old S3-compatible `VersionId` returned the expected AWS CUR fixture after replacement |
+| `invoiceImported` | one immutable import and three normalized invoice lines were persisted with a SHA-256 source checksum |
+| `estimateTariffSegmentsPersisted` | one terminated Worker fact crossed two tariff versions and produced eight immutable time-based estimates |
+| `reconciliationPersisted` | tagged CPU and memory invoice lines matched the exact resource-key estimates and persisted matched totals/counts |
+| `restartReplayIdempotent` | a fresh adapter/service replay preserved import ID/checksum, line count, and all estimate IDs |
+| `scheduledAuditIdempotent` | import and reconciliation retained exactly two audit rows with one shared non-empty scheduler correlation ID; replay added none |
 
 The bounded detail was 735 bytes with SHA-256
 `39b7c6b838577970ef2d7dc30ea018e43f7b49ee4a810af35cb69be684087695`. The outer final11 JSON SHA-256 is
