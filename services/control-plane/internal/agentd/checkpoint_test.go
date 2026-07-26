@@ -984,3 +984,18 @@ func runGitTestCommand(t *testing.T, directory string, arguments ...string) stri
 	}
 	return strings.TrimSpace(string(output))
 }
+
+// verifyReadyArtifactFile is a test-only convenience wrapper: production code
+// verifies through verifyReadyArtifactSource with the caller's context.
+func verifyReadyArtifactFile(absolutePath, contentType string, ready artifacts.Artifact) error {
+	source, err := openRegularArtifactSource(absolutePath)
+	if err != nil {
+		return fmt.Errorf("open ready Artifact source: %w", err)
+	}
+	defer source.Close()
+	normalized, err := normalizeRunnerArtifactContentType(contentType)
+	if err != nil {
+		return err
+	}
+	return verifyReadyArtifactSource(context.Background(), source, normalized, ready)
+}

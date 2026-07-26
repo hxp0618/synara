@@ -958,19 +958,6 @@ func artifactRequestID(
 	return "artifact-" + operation + "-" + hex.EncodeToString(digest[:16])
 }
 
-func verifyReadyArtifactFile(absolutePath, contentType string, ready artifacts.Artifact) error {
-	source, err := openRegularArtifactSource(absolutePath)
-	if err != nil {
-		return fmt.Errorf("open ready Artifact source: %w", err)
-	}
-	defer source.Close()
-	normalized, err := normalizeRunnerArtifactContentType(contentType)
-	if err != nil {
-		return err
-	}
-	return verifyReadyArtifactSource(context.Background(), source, normalized, ready)
-}
-
 func verifyReadyArtifactSource(
 	ctx context.Context,
 	source *artifactUploadSource,
