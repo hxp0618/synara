@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -191,12 +192,17 @@ type kubernetesFoundationState struct {
 }
 
 type KubernetesReconciler struct {
-	targets    *Service
-	config     KubernetesReconcilerConfig
-	factory    kubernetesClientFactory
-	logger     *slog.Logger
-	foundation map[uuid.UUID]kubernetesFoundationState
-	now        func() time.Time
+	targets *Service
+	config  KubernetesReconcilerConfig
+	factory kubernetesClientFactory
+	logger  *slog.Logger
+	// foundationMu guards foundation. ReconcileOnce is exported and today runs from a
+	// single leader-runner goroutine, but that is an implicit contract; a concurrent
+	// caller (for example sharding targets to raise throughput) would hit Go's fatal
+	// concurrent map write rather than a recoverable error.
+	foundationMu sync.Mutex
+	foundation   map[uuid.UUID]kubernetesFoundationState
+	now          func() time.Time
 }
 
 func NewKubernetesReconciler(
@@ -294,6 +300,18 @@ type kubernetesWorkerPodState struct {
 	InstanceUID string `gorm:"column:instance_uid"`
 }
 
+func (r *KubernetesReconciler) foundationState(targetID uuid.UUID) kubernetesFoundationState {
+	r.foundationMu.Lock()
+	defer r.foundationMu.Unlock()
+	return r.foundation[targetID]
+}
+
+func (r *KubernetesReconciler) recordFoundationState(targetID uuid.UUID, hash string, appliedAt time.Time) {
+	r.foundationMu.Lock()
+	defer r.foundationMu.Unlock()
+	r.foundation[targetID] = kubernetesFoundationState{hash: hash, appliedAt: appliedAt}
+}
+
 func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persistence.ExecutionTarget) (err error) {
 	healthObservation := ManagedKubernetesRoutingHealthObservation{
 		ExecutionTargetID: target.ID,
@@ -372,7 +390,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		)
 		return err
 	}
-	state := r.foundation[target.ID]
+	state := r.foundationState(target.ID)
 	foundationChanged := state.hash != foundationHash || r.now().Sub(state.appliedAt) >= 5*time.Minute
 	if foundationChanged {
 		if err := r.applyFoundation(ctx, client, target, configuration, credential); err != nil {
@@ -383,7 +401,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
 			return err
 		}
-		r.foundation[target.ID] = kubernetesFoundationState{hash: foundationHash, appliedAt: r.now()}
+		r.recordFoundationState(target.ID, foundationHash, r.now())
 	}
 	executions, err := r.loadKubernetesExecutions(ctx, target.ID)
 	if err != nil {
@@ -1713,7 +1731,7 @@ func (r *KubernetesReconciler) rejectImagePullCredential(
 		if baseHash, err := r.foundationHash(target, configuration); err == nil {
 			clearHash, _ = kubernetesFoundationApplyHash(baseHash, nil)
 		}
-		state := r.foundation[target.ID]
+		state := r.foundationState(target.ID)
 		shouldApply := clearHash == "" || state.hash != clearHash || r.now().Sub(state.appliedAt) >= 5*time.Minute
 		if shouldApply {
 			if err := r.applyFoundation(ctx, client, target, configuration, nil); err != nil {
@@ -1726,7 +1744,7 @@ func (r *KubernetesReconciler) rejectImagePullCredential(
 				)
 			}
 			if clearHash != "" {
-				r.foundation[target.ID] = kubernetesFoundationState{hash: clearHash, appliedAt: r.now()}
+				r.recordFoundationState(target.ID, clearHash, r.now())
 			}
 		}
 	}
