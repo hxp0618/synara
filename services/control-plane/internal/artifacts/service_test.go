@@ -918,3 +918,84 @@ func (s *testObjectStore) Delete(_ context.Context, key string) error {
 	delete(s.contentTypes, key)
 	return nil
 }
+
+// The declared Content-Length is only a fast-path rejection: a chunked request
+// reports -1, which passes that check, so the actual read has to be capped as
+// well. This pins both halves plus the cleanup, because losing the LimitReader
+// would let one upload write unbounded bytes into the Artifact store.
+func TestLocalArtifactUploadRejectsOversizePayloads(t *testing.T) {
+	const limit = 1 << 20 // matches ArtifactMaxUploadBytes in the fixture
+
+	for _, testCase := range []struct {
+		name          string
+		declaredBytes int64
+	}{
+		{"declared oversize", limit + 1},
+		{"undeclared length", -1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newArtifactFixture(t)
+			grant, err := fixture.service.Create(context.Background(), fixture.principal, fixture.sessionID, CreateInput{
+				Kind: "attachment", OriginalName: pointerString("oversize.bin"),
+			}, "artifact-create-oversize-"+testCase.name, "127.0.0.1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := uploadToken(t, grant.URL)
+			// Far larger than the limit so an unbounded read is measurable: the
+			// service must stop pulling bytes instead of draining the whole body.
+			source := &countingReader{remaining: 64 << 20}
+
+			err = fixture.service.UploadLocal(
+				context.Background(), grant.Artifact.ID, token,
+				"application/octet-stream", testCase.declaredBytes, source,
+			)
+			assertProblemCode(t, err, "artifact_too_large")
+
+			// The LimitReader must cap the read, not merely let the post-store
+			// size check reject an already-written payload.
+			if source.read > limit+1 {
+				t.Fatalf("upload read %d bytes, want at most %d", source.read, limit+1)
+			}
+
+			// A rejected upload must not leave a partial object behind, and the
+			// token must be restored so the Worker can retry within its grant.
+			var stored persistence.Artifact
+			if err := fixture.db.Where("id = ?", grant.Artifact.ID).Take(&stored).Error; err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != "pending" {
+				t.Fatalf("rejected upload left status %q", stored.Status)
+			}
+			if len(stored.UploadTokenHash) == 0 {
+				t.Fatal("rejected upload did not restore the upload token")
+			}
+			if _, err := os.Stat(filepath.Join(fixture.artifactRoot, stored.ObjectKey)); err == nil {
+				t.Fatalf("rejected upload left a payload at %s", stored.ObjectKey)
+			}
+		})
+	}
+}
+
+// countingReader yields an effectively endless payload and records how much of
+// it was consumed.
+type countingReader struct {
+	remaining int64
+	read      int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	for index := 0; index < n; index++ {
+		p[index] = 'x'
+	}
+	r.remaining -= int64(n)
+	r.read += int64(n)
+	return n, nil
+}
