@@ -359,7 +359,7 @@ function resolveSynaraMcpToolPresentation(
   return null;
 }
 
-export type SynaraMcpToolStatus = "running" | "completed" | "failed";
+export type SynaraMcpToolStatus = "running" | "completed" | "failed" | "cancelled";
 
 export interface SynaraMcpToolTitleInput {
   readonly toolName?: string | null | undefined;
@@ -387,6 +387,10 @@ export function deriveSynaraMcpToolTitle(input: SynaraMcpToolTitleInput): string
       return presentation.completed;
     case "failed":
       return presentation.failed;
+    case "cancelled":
+      return presentation.running.startsWith("Synara is ")
+        ? `Synara stopped ${presentation.running.slice("Synara is ".length)}`
+        : `Cancelled ${presentation.running}`;
   }
 }
 

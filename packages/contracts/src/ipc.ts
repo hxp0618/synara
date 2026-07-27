@@ -63,6 +63,7 @@ import type {
   GitPullResult,
   GitReadWorkingTreeDiffInput,
   GitReadWorkingTreeDiffResult,
+  GitWorkingTreeDiffStatsResult,
   GitRemoveIndexLockInput,
   GitRemoveWorktreeInput,
   GitResolvePullRequestResult,
@@ -161,6 +162,8 @@ import type {
   ClientOrchestrationCommand,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
+  OrchestrationGetThreadDetailSnapshotInput,
+  OrchestrationGetThreadDetailSnapshotResult,
   OrchestrationImportThreadInput,
   OrchestrationImportThreadResult,
   OrchestrationListProviderDeliveryBlockersInput,
@@ -612,6 +615,9 @@ export interface NativeApi {
     readWorkingTreeDiff: (
       input: GitReadWorkingTreeDiffInput,
     ) => Promise<GitReadWorkingTreeDiffResult>;
+    workingTreeDiffStats: (
+      input: GitReadWorkingTreeDiffInput,
+    ) => Promise<GitWorkingTreeDiffStatsResult>;
     summarizeDiff: (input: GitSummarizeDiffInput) => Promise<GitSummarizeDiffResult>;
     runStackedAction: (input: GitRunStackedActionInput) => Promise<GitRunStackedActionResult>;
     onActionProgress: (callback: (event: GitActionProgressEvent) => void) => () => void;
@@ -706,6 +712,9 @@ export interface NativeApi {
   orchestration: {
     getSnapshot: () => Promise<OrchestrationReadModel>;
     getShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
+    getThreadDetailSnapshot: (
+      input: OrchestrationGetThreadDetailSnapshotInput,
+    ) => Promise<OrchestrationGetThreadDetailSnapshotResult>;
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
     importThread: (
       input: OrchestrationImportThreadInput,

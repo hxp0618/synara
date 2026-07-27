@@ -520,6 +520,7 @@ export function createWsNativeApi(): NativeApi {
       pull: (input) => transport.request(WS_METHODS.gitPull, input),
       status: (input) => transport.request(WS_METHODS.gitStatus, input),
       readWorkingTreeDiff: (input) => transport.request(WS_METHODS.gitReadWorkingTreeDiff, input),
+      workingTreeDiffStats: (input) => transport.request(WS_METHODS.gitWorkingTreeDiffStats, input),
       summarizeDiff: (input) =>
         transport.request(WS_METHODS.gitSummarizeDiff, input, {
           timeoutMs: null,
@@ -677,6 +678,8 @@ export function createWsNativeApi(): NativeApi {
     orchestration: {
       getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),
       getShellSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getShellSnapshot),
+      getThreadDetailSnapshot: (input) =>
+        transport.request(ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot, input),
       dispatchCommand: (command) => {
         return transport.request(ORCHESTRATION_WS_METHODS.dispatchCommand, {
           command: omitNullUserInputAnswers(command),
