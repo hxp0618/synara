@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,9 +16,25 @@ import (
 )
 
 type workspaceCacheLayout struct {
-	Root     string
-	RepoGit  string
-	LockPath string
+	Root        string
+	RepoGit     string
+	FetchMarker string
+	LockPath    string
+}
+
+const (
+	workspaceCacheFetchMarkerName       = "last-successful-fetch"
+	workspaceCacheFetchMarkerMaxSize    = int64(128)
+	workspaceCacheFetchOutcomeFetched   = "fetched"
+	workspaceCacheFetchOutcomeFreshSkip = "cache-fresh-skip"
+	workspaceCacheFetchOutcomeFallback  = "fallback-after-skip-doubt"
+)
+
+type workspaceCacheRefresh func(context.Context, *WorkspaceGitCredential) error
+
+type workspaceCachePreparation struct {
+	outcome           string
+	backgroundRefresh workspaceCacheRefresh
 }
 
 func (m *WorkspaceMaterializer) resolveCacheLayout(
@@ -40,7 +57,10 @@ func (m *WorkspaceMaterializer) resolveCacheLayout(
 	if err != nil {
 		return workspaceCacheLayout{}, err
 	}
-	return workspaceCacheLayout{Root: root, RepoGit: filepath.Join(root, "repo.git"), LockPath: lockPath}, nil
+	return workspaceCacheLayout{
+		Root: root, RepoGit: filepath.Join(root, "repo.git"),
+		FetchMarker: filepath.Join(root, workspaceCacheFetchMarkerName), LockPath: lockPath,
+	}, nil
 }
 
 func (m *WorkspaceMaterializer) withPreparedCache(
@@ -48,21 +68,110 @@ func (m *WorkspaceMaterializer) withPreparedCache(
 	cache workspaceCacheLayout,
 	remote gitpolicy.Remote,
 	defaultBranch string,
+	requiredCommits []string,
 	credential *WorkspaceGitCredential,
 	use func(string) error,
+) (workspaceCachePreparation, error) {
+	lock, err := acquireWorkspaceFileLock(ctx, m.cacheRoot, cache.LockPath)
+	if err != nil {
+		return workspaceCachePreparation{}, fmt.Errorf("acquire Git cache lock: %w", err)
+	}
+	defer lock.Release()
+	cacheReconciled := false
+	if m.fetchFreshnessWindow > 0 {
+		if err := m.reconcileCacheRepository(ctx, cache, remote.URL); err != nil {
+			return workspaceCachePreparation{}, errors.New("Git cache repository could not be reconciled")
+		}
+		cacheReconciled = true
+		if m.cacheFetchIsFresh(ctx, cache, remote.URL, defaultBranch, requiredCommits) {
+			preparation := workspaceCachePreparation{
+				outcome: workspaceCacheFetchOutcomeFreshSkip,
+				backgroundRefresh: func(refreshContext context.Context, refreshCredential *WorkspaceGitCredential) error {
+					return m.refreshCacheRepository(
+						refreshContext, cache, remote, defaultBranch, refreshCredential,
+					)
+				},
+			}
+			if use != nil {
+				if err := use(cache.RepoGit); err != nil {
+					return workspaceCachePreparation{}, err
+				}
+			}
+			return preparation, nil
+		}
+	}
+	if err := m.ensureCacheRepository(ctx, cache, remote, defaultBranch, credential, cacheReconciled, false); err != nil {
+		return workspaceCachePreparation{}, err
+	}
+	if use != nil {
+		if err := use(cache.RepoGit); err != nil {
+			return workspaceCachePreparation{}, err
+		}
+	}
+	outcome := workspaceCacheFetchOutcomeFetched
+	if m.fetchFreshnessWindow > 0 {
+		outcome = workspaceCacheFetchOutcomeFallback
+	}
+	return workspaceCachePreparation{outcome: outcome}, nil
+}
+
+func (m *WorkspaceMaterializer) cacheFetchIsFresh(
+	ctx context.Context,
+	cache workspaceCacheLayout,
+	repositoryURL, defaultBranch string,
+	requiredCommits []string,
+) bool {
+	if m.fetchFreshnessWindow <= 0 || m.validateBareRepository(ctx, cache.RepoGit, repositoryURL) != nil {
+		return false
+	}
+	marker, err := readSmallRegularFile(cache.FetchMarker, workspaceCacheFetchMarkerMaxSize)
+	if err != nil {
+		return false
+	}
+	fetchedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(marker))
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	if m.now != nil {
+		now = m.now().UTC()
+	}
+	age := now.Sub(fetchedAt)
+	if age < 0 || age >= m.fetchFreshnessWindow {
+		return false
+	}
+	references := []string{"refs/remotes/origin/" + defaultBranch}
+	for _, requiredCommit := range requiredCommits {
+		requiredCommit = strings.TrimSpace(requiredCommit)
+		if !validGitObjectID(requiredCommit) {
+			return false
+		}
+		references = append(references, requiredCommit)
+	}
+	for _, reference := range references {
+		commit, err := m.runGit(
+			ctx, cache.RepoGit, gitEnvironment(nil), "rev-parse", "--verify", strings.TrimSpace(reference)+"^{commit}",
+		)
+		if err != nil || !validGitObjectID(commit) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *WorkspaceMaterializer) refreshCacheRepository(
+	ctx context.Context,
+	cache workspaceCacheLayout,
+	remote gitpolicy.Remote,
+	defaultBranch string,
+	credential *WorkspaceGitCredential,
 ) error {
 	lock, err := acquireWorkspaceFileLock(ctx, m.cacheRoot, cache.LockPath)
 	if err != nil {
 		return fmt.Errorf("acquire Git cache lock: %w", err)
 	}
 	defer lock.Release()
-	if err := m.ensureCacheRepository(ctx, cache, remote, defaultBranch, credential); err != nil {
-		return err
-	}
-	if use != nil {
-		return use(cache.RepoGit)
-	}
-	return nil
+	return m.ensureCacheRepository(ctx, cache, remote, defaultBranch, credential, false, true)
 }
 
 func (m *WorkspaceMaterializer) withCacheReadLock(
@@ -88,12 +197,23 @@ func (m *WorkspaceMaterializer) ensureCacheRepository(
 	remote gitpolicy.Remote,
 	defaultBranch string,
 	credential *WorkspaceGitCredential,
+	reconciled bool,
+	requireFetchMarker bool,
 ) error {
-	if err := m.reconcileCacheRepository(ctx, cache, remote.URL); err != nil {
-		return errors.New("Git cache repository could not be reconciled")
+	if !reconciled {
+		if err := m.reconcileCacheRepository(ctx, cache, remote.URL); err != nil {
+			return errors.New("Git cache repository could not be reconciled")
+		}
 	}
 	if m.validateBareRepository(ctx, cache.RepoGit, remote.URL) == nil {
 		if err := m.fetchCacheRepository(ctx, cache.RepoGit, remote, defaultBranch, credential); err == nil {
+			markerErr := m.writeCacheFetchMarker(cache)
+			if requireFetchMarker {
+				return markerErr
+			}
+			// A foreground Fetch remains authoritative even when optional
+			// optimization metadata cannot be recorded. The next Claim then
+			// treats the missing/old marker as doubt and Fetches again.
 			return nil
 		}
 	}
@@ -110,6 +230,47 @@ func (m *WorkspaceMaterializer) ensureCacheRepository(
 	}
 	if err := replaceWorkspaceGeneration(cache.RepoGit, staging); err != nil {
 		return errors.New("Git cache repository could not be installed")
+	}
+	markerErr := m.writeCacheFetchMarker(cache)
+	if requireFetchMarker {
+		return markerErr
+	}
+	// Preserve the default foreground path's success semantics; a missing
+	// marker only disables cache-first reuse on the next Claim.
+	return nil
+}
+
+func (m *WorkspaceMaterializer) writeCacheFetchMarker(cache workspaceCacheLayout) error {
+	if !pathContainedBy(cache.Root, cache.FetchMarker) || filepath.Dir(cache.FetchMarker) != cache.Root {
+		return errors.New("Git cache Fetch marker path is invalid")
+	}
+	fetchedAt := time.Now().UTC()
+	if m.now != nil {
+		fetchedAt = m.now().UTC()
+	}
+	temporary, err := os.CreateTemp(cache.Root, ".fetch-marker-*")
+	if err != nil {
+		return errors.New("Git cache Fetch marker could not be staged")
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return errors.New("Git cache Fetch marker permissions could not be set")
+	}
+	if _, err := temporary.WriteString(fetchedAt.Format(time.RFC3339Nano) + "\n"); err != nil {
+		_ = temporary.Close()
+		return errors.New("Git cache Fetch marker could not be written")
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return errors.New("Git cache Fetch marker could not be synced")
+	}
+	if err := temporary.Close(); err != nil {
+		return errors.New("Git cache Fetch marker could not be closed")
+	}
+	if err := os.Rename(temporaryPath, cache.FetchMarker); err != nil {
+		return errors.New("Git cache Fetch marker could not be installed")
 	}
 	return nil
 }

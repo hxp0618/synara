@@ -233,14 +233,28 @@ func (r *Runner) runProviderHostV2(
 	controls <-chan RunnerControl,
 	handle func(context.Context, RunnerMessage) error,
 ) (result RunnerResult, err error) {
-	process, err := r.startProviderHostV2(
-		ctx,
-		credential,
-		input.Execution.ID,
-		input.Execution.Generation,
-	)
-	if err != nil {
-		return RunnerResult{}, err
+	adoption, prestartAttempted, prestartOutcome := r.takeProviderHostV2Prestart(input, credential)
+	process := adoption.process
+	runtimeEventVersion := adoption.runtimeEventVersion
+	if prestartAttempted && r.logger != nil {
+		r.logger.Info(
+			"Provider Host warm prestart outcome",
+			"outcome", prestartOutcome,
+			"executionId", input.Execution.ID,
+			"generation", input.Execution.Generation,
+			"provider", strings.TrimSpace(input.Workload.Provider),
+		)
+	}
+	if process == nil {
+		process, err = r.startProviderHostV2(
+			ctx,
+			credential,
+			input.Execution.ID,
+			input.Execution.Generation,
+		)
+		if err != nil {
+			return RunnerResult{}, err
+		}
 	}
 	finished := false
 	defer func() {
@@ -251,29 +265,27 @@ func (r *Runner) runProviderHostV2(
 
 	executionID := input.Execution.ID.String()
 	generation := input.Execution.Generation
-	provider := strings.TrimSpace(input.Workload.Provider)
-	describe := newProviderHostCommand(
-		executionID, generation, "Describe", commandID(input, "describe"),
-		map[string]any{"provider": provider},
-	)
-	describeResult, err := process.executeContext(ctx, describe, nil)
-	if err != nil {
-		return RunnerResult{}, err
+	if adoption.process == nil {
+		provider := strings.TrimSpace(input.Workload.Provider)
+		describe := newProviderHostCommand(
+			executionID, generation, "Describe", commandID(input, "describe"),
+			map[string]any{"provider": provider},
+		)
+		describeResult, describeErr := process.executeContext(ctx, describe, nil)
+		if describeErr != nil {
+			return RunnerResult{}, describeErr
+		}
+		descriptor, descriptorErr := descriptorFromResult(describeResult)
+		if descriptorErr != nil {
+			return RunnerResult{}, descriptorErr
+		}
+		runtimeEventVersion, err = r.configureProviderHostV2ForExecution(
+			process, descriptor, input, credential,
+		)
+		if err != nil {
+			return RunnerResult{}, err
+		}
 	}
-	descriptor, err := descriptorFromResult(describeResult)
-	if err != nil {
-		return RunnerResult{}, err
-	}
-	if err := r.validateProviderHostDescriptorForExecution(descriptor, input, credential); err != nil {
-		return RunnerResult{}, err
-	}
-	runtimeEventVersion, err := negotiateProviderHostRuntimeEventVersion(descriptor.RuntimeEventVersions)
-	if err != nil {
-		return RunnerResult{}, err
-	}
-	process.setRuntimeEventVersion(runtimeEventVersion)
-	process.maximumCommandBytes = min(process.maximumCommandBytes, descriptor.MaximumCommandBytes)
-	process.maximumMessageBytes = min(process.maximumMessageBytes, descriptor.MaximumMessageBytes)
 
 	sessionCommand := "StartSession"
 	if input.ProviderResumeCursor != nil || len(input.Workload.ConversationHistory) > 0 {
@@ -841,6 +853,25 @@ func (r *Runner) validateProviderHostDescriptorForExecution(
 	return nil
 }
 
+func (r *Runner) configureProviderHostV2ForExecution(
+	process *providerHostV2Process,
+	descriptor providerHostDescriptor,
+	input RunnerInput,
+	credential *RunnerCredential,
+) (int, error) {
+	if err := r.validateProviderHostDescriptorForExecution(descriptor, input, credential); err != nil {
+		return 0, err
+	}
+	runtimeEventVersion, err := negotiateProviderHostRuntimeEventVersion(descriptor.RuntimeEventVersions)
+	if err != nil {
+		return 0, err
+	}
+	process.setRuntimeEventVersion(runtimeEventVersion)
+	process.maximumCommandBytes = min(process.maximumCommandBytes, descriptor.MaximumCommandBytes)
+	process.maximumMessageBytes = min(process.maximumMessageBytes, descriptor.MaximumMessageBytes)
+	return runtimeEventVersion, nil
+}
+
 func runnerResultFromTerminal(message providerHostMessage) (RunnerResult, error) {
 	if message.MessageType != "Result" {
 		return RunnerResult{}, protocolFailure("Provider operation did not return a Result message")
@@ -870,7 +901,7 @@ type providerHostV2Process struct {
 	outputPipes         *processOutputPipes
 	stdin               io.WriteCloser
 	stderr              *boundedBuffer
-	credentialWrite     <-chan error
+	credentialHandoff   *providerHostCredentialHandoff
 	maximumCommandBytes int
 	maximumMessageBytes int
 	runtimeEventVersion int
@@ -886,6 +917,57 @@ type providerHostV2Process struct {
 	waitErr        error
 	credentialOnce sync.Once
 	credentialErr  error
+}
+
+type providerHostCredentialDelivery struct {
+	credential *RunnerCredential
+	write      bool
+}
+
+type providerHostCredentialHandoff struct {
+	delivery chan providerHostCredentialDelivery
+	result   chan error
+	once     sync.Once
+}
+
+func newProviderHostCredentialHandoff(writePipe *os.File) *providerHostCredentialHandoff {
+	handoff := &providerHostCredentialHandoff{
+		delivery: make(chan providerHostCredentialDelivery),
+		result:   make(chan error, 1),
+	}
+	go func() {
+		delivery := <-handoff.delivery
+		var err error
+		if delivery.write {
+			err = json.NewEncoder(writePipe).Encode(delivery.credential)
+		}
+		if closeErr := writePipe.Close(); err == nil {
+			err = closeErr
+		}
+		handoff.result <- err
+		close(handoff.result)
+	}()
+	return handoff
+}
+
+func (h *providerHostCredentialHandoff) complete(delivery providerHostCredentialDelivery) error {
+	completed := false
+	h.once.Do(func() {
+		completed = true
+		h.delivery <- delivery
+	})
+	if !completed {
+		return errors.New("Provider Host credential pipe was already completed")
+	}
+	return nil
+}
+
+func (h *providerHostCredentialHandoff) deliver(credential *RunnerCredential) error {
+	return h.complete(providerHostCredentialDelivery{credential: credential, write: true})
+}
+
+func (h *providerHostCredentialHandoff) closeWithoutWrite() error {
+	return h.complete(providerHostCredentialDelivery{})
 }
 
 func (p *providerHostV2Process) setRuntimeEventVersion(version int) {
@@ -947,6 +1029,24 @@ func (r *Runner) startProviderHostV2(
 	executionID uuid.UUID,
 	generation int64,
 ) (*providerHostV2Process, error) {
+	return r.startProviderHostV2WithCredential(ctx, credential, false, executionID, generation)
+}
+
+func (r *Runner) startProviderHostV2DeferredCredential(
+	ctx context.Context,
+	executionID uuid.UUID,
+	generation int64,
+) (*providerHostV2Process, error) {
+	return r.startProviderHostV2WithCredential(ctx, nil, true, executionID, generation)
+}
+
+func (r *Runner) startProviderHostV2WithCredential(
+	ctx context.Context,
+	credential *RunnerCredential,
+	deferCredential bool,
+	executionID uuid.UUID,
+	generation int64,
+) (*providerHostV2Process, error) {
 	if len(r.command) == 0 {
 		return nil, &runnerFailure{code: "provider_unavailable", message: "Provider Host command is empty", canMoveWorker: true}
 	}
@@ -969,25 +1069,22 @@ func (r *Runner) startProviderHostV2(
 		}
 	}()
 	command.Env = providerHostEnvironment(os.Environ(), r.experimentalProviderList())
-	var credentialWrite <-chan error
-	if credential != nil {
+	var credentialHandoff *providerHostCredentialHandoff
+	credentialHandoffOwned := false
+	defer func() {
+		if credentialHandoff != nil && !credentialHandoffOwned {
+			_ = credentialHandoff.closeWithoutWrite()
+			<-credentialHandoff.result
+		}
+	}()
+	if credential != nil || deferCredential {
 		readPipe, writePipe, err := os.Pipe()
 		if err != nil {
 			return nil, fmt.Errorf("open Provider Host credential pipe: %w", err)
 		}
 		command.ExtraFiles = []*os.File{readPipe}
 		command.Env = append(command.Env, "SYNARA_PROVIDER_CREDENTIAL_FD=3")
-		writeResult := make(chan error, 1)
-		credentialWrite = writeResult
-		go func() {
-			defer close(writeResult)
-			encoder := json.NewEncoder(writePipe)
-			err := encoder.Encode(credential)
-			if closeErr := writePipe.Close(); err == nil {
-				err = closeErr
-			}
-			writeResult <- err
-		}()
+		credentialHandoff = newProviderHostCredentialHandoff(writePipe)
 	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -1036,18 +1133,24 @@ func (r *Runner) startProviderHostV2(
 	scanner.Buffer(make([]byte, 64*1024), r.maxMessageBytes)
 	process := &providerHostV2Process{
 		command: command, processTree: processTree, outputPipes: outputPipes, stdin: stdin, stderr: stderr,
-		credentialWrite: credentialWrite, maximumCommandBytes: providerHostCommandLimit,
+		credentialHandoff: credentialHandoff, maximumCommandBytes: providerHostCommandLimit,
 		maximumMessageBytes: r.maxMessageBytes,
 		commands:            make(map[string]*providerHostCommandState), completed: make(map[string]providerHostCompletedCommand),
 		readerDone: make(chan struct{}),
 	}
 	processTreeOwned = true
 	outputPipesOwned = true
+	credentialHandoffOwned = true
 	go func() {
 		_ = process.waitProcess()
 		_ = process.processTree.terminate()
 	}()
 	go process.readLoop(scanner)
+	if credential != nil {
+		if err := process.deliverCredential(credential); err != nil {
+			return nil, errors.Join(err, process.abort())
+		}
+	}
 	return process, nil
 }
 
@@ -1336,6 +1439,7 @@ func (p *providerHostV2Process) finish() error {
 	}
 	p.closing = true
 	p.mu.Unlock()
+	p.discardCredential()
 	if err := p.stdin.Close(); err != nil {
 		return fmt.Errorf("close Provider Host stdin: %w", err)
 	}
@@ -1362,6 +1466,7 @@ func (p *providerHostV2Process) abort() error {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
+	p.discardCredential()
 	_ = p.stdin.Close()
 	terminateErr := p.processTree.terminate()
 	<-p.readerDone
@@ -1392,6 +1497,7 @@ func (p *providerHostV2Process) fail(err error) {
 		state.result <- providerHostCommandOutcome{err: err}
 		close(state.result)
 	}
+	p.discardCredential()
 	_ = p.stdin.Close()
 	_ = p.processTree.terminate()
 }
@@ -1408,11 +1514,41 @@ func (p *providerHostV2Process) waitProcess() error {
 
 func (p *providerHostV2Process) credentialResult() error {
 	p.credentialOnce.Do(func() {
-		if p.credentialWrite != nil {
-			p.credentialErr = <-p.credentialWrite
+		if p.credentialHandoff != nil {
+			p.credentialErr = <-p.credentialHandoff.result
 		}
 	})
 	return p.credentialErr
+}
+
+func (p *providerHostV2Process) deliverCredential(credential *RunnerCredential) error {
+	if p.credentialHandoff == nil {
+		if credential == nil {
+			return nil
+		}
+		return errors.New("Provider Host credential pipe is unavailable")
+	}
+	if credential == nil {
+		return p.credentialHandoff.closeWithoutWrite()
+	}
+	return p.credentialHandoff.deliver(credential)
+}
+
+func (p *providerHostV2Process) discardCredential() {
+	if p.credentialHandoff != nil {
+		_ = p.credentialHandoff.closeWithoutWrite()
+	}
+}
+
+func (p *providerHostV2Process) availableForAdoption() bool {
+	select {
+	case <-p.readerDone:
+		return false
+	default:
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fatalErr == nil && !p.closing && len(p.commands) == 0
 }
 
 func (p *providerHostV2Process) processFailure(err error) error {

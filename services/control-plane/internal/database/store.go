@@ -413,12 +413,12 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 WHERE status IN ('queued', 'recovering', 'leased', 'running', 'waiting-for-approval')`,
 		`INSERT INTO worker_pools (
 		   id, tenant_id, execution_target_id, name, mode, capacity_class,
-		   cluster_id, region, namespace, desired_idle_units, max_active_units,
+		   cluster_id, region, namespace, desired_idle_units, min_idle_units, max_active_units,
 		   scheduling_template, status, version, created_at, updated_at
 		 )
 		 SELECT target.id, target.tenant_id, target.id, 'default',
 		   CASE WHEN target.kind = 'kubernetes' THEN 'per-execution' ELSE 'resident' END,
-		   'standard', '', '', '', 0, 1, '{}', 'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		   'standard', '', '', '', 0, 0, 1, '{}', 'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 		 FROM execution_targets AS target
 		 WHERE NOT EXISTS (
 		   SELECT 1 FROM worker_pools AS pool
@@ -445,6 +445,8 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		      OR NEW.status NOT IN ('active', 'draining', 'disabled')
 		      OR length(trim(NEW.name)) NOT BETWEEN 1 AND 160
 		      OR NEW.desired_idle_units < 0
+		      OR NEW.min_idle_units < 0
+		      OR NEW.min_idle_units > NEW.desired_idle_units
 		      OR NEW.max_active_units < NEW.desired_idle_units
 		      OR NEW.version <= 0
 		      OR json_valid(NEW.scheduling_template) = 0
@@ -472,6 +474,8 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		   WHERE NEW.status NOT IN ('active', 'draining', 'disabled')
 		      OR length(trim(NEW.name)) NOT BETWEEN 1 AND 160
 		      OR NEW.desired_idle_units < 0
+		      OR NEW.min_idle_units < 0
+		      OR NEW.min_idle_units > NEW.desired_idle_units
 		      OR NEW.max_active_units < NEW.desired_idle_units
 		      OR NEW.version <> OLD.version + 1
 		      OR json_valid(NEW.scheduling_template) = 0
@@ -488,6 +492,70 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 BEFORE DELETE ON worker_pools
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Worker pools cannot be deleted');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_pool_warm_capacity_scope_insert`,
+		`CREATE TRIGGER trg_worker_pool_warm_capacity_scope_insert
+		 BEFORE INSERT ON worker_pool_warm_capacity
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker pool warm capacity scope is invalid')
+		   WHERE NOT EXISTS (
+		     SELECT 1
+		     FROM worker_pools AS pool
+		     JOIN execution_targets AS target ON target.id = pool.execution_target_id
+		     WHERE pool.id = NEW.worker_pool_id
+		       AND pool.execution_target_id = NEW.execution_target_id
+		       AND pool.tenant_id IS NEW.tenant_id
+		       AND pool.version = NEW.worker_pool_version
+		       AND pool.mode = 'warm'
+		       AND pool.status <> 'disabled'
+		       AND pool.capacity_class = NEW.capacity_class
+		       AND pool.desired_idle_units = NEW.desired_idle_units
+		       AND pool.min_idle_units = NEW.min_idle_units
+		       AND pool.max_active_units = NEW.max_active_units
+		       AND target.tenant_id IS NOT NULL
+		       AND target.tenant_id IS NEW.tenant_id
+		       AND target.kind = 'kubernetes'
+		       AND target.status = 'active'
+		   )
+		   OR (NEW.worker_release_revision_id IS NOT NULL AND NOT EXISTS (
+		     SELECT 1
+		     FROM worker_release_revisions AS release
+		     WHERE release.id = NEW.worker_release_revision_id
+		       AND release.execution_target_id = NEW.execution_target_id
+		       AND release.tenant_id = NEW.tenant_id
+		   ));
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_pool_warm_capacity_scope_update`,
+		`CREATE TRIGGER trg_worker_pool_warm_capacity_scope_update
+		 BEFORE UPDATE ON worker_pool_warm_capacity
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker pool warm capacity scope is invalid')
+		   WHERE NOT EXISTS (
+		     SELECT 1
+		     FROM worker_pools AS pool
+		     JOIN execution_targets AS target ON target.id = pool.execution_target_id
+		     WHERE pool.id = NEW.worker_pool_id
+		       AND pool.execution_target_id = NEW.execution_target_id
+		       AND pool.tenant_id IS NEW.tenant_id
+		       AND pool.version = NEW.worker_pool_version
+		       AND pool.mode = 'warm'
+		       AND pool.status <> 'disabled'
+		       AND pool.capacity_class = NEW.capacity_class
+		       AND pool.desired_idle_units = NEW.desired_idle_units
+		       AND pool.min_idle_units = NEW.min_idle_units
+		       AND pool.max_active_units = NEW.max_active_units
+		       AND target.tenant_id IS NOT NULL
+		       AND target.tenant_id IS NEW.tenant_id
+		       AND target.kind = 'kubernetes'
+		       AND target.status = 'active'
+		   )
+		   OR (NEW.worker_release_revision_id IS NOT NULL AND NOT EXISTS (
+		     SELECT 1
+		     FROM worker_release_revisions AS release
+		     WHERE release.id = NEW.worker_release_revision_id
+		       AND release.execution_target_id = NEW.execution_target_id
+		       AND release.tenant_id = NEW.tenant_id
+		   ));
 		 END`,
 		`DROP TRIGGER IF EXISTS trg_execution_placement_policy_insert`,
 		`CREATE TRIGGER trg_execution_placement_policy_insert

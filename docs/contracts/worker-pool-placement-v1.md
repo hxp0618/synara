@@ -45,6 +45,14 @@ Capacity classes begin with `standard` and `interactive`. They are scheduling co
 storage, accelerators, and price data stay in the Pool's versioned scheduling template until a shared class registry is
 introduced.
 
+`desiredIdleUnits` is the Pool's total idle-warm target. `minIdleUnits` is a guaranteed floor inside that target:
+`0 <= minIdleUnits <= desiredIdleUnits`. For Kubernetes warm Pools, slots below the floor are replenished before cold
+Execution Pods and are exempt from demand-fallback eviction. Remaining desired slots are best-effort and retain the
+cold-first behavior. The guarantee does not override the Target's `maxActivePods` ceiling; budget truncation leaves the
+floor unmet and must be reported as a visible deficit rather than failing the reconcile pass.
+`minIdleUnits` guarantees reconcile priority and fail-visible capacity state, not a reservation for a specific launch or
+a bounded start time; placement does not wait inside its launch transaction when the floor is unavailable.
+
 `clusterId`, `region`, and `namespace` are target-local placement attributes in v1. For the first Kubernetes
 implementation, `clusterId` is the canonical local value `kubernetes` and Pool namespace must equal the Target's
 managed namespace. Cross-Target or global multi-cluster selection is deliberately outside this contract.
@@ -150,9 +158,9 @@ deletion-pending Pods. `worker_pool_warm_capacity` reports only the release-awar
 Reconciler has proved reusable now.
 
 Each warm-capacity row is scoped to an exact tenant-owned Kubernetes Target, Pool ID/version, capacity class, and current
-release revision/channel. It freezes the Pool's desired/max configuration, observed claimed footprint, computed desired
-warm footprint, and ready-idle units. Observations have a bounded TTL, a monotonic observation time, and a CAS version;
-missing, stale, unsupported, or release-mismatched observations never advertise a warm hit.
+release revision/channel. It freezes the Pool's desired/min/max configuration, observed claimed footprint, computed
+desired warm footprint, and ready-idle units. Observations have a bounded TTL, a monotonic observation time, and a CAS
+version; missing, stale, unsupported, or release-mismatched observations never advertise a warm hit.
 
 `readyIdleUnits` is published after the Reconciler validates exact Pod/Worker identity and subtracts ready Workers already
 needed by visible queued/recovering Executions. It is therefore a performance preference, not a reservation ledger or an
@@ -187,9 +195,12 @@ and requested CPU/memory/ephemeral-storage seconds. They deliberately contain no
 labels.
 
 The live authority adds `synara_worker_pool_warm_capacity_authorities{capacity_class,freshness,warm_supported}` and
-`synara_worker_pool_warm_capacity_units{capacity_class,kind}`. `kind` is limited to `desired_total`, `claimed`, and
-`ready_idle`; unit sums include only fresh observations. Unknown capacity classes collapse to `other`, and no
-Tenant/Target/Pool identifier is exposed as a label.
+`synara_worker_pool_warm_capacity_units{capacity_class,kind}`. `kind` is limited to `desired_idle`, `min_idle`,
+`desired_total`, `claimed`, and `ready_idle`; unit sums include only fresh observations. The live
+`synara_worker_pool_warm_deficit{capacity_class}` gauge sums `max(0, min_idle_units - ready_idle_units)` per fresh
+authority row. A non-zero deficit means the guaranteed floor is currently unmet, including when the Target-wide Pod
+budget truncated guaranteed-slot creation; it does not relax the ceiling or reserve a warm unit for a particular
+Execution. Unknown capacity classes collapse to `other`, and no Tenant/Target/Pool identifier is exposed as a label.
 
 Durable queue pressure adds `synara_execution_queue_depth{target_kind,capacity_class}` and
 `synara_execution_queue_oldest_age_seconds{target_kind,capacity_class}`. Both combine `queued | recovering`, bound

@@ -16,11 +16,7 @@
     "status": "passed",
     "durationSeconds": 138
   },
-  "plannedCases": [
-    "rbac",
-    "leader-takeover",
-    "control-plane-failover"
-  ],
+  "plannedCases": ["rbac", "leader-takeover", "control-plane-failover"],
   "allowedSkippedCases": [],
   "caseCounts": {
     "passed": 3,
@@ -37,71 +33,29 @@
         "clusterRoleName": "synara-control-plane-reconciler-synara-stage4-isolated-final2",
         "rules": [
           {
-            "apiGroups": [
-              "authentication.k8s.io"
-            ],
-            "resources": [
-              "tokenreviews"
-            ],
-            "verbs": [
-              "create"
-            ]
+            "apiGroups": ["authentication.k8s.io"],
+            "resources": ["tokenreviews"],
+            "verbs": ["create"]
           },
           {
-            "apiGroups": [
-              ""
-            ],
-            "resources": [
-              "namespaces"
-            ],
-            "verbs": [
-              "get",
-              "create",
-              "patch"
-            ]
+            "apiGroups": [""],
+            "resources": ["namespaces"],
+            "verbs": ["get", "create", "patch"]
           },
           {
-            "apiGroups": [
-              ""
-            ],
-            "resources": [
-              "pods"
-            ],
-            "verbs": [
-              "get",
-              "list",
-              "create",
-              "patch",
-              "delete"
-            ]
+            "apiGroups": [""],
+            "resources": ["pods"],
+            "verbs": ["get", "list", "create", "patch", "delete"]
           },
           {
-            "apiGroups": [
-              ""
-            ],
-            "resources": [
-              "secrets",
-              "serviceaccounts",
-              "resourcequotas"
-            ],
-            "verbs": [
-              "get",
-              "create",
-              "patch"
-            ]
+            "apiGroups": [""],
+            "resources": ["secrets", "serviceaccounts", "resourcequotas"],
+            "verbs": ["get", "create", "patch"]
           },
           {
-            "apiGroups": [
-              "networking.k8s.io"
-            ],
-            "resources": [
-              "networkpolicies"
-            ],
-            "verbs": [
-              "get",
-              "create",
-              "patch"
-            ]
+            "apiGroups": ["networking.k8s.io"],
+            "resources": ["networkpolicies"],
+            "verbs": ["get", "create", "patch"]
           }
         ],
         "checks": [
@@ -414,10 +368,7 @@
     "finishedAt": "2026-07-26T10:08:45Z",
     "configuredDurationSeconds": 120,
     "durationSeconds": 121,
-    "plannedCases": [
-      "leader-takeover",
-      "control-plane-failover"
-    ],
+    "plannedCases": ["leader-takeover", "control-plane-failover"],
     "idleReadyProbeFailures": 0,
     "requiredSkippedCycles": 0,
     "cycles": [

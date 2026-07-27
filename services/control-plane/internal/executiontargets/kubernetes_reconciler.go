@@ -634,7 +634,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		existing[pod.Name] = pod
 	}
-	_, validationWarmPlansByName, err := kubernetesWarmPodPlans(
+	_, _, validationWarmPlansByName, err := kubernetesWarmPodPlans(
 		warmPools, warmPoolsSupported, warmClaimedCounts, warmRelease, podBaseHash, configuration.Image,
 	)
 	if err != nil {
@@ -680,7 +680,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		if observed.State == nil {
 			existing[observed.Pod.Name] = observed.Pod
-			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok {
+			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok && !kubernetesWarmPodPlanGuaranteed(plan) {
 				warmDemandEvictionCandidates = append(warmDemandEvictionCandidates, kubernetesWarmDemandEvictionCandidate{
 					Observed: observed,
 					Key:      key,
@@ -721,7 +721,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				}
 			}
 			existing[observed.Pod.Name] = observed.Pod
-			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok {
+			if key, ok := kubernetesWarmCapacityKeyForPlan(plan); ok && !kubernetesWarmPodPlanGuaranteed(plan) {
 				warmDemandEvictionCandidates = append(warmDemandEvictionCandidates, kubernetesWarmDemandEvictionCandidate{
 					Observed: observed,
 					Key:      key,
@@ -823,7 +823,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 		}
 	}
-	desiredWarmPlans, _, err := kubernetesWarmPodPlans(
+	guaranteedWarmPlans, bestEffortWarmPlans, _, err := kubernetesWarmPodPlans(
 		warmPools, warmPoolsSupported, warmClaimedCounts, warmRelease, podBaseHash, configuration.Image,
 	)
 	if err != nil {
@@ -834,13 +834,43 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	// capacity so reconciliation does not create a replacement that the API
 	// server must reject with an exceeded-quota error.
 	scheduled := len(existing) + deleted
+	var executionFailures []error
+	applyWarmPlans := func(plans []kubernetesWarmPodPlan) {
+		for _, plan := range plans {
+			if scheduled >= configuration.MaxActivePods {
+				break
+			}
+			name := kubernetesWarmPodName(plan)
+			if _, found := existing[name]; found {
+				continue
+			}
+			pod, err := r.warmPoolPod(target, configuration, plan, credential)
+			if err != nil {
+				executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
+				continue
+			}
+			path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
+			if err := client.Apply(ctx, path, pod); err != nil {
+				executionFailures = append(executionFailures, fmt.Errorf(
+					"warm pod %s: %w", name,
+					problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err),
+				))
+				continue
+			}
+			created++
+			scheduled++
+		}
+	}
+	// Guaranteed slots consume the target-wide budget before cold Execution
+	// Pods. Budget exhaustion truncates this slice without failing the pass;
+	// the published min/ready authority makes the resulting deficit visible.
+	applyWarmPlans(guaranteedWarmPlans)
 	// One Execution that cannot get a Pod must not starve every other queued
 	// Execution on this target for the cycle: a malformed pool scheduling
 	// template, a rejected Pod spec or a failed observation write is scoped to
 	// its own Execution. Failures are collected and reported after the sweep,
 	// so the pass is still reported as failed and warm capacity stays
 	// unpublished, but the remaining Executions are still placed.
-	var executionFailures []error
 	for _, execution := range executions {
 		if execution.Status != "queued" && execution.Status != "recovering" {
 			continue
@@ -915,30 +945,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		created++
 		scheduled++
 	}
-	for _, plan := range desiredWarmPlans {
-		if scheduled >= configuration.MaxActivePods {
-			break
-		}
-		name := kubernetesWarmPodName(plan)
-		if _, found := existing[name]; found {
-			continue
-		}
-		pod, err := r.warmPoolPod(target, configuration, plan, credential)
-		if err != nil {
-			executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
-			continue
-		}
-		path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
-		if err := client.Apply(ctx, path, pod); err != nil {
-			executionFailures = append(executionFailures, fmt.Errorf(
-				"warm pod %s: %w", name,
-				problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err),
-			))
-			continue
-		}
-		created++
-		scheduled++
-	}
+	applyWarmPlans(bestEffortWarmPlans)
 	if err := r.setKubernetesStatus(ctx, target, "active", foundationChanged, created+deleted > 0, created, deleted); err != nil {
 		return errors.Join(append(executionFailures, err)...)
 	}
@@ -1236,13 +1243,14 @@ func (r *KubernetesReconciler) loadKubernetesWarmPools(ctx context.Context, targ
 		ClusterID          string    `gorm:"column:cluster_id"`
 		Namespace          string    `gorm:"column:namespace"`
 		DesiredIdleUnits   int       `gorm:"column:desired_idle_units"`
+		MinIdleUnits       int       `gorm:"column:min_idle_units"`
 		MaxActiveUnits     int       `gorm:"column:max_active_units"`
 		SchedulingTemplate string    `gorm:"column:scheduling_template"`
 		Status             string    `gorm:"column:status"`
 	}
 	var rows []warmPoolRow
 	err := r.targets.db.WithContext(ctx).Table("worker_pools").
-		Select("id, version, capacity_class, cluster_id, namespace, desired_idle_units, max_active_units, scheduling_template, status").
+		Select("id, version, capacity_class, cluster_id, namespace, desired_idle_units, min_idle_units, max_active_units, scheduling_template, status").
 		Where("execution_target_id = ? AND mode = ?", targetID, placement.PoolModeWarm).
 		Order("capacity_class, id").
 		Scan(&rows).Error
@@ -1260,7 +1268,7 @@ func (r *KubernetesReconciler) loadKubernetesWarmPools(ctx context.Context, targ
 		items = append(items, kubernetesWarmPool{
 			ID: row.ID, Version: row.Version, CapacityClass: row.CapacityClass,
 			ClusterID: row.ClusterID, Namespace: row.Namespace,
-			DesiredIdleUnits: row.DesiredIdleUnits, MaxActiveUnits: row.MaxActiveUnits,
+			DesiredIdleUnits: row.DesiredIdleUnits, MinIdleUnits: row.MinIdleUnits, MaxActiveUnits: row.MaxActiveUnits,
 			SchedulingTemplate: template, Status: row.Status,
 		})
 	}

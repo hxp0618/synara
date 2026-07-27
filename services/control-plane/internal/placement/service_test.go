@@ -277,6 +277,7 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 	ctx := context.Background()
 	target := fixture.createTarget(t, "kubernetes", false)
 
+	minIdleUnits := 1
 	created, err := fixture.service.CreatePool(ctx, fixture.owner, fixture.tenantID, target.ID, CreatePoolInput{
 		Name:               "Warm Interactive",
 		Mode:               PoolModeWarm,
@@ -285,6 +286,7 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 		Region:             "cn-sha",
 		Namespace:          "workers",
 		DesiredIdleUnits:   1,
+		MinIdleUnits:       &minIdleUnits,
 		MaxActiveUnits:     3,
 		SchedulingTemplate: map[string]any{"priorityClassName": "interactive"},
 		Status:             PoolStatusActive,
@@ -292,7 +294,7 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Version != 1 || created.Mode != PoolModeWarm || created.CapacityClass != CapacityClassInteractive {
+	if created.Version != 1 || created.Mode != PoolModeWarm || created.CapacityClass != CapacityClassInteractive || created.MinIdleUnits != 1 {
 		t.Fatalf("created pool = %#v", created)
 	}
 
@@ -368,6 +370,42 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 		DesiredIdleUnits: 0, MaxActiveUnits: 1, SchedulingTemplate: map[string]any{}, Status: PoolStatusActive,
 	}); problemCode(err) != "worker_pool_mode_target_unsupported" {
 		t.Fatalf("ssh warm create err = %v", err)
+	}
+}
+
+func TestNormalizePoolInputValidatesMinIdleUnits(t *testing.T) {
+	tests := []struct {
+		name        string
+		minIdle     *int
+		desiredIdle int
+		wantMin     int
+		wantCode    string
+	}{
+		{name: "omitted defaults to zero", desiredIdle: 2, wantMin: 0},
+		{name: "within desired idle accepted", minIdle: poolInputIntPointer(1), desiredIdle: 2, wantMin: 1},
+		{name: "negative rejected", minIdle: poolInputIntPointer(-1), desiredIdle: 2, wantCode: "invalid_worker_pool_capacity_bounds"},
+		{name: "above desired idle rejected", minIdle: poolInputIntPointer(3), desiredIdle: 2, wantCode: "invalid_worker_pool_capacity_bounds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			normalized, err := normalizePoolInput(CreatePoolInput{
+				Name: "warm", Mode: PoolModeWarm, CapacityClass: CapacityClassInteractive,
+				DesiredIdleUnits: test.desiredIdle, MinIdleUnits: test.minIdle, MaxActiveUnits: 4,
+				SchedulingTemplate: map[string]any{}, Status: PoolStatusActive,
+			})
+			if test.wantCode != "" {
+				if code := problemCode(err); code != test.wantCode {
+					t.Fatalf("problem code = %q, want %q (error: %v)", code, test.wantCode, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if normalized.MinIdleUnits == nil || *normalized.MinIdleUnits != test.wantMin {
+				t.Fatalf("normalized minIdleUnits = %#v, want %d", normalized.MinIdleUnits, test.wantMin)
+			}
+		})
 	}
 }
 
@@ -535,6 +573,8 @@ func (f placementFixture) createPool(
 	}
 	return pool
 }
+
+func poolInputIntPointer(value int) *int { return &value }
 
 func (f placementFixture) createWarmCapacity(
 	t *testing.T,

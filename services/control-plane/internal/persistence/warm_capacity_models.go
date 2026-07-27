@@ -16,6 +16,7 @@ type WorkerPoolWarmCapacity struct {
 	WorkerReleaseRevisionID *uuid.UUID `gorm:"column:worker_release_revision_id;type:uuid"`
 	WorkerReleaseChannel    *string    `gorm:"column:worker_release_channel"`
 	DesiredIdleUnits        int        `gorm:"column:desired_idle_units;not null;default:0"`
+	MinIdleUnits            int        `gorm:"column:min_idle_units;not null;default:0"`
 	MaxActiveUnits          int        `gorm:"column:max_active_units;not null;default:0"`
 	DesiredTotalUnits       int        `gorm:"column:desired_total_units;not null;default:0"`
 	ClaimedUnits            int        `gorm:"column:claimed_units;not null;default:0"`

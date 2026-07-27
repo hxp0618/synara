@@ -17,6 +17,7 @@ type WorkerPool struct {
 	Region             string         `gorm:"column:region;not null;default:''"`
 	Namespace          string         `gorm:"column:namespace;not null;default:''"`
 	DesiredIdleUnits   int            `gorm:"column:desired_idle_units;not null;default:0"`
+	MinIdleUnits       int            `gorm:"column:min_idle_units;not null;default:0"`
 	MaxActiveUnits     int            `gorm:"column:max_active_units;not null;default:1"`
 	SchedulingTemplate map[string]any `gorm:"column:scheduling_template;serializer:json"`
 	Status             string         `gorm:"column:status;not null;default:active;index:idx_worker_pool_target_status,priority:2"`

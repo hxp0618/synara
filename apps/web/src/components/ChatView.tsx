@@ -8113,67 +8113,65 @@ export default function ChatView({
       // directly inside a try/catch, and one bails out this whole component.
       // Nested function bodies lower separately; the catch still sees rejections.
       const runApprovalDispatch = async () => {
-          await dispatchApprovalInteractionResponse({
-            authoritative: controlPlane.isAuthoritative,
-            ...(approval.executionId !== undefined ? { executionId: approval.executionId } : {}),
-            requestId,
-            decision,
-            resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
-              if (!approval.interactionId) {
-                throw new Error("The durable approval is missing its Interaction reference.");
-              }
-              await controlPlane.resolveApproval(
-                activeThreadId,
-                executionId,
-                durableRequestId,
-                durableDecision,
-                `web-interaction-${approval.interactionId}-approval-${durableDecision}`,
-              );
-            },
-            interruptControlPlane: async () => {
-              if (!approval.interactionId) {
-                throw new Error("The durable approval is missing its Interaction reference.");
-              }
-              await controlPlane.interruptActiveTurn(
-                activeThreadId,
-                `web-interaction-${approval.interactionId}-interrupt`,
-              );
-            },
-            respondNative: async () => {
-              const api = readNativeApi();
-              if (!api) {
-                throw new Error("The local provider connection is unavailable.");
-              }
-              // Durably persist "always allow" client-side so the next turn (after an
-              // idle-stop or runtime restart) keeps full-access instead of asking again.
-              // The server's session override only covers the current live turn.
-              const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(
-                runtimeMode,
-                decision,
-              );
-              if (durableRuntimeMode) {
-                setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
-              }
-              await api.orchestration.dispatchCommand({
-                type: "thread.approval.respond",
-                commandId: newCommandId(),
-                threadId: activeThreadId,
-                requestId,
-                decision,
-                ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
-                createdAt: new Date().toISOString(),
-              });
-            },
-          });
+        await dispatchApprovalInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          ...(approval.executionId !== undefined ? { executionId: approval.executionId } : {}),
+          requestId,
+          decision,
+          resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.resolveApproval(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableDecision,
+              `web-interaction-${approval.interactionId}-approval-${durableDecision}`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${approval.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            // Durably persist "always allow" client-side so the next turn (after an
+            // idle-stop or runtime restart) keeps full-access instead of asking again.
+            // The server's session override only covers the current live turn.
+            const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(
+              runtimeMode,
+              decision,
+            );
+            if (durableRuntimeMode) {
+              setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
+            }
+            await api.orchestration.dispatchCommand({
+              type: "thread.approval.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              decision,
+              ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+              createdAt: new Date().toISOString(),
+            });
+          },
+        });
       };
       try {
         await runApprovalDispatch();
       } catch (err) {
-        const runApprovalDispatchMessage = err instanceof Error ? err.message : "Failed to submit approval decision.";
-        setStoreThreadError(
-          activeThreadId,
-          runApprovalDispatchMessage,
-        );
+        const runApprovalDispatchMessage =
+          err instanceof Error ? err.message : "Failed to submit approval decision.";
+        setStoreThreadError(activeThreadId, runApprovalDispatchMessage);
       }
       // Cleanup runs after the catch rather than in a `finally`: React Compiler's
       // BuildHIR cannot lower a TryStatement with a finalizer, and a single one
@@ -8218,67 +8216,65 @@ export default function ChatView({
       // directly inside a try/catch, and one bails out this whole component.
       // Nested function bodies lower separately; the catch still sees rejections.
       const runUserInputDispatch = async () => {
-          await dispatchUserInputInteractionResponse({
-            authoritative: controlPlane.isAuthoritative,
-            cancel,
-            ...(pendingInput.executionId !== undefined
-              ? { executionId: pendingInput.executionId }
-              : {}),
-            requestId,
-            answers,
-            resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
-              if (!pendingInput.interactionId) {
-                throw new Error(
-                  "The durable user-input request is missing its Interaction reference.",
-                );
-              }
-              await controlPlane.resolveUserInput(
-                activeThreadId,
-                executionId,
-                durableRequestId,
-                durableAnswers,
-                `web-interaction-${pendingInput.interactionId}-user-input`,
+        await dispatchUserInputInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          cancel,
+          ...(pendingInput.executionId !== undefined
+            ? { executionId: pendingInput.executionId }
+            : {}),
+          requestId,
+          answers,
+          resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
+            if (!pendingInput.interactionId) {
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
               );
-            },
-            interruptControlPlane: async () => {
-              if (!pendingInput.interactionId) {
-                throw new Error(
-                  "The durable user-input request is missing its Interaction reference.",
-                );
-              }
-              await controlPlane.interruptActiveTurn(
-                activeThreadId,
-                `web-interaction-${pendingInput.interactionId}-interrupt`,
+            }
+            await controlPlane.resolveUserInput(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableAnswers,
+              `web-interaction-${pendingInput.interactionId}-user-input`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!pendingInput.interactionId) {
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
               );
-            },
-            respondNative: async () => {
-              const api = readNativeApi();
-              if (!api) {
-                throw new Error("The local provider connection is unavailable.");
-              }
-              const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
-                ? answers
-                : omitNullPendingUserInputAnswers(answers);
-              await api.orchestration.dispatchCommand({
-                type: "thread.user-input.respond",
-                commandId: newCommandId(),
-                threadId: activeThreadId,
-                requestId,
-                answers: dispatchAnswers,
-                ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
-                createdAt: new Date().toISOString(),
-              });
-            },
-          });
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${pendingInput.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
+              ? answers
+              : omitNullPendingUserInputAnswers(answers);
+            await api.orchestration.dispatchCommand({
+              type: "thread.user-input.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              answers: dispatchAnswers,
+              ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+              createdAt: new Date().toISOString(),
+            });
+          },
+        });
       };
       try {
         await runUserInputDispatch();
       } catch (err) {
-        const runUserInputDispatchMessage = err instanceof Error ? err.message : "Failed to submit user input.";
-        setStoreThreadError(
-          activeThreadId,
-          runUserInputDispatchMessage,
-        );
+        const runUserInputDispatchMessage =
+          err instanceof Error ? err.message : "Failed to submit user input.";
+        setStoreThreadError(activeThreadId, runUserInputDispatchMessage);
       }
       // See the approval handler above: no `finally`, for React Compiler.
       setRespondingUserInputRequestKeys((existing) => existing.filter((key) => key !== requestKey));

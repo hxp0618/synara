@@ -67,6 +67,7 @@ func TestExecutionPlacementRoutesEnforceTenantReadManageAndCAS(t *testing.T) {
 		"region":             "",
 		"namespace":          "",
 		"desiredIdleUnits":   2,
+		"minIdleUnits":       1,
 		"maxActiveUnits":     6,
 		"schedulingTemplate": map[string]any{},
 		"status":             "active",
@@ -84,7 +85,7 @@ func TestExecutionPlacementRoutesEnforceTenantReadManageAndCAS(t *testing.T) {
 	}
 	var created placement.Pool
 	decodePlacementHTTPResponse(t, createdResponse, &created)
-	if created.Name != "interactive-warm" || created.Mode != placement.PoolModeWarm || created.Version != 1 {
+	if created.Name != "interactive-warm" || created.Mode != placement.PoolModeWarm || created.Version != 1 || created.MinIdleUnits != 1 {
 		t.Fatalf("created pool = %#v", created)
 	}
 
@@ -98,6 +99,7 @@ func TestExecutionPlacementRoutesEnforceTenantReadManageAndCAS(t *testing.T) {
 		"region":             "cn-east-1",
 		"namespace":          "synara-workers",
 		"desiredIdleUnits":   3,
+		"minIdleUnits":       2,
 		"maxActiveUnits":     8,
 		"schedulingTemplate": map[string]any{"priorityClassName": "interactive"},
 		"status":             "draining",
@@ -114,7 +116,7 @@ func TestExecutionPlacementRoutesEnforceTenantReadManageAndCAS(t *testing.T) {
 	}
 	var updated placement.Pool
 	decodePlacementHTTPResponse(t, updatedResponse, &updated)
-	if updated.Name != "interactive-warm-primary" || updated.Version != 2 || updated.Status != placement.PoolStatusDraining {
+	if updated.Name != "interactive-warm-primary" || updated.Version != 2 || updated.Status != placement.PoolStatusDraining || updated.MinIdleUnits != 2 {
 		t.Fatalf("updated pool = %#v", updated)
 	}
 
@@ -172,6 +174,7 @@ func TestExecutionPlacementRoutesEnforceTenantReadManageAndCAS(t *testing.T) {
 			"region":             "cn-east-1",
 			"namespace":          "synara-workers",
 			"desiredIdleUnits":   1,
+			"minIdleUnits":       1,
 			"maxActiveUnits":     4,
 			"schedulingTemplate": map[string]any{},
 			"status":             "active",

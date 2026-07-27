@@ -69,10 +69,59 @@ type Daemon struct {
 }
 
 func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
+	runner := NewRunner(cfg)
+	runner.logger = logger
+	workspace := newConfiguredWorkspaceMaterializer(cfg)
 	return &Daemon{
-		config: cfg, client: NewClient(cfg), runner: NewRunner(cfg),
-		workspace: NewWorkspaceMaterializerWithCache(cfg.WorkspaceRoot, cfg.GitCacheRoot, cfg.ExecutionTargetID), logger: logger,
+		config: cfg, client: NewClient(cfg), runner: runner,
+		workspace: workspace, logger: logger,
 	}
+}
+
+func newConfiguredWorkspaceMaterializer(cfg Config) *WorkspaceMaterializer {
+	materializer := NewWorkspaceMaterializerWithCache(cfg.WorkspaceRoot, cfg.GitCacheRoot, cfg.ExecutionTargetID)
+	materializer.fetchFreshnessWindow = cfg.WorkspaceFetchWindow
+	return materializer
+}
+
+func workspaceRepositoryFingerprint(value *string) string {
+	if value == nil {
+		return ""
+	}
+	fingerprint := strings.TrimSpace(*value)
+	if len(fingerprint) > 64 {
+		fingerprint = fingerprint[:64]
+	}
+	return fingerprint
+}
+
+func (d *Daemon) startWorkspaceBackgroundCacheRefresh(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	repositoryFingerprint *string,
+	refresh workspaceCacheRefresh,
+	credential *WorkspaceGitCredential,
+) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer clearWorkspaceGitCredential(credential)
+		if err := refresh(ctx, credential); err != nil {
+			message := err.Error()
+			if len(message) > 1_000 {
+				message = message[:1_000]
+			}
+			d.logger.Warn(
+				"Workspace cache background refresh failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"repositoryFingerprint", workspaceRepositoryFingerprint(repositoryFingerprint),
+				"error", message,
+			)
+		}
+	}()
+	return done
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -125,6 +174,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer stopHeartbeat()
 	workerFatalErrors := make(chan error, 1)
 	go d.heartbeatLoop(heartbeatContext, cancelRun, workerFatalErrors)
+	if providerHostPrestartEnabled(d.config) {
+		d.runner.startProviderHostV2Prestart(ctx, d.config.RequestTimeout)
+		defer d.runner.stopProviderHostV2Prestart()
+	}
 	cleanupSchedule := newWorkspaceCleanupClaimSchedule(time.Now())
 	canClaimWorkspaceCleanup := workspaceCleanupClaimsEnabled(d.config)
 
@@ -569,10 +622,15 @@ func (d *Daemon) runExecution(
 	executionContext = withExecutionSecretGuard(executionContext, executionGuard)
 	materializer := d.workspace
 	if materializer == nil {
-		materializer = NewWorkspaceMaterializerWithCache(d.config.WorkspaceRoot, d.config.GitCacheRoot, d.config.ExecutionTargetID)
+		materializer = newConfiguredWorkspaceMaterializer(d.config)
 	}
 	var err error
 	var gitCredential *WorkspaceGitCredential
+	clearGitCredential := func() {
+		clearWorkspaceGitCredential(gitCredential)
+		gitCredential = nil
+	}
+	defer clearGitCredential()
 	gitCredential, err = resolveWorkspaceGitCredentialStage(
 		executionContext, d.client, execution.ID, lease, workload.CredentialGrants, "git_fetch", executionGuard,
 	)
@@ -585,6 +643,15 @@ func (d *Daemon) runExecution(
 	if err == nil {
 		materialized, err = materializer.Materialize(executionContext, execution, workload, gitCredential)
 	}
+	if materialized.cacheFetchOutcome != "" {
+		d.logger.Info(
+			"Workspace cache materialization completed",
+			"executionId", execution.ID,
+			"generation", lease.Generation,
+			"repositoryFingerprint", workspaceRepositoryFingerprint(materialized.RepositoryFingerprint),
+			"outcome", materialized.cacheFetchOutcome,
+		)
+	}
 	if err == nil {
 		defer func() {
 			if releaseErr := materialized.Release(); releaseErr != nil {
@@ -592,8 +659,9 @@ func (d *Daemon) runExecution(
 			}
 		}()
 	}
-	clearWorkspaceGitCredential(gitCredential)
-	gitCredential = nil
+	if materialized.backgroundCacheRefresh == nil {
+		clearGitCredential()
+	}
 	if err == nil && workload.RestoreCheckpoint != nil {
 		restorer, ok := materializer.(workspaceRestorer)
 		if !ok {
@@ -636,6 +704,7 @@ func (d *Daemon) runExecution(
 		defer artifactRoot.Close()
 	}
 	if err != nil {
+		clearGitCredential()
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
 			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached during Workspace preparation")
@@ -672,6 +741,21 @@ func (d *Daemon) runExecution(
 			return errors.Join(failErr, stopRenewal())
 		}
 	}
+	var backgroundCacheRefreshDone <-chan struct{}
+	if materialized.backgroundCacheRefresh != nil {
+		refresh := materialized.backgroundCacheRefresh
+		materialized.backgroundCacheRefresh = nil
+		refreshCredential := gitCredential
+		gitCredential = nil
+		backgroundCacheRefreshDone = d.startWorkspaceBackgroundCacheRefresh(
+			executionContext, execution, lease, materialized.RepositoryFingerprint, refresh, refreshCredential,
+		)
+		defer func() {
+			cancelExecution()
+			<-backgroundCacheRefreshDone
+		}()
+	}
+	clearGitCredential()
 	memoryDocuments, err := d.resolveMemoryDocuments(executionContext, execution, lease, workload.MemoryReferences)
 	if err != nil {
 		if ctx.Err() != nil {

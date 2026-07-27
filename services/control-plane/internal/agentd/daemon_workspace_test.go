@@ -1,10 +1,12 @@
 package agentd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -188,8 +190,14 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		checkpoint    executions.CreateWorkspaceCheckpointInput
 		requestBodies []string
 	}
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	executionStarted := make(chan struct{})
+	backgroundRefreshResult := make(chan error, 1)
+	var logs bytes.Buffer
+	controlPlaneURL, err := url.Parse("http://control-plane.invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		base := "/v1/workers/executions/" + executionID.String() + "/"
 		requestBody, _ := io.ReadAll(request.Body)
 		request.Body = io.NopCloser(strings.NewReader(string(requestBody)))
@@ -247,7 +255,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 			state.order = append(state.order, "checkpoint.artifact.create")
 			state.Unlock()
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`"},"method":"PUT","url":"`+server.URL+`/checkpoint-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`"},"method":"PUT","url":"`+controlPlaneURL.String()+`/checkpoint-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
 		case base + "artifacts/" + artifactID.String() + "/complete":
 			var input struct {
 				SHA256 string `json:"sha256"`
@@ -270,6 +278,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 			state.Lock()
 			state.order = append(state.order, "execution.start")
 			state.Unlock()
+			close(executionStarted)
 			response.WriteHeader(http.StatusNoContent)
 		case base + "complete":
 			state.Lock()
@@ -279,12 +288,14 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		default:
 			http.Error(response, "unexpected path", http.StatusNotFound)
 		}
-	}))
-	defer server.Close()
-	controlPlaneURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
+	transport := workspaceRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result := response.Result()
+		result.Request = request
+		return result, nil
+	})
 	cfg := Config{
 		ControlPlaneURL: controlPlaneURL, TargetKind: platform.TargetLocal,
 		RunnerCommand:  agentdDrainRunnerTestCommand(),
@@ -293,6 +304,8 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
 	}
 	client := NewClient(cfg)
+	client.http.Transport = transport
+	client.uploadHTTP.Transport = transport
 	client.workerToken = "worker-token"
 	materializedDirectory := t.TempDir()
 	daemon := &Daemon{
@@ -310,6 +323,24 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 				return WorkspaceMaterialization{
 					Directory: materializedDirectory, Managed: true, RepositoryFingerprint: fingerprint,
 					CurrentBranch: branch, BaseCommit: baseCommit, HeadCommit: headCommit,
+					cacheFetchOutcome: workspaceCacheFetchOutcomeFreshSkip,
+					backgroundCacheRefresh: func(_ context.Context, refreshCredential *WorkspaceGitCredential) error {
+						state.Lock()
+						readyBeforeRefresh := state.ready.RepositoryFingerprint != nil
+						state.Unlock()
+						if !readyBeforeRefresh {
+							backgroundRefreshResult <- errors.New("background refresh started before workspace.ready")
+							return errors.New("background refresh ordering failed")
+						}
+						if refreshCredential == nil || refreshCredential.HTTPS == nil ||
+							refreshCredential.HTTPS.Token != "git-secret-token" {
+							backgroundRefreshResult <- errors.New("background refresh did not reuse the resolved Claim credential")
+							return errors.New("background refresh credential failed")
+						}
+						<-executionStarted
+						backgroundRefreshResult <- nil
+						return errors.New("bounded background refresh failure")
+					},
 				}, nil
 			},
 			inspect: func(_ context.Context, _ WorkspaceMaterialization) (WorkspaceInspection, error) {
@@ -319,7 +350,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 				return WorkspaceInspection{Dirty: false}, nil
 			},
 		},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger: slog.New(slog.NewTextHandler(&logs, nil)),
 	}
 	execution := executions.Execution{ID: executionID, TenantID: tenantID, TurnID: uuid.New(), Generation: 1}
 	workload := executions.Workload{
@@ -331,6 +362,9 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		}},
 	}
 	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-backgroundRefreshResult; err != nil {
 		t.Fatal(err)
 	}
 	state.Lock()
@@ -360,6 +394,128 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(state.requestBodies, "\n"), "git-secret-token") {
 		t.Fatal("Git Credential leaked into an agentd request after resolution")
+	}
+	encodedLogs := logs.String()
+	if strings.Count(encodedLogs, "Workspace cache materialization completed") != 1 ||
+		!strings.Contains(encodedLogs, "outcome=cache-fresh-skip") ||
+		!strings.Contains(encodedLogs, "Workspace cache background refresh failed") {
+		t.Fatalf("Workspace cache visibility logs are incomplete: %s", encodedLogs)
+	}
+}
+
+func TestDaemonGrantResolveFailureRejectsFreshWorkspaceCache(t *testing.T) {
+	executionID := uuid.New()
+	tenantID := uuid.New()
+	workerID := uuid.New()
+	workspaceID := uuid.New()
+	gitGrantID := uuid.New()
+	lease := executions.Lease{
+		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
+		Generation: 1, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	var state struct {
+		sync.Mutex
+		order []string
+	}
+	transport := workspaceRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		base := "/v1/workers/executions/" + executionID.String() + "/"
+		state.Lock()
+		defer state.Unlock()
+		status := http.StatusNoContent
+		body := ""
+		switch request.URL.Path {
+		case base + "credential-grants/" + gitGrantID.String() + "/resolve":
+			state.order = append(state.order, "git.resolve.rejected")
+			status = http.StatusForbidden
+			body = `{"error":"credential revoked"}`
+		case base + "workspace/failed":
+			state.order = append(state.order, "workspace.failed")
+		case base + "fail":
+			state.order = append(state.order, "execution.fail")
+		default:
+			status = http.StatusNotFound
+			body = "unexpected path"
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+	controlPlaneURL, err := url.Parse("http://control-plane.invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		ControlPlaneURL: controlPlaneURL, TargetKind: platform.TargetLocal,
+		RunnerCommand: []string{"unused"}, RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: t.TempDir(),
+		PollInterval: time.Millisecond, HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour,
+		DrainTimeout: time.Second, RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
+		WorkspaceFetchWindow: time.Minute,
+	}
+	client := NewClient(cfg)
+	client.http.Transport = transport
+	client.workerToken = "worker-token"
+	materializeCalled := false
+	daemon := &Daemon{
+		config: cfg, client: client, runner: NewRunner(cfg),
+		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error) {
+			materializeCalled = true
+			return WorkspaceMaterialization{cacheFetchOutcome: workspaceCacheFetchOutcomeFreshSkip}, nil
+		}),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	execution := executions.Execution{ID: executionID, TenantID: tenantID, TurnID: uuid.New(), Generation: 1}
+	workload := executions.Workload{
+		TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(),
+		TurnID: execution.TurnID, RemoteWorkspaceID: &workspaceID, Provider: "codex", InputText: "run",
+		CredentialGrants: []executions.CredentialGrantDescriptor{{
+			GrantID: gitGrantID, BindingKind: "git_fetch", Purpose: "git", Provider: "git",
+			CredentialType: "https_token", Selector: "https://git.example.com/team/repository.git",
+		}},
+	}
+	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err == nil {
+		t.Fatal("revoked git_fetch Grant did not fail the Execution")
+	}
+	if materializeCalled {
+		t.Fatal("fresh Workspace cache bypassed the per-Claim git_fetch Grant resolve")
+	}
+	state.Lock()
+	defer state.Unlock()
+	want := []string{"git.resolve.rejected", "workspace.failed", "execution.fail"}
+	if !reflect.DeepEqual(state.order, want) {
+		t.Fatalf("unexpected revoked Grant lifecycle: %#v", state.order)
+	}
+}
+
+func TestDaemonBackgroundCacheRefreshFailureIsBoundedAndClearsCredential(t *testing.T) {
+	var logs bytes.Buffer
+	daemon := &Daemon{logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	credential := &WorkspaceGitCredential{HTTPS: &GitHTTPSCredential{
+		Host: "git.example.com", Username: "git-user", Token: "short-lived-token",
+	}}
+	done := daemon.startWorkspaceBackgroundCacheRefresh(
+		context.Background(),
+		executions.Execution{ID: uuid.New()},
+		executions.Lease{Generation: 7},
+		stringPointer(strings.Repeat("a", 64)),
+		func(_ context.Context, received *WorkspaceGitCredential) error {
+			if received != credential || received.HTTPS == nil || received.HTTPS.Token != "short-lived-token" {
+				t.Errorf("background refresh did not receive the resolved Credential: %#v", received)
+			}
+			return errors.New(strings.Repeat("x", 2_000))
+		},
+		credential,
+	)
+	<-done
+	if credential.HTTPS != nil || credential.SSH != nil {
+		t.Fatalf("background refresh retained the resolved Credential: %#v", credential)
+	}
+	encoded := logs.String()
+	if !strings.Contains(encoded, "Workspace cache background refresh failed") ||
+		strings.Contains(encoded, strings.Repeat("x", 1_001)) {
+		t.Fatalf("background refresh failure log was missing or unbounded: %s", encoded)
 	}
 }
 
@@ -441,6 +597,12 @@ func TestDaemonReportsManagedWorkspaceFailureBeforeFailingExecution(t *testing.T
 }
 
 type workspaceMaterializerFunc func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error)
+
+type workspaceRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f workspaceRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func (f workspaceMaterializerFunc) Materialize(
 	ctx context.Context,

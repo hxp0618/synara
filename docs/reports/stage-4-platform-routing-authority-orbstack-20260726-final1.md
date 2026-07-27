@@ -27,18 +27,18 @@ The Control Plane configuration contains only public keys. The signer private ke
 
 ## Source identity
 
-| Source | SHA-256 |
-| --- | --- |
-| `000083_platform_routing_authority_publications.sql` | `8ecd54b14837bbb4f42662735e3dcb569e6931f12160b5aea976bba5edfd0c51` |
-| `internal/routing/platform_authority.go` | `5bf04a33df7d168dae8a983da9a8b178bd8a860d58272785e7a0d619be84decb` |
-| `internal/config/platform_routing_publishers.go` | `3e7a106eb62055385db9614dc9a8bc45172caabc316b493b5a7b6e5af2b5745f` |
-| `internal/persistence/platform_routing_authority_models.go` | `afcbd40952f084f2fa6d0a70834d53668f8da49fde797b5e2f8a98bb67d98256` |
-| `internal/database/platform_routing_authority_sqlite.go` | `29e8d902e91cf34ad04e5729f2f4217b50ee2cc666a3a223fe3870b8721c3ebe` |
-| `internal/routing/platform_authority_test.go` | `19f9b39d62ee9d5adc26ee09bda9feede00fb9d4549430c386a72598bbe597b1` |
+| Source                                                             | SHA-256                                                            |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `000083_platform_routing_authority_publications.sql`               | `8ecd54b14837bbb4f42662735e3dcb569e6931f12160b5aea976bba5edfd0c51` |
+| `internal/routing/platform_authority.go`                           | `5bf04a33df7d168dae8a983da9a8b178bd8a860d58272785e7a0d619be84decb` |
+| `internal/config/platform_routing_publishers.go`                   | `3e7a106eb62055385db9614dc9a8bc45172caabc316b493b5a7b6e5af2b5745f` |
+| `internal/persistence/platform_routing_authority_models.go`        | `afcbd40952f084f2fa6d0a70834d53668f8da49fde797b5e2f8a98bb67d98256` |
+| `internal/database/platform_routing_authority_sqlite.go`           | `29e8d902e91cf34ad04e5729f2f4217b50ee2cc666a3a223fe3870b8721c3ebe` |
+| `internal/routing/platform_authority_test.go`                      | `19f9b39d62ee9d5adc26ee09bda9feede00fb9d4549430c386a72598bbe597b1` |
 | `internal/routing/platform_authority_postgres_integration_test.go` | `9aecd9ae26f21cdd61835c8baae0800638ddd1e69e80cc57b7efc3bfaa9e895b` |
-| `internal/routing/platform_authority_http_integration_test.go` | `bd83d9a2bed980248d4447ae017d194cc702dec6b77b34b87126ddc67e2b7b19` |
-| `cmd/routing-authority-sign/main.go` | `b48cf17651b7c1bb9daade3f8889c293416b74f8b66a824c1e910f464c0308fc` |
-| `internal/observability/distributed_routing_billing_metrics.go` | `61b61cdbc3750686f880de49179578beb8d3afb844463f84582e6762ac8cf865` |
+| `internal/routing/platform_authority_http_integration_test.go`     | `bd83d9a2bed980248d4447ae017d194cc702dec6b77b34b87126ddc67e2b7b19` |
+| `cmd/routing-authority-sign/main.go`                               | `b48cf17651b7c1bb9daade3f8889c293416b74f8b66a824c1e910f464c0308fc` |
+| `internal/observability/distributed_routing_billing_metrics.go`    | `61b61cdbc3750686f880de49179578beb8d3afb844463f84582e6762ac8cf865` |
 
 ## SQLite and package-level results
 
