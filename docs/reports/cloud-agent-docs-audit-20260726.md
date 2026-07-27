@@ -51,17 +51,17 @@
 12. `docs/runbooks/worker-release-rollout.md`："本实现边界为 `000042`" 同类问题，同样修复。
 13. `docs/contracts/workspace-v1.md`："DDL source of truth through `000027`" 锚点过时，已改为
     区间 + 持续扩展表述。
-18. `docs/contracts/provider-host-v1.md`：三份冻结基线中唯一缺 legacy 横幅的文档，已补
+14. `docs/contracts/provider-host-v1.md`：三份冻结基线中唯一缺 legacy 横幅的文档，已补
     （详见第二节基线条目）。
-19. `docs/plans/stage-2-go-control-plane-productionization.md`：状态节增加"已完成/已验收 +
+15. `docs/plans/stage-2-go-control-plane-productionization.md`：状态节增加"已完成/已验收 +
     文中'当前'为收口时点"声明，"当前 Schema"改为"收口时 Schema"。
-20. `docs/plans/stage-3-provider-runtime-remote-worker-productization.md`：标题下增加 COMPLETE
+16. `docs/plans/stage-3-provider-runtime-remote-worker-productization.md`：标题下增加 COMPLETE
     横幅（2026-07-24 收口、runtime SHA `8415efa1`），声明文中 checkpoint/`partial`/migration
     boundary 均为时点快照。
-21. `docs/plans/stage-3-drift-audit.md`："Current baseline" 改为 "Audit baseline" 并加历史记录
+17. `docs/plans/stage-3-drift-audit.md`："Current baseline" 改为 "Audit baseline" 并加历史记录
     横幅，覆盖文中多处 "`partial`"与 "boundary 仍为 `000041`" 的时点性。
 
-22. `docs/plans/saas-tenancy-organization-user-plan.md` §5.3：Permission 清单停留在 Phase 0-3 的
+18. `docs/plans/saas-tenancy-organization-user-plan.md` §5.3：Permission 清单停留在 Phase 0-3 的
     29 个初始值（代码现有 48 个）。按单一来源原则未补第三份全量副本，改为标注时点性并指向
     `permissions.go` 与 `role-permission-matrix.md`。§5.1/5.2 的 6 租户角色、5 组织角色与代码一致；
     文档头部 Phase 0-6 状态声明与 TODO.md 一致。

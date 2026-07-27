@@ -47,6 +47,7 @@ type Pool struct {
 	Region             string         `json:"region"`
 	Namespace          string         `json:"namespace"`
 	DesiredIdleUnits   int            `json:"desiredIdleUnits"`
+	MinIdleUnits       int            `json:"minIdleUnits"`
 	MaxActiveUnits     int            `json:"maxActiveUnits"`
 	SchedulingTemplate map[string]any `json:"schedulingTemplate"`
 	Status             string         `json:"status"`
@@ -86,6 +87,7 @@ type CreatePoolInput struct {
 	Region             string         `json:"region"`
 	Namespace          string         `json:"namespace"`
 	DesiredIdleUnits   int            `json:"desiredIdleUnits"`
+	MinIdleUnits       *int           `json:"minIdleUnits"`
 	MaxActiveUnits     int            `json:"maxActiveUnits"`
 	SchedulingTemplate map[string]any `json:"schedulingTemplate"`
 	Status             string         `json:"status"`
@@ -273,6 +275,7 @@ func (s *Service) CreatePool(
 			Region:             normalized.Region,
 			Namespace:          normalized.Namespace,
 			DesiredIdleUnits:   normalized.DesiredIdleUnits,
+			MinIdleUnits:       *normalized.MinIdleUnits,
 			MaxActiveUnits:     normalized.MaxActiveUnits,
 			SchedulingTemplate: normalized.SchedulingTemplate,
 			Status:             normalized.Status,
@@ -364,6 +367,7 @@ func (s *Service) UpdatePool(
 		current.Region = normalized.Region
 		current.Namespace = normalized.Namespace
 		current.DesiredIdleUnits = normalized.DesiredIdleUnits
+		current.MinIdleUnits = *normalized.MinIdleUnits
 		current.MaxActiveUnits = normalized.MaxActiveUnits
 		current.SchedulingTemplate = normalized.SchedulingTemplate
 		current.Status = normalized.Status
@@ -373,7 +377,7 @@ func (s *Service) UpdatePool(
 			Where("id = ? AND version = ?", current.ID, expectedVersion).
 			Select(
 				"name", "mode", "capacity_class", "cluster_id", "region", "namespace",
-				"desired_idle_units", "max_active_units", "scheduling_template", "status", "version", "updated_at",
+				"desired_idle_units", "min_idle_units", "max_active_units", "scheduling_template", "status", "version", "updated_at",
 			).
 			Updates(&current)
 		if result.Error != nil {
@@ -545,6 +549,7 @@ func previewDefaultPool(
 		Region:             "",
 		Namespace:          "",
 		DesiredIdleUnits:   0,
+		MinIdleUnits:       0,
 		MaxActiveUnits:     1,
 		SchedulingTemplate: map[string]any{},
 		Status:             PoolStatusActive,
@@ -660,6 +665,7 @@ func (s *Service) ensureDefaultPool(
 		Region:             "",
 		Namespace:          "",
 		DesiredIdleUnits:   0,
+		MinIdleUnits:       0,
 		MaxActiveUnits:     1,
 		SchedulingTemplate: map[string]any{},
 		Status:             PoolStatusActive,
@@ -744,6 +750,7 @@ func toPool(model persistence.WorkerPool) Pool {
 		Region:             model.Region,
 		Namespace:          model.Namespace,
 		DesiredIdleUnits:   model.DesiredIdleUnits,
+		MinIdleUnits:       model.MinIdleUnits,
 		MaxActiveUnits:     model.MaxActiveUnits,
 		SchedulingTemplate: template,
 		Status:             model.Status,
@@ -823,8 +830,12 @@ func normalizePoolInput(input CreatePoolInput) (CreatePoolInput, error) {
 	default:
 		return CreatePoolInput{}, problem.New(400, "invalid_worker_pool_status", "Worker pool status must be active, draining, or disabled.")
 	}
-	if input.DesiredIdleUnits < 0 || input.MaxActiveUnits < input.DesiredIdleUnits {
-		return CreatePoolInput{}, problem.New(400, "invalid_worker_pool_capacity_bounds", "Worker pool desiredIdleUnits and maxActiveUnits are invalid.")
+	minIdleUnits := 0
+	if input.MinIdleUnits != nil {
+		minIdleUnits = *input.MinIdleUnits
+	}
+	if input.DesiredIdleUnits < 0 || minIdleUnits < 0 || minIdleUnits > input.DesiredIdleUnits || input.MaxActiveUnits < input.DesiredIdleUnits {
+		return CreatePoolInput{}, problem.New(400, "invalid_worker_pool_capacity_bounds", "Worker pool capacity bounds require 0 <= minIdleUnits <= desiredIdleUnits <= maxActiveUnits.")
 	}
 	template := input.SchedulingTemplate
 	if template == nil {
@@ -838,6 +849,7 @@ func normalizePoolInput(input CreatePoolInput) (CreatePoolInput, error) {
 		Region:             strings.TrimSpace(input.Region),
 		Namespace:          strings.TrimSpace(input.Namespace),
 		DesiredIdleUnits:   input.DesiredIdleUnits,
+		MinIdleUnits:       &minIdleUnits,
 		MaxActiveUnits:     input.MaxActiveUnits,
 		SchedulingTemplate: template,
 		Status:             status,

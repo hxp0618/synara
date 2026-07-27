@@ -20,6 +20,7 @@ type ManagedKubernetesWarmCapacityObservation struct {
 	WarmSupported           bool
 	WorkerReleaseRevisionID *uuid.UUID
 	WorkerReleaseChannel    *string
+	MinIdleUnits            int
 	DesiredTotalUnits       int
 	ClaimedUnits            int
 	ReadyIdleUnits          int
@@ -73,6 +74,7 @@ func (p *ManagedKubernetesWarmCapacityPublisher) PublishReconcile(
 		WarmSupported:           observation.WarmSupported,
 		WorkerReleaseRevisionID: observation.WorkerReleaseRevisionID,
 		WorkerReleaseChannel:    observation.WorkerReleaseChannel,
+		MinIdleUnits:            observation.MinIdleUnits,
 		DesiredTotalUnits:       observation.DesiredTotalUnits,
 		ClaimedUnits:            observation.ClaimedUnits,
 		ReadyIdleUnits:          observation.ReadyIdleUnits,

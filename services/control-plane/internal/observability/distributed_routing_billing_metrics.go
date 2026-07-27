@@ -34,9 +34,12 @@ type warmCapacityAuthorityGroup struct {
 
 type warmCapacityUnitGroup struct {
 	CapacityClass     string `gorm:"column:capacity_class"`
+	DesiredIdleUnits  int64  `gorm:"column:desired_idle_units"`
+	MinIdleUnits      int64  `gorm:"column:min_idle_units"`
 	DesiredTotalUnits int64  `gorm:"column:desired_total_units"`
 	ClaimedUnits      int64  `gorm:"column:claimed_units"`
 	ReadyIdleUnits    int64  `gorm:"column:ready_idle_units"`
+	DeficitUnits      int64  `gorm:"column:deficit_units"`
 }
 
 type warmCapacityAuthorityMetricKey struct {
@@ -570,26 +573,38 @@ func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
 	var unitRows []warmCapacityUnitGroup
 	if err := r.db.WithContext(ctx).Table("worker_pool_warm_capacity").
 		Select(`capacity_class,
+			SUM(desired_idle_units) AS desired_idle_units,
+			SUM(min_idle_units) AS min_idle_units,
 			SUM(desired_total_units) AS desired_total_units,
 			SUM(claimed_units) AS claimed_units,
-			SUM(ready_idle_units) AS ready_idle_units`).
+			SUM(ready_idle_units) AS ready_idle_units,
+			SUM(CASE
+				WHEN min_idle_units > ready_idle_units THEN min_idle_units - ready_idle_units
+				ELSE 0
+			END) AS deficit_units`).
 		Where("expires_at > ?", now).
 		Group("capacity_class").
 		Scan(&unitRows).Error; err != nil {
 		return fmt.Errorf("collect fresh Worker Pool warm capacity unit metrics: %w", err)
 	}
 	type unitTotals struct {
+		desiredIdle  int64
+		minIdle      int64
 		desiredTotal int64
 		claimed      int64
 		readyIdle    int64
+		deficit      int64
 	}
 	units := make(map[string]unitTotals)
 	for _, row := range unitRows {
 		capacityClass := boundedWarmCapacityClass(row.CapacityClass)
 		totals := units[capacityClass]
+		totals.desiredIdle += row.DesiredIdleUnits
+		totals.minIdle += row.MinIdleUnits
 		totals.desiredTotal += row.DesiredTotalUnits
 		totals.claimed += row.ClaimedUnits
 		totals.readyIdle += row.ReadyIdleUnits
+		totals.deficit += row.DeficitUnits
 		units[capacityClass] = totals
 	}
 	capacityClasses := make([]string, 0, len(units))
@@ -609,6 +624,8 @@ func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
 			kind  string
 			value int64
 		}{
+			{kind: "desired_idle", value: totals.desiredIdle},
+			{kind: "min_idle", value: totals.minIdle},
 			{kind: "desired_total", value: totals.desiredTotal},
 			{kind: "claimed", value: totals.claimed},
 			{kind: "ready_idle", value: totals.readyIdle},
@@ -620,6 +637,20 @@ func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
 				sample.value,
 			)
 		}
+	}
+	writeHelp(
+		output,
+		"synara_worker_pool_warm_deficit",
+		"Fresh authoritative guaranteed warm-floor deficit by bounded capacity class.",
+		"gauge",
+	)
+	for _, capacityClass := range capacityClasses {
+		fmt.Fprintf(
+			output,
+			"synara_worker_pool_warm_deficit%s %d\n",
+			labels(map[string]string{"capacity_class": capacityClass}),
+			units[capacityClass].deficit,
+		)
 	}
 	return nil
 }

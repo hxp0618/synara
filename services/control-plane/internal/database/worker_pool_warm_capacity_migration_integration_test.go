@@ -33,6 +33,7 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 		WorkerReleaseRevisionID: &fixture.release.ID,
 		WorkerReleaseChannel:    &releaseChannel,
 		DesiredIdleUnits:        fixture.pool.DesiredIdleUnits,
+		MinIdleUnits:            fixture.pool.MinIdleUnits,
 		MaxActiveUnits:          fixture.pool.MaxActiveUnits,
 		DesiredTotalUnits:       3,
 		ClaimedUnits:            1,
@@ -64,6 +65,20 @@ func TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation(t *testing.T) {
 	assertWorkerPoolWarmCapacityConstraintRejected(
 		t,
 		db.Create(&invalidRelease).Error,
+		"Worker pool warm capacity scope is invalid",
+	)
+	assertWorkerPoolWarmCapacityConstraintRejected(
+		t,
+		db.Model(&persistence.WorkerPoolWarmCapacity{}).
+			Where("tenant_id = ? AND execution_target_id = ? AND worker_pool_id = ? AND worker_pool_version = ?",
+				fixture.tenantID, fixture.target.ID, fixture.pool.ID, fixture.pool.Version).
+			Updates(map[string]any{
+				"min_idle_units": 0,
+				"version":        2,
+				"observed_at":    fixture.now.Add(time.Second),
+				"expires_at":     fixture.now.Add(2 * time.Minute),
+				"updated_at":     fixture.now.Add(time.Second),
+			}).Error,
 		"Worker pool warm capacity scope is invalid",
 	)
 
@@ -170,7 +185,7 @@ func seedWorkerPoolWarmCapacityFixture(t *testing.T, db *gorm.DB) workerPoolWarm
 	pool := persistence.WorkerPool{
 		ID: uuid.New(), TenantID: &tenantID, ExecutionTargetID: target.ID,
 		Name: "warm-a", Mode: "warm", CapacityClass: "interactive",
-		DesiredIdleUnits: 2, MaxActiveUnits: 5, SchedulingTemplate: map[string]any{},
+		DesiredIdleUnits: 2, MinIdleUnits: 1, MaxActiveUnits: 5, SchedulingTemplate: map[string]any{},
 		Status: "active", Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	otherPool := persistence.WorkerPool{

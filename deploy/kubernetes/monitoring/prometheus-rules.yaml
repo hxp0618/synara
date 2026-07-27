@@ -141,3 +141,36 @@ spec:
           annotations:
             summary: Synara has expired SSE connection leases
             description: Expired SSE leases remain and should be removed by reconnect or retention cleanup.
+    - name: synara-control-plane.fast-provision-slo
+      rules:
+        - alert: SynaraWarmHitColdStartSLOBreach
+          expr: |
+            max by (target_kind, warm_pool_mode) (
+              synara_execution_cold_start_duration_seconds_30d{warm_pool_result="hit", quantile="p95"}
+            ) > 2.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Warm-hit agent start P95 exceeds the interactive SLO
+            description: Trailing-30-day dispatch-to-Provider-ready P95 for warm-pool hits has exceeded 2.5 seconds for 15 minutes; the fast-provision interactive SLO is breached even when warm capacity is available.
+        - alert: SynaraWarmPoolFallbackSurge
+          expr: |
+            sum(synara_warm_pool_acquisitions_30d{result="fallback"})
+              /
+            clamp_min(sum(synara_warm_pool_acquisitions_30d{result=~"hit|fallback"}), 1)
+            > 0.2
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Warm Pool requests are frequently falling back to cold starts
+            description: More than twenty percent of warm-requested Generations in the trailing 30-day window fell back to cold provisioning; warm capacity is undersized or unhealthy relative to interactive demand.
+        - alert: SynaraWarmPoolMinIdleDeficit
+          expr: sum by (capacity_class) (synara_worker_pool_warm_deficit) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A guaranteed warm floor is unmet
+            description: The guaranteed warm floor has remained unmet for this capacity class for at least ten minutes; inspect target Pod budget, scheduling, and Worker readiness.

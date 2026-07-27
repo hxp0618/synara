@@ -27,6 +27,7 @@ func TestObserveAndGetFreshRoundTrip(t *testing.T) {
 		WarmSupported:           true,
 		WorkerReleaseRevisionID: &fixture.release.ID,
 		WorkerReleaseChannel:    &channel,
+		MinIdleUnits:            fixture.pool.MinIdleUnits,
 		DesiredTotalUnits:       3,
 		ClaimedUnits:            1,
 		ReadyIdleUnits:          2,
@@ -40,6 +41,7 @@ func TestObserveAndGetFreshRoundTrip(t *testing.T) {
 	}
 	if observed.CapacityClass != fixture.pool.CapacityClass ||
 		observed.DesiredIdleUnits != fixture.pool.DesiredIdleUnits ||
+		observed.MinIdleUnits != fixture.pool.MinIdleUnits ||
 		observed.MaxActiveUnits != fixture.pool.MaxActiveUnits ||
 		observed.Version != 1 ||
 		observed.WorkerReleaseRevisionID == nil ||
@@ -74,6 +76,7 @@ func TestObserveAndGetFreshRoundTrip(t *testing.T) {
 		WarmSupported:           true,
 		WorkerReleaseRevisionID: &fixture.release.ID,
 		WorkerReleaseChannel:    &channel,
+		MinIdleUnits:            fixture.pool.MinIdleUnits,
 		DesiredTotalUnits:       4,
 		ClaimedUnits:            2,
 		ReadyIdleUnits:          1,
@@ -113,6 +116,7 @@ func TestObserveRejectsInvalidScopeAndCounters(t *testing.T) {
 		WorkerPoolID:      fixture.pool.ID,
 		WorkerPoolVersion: fixture.pool.Version,
 		WarmSupported:     true,
+		MinIdleUnits:      fixture.pool.MinIdleUnits,
 		DesiredTotalUnits: 2,
 		ClaimedUnits:      1,
 		ReadyIdleUnits:    1,
@@ -148,6 +152,13 @@ func TestObserveRejectsInvalidScopeAndCounters(t *testing.T) {
 				input.WorkerPoolVersion = nonWarmPool.Version
 			},
 			code: "warm_capacity_pool_mode_invalid",
+		},
+		{
+			name: "min idle mismatch rejected",
+			mut: func(input *Observation) {
+				input.MinIdleUnits = fixture.pool.MinIdleUnits + 1
+			},
+			code: "warm_capacity_pool_shape_invalid",
 		},
 		{
 			name: "unsupported counters rejected",
@@ -206,6 +217,7 @@ func TestGetFreshReturnsNilForExpiredMissingOrReleaseMismatch(t *testing.T) {
 		WarmSupported:           true,
 		WorkerReleaseRevisionID: &fixture.release.ID,
 		WorkerReleaseChannel:    &channel,
+		MinIdleUnits:            fixture.pool.MinIdleUnits,
 		DesiredTotalUnits:       2,
 		ClaimedUnits:            1,
 		ReadyIdleUnits:          1,
@@ -317,7 +329,7 @@ func newWarmCapacityFixture(t *testing.T) warmCapacityFixture {
 	pool := persistence.WorkerPool{
 		ID: uuid.New(), TenantID: &tenantID, ExecutionTargetID: targetID,
 		Name: "warm-default", Mode: poolModeWarm, CapacityClass: capacityClassInteractive,
-		DesiredIdleUnits: 2, MaxActiveUnits: 5, SchedulingTemplate: map[string]any{},
+		DesiredIdleUnits: 2, MinIdleUnits: 1, MaxActiveUnits: 5, SchedulingTemplate: map[string]any{},
 		Status: "active", Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := db.Create(&pool).Error; err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1177,6 +1178,8 @@ const (
 	providerHostTestCommandLogArgument = "--synara-provider-host-test-command-log"
 	providerHostTestExitMarkerArgument = "--synara-provider-host-test-exit-marker"
 	providerHostTestExpectedEnvArg     = "--synara-provider-host-test-expected-env"
+	providerHostTestProcessLogArgument = "--synara-provider-host-test-process-log"
+	providerHostTestCredentialLogArg   = "--synara-provider-host-test-credential-log"
 )
 
 func providerHostV2TestCommand() []string {
@@ -1191,6 +1194,12 @@ func providerHostV2TestCommand() []string {
 	}
 	if exitMarker := os.Getenv("PROVIDER_HOST_TEST_EXIT_MARKER"); exitMarker != "" {
 		command = append(command, providerHostTestExitMarkerArgument, exitMarker)
+	}
+	if processLog := os.Getenv("PROVIDER_HOST_TEST_PROCESS_LOG"); processLog != "" {
+		command = append(command, providerHostTestProcessLogArgument, processLog)
+	}
+	if credentialLog := os.Getenv("PROVIDER_HOST_TEST_CREDENTIAL_LOG"); credentialLog != "" {
+		command = append(command, providerHostTestCredentialLogArg, credentialLog)
 	}
 	for _, name := range append(
 		[]string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"},
@@ -1301,6 +1310,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 	}
 	for _, name := range []string{
 		"GO_WANT_PROVIDER_HOST_HELPER", "PROVIDER_HOST_TEST_MODE", "PROVIDER_HOST_TEST_COMMAND_LOG", "PROVIDER_HOST_TEST_EXIT_MARKER",
+		"PROVIDER_HOST_TEST_PROCESS_LOG", "PROVIDER_HOST_TEST_CREDENTIAL_LOG",
 		"SYNARA_PROVIDER_HOST_BUILD_VERSION",
 		"SECRET", "HOST_SECRET", "SYNARA_HOST_SECRET", "SYNARA_AUTH_TOKEN", "SYNARA_WORKER_REGISTRATION_TOKEN",
 		"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "SYNARA_LEASE_TOKEN", "SYNARA_CONTROL_PLANE_URL",
@@ -1314,16 +1324,31 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 	}
-	credentialDelivered := false
-	if fd := strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CREDENTIAL_FD")); fd != "" {
-		file := os.NewFile(3, "provider-credential")
-		var credential RunnerCredential
-		if file == nil || json.NewDecoder(file).Decode(&credential) != nil || credential.Payload["apiKey"] != "provider-secret" {
-			fmt.Fprintln(os.Stderr, "Provider credential was not delivered through FD 3")
+	processOrdinal := 1
+	if processLog := providerHostTestArgument(providerHostTestProcessLogArgument); processLog != "" {
+		data, err := os.ReadFile(processLog)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
+		processOrdinal = strings.Count(string(data), "\n") + 1
+		file, err := os.OpenFile(processLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(file, "start")
 		_ = file.Close()
-		credentialDelivered = true
+	}
+	credentialDelivered := false
+	credentialResolved := false
+	var credentialFile *os.File
+	if fd := strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CREDENTIAL_FD")); fd != "" {
+		credentialFile = os.NewFile(3, "provider-credential")
+		if credentialFile == nil {
+			fmt.Fprintln(os.Stderr, "Provider credential FD 3 was unavailable")
+			os.Exit(2)
+		}
 	}
 
 	mode := providerHostTestArgument(providerHostTestModeArgument)
@@ -1333,6 +1358,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 	var pendingSend *providerHostCommand
 	runtimeOutputDirectory := ""
 	providerStateDirectory := ""
+	describeCount := 0
 	for scanner.Scan() {
 		var command providerHostCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
@@ -1362,6 +1388,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		}
 		switch command.CommandType {
 		case "Describe":
+			describeCount++
 			provider, _ := command.Payload["provider"].(string)
 			capabilities := map[string]any{
 				"send-turn": "native", "steer-turn": "native", "compact": "native", "review": "native",
@@ -1395,12 +1422,16 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			if mode == "missing-provider-cli-version" {
 				delete(capabilityDescriptor, "providerCliVersion")
 			}
+			credentialDeliveryModes := []string{"anonymous-fd"}
+			if mode == "prestart-mismatch" && processOrdinal == 1 && normalizeProvider(provider) == "codex" {
+				credentialDeliveryModes = nil
+			}
 			descriptor := map[string]any{
 				"protocolVersion":  map[string]any{"major": major, "minor": minor, "futureMinorField": true},
 				"hostBuildVersion": "test-host", "maximumCommandBytes": providerHostCommandLimit,
 				"maximumMessageBytes":     1 << 20,
 				"runtimeEventVersions":    providerHostTestRuntimeEventVersions(mode),
-				"credentialDeliveryModes": []string{"anonymous-fd"},
+				"credentialDeliveryModes": credentialDeliveryModes,
 				"resumeStrategies":        []string{"native-cursor", "authoritative-history"},
 				"capabilityDescriptor":    capabilityDescriptor,
 			}
@@ -1421,7 +1452,36 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
 				"descriptor": descriptor,
 			}, nil)
+			if mode == "prestart-crash" && describeCount == len(providerHostProviders) {
+				fmt.Fprintln(os.Stderr, "simulated prestarted Host crash")
+				os.Exit(23)
+			}
 		case "StartSession", "ResumeSession":
+			if credentialFile != nil && !credentialResolved {
+				var credential RunnerCredential
+				credentialErr := json.NewDecoder(credentialFile).Decode(&credential)
+				_ = credentialFile.Close()
+				credentialResolved = true
+				if credentialErr == nil {
+					if credential.Payload["apiKey"] != "provider-secret" {
+						fmt.Fprintln(os.Stderr, "Provider credential was not delivered through FD 3")
+						os.Exit(2)
+					}
+					credentialDelivered = true
+					if credentialLog := providerHostTestArgument(providerHostTestCredentialLogArg); credentialLog != "" {
+						file, err := os.OpenFile(credentialLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, err)
+							os.Exit(2)
+						}
+						_, _ = fmt.Fprintln(file, credential.Payload["apiKey"])
+						_ = file.Close()
+					}
+				} else if !errors.Is(credentialErr, io.EOF) {
+					fmt.Fprintln(os.Stderr, "Provider credential pipe was invalid:", credentialErr)
+					os.Exit(2)
+				}
+			}
 			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {
 				fmt.Fprintln(os.Stderr, "Runtime Event negotiation was not carried into the session command")
 				os.Exit(2)

@@ -754,6 +754,45 @@ func TestKubernetesReconcilerPrioritizesExecutionPodsBeforeWarmPoolsAtTargetCap(
 	}
 }
 
+func TestKubernetesReconcilerPrioritizesGuaranteedWarmPodsAndExposesBudgetTruncation(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["maxActivePods"] = 1
+	fixture.updateConfiguration(t, configuration)
+	pool := fixture.createWarmPoolWithMinIdle(
+		t,
+		placement.CapacityClassInteractive,
+		2,
+		2,
+		2,
+		placement.PoolStatusActive,
+	)
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	var observations []ManagedKubernetesWarmCapacityObservation
+	fixture.reconciler.config.PublishWarmCapacity = func(_ context.Context, observation ManagedKubernetesWarmCapacityObservation) error {
+		observations = append(observations, observation)
+		return nil
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.pods) != 1 || client.kindCount("Pod") != 1 {
+		t.Fatalf("budget-truncated reconcile created pods=%d active=%#v", client.kindCount("Pod"), client.pods)
+	}
+	pod := onlyFakePod(t, client)
+	if pod.Labels[kubernetesWorkerModeLabel] != kubernetesWorkerModeWarmPool ||
+		pod.Labels[kubernetesWarmSlotLabel] != "0" ||
+		pod.Labels[kubernetesWorkerPoolIDLabel] != pool.ID.String() {
+		t.Fatalf("guaranteed warm Pod was not prioritized ahead of cold demand: %#v", pod.Labels)
+	}
+	if len(observations) != 1 || observations[0].MinIdleUnits != 2 ||
+		observations[0].DesiredTotalUnits != 2 || observations[0].ReadyIdleUnits != 0 {
+		t.Fatalf("budget-truncated warm authority = %#v", observations)
+	}
+}
+
 func TestKubernetesReconcilerReservesReadyWarmWorkerBeforeColdFallback(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	configuration := kubernetesTestConfiguration("")
@@ -1041,6 +1080,64 @@ func TestKubernetesReconcilerEvictsNotReadyWarmWorkerForColdDemandAtTargetCap(t 
 				t.Fatalf("later pass rebuilt warm capacity or repeated deletion: deleted=%#v active=%#v created=%d->%d", client.deletedPods, client.pods, createdPods, client.kindCount("Pod"))
 			}
 		})
+	}
+}
+
+func TestKubernetesReconcilerExemptsGuaranteedWarmSlotFromDemandFallbackEviction(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["maxActivePods"] = 2
+	fixture.updateConfiguration(t, configuration)
+	fixture.createWarmPoolWithMinIdle(
+		t,
+		placement.CapacityClassInteractive,
+		2,
+		1,
+		2,
+		placement.PoolStatusActive,
+	)
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("execution_target_id = ?", fixture.targetID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	warmPodsBySlot := make(map[string]kubernetesPod)
+	for _, pod := range client.pods {
+		warmPodsBySlot[pod.Labels[kubernetesWarmSlotLabel]] = pod
+	}
+	if len(warmPodsBySlot) != 2 {
+		t.Fatalf("initial warm slots = %#v, want slots 0 and 1", warmPodsBySlot)
+	}
+	if err := fixture.db.Model(&persistence.AgentExecution{}).
+		Where("id = ?", fixture.executionIDs[0]).
+		Update("status", "queued").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deletedPods) != 1 || client.deletedPods[0] != warmPodsBySlot["1"].Name {
+		t.Fatalf("demand fallback deleted %#v, want only best-effort slot 1", client.deletedPods)
+	}
+	if _, found := client.pods[warmPodsBySlot["0"].Name]; !found {
+		t.Fatalf("guaranteed slot 0 was evicted: active=%#v", client.pods)
+	}
+	if _, found := findExecutionPod(client, fixture.executionIDs[0]); found {
+		t.Fatalf("cold Pod was created before deletion released quota: active=%#v", client.pods)
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := findExecutionPod(client, fixture.executionIDs[0]); !found {
+		t.Fatalf("cold demand did not use capacity released by best-effort slot: active=%#v", client.pods)
 	}
 }
 
@@ -1617,10 +1714,10 @@ func TestKubernetesReconcilerConfirmsMissingRegisteredPodAfterSuccessfulList(t *
 func TestKubernetesWarmPodPlansBackfillIdleSlotAfterClaim(t *testing.T) {
 	pool := kubernetesWarmPool{
 		ID: uuid.New(), Version: 1, CapacityClass: placement.CapacityClassInteractive,
-		DesiredIdleUnits: 1, MaxActiveUnits: 2, SchedulingTemplate: map[string]any{},
+		DesiredIdleUnits: 2, MinIdleUnits: 1, MaxActiveUnits: 3, SchedulingTemplate: map[string]any{},
 		Status: placement.PoolStatusActive,
 	}
-	plans, _, err := kubernetesWarmPodPlans(
+	guaranteed, bestEffort, plansByName, err := kubernetesWarmPodPlans(
 		[]kubernetesWarmPool{pool},
 		true,
 		map[uuid.UUID]int{pool.ID: 1},
@@ -1631,8 +1728,14 @@ func TestKubernetesWarmPodPlansBackfillIdleSlotAfterClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[0].Slot != 0 || plans[1].Slot != 1 {
-		t.Fatalf("warm plans after one claim = %#v, want occupied slot 0 plus idle backfill slot 1", plans)
+	if len(guaranteed) != 1 || guaranteed[0].Slot != 0 {
+		t.Fatalf("guaranteed warm plans = %#v, want slot 0", guaranteed)
+	}
+	if len(bestEffort) != 2 || bestEffort[0].Slot != 1 || bestEffort[1].Slot != 2 {
+		t.Fatalf("best-effort warm plans = %#v, want slots 1 and 2", bestEffort)
+	}
+	if len(plansByName) != 3 {
+		t.Fatalf("warm plan name index = %#v, want all three stable plans", plansByName)
 	}
 }
 
@@ -2165,13 +2268,22 @@ func (f kubernetesReconcileFixture) createWarmPool(
 	desiredIdleUnits, maxActiveUnits int,
 	status string,
 ) persistence.WorkerPool {
+	return f.createWarmPoolWithMinIdle(t, capacityClass, desiredIdleUnits, 0, maxActiveUnits, status)
+}
+
+func (f kubernetesReconcileFixture) createWarmPoolWithMinIdle(
+	t *testing.T,
+	capacityClass string,
+	desiredIdleUnits, minIdleUnits, maxActiveUnits int,
+	status string,
+) persistence.WorkerPool {
 	t.Helper()
 	now := time.Now().UTC()
 	pool := persistence.WorkerPool{
 		ID: uuid.New(), TenantID: &f.tenantID, ExecutionTargetID: f.targetID,
 		Name: "warm-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8],
 		Mode: placement.PoolModeWarm, CapacityClass: capacityClass,
-		DesiredIdleUnits: desiredIdleUnits, MaxActiveUnits: maxActiveUnits,
+		DesiredIdleUnits: desiredIdleUnits, MinIdleUnits: minIdleUnits, MaxActiveUnits: maxActiveUnits,
 		SchedulingTemplate: map[string]any{}, Status: status, Version: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}

@@ -42,7 +42,9 @@ Workspace generation:
 
 ```text
 GIT_CACHE_ROOT/
-  v1/<target>/<tenant>/<project>/<repository-fingerprint>/repo.git
+  v1/<target>/<tenant>/<project>/<repository-fingerprint>/
+    repo.git
+    last-successful-fetch
 
 WORKSPACE_ROOT/
   .locks/...
@@ -57,11 +59,27 @@ materialization uses v3; layout v2 is adoption-only for an existing row explicit
 is never inferred from omitted v3 fields. Worker Protocol v2 carries both identities and rejects a downgrade.
 
 The cache is a bare, read-only materialization input from the Provider's perspective. Agentd takes a cross-process
-cache lock and performs a credential-authorized network Fetch on every Turn, so a warm cache cannot bypass a
-revoked Credential. It then Fetches through an explicitly enabled, controlled `file://` transport into the
-Workspace-private `repo.git` and creates a relative linked worktree under `checkout`. The private repository must
-not use hardlinks, alternates, `--shared`, `--reference*`, or the shared cache as its Git common directory. Deleting
-or rebuilding the cache therefore cannot corrupt an existing dirty Workspace.
+cache lock. `SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW=0` is the default and preserves the existing behavior:
+agentd performs a credential-authorized network Fetch on every Turn. A configured positive window is bounded to at
+most `1h`. Within that window, agentd may skip the foreground network Fetch only when `last-successful-fetch`
+contains a valid RFC3339 time from a successful credentialed Fetch for that exact repository-fingerprint cache and
+the validated bare cache resolves the requested default ref and any requested Checkpoint base/head Commit. Missing,
+stale, future or unparsable marker data, an unavailable ref/Commit, or any invalid/corrupt cache state is doubt and
+falls back to the normal foreground Fetch/rebuild path.
+
+After each successful foreground or background network Fetch, agentd writes `last-successful-fetch` beside
+`repo.git` under the same cache lock using write-temp-then-rename. The marker contains only the RFC3339 Fetch time;
+it contains no Credential or Repository URL. A foreground skip schedules exactly one credentialed background
+refresh immediately after `workspace.ready`, concurrently with Provider startup, using the already-resolved
+per-Claim Credential. Background failure is bounded in logs and does not fail the running Turn. The subsequent
+marker/window check naturally returns to a foreground Fetch when freshness can no longer be proven. Each Repository
+materialization logs one bounded outcome: `fetched`, `cache-fresh-skip` or `fallback-after-skip-doubt`. This
+optimization adds no Worker Protocol fields and does not change the `workspace.ready` payload.
+
+Agentd Fetches through an explicitly enabled, controlled `file://` transport into the Workspace-private `repo.git`
+and creates a relative linked worktree under `checkout`. The private repository must not use hardlinks, alternates,
+`--shared`, `--reference*`, or the shared cache as its Git common directory. Deleting or rebuilding the cache
+therefore cannot corrupt an existing dirty Workspace.
 
 One cross-process Workspace lock is held from materialization through Provider exit, final inspection,
 Checkpoint creation and the terminal Complete/Fail/Release attempt. Lock ordering is always Workspace then cache.
@@ -74,13 +92,16 @@ Workspace preparation happens while the claimed Lease is being renewed and befor
 
 1. Create and verify each Workspace path component without following symlinks.
 2. Validate the Repository URL, default branch and repository fingerprint.
-3. Under the cache lock, Fetch the default branch from the validated network remote on every Turn; atomically
-   rebuild a missing or corrupt bare cache.
+3. Resolve the per-Claim `git_fetch` Grant and fail closed before considering cache reuse. Under the cache lock,
+   perform the default every-Turn foreground Fetch, or, only within a configured positive freshness window, prove
+   the exact cache marker and requested ref/Commit are fresh and resolvable. Any doubt falls back to the foreground
+   Fetch; atomically rebuild a missing or corrupt bare cache.
 4. Build or validate a Workspace-private bare repository and relative linked worktree without shared object
    storage, then Fetch the requested ref from the controlled cache input.
 5. Create/restore a deterministic `synara/session-<session-id>` branch when the checkout is still on the default branch.
 6. Read the current branch, merge base and HEAD and revalidate the private Git metadata.
-7. Report `workspace.ready` under the current Worker/Generation, then start the Provider.
+7. Report `workspace.ready` under the current Worker/Generation. If the foreground Fetch was skipped, start one
+   background refresh with the already-resolved Claim Credential while starting the Provider.
 
 Preparation failure reports `workspace.failed` and fails the Execution with a stable `workspace_invalid` code.
 The ready/failed endpoints are idempotent and Generation-fenced; an obsolete Worker cannot overwrite state from
@@ -111,6 +132,12 @@ normalized non-secret selector and can only transition once from active to disab
 Generation-fenced Grant for each active Project Binding. Claim receipt replay reuses those Grant IDs, while recovery
 creates new Grants and snapshots the then-current Credential versions. Workload and Worker resolve APIs expose the
 Grant descriptor, never the underlying Credential ID or version.
+
+A warm cache cannot bypass Grant resolution: the per-Claim `git_fetch` Grant resolve remains mandatory and
+fail-closed; the freshness window bounds only the network staleness of objects already authorized. A successful
+Grant resolve for the same Claim always happens before reading the freshness marker or reusing cache objects. Cache
+reuse never re-resolves after Provider startup and never extends a Credential beyond the already-resolved Claim
+operation.
 
 Private HTTPS uses a Project-bound, purpose-isolated `git/https_token` Credential. Agentd resolves it only for
 the current Worker, Lease and Generation and exposes it to Git through an ephemeral Unix-socket AskPass helper.

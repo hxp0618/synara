@@ -15,7 +15,7 @@ import (
 
 func TestManagedKubernetesWarmCapacityPublisherWritesScopedObservation(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
-	pool := fixture.createWarmPool(t, placement.CapacityClassInteractive, 1, 2, placement.PoolStatusActive)
+	pool := fixture.createWarmPoolWithMinIdle(t, placement.CapacityClassInteractive, 1, 1, 2, placement.PoolStatusActive)
 	if err := fixture.db.Model(&persistence.ExecutionTarget{}).
 		Where("id = ?", fixture.targetID).
 		Update("status", "active").Error; err != nil {
@@ -31,7 +31,7 @@ func TestManagedKubernetesWarmCapacityPublisherWritesScopedObservation(t *testin
 	if err := publisher.PublishReconcile(context.Background(), ManagedKubernetesWarmCapacityObservation{
 		TenantID: fixture.tenantID, ExecutionTargetID: fixture.targetID,
 		WorkerPoolID: pool.ID, WorkerPoolVersion: pool.Version,
-		WarmSupported: true, DesiredTotalUnits: 1, ReadyIdleUnits: 1,
+		WarmSupported: true, MinIdleUnits: 1, DesiredTotalUnits: 1, ReadyIdleUnits: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestManagedKubernetesWarmCapacityPublisherWritesScopedObservation(t *testin
 		!capacity.ExpiresAt.Equal(observedAt.Add(10*time.Second)) {
 		t.Fatalf("warm capacity publisher metadata = %#v", capacity)
 	}
-	if !capacity.WarmSupported || capacity.DesiredTotalUnits != 1 || capacity.ClaimedUnits != 0 || capacity.ReadyIdleUnits != 1 {
+	if !capacity.WarmSupported || capacity.MinIdleUnits != 1 || capacity.DesiredTotalUnits != 1 || capacity.ClaimedUnits != 0 || capacity.ReadyIdleUnits != 1 {
 		t.Fatalf("warm capacity publisher counters = %#v", capacity)
 	}
 }

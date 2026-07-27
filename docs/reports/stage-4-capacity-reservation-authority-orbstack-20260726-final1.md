@@ -31,18 +31,18 @@ downgrade error and fixed launches also fail closed on stale, unhealthy, saturat
 
 ## Source identity
 
-| Source | SHA-256 |
-| --- | --- |
-| `000084_execution_capacity_reservation_authority.sql` | `7073977b4c4273c2a0d7614bf886d6db694604bba7dfaad43ad6382f866ad0f9` |
-| `internal/routing/capacity_reservations.go` | `f3142982ce864feb55714b55fa00a8d3293deb3defefa778fd8786d4f73893af` |
-| `internal/routing/service.go` | `6e72e9ed59c12e604284eb1550e3e9dce33dc9cd5a9bd773a5e812147ec33378` |
-| `internal/executiontargets/kubernetes_reconciler.go` | `01db065231db5250978879228ea48e6939942aa07fe56bd4c0dd3d10fbbb0da5` |
-| `internal/sessions/scheduled_execution.go` | `69863209d4be12a96e51881490ec3b7868c981077674a706278f558239c1e702` |
-| `internal/database/capacity_reservation_sqlite.go` | `c2b3853867b545926ed84f65df3bc73f84dc40edb9690f996cd67802b4e904cf` |
-| `internal/persistence/capacity_admission_models.go` | `cbf02ee28e6d6200d3a11e9693fd3be78b96c42adbe6b52ad178430d7c6ebe57` |
+| Source                                                                                    | SHA-256                                                            |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `000084_execution_capacity_reservation_authority.sql`                                     | `7073977b4c4273c2a0d7614bf886d6db694604bba7dfaad43ad6382f866ad0f9` |
+| `internal/routing/capacity_reservations.go`                                               | `f3142982ce864feb55714b55fa00a8d3293deb3defefa778fd8786d4f73893af` |
+| `internal/routing/service.go`                                                             | `6e72e9ed59c12e604284eb1550e3e9dce33dc9cd5a9bd773a5e812147ec33378` |
+| `internal/executiontargets/kubernetes_reconciler.go`                                      | `01db065231db5250978879228ea48e6939942aa07fe56bd4c0dd3d10fbbb0da5` |
+| `internal/sessions/scheduled_execution.go`                                                | `69863209d4be12a96e51881490ec3b7868c981077674a706278f558239c1e702` |
+| `internal/database/capacity_reservation_sqlite.go`                                        | `c2b3853867b545926ed84f65df3bc73f84dc40edb9690f996cd67802b4e904cf` |
+| `internal/persistence/capacity_admission_models.go`                                       | `cbf02ee28e6d6200d3a11e9693fd3be78b96c42adbe6b52ad178430d7c6ebe57` |
 | `internal/executiontargets/kubernetes_reservation_authority_orbstack_integration_test.go` | `702afe9b2087c27f95f8111a2069b38518b878b1a83b9745e50b7ad79d7e2eec` |
-| `internal/routing/commit_validation_postgres_integration_test.go` | `ef6a7515d7311408bdafae517fccae95d3b42d5ed2ab30fe228c392b923f1705` |
-| `internal/observability/distributed_routing_billing_metrics.go` | `123f9f37b2940725aff5ddeadb794684cad2e02c3377be308d1873f74fe2beb4` |
+| `internal/routing/commit_validation_postgres_integration_test.go`                         | `ef6a7515d7311408bdafae517fccae95d3b42d5ed2ab30fe228c392b923f1705` |
+| `internal/observability/distributed_routing_billing_metrics.go`                           | `123f9f37b2940725aff5ddeadb794684cad2e02c3377be308d1873f74fe2beb4` |
 
 ## Package and SQLite results
 

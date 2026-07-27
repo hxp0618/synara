@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -35,24 +36,43 @@ type workspaceCleaner interface {
 }
 
 type WorkspaceMaterialization struct {
-	Directory             string
-	LogicalRoot           string
-	GitDir                string
-	Managed               bool
-	RestoredCheckpointID  *uuid.UUID
-	RepositoryFingerprint *string
-	CurrentBranch         *string
-	BaseCommit            *string
-	HeadCommit            *string
-	cache                 workspaceCacheLayout
-	manifest              workspaceGenerationManifest
-	release               func() error
+	Directory              string
+	LogicalRoot            string
+	GitDir                 string
+	Managed                bool
+	RestoredCheckpointID   *uuid.UUID
+	RepositoryFingerprint  *string
+	CurrentBranch          *string
+	BaseCommit             *string
+	HeadCommit             *string
+	cache                  workspaceCacheLayout
+	manifest               workspaceGenerationManifest
+	cacheFetchOutcome      string
+	backgroundCacheRefresh workspaceCacheRefresh
+	release                func() error
 }
 
 type WorkspaceInspection struct {
 	Dirty         bool
 	CurrentBranch *string
 	HeadCommit    *string
+}
+
+func requestedWorkspaceCacheCommits(checkpoint *executions.WorkspaceCheckpoint) []string {
+	if checkpoint == nil {
+		return nil
+	}
+	switch checkpoint.Strategy {
+	case "git-reference":
+		if checkpoint.HeadCommit != nil {
+			return []string{*checkpoint.HeadCommit}
+		}
+	case "patch":
+		if checkpoint.BaseCommit != nil {
+			return []string{*checkpoint.BaseCommit}
+		}
+	}
+	return nil
 }
 
 type WorkspaceMaterializer struct {
@@ -63,6 +83,8 @@ type WorkspaceMaterializer struct {
 	runGit               func(context.Context, string, []string, ...string) (string, error)
 	executable           func() (string, error)
 	cleanupDirectorySync func(*os.Root, string) error
+	fetchFreshnessWindow time.Duration
+	now                  func() time.Time
 }
 
 func NewWorkspaceMaterializer(root string) *WorkspaceMaterializer {
@@ -75,7 +97,7 @@ func NewWorkspaceMaterializerWithCache(root, cacheRoot string, targetID uuid.UUI
 	}
 	materializer := &WorkspaceMaterializer{
 		root: root, cacheRoot: cacheRoot, targetID: targetID,
-		resolver: net.DefaultResolver, executable: os.Executable,
+		resolver: net.DefaultResolver, executable: os.Executable, now: time.Now,
 	}
 	materializer.runGit = materializer.runGitCommand
 	return materializer
@@ -194,7 +216,8 @@ func (m *WorkspaceMaterializer) Materialize(
 	baseMaterialization.GitDir = layout.GitDir
 	baseMaterialization.manifest = expected
 	baseMaterialization.RepositoryFingerprint = &fingerprint
-	if err := m.withPreparedCache(ctx, cache, remote, defaultBranch, credential, func(cacheRepository string) error {
+	var cachePreparation workspaceCachePreparation
+	if cachePreparation, err = m.withPreparedCache(ctx, cache, remote, defaultBranch, requestedWorkspaceCacheCommits(workload.RestoreCheckpoint), credential, func(cacheRepository string) error {
 		if err := reconcileWorkspaceGeneration(layout.Root, func(root string) error {
 			return m.validatePrivateGitGeneration(ctx, workspaceLayoutAtRoot(layout, root), expected)
 		}); err != nil {
@@ -239,6 +262,8 @@ func (m *WorkspaceMaterializer) Materialize(
 			"workspace_invalid", "The Git Workspace could not be prepared from its validated cache.", true, true,
 		)
 	}
+	baseMaterialization.cacheFetchOutcome = cachePreparation.outcome
+	baseMaterialization.backgroundCacheRefresh = cachePreparation.backgroundRefresh
 	if err := m.validatePrivateGitGeneration(ctx, layout, expected); err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure("workspace_invalid", "The private Git Workspace failed validation.", true, false)
 	}

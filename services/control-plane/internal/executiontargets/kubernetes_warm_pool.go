@@ -23,6 +23,7 @@ type kubernetesWarmPool struct {
 	ClusterID          string         `gorm:"column:cluster_id"`
 	Namespace          string         `gorm:"column:namespace"`
 	DesiredIdleUnits   int            `gorm:"column:desired_idle_units"`
+	MinIdleUnits       int            `gorm:"column:min_idle_units"`
 	MaxActiveUnits     int            `gorm:"column:max_active_units"`
 	SchedulingTemplate map[string]any `gorm:"column:scheduling_template"`
 	Status             string         `gorm:"column:status"`
@@ -83,6 +84,10 @@ type kubernetesWarmDemandEvictionCandidate struct {
 	Key      kubernetesWarmCapacityKey
 }
 
+func kubernetesWarmPodPlanGuaranteed(plan kubernetesWarmPodPlan) bool {
+	return plan.Slot < plan.Pool.MinIdleUnits
+}
+
 func managedKubernetesWarmCapacityObservations(
 	tenantID uuid.UUID,
 	executionTargetID uuid.UUID,
@@ -107,6 +112,7 @@ func managedKubernetesWarmCapacityObservations(
 			WorkerPoolID:      pool.ID,
 			WorkerPoolVersion: pool.Version,
 			WarmSupported:     warmPoolsSupported,
+			MinIdleUnits:      pool.MinIdleUnits,
 			ClaimedUnits:      claimed,
 		}
 		if !warmPoolsSupported {
@@ -320,11 +326,12 @@ func kubernetesWarmPodPlans(
 	warmRelease kubernetesWarmReleaseSelection,
 	podBaseHash string,
 	baseImage string,
-) ([]kubernetesWarmPodPlan, map[string]kubernetesWarmPodPlan, error) {
-	plans := make([]kubernetesWarmPodPlan, 0)
+) ([]kubernetesWarmPodPlan, []kubernetesWarmPodPlan, map[string]kubernetesWarmPodPlan, error) {
+	guaranteedPlans := make([]kubernetesWarmPodPlan, 0)
+	bestEffortPlans := make([]kubernetesWarmPodPlan, 0)
 	plansByName := make(map[string]kubernetesWarmPodPlan)
 	if !warmPoolsSupported {
-		return plans, plansByName, nil
+		return guaranteedPlans, bestEffortPlans, plansByName, nil
 	}
 	for _, pool := range warmPools {
 		if pool.Status != placement.PoolStatusActive {
@@ -342,14 +349,18 @@ func kubernetesWarmPodPlans(
 			plan := kubernetesWarmPodPlan{Pool: pool, Slot: slot, Release: warmRelease}
 			configHash, err := kubernetesWarmPoolPodHash(podBaseHash, baseImage, plan)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			plan.ConfigHash = configHash
-			plans = append(plans, plan)
+			if slot < pool.MinIdleUnits {
+				guaranteedPlans = append(guaranteedPlans, plan)
+			} else {
+				bestEffortPlans = append(bestEffortPlans, plan)
+			}
 			plansByName[kubernetesWarmPodName(plan)] = plan
 		}
 	}
-	return plans, plansByName, nil
+	return guaranteedPlans, bestEffortPlans, plansByName, nil
 }
 
 func kubernetesWarmPodName(plan kubernetesWarmPodPlan) string {

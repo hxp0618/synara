@@ -135,16 +135,16 @@ Final namespace and local port `55482` lookups returned nothing.
 
 ## Source hashes
 
-| Artifact | SHA-256 |
-| --- | --- |
-| `migrations/000082_shared_actual_invoice_allocation.sql` | `00ab49f880c7f852c5527d6c70076fdac95145d4eb9faae66d3291c140f0fa38` |
-| `internal/billing/shared_actual_allocation.go` | `c39c3091ea9b37b356ff1edb4552ffff52e3f1a9e50d9d8d57b7d878feaeefd5` |
-| `internal/billing/shared_allocation.go` | `822af3b87b206cf13a59d7ea5b145c51cb9ab646dfec0e41ff5bcec344e3007b` |
-| `internal/persistence/shared_actual_allocation_models.go` | `1f2b4bb3b3a26dcbcff26e14fa2b6dedd4b06643e676c475144b312e1fef198b` |
-| `internal/database/shared_actual_allocation_sqlite.go` | `fb2277718470857ed983f90122439c1dcdf713436d1c8c1b48cbf95d6794bf3d` |
-| `internal/billing/shared_actual_allocation_test.go` | `b2b24b92dfa0d7f949ecfb671cbc60e73563d9e2eb08b24ef3f5db993c3eecea` |
+| Artifact                                                          | SHA-256                                                            |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `migrations/000082_shared_actual_invoice_allocation.sql`          | `00ab49f880c7f852c5527d6c70076fdac95145d4eb9faae66d3291c140f0fa38` |
+| `internal/billing/shared_actual_allocation.go`                    | `c39c3091ea9b37b356ff1edb4552ffff52e3f1a9e50d9d8d57b7d878feaeefd5` |
+| `internal/billing/shared_allocation.go`                           | `822af3b87b206cf13a59d7ea5b145c51cb9ab646dfec0e41ff5bcec344e3007b` |
+| `internal/persistence/shared_actual_allocation_models.go`         | `1f2b4bb3b3a26dcbcff26e14fa2b6dedd4b06643e676c475144b312e1fef198b` |
+| `internal/database/shared_actual_allocation_sqlite.go`            | `fb2277718470857ed983f90122439c1dcdf713436d1c8c1b48cbf95d6794bf3d` |
+| `internal/billing/shared_actual_allocation_test.go`               | `b2b24b92dfa0d7f949ecfb671cbc60e73563d9e2eb08b24ef3f5db993c3eecea` |
 | `internal/billing/shared_allocation_postgres_integration_test.go` | `3c2dac07350095c7b8456485c97cfc4b4b8b35df0384a5a702a21e38f93cb85f` |
-| `internal/observability/distributed_routing_billing_metrics.go` | `b64b538e6dfcbf6a31d0f957a33b9236f3ffa79e9d76717ffd5db266d248c254` |
+| `internal/observability/distributed_routing_billing_metrics.go`   | `b64b538e6dfcbf6a31d0f957a33b9236f3ffa79e9d76717ffd5db266d248c254` |
 
 Paths in this table are relative to `services/control-plane` except the report itself.
 

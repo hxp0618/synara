@@ -50,11 +50,11 @@ The 78-second baseline proved:
 
 ## Top-level cases
 
-| Case | Result | Key evidence |
-| --- | --- | --- |
-| RBAC | passed | 28 allow/deny checks against the isolated ClusterRole |
-| Leader takeover | passed | exact old Pod UID deleted, holder changed, fencing token `3 -> 4`, readiness failures `0` |
-| Control Plane failover | passed | deleted Pod replaced while the second replica stayed ready, readiness failures `0` |
+| Case                   | Result | Key evidence                                                                              |
+| ---------------------- | ------ | ----------------------------------------------------------------------------------------- |
+| RBAC                   | passed | 28 allow/deny checks against the isolated ClusterRole                                     |
+| Leader takeover        | passed | exact old Pod UID deleted, holder changed, fencing token `3 -> 4`, readiness failures `0` |
+| Control Plane failover | passed | deleted Pod replaced while the second replica stayed ready, readiness failures `0`        |
 
 ## Soak
 
@@ -110,14 +110,14 @@ Final lookups returned no namespace, ClusterRole, or ClusterRoleBinding for the 
 
 ## Evidence files and hashes
 
-| Artifact | SHA-256 |
-| --- | --- |
-| `stage-4-orbstack-isolated-resilience-20260726-final1.json` | `41b709c2340c5debfe5a3dcc583d0c7d1c857b2ad5c1666c00ab36b6e0458e95` |
+| Artifact                                                                  | SHA-256                                                            |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `stage-4-orbstack-isolated-resilience-20260726-final1.json`               | `41b709c2340c5debfe5a3dcc583d0c7d1c857b2ad5c1666c00ab36b6e0458e95` |
 | `stage-4-orbstack-isolated-resilience-20260726-final1.json.journal.jsonl` | `6e98452f63ad3e23e7e5e960a044d9cb111446da82ebf717e84649d70d2725b0` |
-| `stage-4-orbstack-isolated-resilience-20260726-final1.json.partial.json` | `31638cbdc7e032f080098461ffd71157d66b9e363935bb6718b73c64d9b33f30` |
-| `deploy/kubernetes/acceptance.sh` | `914a309491fc38bd3e5fe87b230c8f3baf22a50c369b7ef0d2370088a89e1fd7` |
-| `deploy/kubernetes/resilience-acceptance.sh` | `19949ebb6a95be40198eb5d97999e4562c040a8c42ec9ad83e38a7e5ce213f47` |
-| `deploy/kubernetes/validate-resilience-assets.py` | `3f258ad39277d03bff9b8092a764768a023eff4bccdc8da1002ea2d50b2ab87d` |
+| `stage-4-orbstack-isolated-resilience-20260726-final1.json.partial.json`  | `31638cbdc7e032f080098461ffd71157d66b9e363935bb6718b73c64d9b33f30` |
+| `deploy/kubernetes/acceptance.sh`                                         | `914a309491fc38bd3e5fe87b230c8f3baf22a50c369b7ef0d2370088a89e1fd7` |
+| `deploy/kubernetes/resilience-acceptance.sh`                              | `19949ebb6a95be40198eb5d97999e4562c040a8c42ec9ad83e38a7e5ce213f47` |
+| `deploy/kubernetes/validate-resilience-assets.py`                         | `3f258ad39277d03bff9b8092a764768a023eff4bccdc8da1002ea2d50b2ab87d` |
 
 ## Boundary
 

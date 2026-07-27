@@ -35,6 +35,7 @@ type Observation struct {
 	WarmSupported           bool
 	WorkerReleaseRevisionID *uuid.UUID
 	WorkerReleaseChannel    *string
+	MinIdleUnits            int
 	DesiredTotalUnits       int
 	ClaimedUnits            int
 	ReadyIdleUnits          int
@@ -114,6 +115,12 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		if pool.DesiredIdleUnits > pool.MaxActiveUnits {
 			return problem.New(409, "warm_capacity_pool_shape_invalid", "Worker Pool desired idle units exceed max active units.")
 		}
+		if pool.MinIdleUnits < 0 || pool.MinIdleUnits > pool.DesiredIdleUnits {
+			return problem.New(409, "warm_capacity_pool_shape_invalid", "Worker Pool min idle units are outside its desired idle units.")
+		}
+		if input.MinIdleUnits != pool.MinIdleUnits {
+			return problem.New(409, "warm_capacity_pool_shape_invalid", "Warm capacity min idle units do not match the Worker Pool.")
+		}
 		if input.DesiredTotalUnits > pool.MaxActiveUnits {
 			return problem.New(400, "invalid_warm_capacity_counters", "Warm desired total units must not exceed the Worker Pool max active units.")
 		}
@@ -146,6 +153,7 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 				WorkerReleaseRevisionID: releaseRevisionID,
 				WorkerReleaseChannel:    releaseChannel,
 				DesiredIdleUnits:        pool.DesiredIdleUnits,
+				MinIdleUnits:            input.MinIdleUnits,
 				MaxActiveUnits:          pool.MaxActiveUnits,
 				DesiredTotalUnits:       input.DesiredTotalUnits,
 				ClaimedUnits:            input.ClaimedUnits,
@@ -174,6 +182,7 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		result.WorkerReleaseRevisionID = releaseRevisionID
 		result.WorkerReleaseChannel = releaseChannel
 		result.DesiredIdleUnits = pool.DesiredIdleUnits
+		result.MinIdleUnits = input.MinIdleUnits
 		result.MaxActiveUnits = pool.MaxActiveUnits
 		result.DesiredTotalUnits = input.DesiredTotalUnits
 		result.ClaimedUnits = input.ClaimedUnits
@@ -191,6 +200,7 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 			"worker_release_revision_id": result.WorkerReleaseRevisionID,
 			"worker_release_channel":     result.WorkerReleaseChannel,
 			"desired_idle_units":         result.DesiredIdleUnits,
+			"min_idle_units":             result.MinIdleUnits,
 			"max_active_units":           result.MaxActiveUnits,
 			"desired_total_units":        result.DesiredTotalUnits,
 			"claimed_units":              result.ClaimedUnits,

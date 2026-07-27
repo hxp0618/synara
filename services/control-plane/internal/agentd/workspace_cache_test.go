@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 )
 
 func createWorkspaceTestSource(t *testing.T) string {
@@ -101,6 +102,14 @@ func TestWorkspaceCacheMaterializesPrivateWorktreeAndFetchesEveryTurn(t *testing
 	if !first.Managed || first.LogicalRoot == "" || first.GitDir == "" || first.Directory != filepath.Join(first.LogicalRoot, "checkout") {
 		t.Fatalf("unexpected private Workspace materialization: %#v", first)
 	}
+	if first.cacheFetchOutcome != workspaceCacheFetchOutcomeFetched || first.backgroundCacheRefresh != nil {
+		t.Fatalf("default freshness window changed foreground Fetch behavior: outcome=%q refresh=%v", first.cacheFetchOutcome, first.backgroundCacheRefresh != nil)
+	}
+	if marker, err := readSmallRegularFile(first.cache.FetchMarker, workspaceCacheFetchMarkerMaxSize); err != nil {
+		t.Fatalf("successful foreground Fetch did not write its marker: %v", err)
+	} else if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(marker)); err != nil {
+		t.Fatalf("foreground Fetch marker is not RFC3339: %q: %v", marker, err)
+	}
 	gitFileInfo, err := os.Lstat(filepath.Join(first.Directory, ".git"))
 	if err != nil || !gitFileInfo.Mode().IsRegular() || gitFileInfo.Mode()&os.ModeSymlink != 0 {
 		t.Fatalf("checkout .git is not a regular gitfile: info=%v err=%v", gitFileInfo, err)
@@ -118,7 +127,8 @@ func TestWorkspaceCacheMaterializesPrivateWorktreeAndFetchesEveryTurn(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Directory != firstDirectory || networkFetches.Load() != 2 {
+	if second.Directory != firstDirectory || networkFetches.Load() != 2 ||
+		second.cacheFetchOutcome != workspaceCacheFetchOutcomeFetched || second.backgroundCacheRefresh != nil {
 		t.Fatalf("warm Workspace was not reused with a fresh Fetch: directory=%s fetches=%d", second.Directory, networkFetches.Load())
 	}
 	if err := second.Release(); err != nil {
@@ -141,6 +151,196 @@ func TestWorkspaceCacheMaterializesPrivateWorktreeAndFetchesEveryTurn(t *testing
 		t.Fatal(err)
 	}
 	runTestGit(t, second.Directory, "cat-file", "-e", "HEAD^{commit}")
+}
+
+func TestWorkspaceCacheFreshMarkerSkipsForegroundAndRefreshesInBackground(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	materializer.now = func() time.Time { return now }
+	networkFetches := configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Minute)
+	materializer.fetchFreshnessWindow = 15 * time.Minute
+
+	second, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if networkFetches.Load() != 1 || second.cacheFetchOutcome != workspaceCacheFetchOutcomeFreshSkip || second.backgroundCacheRefresh == nil {
+		t.Fatalf("fresh resolvable cache did not skip foreground Fetch: fetches=%d outcome=%q refresh=%v", networkFetches.Load(), second.cacheFetchOutcome, second.backgroundCacheRefresh != nil)
+	}
+	if err := second.backgroundCacheRefresh(context.Background(), nil); err != nil {
+		t.Fatalf("background cache refresh failed: %v", err)
+	}
+	if networkFetches.Load() != 2 {
+		t.Fatalf("background cache refresh did not run exactly one Fetch: %d", networkFetches.Load())
+	}
+	marker, err := readSmallRegularFile(second.cache.FetchMarker, workspaceCacheFetchMarkerMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(marker))
+	if err != nil || !fetchedAt.Equal(now) {
+		t.Fatalf("background Fetch marker = %q (%v), want %s", marker, err, now.Format(time.RFC3339Nano))
+	}
+}
+
+func TestWorkspaceCacheFreshnessDoubtFallsBackToForegroundFetch(t *testing.T) {
+	fixedNow := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		mutate     func(*testing.T, *WorkspaceMaterializer, workspaceCacheLayout)
+		checkpoint func() *executions.WorkspaceCheckpoint
+	}{
+		{
+			name: "missing marker",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, cache workspaceCacheLayout) {
+				if err := os.Remove(cache.FetchMarker); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "stale marker",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, cache workspaceCacheLayout) {
+				if err := os.WriteFile(cache.FetchMarker, []byte(fixedNow.Add(-15*time.Minute).Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt marker",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, cache workspaceCacheLayout) {
+				if err := os.WriteFile(cache.FetchMarker, []byte("not-a-time\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "missing patch base commit",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, _ workspaceCacheLayout) {},
+			checkpoint: func() *executions.WorkspaceCheckpoint {
+				missing := strings.Repeat("a", 40)
+				return &executions.WorkspaceCheckpoint{Strategy: "patch", BaseCommit: &missing}
+			},
+		},
+		{
+			name:   "missing git reference",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, _ workspaceCacheLayout) {},
+			checkpoint: func() *executions.WorkspaceCheckpoint {
+				missing := strings.Repeat("b", 40)
+				return &executions.WorkspaceCheckpoint{Strategy: "git-reference", HeadCommit: &missing}
+			},
+		},
+		{
+			name: "corrupt cache",
+			mutate: func(t *testing.T, _ *WorkspaceMaterializer, cache workspaceCacheLayout) {
+				if err := os.WriteFile(filepath.Join(cache.RepoGit, "config"), []byte("corrupt\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspaceRoot := t.TempDir()
+			cacheRoot := t.TempDir()
+			targetID := uuid.New()
+			execution, workload := workspaceTestWorkload(targetID)
+			materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+			materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+			materializer.now = func() time.Time { return fixedNow }
+			networkFetches := configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+
+			first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache := first.cache
+			if err := first.Release(); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, materializer, cache)
+			if test.checkpoint != nil {
+				workload.RestoreCheckpoint = test.checkpoint()
+			}
+			materializer.fetchFreshnessWindow = 10 * time.Minute
+
+			second, err := materializer.Materialize(context.Background(), execution, workload, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer second.Release()
+			if networkFetches.Load() != 2 || second.cacheFetchOutcome != workspaceCacheFetchOutcomeFallback || second.backgroundCacheRefresh != nil {
+				t.Fatalf("cache doubt did not fall back to foreground Fetch: fetches=%d outcome=%q refresh=%v", networkFetches.Load(), second.cacheFetchOutcome, second.backgroundCacheRefresh != nil)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCacheFetchMarkerIsWrittenUnderCacheLock(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	layout, err := materializer.resolveWorkspaceLayout(execution, workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := materializer.resolveCacheLayout(
+		layout, workload.TenantID, workload.ProjectID, gitpolicy.Fingerprint(*workload.RepositoryURL),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockObserved := false
+	configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), func(_ string, _ []string, arguments []string) {
+		for _, argument := range arguments {
+			if !strings.HasPrefix(argument, "http.curloptResolve=") {
+				continue
+			}
+			if _, err := os.Lstat(cache.FetchMarker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Fetch marker existed before successful network Fetch: %v", err)
+			}
+			lockContext, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+			defer cancel()
+			lock, err := acquireWorkspaceFileLock(lockContext, cacheRoot, cache.LockPath)
+			if lock != nil {
+				_ = lock.Release()
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("network Fetch did not hold the cache lock: %v", err)
+			}
+			lockObserved = true
+			break
+		}
+	})
+
+	materialized, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer materialized.Release()
+	if !lockObserved {
+		t.Fatal("test did not observe a network Fetch")
+	}
+	if _, err := readSmallRegularFile(cache.FetchMarker, workspaceCacheFetchMarkerMaxSize); err != nil {
+		t.Fatalf("successful Fetch did not install its marker before releasing the cache lock: %v", err)
+	}
 }
 
 func TestWorkspaceLockCoversConcurrentTurns(t *testing.T) {

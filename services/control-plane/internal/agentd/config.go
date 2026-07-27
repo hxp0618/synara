@@ -48,6 +48,7 @@ type Config struct {
 	ProcessContainmentCapability map[string]any
 	WorkspaceRoot                string
 	GitCacheRoot                 string
+	WorkspaceFetchWindow         time.Duration
 	PollInterval                 time.Duration
 	HeartbeatInterval            time.Duration
 	LeaseRenewInterval           time.Duration
@@ -237,6 +238,12 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.ArtifactTimeout, err = durationEnv("SYNARA_AGENTD_ARTIFACT_TIMEOUT", 30*time.Minute); err != nil {
 		return Config{}, err
+	}
+	if cfg.WorkspaceFetchWindow, err = durationEnv("SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW", 0); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkspaceFetchWindow < 0 || cfg.WorkspaceFetchWindow > time.Hour {
+		return Config{}, errors.New("SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW must be between 0 and 1h")
 	}
 	if cfg.RunnerMessageBytes, err = intEnv("SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", 1<<20); err != nil {
 		return Config{}, err

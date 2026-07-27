@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -313,6 +314,36 @@ func TestLoadConfigUsesExplicitGitCacheRoot(t *testing.T) {
 	}
 }
 
+func TestLoadConfigBoundsWorkspaceFetchFreshnessWindow(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkspaceFetchWindow != 0 {
+		t.Fatalf("Workspace Fetch freshness window default = %s, want 0", cfg.WorkspaceFetchWindow)
+	}
+
+	t.Setenv("SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW", "15m")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkspaceFetchWindow != 15*time.Minute {
+		t.Fatalf("Workspace Fetch freshness window = %s, want 15m", cfg.WorkspaceFetchWindow)
+	}
+
+	for _, value := range []string{"-1s", "1h1ns", "not-a-duration"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW", value)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW") {
+				t.Fatalf("invalid Workspace Fetch freshness window %q was accepted: %v", value, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigGeneratesInstanceUIDOutsideKubernetes(t *testing.T) {
 	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")
 	setAgentdConfigEnvironment(t, workspaceRoot, "")
@@ -562,6 +593,7 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "SYNARA_AGENTD_NAMESPACE",
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",
+		"SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW",
 		"SYNARA_AGENTD_WORKER_MODE",
 		"SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", "SYNARA_AGENTD_VERSION",
 		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE",

@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -26,6 +28,9 @@ type Runner struct {
 	instanceUID              uuid.UUID
 	supervisorInstance       uuid.UUID
 	protectedRootLease       *ProtectedCgroupRootLease
+	logger                   *slog.Logger
+	prestartMu               sync.Mutex
+	providerHostPrestart     *providerHostV2PrestartManager
 }
 
 func NewRunner(cfg Config) *Runner {
