@@ -113,6 +113,88 @@ func migrateWorkerRevocationSQLiteSafety(ctx context.Context, db *gorm.DB) error
 		   administrative_status,
 		   id
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_instances_reconciliation_drains
+		 ON worker_instances (
+		   execution_target_id,
+		   target_kind,
+		   reconciliation_drain_requested_at,
+		   id
+		 )
+		 WHERE reconciliation_drain_requested_at IS NOT NULL
+		   AND status <> 'terminated'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_worker_instances_active_reconciliation_drain_target
+		 ON worker_instances (execution_target_id)
+		 WHERE target_kind = 'docker'
+		   AND reconciliation_drain_requested_at IS NOT NULL
+		   AND status <> 'terminated'`,
+		`DROP TRIGGER IF EXISTS trg_worker_instances_reconciliation_drain_shape_insert`,
+		`CREATE TRIGGER trg_worker_instances_reconciliation_drain_shape_insert
+		 BEFORE INSERT ON worker_instances
+		 WHEN NOT (
+		   (
+		     NEW.reconciliation_drain_incarnation IS NULL
+		     AND NEW.reconciliation_drain_instance_uid IS NULL
+		     AND NEW.reconciliation_drain_requested_at IS NULL
+		     AND NEW.reconciliation_drain_reason IS NULL
+		   )
+		   OR
+		   (
+		     NEW.reconciliation_drain_incarnation IS NOT NULL
+		     AND NEW.reconciliation_drain_incarnation > 0
+		     AND NEW.reconciliation_drain_incarnation <= NEW.incarnation
+		     AND NEW.reconciliation_drain_instance_uid IS NOT NULL
+		     AND length(NEW.reconciliation_drain_instance_uid) = 36
+		     AND lower(NEW.reconciliation_drain_instance_uid) = NEW.reconciliation_drain_instance_uid
+		     AND substr(NEW.reconciliation_drain_instance_uid, 9, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 14, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 19, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 24, 1) = '-'
+		     AND length(replace(NEW.reconciliation_drain_instance_uid, '-', '')) = 32
+		     AND replace(NEW.reconciliation_drain_instance_uid, '-', '') NOT GLOB '*[^0-9a-f]*'
+		     AND NEW.reconciliation_drain_requested_at IS NOT NULL
+		     AND NEW.reconciliation_drain_reason IS NOT NULL
+		     AND length(trim(NEW.reconciliation_drain_reason)) BETWEEN 1 AND 200
+		     AND NEW.reconciliation_drain_reason = trim(NEW.reconciliation_drain_reason)
+		   )
+		 )
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker reconciliation drain');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_instances_reconciliation_drain_shape_update`,
+		`CREATE TRIGGER trg_worker_instances_reconciliation_drain_shape_update
+		 BEFORE UPDATE OF incarnation, reconciliation_drain_incarnation, reconciliation_drain_instance_uid,
+		   reconciliation_drain_requested_at, reconciliation_drain_reason
+		 ON worker_instances
+		 WHEN NOT (
+		   (
+		     NEW.reconciliation_drain_incarnation IS NULL
+		     AND NEW.reconciliation_drain_instance_uid IS NULL
+		     AND NEW.reconciliation_drain_requested_at IS NULL
+		     AND NEW.reconciliation_drain_reason IS NULL
+		   )
+		   OR
+		   (
+		     NEW.reconciliation_drain_incarnation IS NOT NULL
+		     AND NEW.reconciliation_drain_incarnation > 0
+		     AND NEW.reconciliation_drain_incarnation <= NEW.incarnation
+		     AND NEW.reconciliation_drain_instance_uid IS NOT NULL
+		     AND length(NEW.reconciliation_drain_instance_uid) = 36
+		     AND lower(NEW.reconciliation_drain_instance_uid) = NEW.reconciliation_drain_instance_uid
+		     AND substr(NEW.reconciliation_drain_instance_uid, 9, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 14, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 19, 1) = '-'
+		     AND substr(NEW.reconciliation_drain_instance_uid, 24, 1) = '-'
+		     AND length(replace(NEW.reconciliation_drain_instance_uid, '-', '')) = 32
+		     AND replace(NEW.reconciliation_drain_instance_uid, '-', '') NOT GLOB '*[^0-9a-f]*'
+		     AND NEW.reconciliation_drain_requested_at IS NOT NULL
+		     AND NEW.reconciliation_drain_reason IS NOT NULL
+		     AND length(trim(NEW.reconciliation_drain_reason)) BETWEEN 1 AND 200
+		     AND NEW.reconciliation_drain_reason = trim(NEW.reconciliation_drain_reason)
+		   )
+		 )
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker reconciliation drain');
+		 END`,
 		`DROP TRIGGER IF EXISTS trg_worker_instances_revocation_shape_insert`,
 		`CREATE TRIGGER trg_worker_instances_revocation_shape_insert
 		 BEFORE INSERT ON worker_instances

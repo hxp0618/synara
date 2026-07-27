@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "synara.kubernetes-dual-cluster-acceptance.v1",
+  "runID": "20260727101810-32632-16982",
+  "startedAt": "2026-07-27T10:18:10Z",
+  "finishedAt": "2026-07-27T10:22:37Z",
+  "status": "passed",
+  "exitCode": 0,
+  "phase": "test-complete",
+  "failure": null,
+  "contexts": {
+    "primary": {
+      "name": "orbstack",
+      "kubernetesVersion": "v1.34.8+orb1",
+      "nodeCount": 1
+    },
+    "secondary": {
+      "name": "kind-synara-dr-20260727101810-32632-16982",
+      "kubernetesVersion": "v1.33.1",
+      "nodeCount": 1
+    }
+  },
+  "test": {
+    "name": "TestStage4DualClusterDisasterRecoveryAgainstRealAPIServers",
+    "status": "passed",
+    "exitCode": 0
+  },
+  "checks": {
+    "currentContextUnchanged": true,
+    "detailProduced": true,
+    "detailValidJSON": true,
+    "detailWithin65536Bytes": true,
+    "detailContainsNoConnectionMaterial": true,
+    "detailAssertionsAllowlistedBooleans": true,
+    "integrationAssertions": {
+      "boundedChaosCyclesCompleted": true,
+      "concurrentControlPlaneSweepSingleCommit": true,
+      "exactReadinessAccepted": true,
+      "missingReadinessFailedClosed": true,
+      "multiClusterPressureVerified": true,
+      "obsoletePrimaryPodAbsent": true,
+      "podBoundWorkloadIdentityVerified": true,
+      "postgresSharedAuthorityVerified": true,
+      "reconcilerHandoffVerified": true,
+      "recoveryBundleIntegrityVerified": true,
+      "singleSuccessor": true,
+      "sourcePlacementImmutable": true,
+      "sourceRuntimeReady": true,
+      "successorLineagePersisted": true,
+      "successorRuntimeReady": true
+    }
+  },
+  "detail": {
+    "bytes": 2774,
+    "sha256": "d01d3d460d060ce11e64208c813a058fe135e1e8ab0db01328c6eea12616ae27"
+  },
+  "source": {
+    "gitSHA": "b0182cf6436683a32a25b3905d57c1936d20564e",
+    "worktreeDirty": true
+  },
+  "workerImage": {
+    "tag": "synara-worker:dual-cluster-20260727101810-32632-16982",
+    "configID": "sha256:b9d4bab2caf8dcdfdee23bd71679ae42c916b6070472cee6e8ed1b006b7b54a1",
+    "manifestDigest": "sha256:b9d4bab2caf8dcdfdee23bd71679ae42c916b6070472cee6e8ed1b006b7b54a1",
+    "acceptanceBoundary": {
+      "workerAPI": "bounded-stub-with-production-kubernetes-identity-verifier",
+      "podBoundWorkloadIdentityVerified": true,
+      "fullWorkerRegistrationPersistenceVerified": false
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "tokenRequestCredentialsPersisted": false,
+    "touchedSynaraSystem": false,
+    "kindKubeconfigIsolated": true
+  }
+}

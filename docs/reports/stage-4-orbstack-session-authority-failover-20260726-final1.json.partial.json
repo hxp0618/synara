@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "failed",
+  "startedAt": "2026-07-26T14:53:28Z",
+  "updatedAt": "2026-07-26T14:55:12Z",
+  "finishedAt": "2026-07-26T14:55:12Z",
+  "context": "orbstack",
+  "namespace": "synara-stage4-session-authority",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-session-authority",
+  "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final1.json",
+  "journalFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final1.json.journal.jsonl",
+  "partialFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final1.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 104
+  },
+  "plannedCases": [
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "scenarios": [
+    {
+      "name": "control-plane-failover",
+      "status": "failed",
+      "startedAt": "2026-07-26T14:55:12Z",
+      "finishedAt": "2026-07-26T14:55:12Z",
+      "details": {
+        "error": "failed to create the pre-failover Session authority sentinel",
+        "sessionAuthority": {
+          "mode": "stage2-postgres",
+          "verified": false
+        }
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "failed",
+    "startedAt": "2026-07-26T14:53:28Z",
+    "finishedAt": "2026-07-26T14:55:12Z",
+    "durationSeconds": 104,
+    "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final1.json",
+    "unexpectedExitStatus": null
+  }
+}

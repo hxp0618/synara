@@ -1,6 +1,9 @@
 # Stage 4：分布式执行与资源生命周期产品化
 
-状态：IN PROGRESS
+状态：COMPLETE（2026-07-27）。最终收尾证据：
+[`queue/capacity/network/storage final1`](../reports/stage-4-queue-capacity-network-storage-20260727-final1.md)、
+[`dual-cluster pressure/chaos final7`](../reports/stage-4-dual-cluster-pressure-chaos-20260727-final7.md)、
+[`Personal/SSH/Docker regression final1`](../reports/stage-4-single-node-regression-20260727-final1.md)。
 
 Stage 3 冻结了 Provider/Worker Contract、Control Plane 权威 Session、Generation fencing、Workspace
 Checkpoint 和跨 Pod 恢复。Stage 4 不重新定义这些契约，而是在其上实现可解释的资源生命周期、
@@ -15,7 +18,7 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
 3. Tenant/Project/Session 生命周期策略与 Web 配置、状态展示。
 4. Warm Pool、冷启动 SLO、Pod 成本和恢复指标。
 
-### 1.1 当前状态摘要（截至 2026-07-26）
+### 1.1 当前状态摘要（截至 2026-07-27）
 
 挂起 / 恢复主链路：
 
@@ -26,6 +29,10 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
   `Succeeded`/agentd exit 0 终态共同构成完成证明；`DELETE 202`、Pod `NotFound`、`Failed` 或浏览器/Worker
   心跳都不能提交 Suspend。
 - Provider Host 2.2 active-turn Suspend 已使用一次性 native cursor receipt 和相同的精确 Pod 终态证明落地。
+- 隔离 OrbStack E3 final2 已从空 namespace 运行双副本/DB/MinIO/RBAC baseline，并用真实 kubelet 完成
+  `waiting-for-approval -> checkpoint -> Generation 1 Pod Succeeded/UID absent -> suspended resolution ->`
+  `Generation 2 replacement Pod -> completed`。恢复 Pod 验证了原 Workspace Artifact；两份 Recovery Bundle 的
+  配置、上下文、Memory、Workspace、Interaction resolution、Scheduling Decision 与 predecessor lineage 全部通过。
 - 跨域 DR 已按当前 Session 水位与冻结 Bundle 水位合并 Artifact authority，并覆盖 fork origin、rollback、
   畸形引用和运行期新增 Artifact。Resume Snapshot 的 byte/token budget 不再删除 Result Artifact 引用本体，
   只会先裁剪 narrative / tool / interaction 元数据以及可选 Artifact metadata；若精确引用集合本身仍超预算则
@@ -50,7 +57,9 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
 
 - Warm Pool 的 [Worker Pool/Placement v1 契约](../contracts/worker-pool-placement-v1.md) 已冻结并落地
   target-local Kubernetes 预热容量、release-aware one-shot Worker、cold fallback 和 pool-aware scheduling
-  template。
+  template；Migration `000087` 已把 `minIdleUnits` 保证下限、优先创建、best-effort-only demand eviction 和
+  bounded deficit authority 接入真实 Reconciler。当前 dirty-source 的 OrbStack kubelet + PostgreSQL 证据见
+  [`final1`](../reports/stage-4-guaranteed-warm-orbstack-pg-20260727-final1.md)。
 - 当前工作树已具备跨 Target/Region/Cluster 的分组路由、lease-free 灾难恢复 successor、多副本 Reconciler
   Leader Election，以及不同 UID/GID 的受保护 cgroup-v2 supervisor。
 - 普通 Create Session、Turn、review/compact 的公共 launch coordinator 会在 target-local placement 之前执行
@@ -67,39 +76,56 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
   [`Execution Capacity Reservation Authority v1`](../contracts/execution-capacity-reservation-authority-v1.md)。
 - 共享 `fairqueue` 已进入 Kubernetes batch Pod 选择和通用/暖池 Worker Claim；Claim 在 Target lock 下按
   Tenant active service units equal-share，并有真实 PostgreSQL idle-Tenant 优先证明。
-- Migration `000076` 为普通 Turn、review/compact 和 failover successor 建立原子 `selected-only` Scheduling
-  Decision/Candidate，冻结 final post-lock Health、queue pressure、DR readiness、placement 及 canonical
-  SHA-256，并把 Decision identity 接入 Recovery Bundle；历史数据明确标为 `legacy-selected-only`。
+- Migration `000088` 已把 reusable `general-pool` 的租户边界显式化：Pool 冻结
+  `tenantIsolation=pinned|shared`，默认 pinned 在首个 Execution/Workspace-cleanup Claim 原子绑定 Tenant，
+  之后候选过滤、Heartbeat、逻辑重注册及 PostgreSQL/SQLite 触发器均禁止清空/换绑；显式 shared 保留
+  equal-share 跨 Tenant 轮转。真实 OrbStack 两物理 Pod + PostgreSQL 双连接/负向门禁见
+  [`final1`](../reports/stage-4-worker-pool-tenant-isolation-orbstack-pg-20260727-final1.md)。
+- Kubernetes Priority 已限定为 non-preempting scheduler order：默认 Pod 使用预置
+  `synara-worker-nonpreempting-v1`，自定义类在 Pod apply 前通过 Target credential 读取真实 PriorityClass，缺失、
+  RBAC 不足或实际非 `Never` 均 fail closed；Pod-spec revision 会替换旧的隐式默认策略容量。真实 OrbStack API/
+  kubelet 已同时证明 cold/warm Running Pod、Admission 写入的 priority/value/`Never` 与可抢占类负向拒绝，见
+  [`final1`](../reports/stage-4-kubernetes-nonpreempting-priority-orbstack-20260727-final1.md)。
+- Migration `000076` 为普通 Turn、review/compact 和 failover successor 建立原子 Scheduling Decision graph；
+  routed launch 现冻结完整 Member-ID 顺序 candidate trace、routing/preview/policy/capability rejection、final
+  post-lock Health/queue/DR/placement 及 canonical SHA-256，fixed Target 保持 `selected-only`，历史数据明确标为
+  `legacy-selected-only`；Decision identity 已接入 Recovery Bundle。
 - tenant-owned managed Kubernetes 的 fresh-reconcile health publisher 已落地；Migration `000083` 也已补齐
   platform-shared/external Target 的 Ed25519 签名、精确 scope、immutable receipt 和 health/DR readiness
   原子接入面（`SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON`）。
 
 成本 / 指标：
 
-- versioned tariff 与 AWS/GCP/Azure 实际云账单只读导入、幂等对账已落地。
+- 正式支持 operator-managed versioned tariff、requested-resource facts、estimate 与幂等对账。已有
+  AWS/GCP/Azure provider-shaped parser/Blob adapter 仅作为内部兼容与测试面保留，不构成受支持的原生云账单连接器。
 - Generation 与物理 Worker/Pod incarnation 事实已持久化，用于重启后仍稳定的 30 天冷启动分位、warm
   hit/fallback、恢复终态、运行/空闲时长及 requested-resource-seconds 成本代理；terminal Worker incarnation
   历史与 Generation 分位数已分别由 Migration `000079`/`000081` 转为可合并的日级预聚合。
 - 指标已补到 Provider `session.started` ready 延迟、Generation start/ready outcome、claim-time resume
   decision、经过严格验证的 runtime fallback reason，以及短期 Provider Credential access Lease 状态。
 
-仍开放的部署验收项（Stage 4 保持 IN PROGRESS 的原因）：
+以下是部署/发布 follow-up，不是 Stage 4 领域实现阻塞项：
 
-- 真实外部 Target probe（签名接入面已落地，外部 publisher workload 与生产密钥管理仍是部署项）。
-- 跨故障域 Artifact/Checkpoint 复制与生产 Metadata 控制面切换。
-- 受保护 supervisor 的生产宿主机特权验收。
-- 托管云多可用区与生产时长 Kubernetes soak。
-- 完整 rejected-candidate 重放轨迹和生产多租户 load/soak 证据。
+- 真实外部 Target probe 的 publisher workload 与生产密钥托管由 operator 部署；签名接入面已落地。
+- Geographic DR 需要 operator 自行部署跨站点 Artifact/Checkpoint/Memory/Metadata 复制；当前产品承诺仅为
+  self-hosted logical cross-Cluster authority，不宣称跨站 RPO/RTO。
+- 受保护 supervisor 的每台生产宿主机特权验收、自建目标硬件长时 soak 和生产多租户 load/soak 是发布/Stage 6
+  运维门禁；checked-in OrbStack/Kind/SSH/Docker runner 是可重复入口，不再要求某个云厂商环境。
 
-### 1.2 本地验收证据（不替代托管云/生产验收）
+明确不在当前 Stage 4 支持范围：EKS/GKE/AKS 专属 Workload Identity、AWS/GCP/Azure 原生账单 Export、云厂商
+KMS/IAM fallback、托管云多可用区和跨云 E4/E5。未来若需求和预算成立，再以独立项目恢复
+[`Managed-cloud billing acceptance v1`](../contracts/managed-cloud-billing-acceptance-v1.md)；这些 deferred gates
+不阻塞自建 Kubernetes 发布。
+
+### 1.2 自建 Kubernetes 验收证据与部署边界
 
 - [disposable Kind 韧性 final5](../reports/stage-4-kind-resilience-acceptance-20260726-final5.md)：1 个
   Kubernetes control-plane node、3 个 Worker node、2 个分散的 Synara Control Plane Pod，`rbac`、`topology`、
   `leader-takeover`、`control-plane-failover`、`node-drain`、`node-partition` 共 6/6 场景通过且无 skip；600 秒
   配置 soak 实际运行 601 秒，10/10 disruption cycle 通过，idle 和每轮 readiness probe failure 均为 0。精确
   Reconciler holder Pod 被删除后 holder 改变且 fencing token 只从 3 增至 4；20 秒 Node partition 后节点重连和
-  双副本 readiness 均恢复。该结果只证明 checked-in Kind lane 的预生产行为，不替代托管 Kubernetes 的 Node
-  controller、存储、负载均衡、跨可用区网络和长周期生产 soak。
+  双副本 readiness 均恢复。该结果证明 checked-in 自建多节点 Kubernetes lane；operator 仍需在目标硬件复跑
+  长周期 soak，但不需要补托管云 Node controller、云负载均衡或跨可用区证据。
 - [OrbStack real-kubelet final14](../reports/stage-4-orbstack-resilience-acceptance-20260726-final14.md)：不可变
   镜像 `synara-control-plane:stage4-orbstack-final12-20260726`
   （`sha256:e0c9b0079432052203e044c4becad86eb251746cd220f0951ac1b4557905de39`）在双副本下完成 RBAC、Lease Guard
@@ -107,7 +133,21 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
   readiness probe failure 都为 0，`/ready` 在扰动后报告 schema 73/73。Migration `000071`–`000073` 的
   row/checksum、Target operation/expected-instance 列和 Worker bootstrap-generation 列已在保留的 PostgreSQL 中
   现场核对；对应 disposable OrbStack SSH final4 还通过 16/16 生命周期与撤权验收。OrbStack 仍是单节点，因此
-  final14 与多节点 Kind final5 互补，不等价于托管云多可用区和生产时长验收。
+  final14 与多节点 Kind final5 互补；目标自建硬件上的生产时长验收仍由 operator 运行同一 runner，托管云
+  多可用区不在当前支持范围。
+- [OrbStack Session authority failover final3](../reports/stage-4-orbstack-session-authority-failover-20260726-final3.md)：
+  schema 85 双副本 baseline 通过后删除一个 Control Plane Pod，replacement Ready 且 10 秒窗口 readiness failure
+  为 0；故障前后独立 Session authority 仍精确一行，完整 `agent_sessions` 行 SHA-256 完全一致。producer 对
+  `kubectl exec` 未知提交结果使用单次写入 + 精确 Session ID 只读 reconciliation，不盲重放 User/Tenant/Session
+  graph。该结果关闭本地 E3 Control Plane Pod failure 的 Session-state 证据，不替代 whole-Cluster、外部
+  PostgreSQL 或多可用区故障证明。
+- [OrbStack Resource Lifecycle final2](../reports/stage-4-orbstack-resource-lifecycle-20260727-final2.md)：从空隔离
+  namespace 启动双副本 Control Plane、PostgreSQL 和 MinIO；124 秒 baseline 与 102 秒 lifecycle case 均通过。
+  Generation 1 waiting Pod 在 60 秒后以 `kubernetes-pod-terminal-v1` 到达 `Succeeded`，Lease 清零且精确 UID
+  在 Resume 前消失；审批在 suspended 期间保存为 `resume-recorded`，Generation 2 使用不同 Pod UID，恢复并验证
+  Workspace Artifact 后完成。Bundle lineage 与配置/上下文/Memory/Workspace/Interaction/Scheduling Decision
+  覆盖均通过；清理后两套 namespace 和专用 RBAC 不存在，原 `synara-system` 保持 2/2。该结果关闭本地 real-kubelet
+  lifecycle E3，关闭仓库侧 real-kubelet 机制门禁；目标自建硬件的生产时长仍是部署验收。
 - Migration `000069` 的 target-local Warm capacity authority 也延续到 final14：独立 `synara-warm-final6b` Pod
   在后续 rollout 和控制面故障后仍保持原 UID、Ready、零重启；final10 后 4 个追加 Reconciler 样本将 authority
   version 从 4676 推进到 4689，并持续报告 desired/claimed/ready-idle=`1/0/1`。Placement 仍只把 fresh-ready 作为
@@ -127,15 +167,15 @@ scale-to-zero、容量调度、多集群恢复和成本治理。
   当前 Turn 的 Context 和 Result Artifact。两侧 Target-audience projected token 通过生产 Kubernetes verifier 在
   真实 API Server 上完成 TokenReview、ServiceAccount/Pod claim 和 Pod GET/ownership 校验，并拒绝未绑定的控制
   凭证。该 lane 是本地可重复 control-path 证据，不代表完整 Worker 注册持久化、实际 backing-store 复制、
-  successor 对恢复包的完整 Provider 运行时消费、生产 PostgreSQL failover、云 Workload Identity 或云上独立
-  Region/AZ，后者仍保持部署验收待办。
+  successor 对恢复包的完整 Provider 运行时消费、生产 PostgreSQL failover或物理独立故障域；这些只在 operator
+  宣称地理级 DR 时作为可选部署验收，不阻塞单站点/逻辑双 Cluster 支持。
 - [账单 runtime final19](../reports/stage-4-billing-postgres-minio-acceptance-20260726-final19.md)：在隔离 Docker
   网络内使用真实 PostgreSQL 17.10 和 versioned MinIO，验证了精确旧 VersionId、AWS CUR2 native-shaped manifest、
   多 chunk CSV/GZIP、split-child parent replacement、两段 tariff estimate、对账、scheduler audit、重启 replay 与
   并发首次导入串行化。证据绑定 wrapper、生产 billing service、三份测试源码、parser/source 实现和实际 Linux
   test binary 的 SHA-256，并强制执行 child-only、net/gross orphan、跨 chunk 缺 parent 三个负例；清理后无
-  run-owned container/network/volume。该结果仍明确报告 `cloudWorkloadIdentityVerified=false`，不替代真实
-  AWS/GCP/Azure export 与 workload identity 门禁。
+  run-owned container/network/volume。该 lane 只验证内部 provider-shaped parser/adapter mechanics；当前产品
+  成本路径使用 operator tariff，不要求真实 AWS/GCP/Azure Export 或 Workload Identity。
 
 这里的 `Session.status = suspended` 继续表示用户或管理员控制的操作状态。资源挂起使用独立
 `resourceState = suspended`，两者不得混用。
@@ -350,6 +390,9 @@ Operator hard bounds
       `resume-recorded` / `recovering` 与 Reconciler 删除 suspended Pod 的 Control Plane 状态链路已落地；
       `worker-attested-v1` 需要签名 strict containment，Kubernetes 生产路径可使用 Pod-bound identity + exact
       kubelet terminal proof。
+- [x] checked-in `resource-lifecycle` 韧性 case 已将上述链路接到真实 Kubernetes acceptance：先写 Workspace
+      Artifact，再进入 approval wait，验证旧 Pod `Succeeded`/UID absent、suspended resolution、不同 Pod UID 的
+      Generation 2、恢复 Artifact 内容和两份原子 Bundle；OrbStack E3 final2 与 retained-baseline debug4 连续通过。
 - [x] Migration `000054`：冻结 suspend attempt 的 Execution Target、Worker incarnation、Pod name/UID，增加
       `checkpoint-ready` 与 `Succeeded` terminal proof 的一次写入/不可变约束；Kubernetes Worker 注册改用
       target-scoped projected ServiceAccount token、TokenReview 和实时 Pod ownership 校验，不再向 Worker Pod
@@ -377,11 +420,52 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       只用 fresh-ready 信号作性能偏好。Prometheus 只暴露 bounded class/freshness/support/kind；PostgreSQL 已验证
       scope/CAS/不可删除约束。所有 suspended Resume 路径会在统一 Tenant admission lock 下重新获取 execution
       quota，并有真实 PostgreSQL 双 Session 并发单赢家证明。
+- [x] Migration `000087` + guaranteed-warm：`minIdleUnits` 保持在 `desiredIdleUnits` 内，保证槽在冷 Execution
+      Pod 前消费 Target-wide budget，demand fallback 只能驱逐保证线以上的 best-effort 槽；预算不足不绕过
+      `maxActivePods`，而是通过 `min_idle - ready_idle` bounded deficit fail-visible。真实 OrbStack 两 Running warm
+      Pod、精确 UID 驱逐、保证槽 UID 连续、后续冷 Pod 创建及 PostgreSQL authority/negative gate 见
+      [`final1`](../reports/stage-4-guaranteed-warm-orbstack-pg-20260727-final1.md)。
+- [x] Migration `000088` + Worker Tenant isolation：Pool `tenantIsolation` 与 Worker 首次 Tenant binding
+      均为不可变权威；Execution/Workspace-cleanup Claim 共用 pinned fence，shared 仅显式 opt-in。SQLite
+      partial index/trigger、PostgreSQL constraint class/双连接串行化与真实 OrbStack pinned/shared Pod 容量均
+      通过，见
+      [`final1`](../reports/stage-4-worker-pool-tenant-isolation-orbstack-pg-20260727-final1.md)。scrub-on-release
+      仍是 Stage 5 的纵深防御，不作为跨租户安全的唯一依据。
+- [x] Migration `000089` + shared `executionqueue`：Automation/Batch/Interactive class、priority、quota units、
+      Tenant/Project/Session/Automation hierarchical admission，以及 starvation promotion/equal-share/FIFO 已同时
+      进入 Kubernetes 与 reusable Worker Claim；SQLite 与 PostgreSQL 并发 gate 通过。
+- [x] Migration `000090` + Worker Pool autoscaling：Queue Depth/oldest age、target delay、min/max、cooldown、
+      stabilized scale-down、effective desired warm capacity 与 interactive hard cold-start deadline 均为服务端
+      durable authority，leader-only controller、API、Deployment env、metrics 和告警已接通。
+- [x] Migration `000091` + Target capacity vector：Kubernetes ResourceQuota 的 Pod/CPU/Memory/Ephemeral/GPU
+      total/allocated/available 和最紧资源 schedulable units 已持久化；不完整/过期 authority fail closed，Prometheus
+      recording rules 承担 operator-retained 历史预聚合。
+- [x] Migration `000092` + Outbox pressure：adaptive batch/concurrency、same-key ordered lanes、只对新
+      `execution.queued` 的 hard throttle，以及 Recovery/terminal/cancel/cleanup 永不被该阈值阻断均已落地。
+- [x] Self-hosted network/private dependency/Workspace Storage v1：NetworkPolicy DNS selector、CIDR+port allowlist、
+      metadata subtraction、private Git、controlled proxy、private image、npm/PyPI read Grant 与
+      [`Workspace Storage Boundary v1`](../contracts/workspace-storage-boundary-v1.md) 均有 fail-closed tests。
+- [x] OrbStack + disposable Kind 共享 PostgreSQL 的 190 秒双集群压力/chaos 已通过：两个 Control Plane
+      service/Reconciler、每集群 8 Execution/峰值 4 Pod、并发 failover 单 successor、3 轮双集群 exact UID
+      replacement；Personal/SSH/Docker current-source regression 与 real OrbStack Docker 也通过。
+- [x] Kubernetes Priority/Preemption v1：Pool 写入层仅接受 `preemptionPolicy=Never`，默认与自定义
+      PriorityClass 均由 Reconciler 读取真实集群策略后才允许 Pod apply；默认 Kustomize asset、只读 RBAC、
+      Pod-spec revision 轮换和 cold/warm 双路径均已接入。不存在运行中 Worker displacement 语义，真实证据见
+      [`final1`](../reports/stage-4-kubernetes-nonpreempting-priority-orbstack-20260727-final1.md)。
 - [x] Migration `000070` + durable exact Pod UID deletion fence：Worker Register/Delete 共享 logical-identity
       transaction lock；Delete 在外部 Kubernetes 调用前原子检查 Execution/Cleanup lease、写不可变 fence 并
       drain exact incarnation。fenced UID 的 Register/Auth/Heartbeat/Claim/reactivation 全部 fail closed，
       agentd 将 fence 响应视为 terminal；同名 replacement 新 UID 仍可正常注册和 Claim，UID-precondition 409
       作为旧观察处理且保留旧 fence。
+- [x] Migration `000086` + Managed Docker durable rolling Drain：Reconciler 在 Docker DELETE 前冻结 exact Worker
+      incarnation/instance UID 并阻断新的 Execution/Workspace-cleanup Claim，已有两类 Lease 可正常结束且都会在
+      删除前复核。数据库约束保证每 Target 只有一个非终态 Drain；每轮最多替换一个旧逻辑 Worker，下一轮还受
+      desired replacement 注册、fresh heartbeat、compatibility 与 release readiness 门禁。DELETE 后进程崩溃可由
+      后续 Engine List 依据 missing exact container 恢复，同名新容器以新 instance UID 注册后才完成旧 fence。
+      真实 PostgreSQL Claim/Drain 并发和单 Target 双 Drain 竞态、真实 OrbStack Docker 两 Worker 逐轮替换与精确
+      cleanup 证据见
+      [`final1`](../reports/stage-4-managed-docker-rolling-drain-orbstack-pg-20260727-final1.md)；验收镜像来自当前脏
+      工作树，只证明 mechanics，不是 clean-SHA 生产发布证据。
 - [x] Migration `000061` + Pod observer：物理 Worker incarnation 固化注册身份、Pool snapshot、requested CPU/
       Memory/Ephemeral Storage 与 active/idle/draining/terminal 时间线。Kubernetes `DELETE` 只进入 draining，只有
       kubelet terminal phase 或成功 List 后确认 exact Pod UID missing 才关闭 `terminated_at`。指标提供 trailing
@@ -423,8 +507,10 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
 - [x] Migration `000051` 将 Worker Lease 绑定到不可变 worker incarnation / instance UID；Worker 重注册后即使
       逻辑 `worker_id` 相同，也不能续租、完成 quiesce 后的 Suspend 或继承旧 Pod 的 Generation 权限。
 - [x] Linux/非 Kubernetes 受保护 cgroup-v2 supervisor 已支持独立 Provider UID/GID、supervisor-owned parent、
-      启动前 `UseCgroupFD` 绑定、`Pdeathsig=SIGKILL`、单调 incarnation/generation fence、`cgroup.kill`、
-      `populated=0` 等待与清理；Provider workspace/runtime output 会显式移交给低权限身份，Git cache、注册材料和
+	  启动前 `UseCgroupFD` 绑定、`Pdeathsig=SIGKILL`、单调 incarnation/generation fence、`cgroup.kill`、
+	  `populated=0` 等待与清理。v3 进一步要求 systemd 254+ `DelegateSubgroup=synara-agentd` 与无进程委派根，
+	  在 held parent/bundle 启用并回读 `cpu/memory/pids`，且于 Provider 首条指令前写入并精确回读有限
+	  `pids.max`/`memory.max`/`cpu.max`；缺 controller、配置或内核接口不会回退无上限。Provider workspace/runtime output 会显式移交给低权限身份，Git cache、注册材料和
       Ed25519 private key 仍由 supervisor/root 保护。只有 live probe 真正证明 credential drop、fd-relative attach、
       `setsid` descendant 清理并由 root-only key 签名时，agentd 才投影可被 Target policy 验证的 capability；legacy
       同身份模式仍不能宣告严格 containment。独立 SSH gate 使用固定 host key、仅读取非秘密 env allowlist，并要求
@@ -434,10 +520,10 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       才提交，offline bootstrap 只接受当前 install/upgrade expected UID + generation，不能 Claim Execution/
       Workspace cleanup。active 重启只恢复同一逻辑 Worker/UID/generation；revoke 则在单个本地事务先提交 Target
       fence 和 Worker/token/lease/recovery/cleanup 撤权，再访问 KMS/远端，失败可复用同 generation 重试。当前仓库已有
-      [特权 Linux 容器证明](../reports/stage-4-protected-cgroup-linux-acceptance-20260725.md)，但生产 SSH 宿主机仍需执行
-      该 gate；OrbStack VM live containment final1 的真实 systemd/cgroup 场景通过 5/5，但 runner 因 OrbStack
-      opaque-ID delete panic 在 cleanup 失败，不能计作全绿 gate；本地 disposable OrbStack SSH final4 已完成 16/16
-      产品路径验收；Kubernetes waiting/active-turn
+	  [特权 Linux 容器证明](../reports/stage-4-protected-cgroup-linux-acceptance-20260725.md)，但生产 SSH 宿主机仍需执行
+	  该 gate；[OrbStack VM v3 live containment final3](../reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md)
+	  已让真实 systemd/cgroup controller/limit/fence/recovery 场景和版本限定的 exact-ID RPC 自动清理一起全绿 5/5，且仍禁止名称回退；本地
+      disposable OrbStack SSH final4 已完成 16/16 产品路径验收；Kubernetes waiting/active-turn
       Suspend 继续使用 exact kubelet Pod terminal proof。
 - [x] Claim 已为每个 Generation 创建不可变 opaque Provider Credential Grant；Recovery Bundle/Workload 冻结
       Grant ID，agentd 通过 Grant + 当前 Lease/Generation 解析 Credential，已存在 Grant 的 Generation 无法回退
@@ -461,15 +547,27 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       Workspace checkpoint 会安全迁移；已投递/结果不确定的副作用 fail closed。failover 在 mutation 前复用共享
       canonical validator 核对源 Bundle 的 persisted hash/envelope，DR successor 首次 Claim 沿 predecessor ancestry
       恢复源当前 Turn Context/Artifact；篡改 Bundle 的失败路径与 Claim/Release/Re-Claim/DR replay 均有测试覆盖。
+- [x] Target Group Member 生命周期 API 已把既有 `active/draining/disabled` authority 暴露为 exact-version CAS：
+      draining 立即停止新 placement 但不打断已有执行，disable 在同 Group/Target 仍有任一非终态 Execution 时
+      fail closed，disabled 为终态，drain 可显式 abort。Group/Member lock 与 routed launch commit 共用线性化边界，
+      状态和 bounded Audit 同事务提交；完整接入、升级、路由下线、Credential 轮换与事故流程见
+      [`Kubernetes Cluster 生命周期 Runbook`](../runbooks/kubernetes-cluster-lifecycle.md)。tenant-owned managed
+      Kubernetes Target 的终态 disable API 还与完整 Reconciler cycle 共用 advisory lock，并在 Target 行锁内对
+      Member、固定 Session、Execution、Pool、Workspace、Worker/Lease 和 fresh exact-zero managed health 全量
+      fail closed；相同终态请求 no-write replay，成功 mutation 与 bounded Audit 原子提交。历史 Target 行不删除，
+      物理 Namespace 清理只允许在 disable 后走 UID precondition。固定 Session 迁移和 encrypted configuration
+      原地轮换仍是明确产品缺口，分别要求归档/保持 blocked 与蓝绿替换，Runbook 禁止 DB 绕过。真实 OrbStack
+      Kubernetes + PostgreSQL、advisory-lock 与并发 Member insert 证据见
+      [`final1`](../reports/stage-4-managed-kubernetes-target-disable-orbstack-20260727-final1.md)。
 - [x] Migration `000065` 将 destination DR readiness 提升为 `(execution_target_id, source_dr_domain)` 精确 authority，
       冻结 publisher、TTL、单调版本和 `replicatedThroughAt` watermark，并按实际需要分别门禁 Artifact、Checkpoint、
       Memory backing store。普通新 Turn 的重新路由与显式 failover 使用相同的 frozen source Region/Cluster 规则；
       缺 source snapshot、过期/错误 source authority 或落后 watermark 都 fail closed。
-- [x] Migration `000064` + Cloud Cost Accounting v1：requested-resource proxy 与货币金额明确分表；versioned
-      tariff 生成 micros estimate，AWS CUR、GCP Cloud Billing Export、Azure Cost Export 通过只读 Blob adapter
-      严格解析实际账单，并按 provider external ID/checksum 幂等导入和对账。runtime 已接入 S3、GCS、Azure Blob
-      默认 workload identity/credential chain、不可变 object version/generation、leader-scoped scheduler 和
-      mutation-only audit；custom S3/Azure HTTP endpoint 必须显式开启且经过严格 URL 校验。本地 BlobSource 使用
+- [x] Migration `000064` + Cloud Cost Accounting v1：requested-resource proxy 与货币金额明确分表；正式产品路径由
+      operator-managed versioned tariff 生成 micros estimate，并按 durable resource facts 幂等对账。AWS CUR、GCP
+      Cloud Billing Export、Azure Cost Export parser 及 S3/GCS/Azure Blob adapter 已有实现，但只保留为内部兼容/
+      测试面，不作为当前受支持的原生云账单连接器。custom S3/Azure HTTP endpoint 必须显式开启且经过严格 URL
+      校验；本地 BlobSource 使用
       root-relative 打开并拒绝中间 symlink。`estimateAfterImport` 已接通内建 durable sweeper：配置必须显式绑定
       tenant-owned `executionTargetIds`，invoice replay 会幂等补扫同账期 Worker facts；一个 Worker 失败不阻止其他
       Worker，但 job 仍失败并可重试。本地 [final19](../reports/stage-4-billing-postgres-minio-acceptance-20260726-final19.md)
@@ -480,8 +578,8 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       import/reconcile 还共享一个满足 PostgreSQL 审计约束的 bounded correlation request ID。相同 invoice identity
       的双连接首次导入还通过 PostgreSQL transaction
       advisory lock 实测串行化：同 checksum 返回同一 import/line identity，不同 checksum 稳定冲突。
-      生产环境仍需分别用真实 AWS/GCP/Azure workload identity 和账单导出对象
-      执行验收；Migration `000068` 已用 append-only Worker claim ledger 补齐 tenant-owned Worker 的 per-period、
+      以上 provider-shaped 路径不再要求真实 AWS/GCP/Azure 验收，也不能用于对外宣称云厂商集成；
+      Migration `000068` 已用 append-only Worker claim ledger 补齐 tenant-owned Worker 的 per-period、
       per-tariff request delta；Execution/Cleanup 的同 request ID 并发 claim 已在真实 PostgreSQL 证明线性化为一次
       ledger/receipt 写入与一次 replay，OrbStack final5 也已确认 Migration 68 在当前镜像应用。Migration `000075`
       又以 1:1 immutable ReleaseFact 覆盖 Execution 与 Workspace Cleanup 的全部生产释放路径，分别冻结业务
@@ -510,20 +608,21 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       slice；跨 Target 歧义、重复 line/slice、晚到 source/estimate、零 basis 非零 actual、篡改和删除全部拒绝，
       未匹配 line/amount 保持显式。SQLite 与 OrbStack PostgreSQL 17.10
       [final1](../reports/stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md) 已验证并发首次写、精确守恒和
-      DB negative gates；真实 provider account/export/workload identity 仍是 E4。Worker 长期 additive rollup 已完成，
+      DB negative gates；真实 provider account/export/workload identity 已明确 deferred。Worker 长期 additive rollup 已完成，
       Generation mergeable distribution 已由 Migration `000081` 完成。
-- [ ] 多副本 Control Plane 的广域压力/混沌、真实 Kubernetes 长时运行和生产 soak 验收。
+- [x] 完成多副本 Control Plane 与自建 Kubernetes 的 checked-in 压力/混沌/soak 验收入口；目标硬件长时运行由
+      operator 在部署时复跑，不再作为仓库 Stage 4 阻塞项。
       Pod-bound identity 还要求 target Kubernetes credential 具备 `tokenreviews.create` 与精确 Pod GET 权限；部署
       验收必须覆盖 TokenReview 不可用、旧 UID replacement、Node partition、Failed/Unknown Pod 和 proof 重放。
       本地 disposable Kind final5 lane 已完成 6/6 必跑场景、Lease Guard v2 精确 Leader takeover 和实际 601 秒/
       10 周期 soak；OrbStack final14 又在 schema 73 镜像上通过 RBAC、Leader takeover、Control Plane failover
-      3/3，并保持 Warm Pod 连续。新的 namespace/RBAC 隔离 baseline 已用 schema 81 当前镜像在 OrbStack 完成
-      Pod/DB/MinIO 故障恢复、3/3 顶层验收和 120 秒 6/6 Leader/Pod disruption soak，所有 readiness failure 为 0，
-      且未修改原 `synara-system`，证据见
-      [`final2`](../reports/stage-4-orbstack-isolated-resilience-20260726-final2.md)；OrbStack + disposable Kind final4
+      3/3，并保持 Warm Pod 连续。namespace/RBAC 隔离 baseline 已用 schema 87 当前 dirty-verification 镜像在
+      OrbStack 完成 Pod/DB/MinIO 故障恢复、3/3 顶层验收和 120 秒 8/8 Leader/Pod disruption soak，所有
+      readiness failure 为 0，且未修改原 `synara-system`，最新证据见
+      [`schema87-final1`](../reports/stage-4-orbstack-isolated-schema87-20260727-final1.md)；OrbStack + disposable Kind final4
       已补齐双真实 API 的跨 Cluster runtime-ready
       DR control path，并在两侧
-      真实执行生产 verifier 的 TokenReview + Pod GET，但这些本地证据仍不能关闭托管云多可用区、实际跨域数据
-      复制和生产时长验收项。Migration `000083` 的签名 routing publisher 另在 OrbStack 两 Control Plane Pod、
+      真实执行生产 verifier 的 TokenReview + Pod GET；这些本地证据关闭仓库侧自建 K8s 机制门禁，但实际跨域数据
+      复制和目标硬件生产时长仍由 operator 部署验收。Migration `000083` 的签名 routing publisher 另在 OrbStack 两 Control Plane Pod、
       survivor 与 replacement 上完成 exact nonce replay，证据见
       [`final1`](../reports/stage-4-platform-routing-authority-orbstack-20260726-final1.md)。

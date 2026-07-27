@@ -99,6 +99,36 @@ func TestResolveRemoteDispatchesOnlyExplicitHTTPSOrSSH(t *testing.T) {
 	}
 }
 
+func TestResolveRemotePrivateNetworkRequiresExplicitNarrowPolicy(t *testing.T) {
+	resolver := staticResolver{
+		"git.corp.example":      {{IP: net.ParseIP("10.42.1.8")}},
+		"metadata.corp.example": {{IP: net.ParseIP("169.254.169.254")}},
+	}
+	if _, err := ResolveRemote(context.Background(), resolver, "https://git.corp.example/team/repo.git"); err == nil {
+		t.Fatal("private Git endpoint was accepted without an explicit policy")
+	}
+	policy, err := ParsePrivateNetworkCIDRs([]string{"10.42.0.0/16"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := ResolveRemoteWithAddressPolicy(
+		context.Background(), resolver, "https://git.corp.example/team/repo.git", policy,
+	)
+	if err != nil || remote.PinnedIP != "10.42.1.8" {
+		t.Fatalf("private Git endpoint = %#v, %v", remote, err)
+	}
+	if _, err := ResolveRemoteWithAddressPolicy(
+		context.Background(), resolver, "https://metadata.corp.example/latest/meta-data", policy,
+	); err == nil {
+		t.Fatal("metadata endpoint was accepted through a private Git policy")
+	}
+	for _, invalid := range []string{"0.0.0.0/0", "169.254.0.0/16", "8.8.8.0/24", "10.0.0.1/8"} {
+		if _, err := ParsePrivateNetworkCIDRs([]string{invalid}); err == nil {
+			t.Fatalf("unsafe private network policy %q was accepted", invalid)
+		}
+	}
+}
+
 func TestNormalizeBranchRejectsAmbiguousRefs(t *testing.T) {
 	for _, branch := range []string{"../main", "main lock", "refs//heads/main", "main.lock", "@{upstream}", "-main", "/main", "main/", "@"} {
 		if _, err := NormalizeBranch(branch, "main"); err == nil {

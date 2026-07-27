@@ -926,8 +926,20 @@ func seedWorkspaceCleanupFixtureWithCleanup(
 	activeExecution bool,
 	registerCleanup bool,
 ) (executionFixture, persistence.RemoteWorkspace, persistence.WorkspaceMaterialization) {
+	return seedWorkspaceCleanupFixtureForTargetKind(
+		t, db, activeExecution, registerCleanup, "kubernetes",
+	)
+}
+
+func seedWorkspaceCleanupFixtureForTargetKind(
+	t *testing.T,
+	db *gorm.DB,
+	activeExecution bool,
+	registerCleanup bool,
+	targetKind string,
+) (executionFixture, persistence.RemoteWorkspace, persistence.WorkspaceMaterialization) {
 	t.Helper()
-	fixture := seedExecutionFixtureWithCleanup(t, db, registerCleanup)
+	fixture := seedExecutionFixtureForTargetKind(t, db, registerCleanup, targetKind)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	createdAt := now.Add(-48 * time.Hour)
 	retentionUntil := now.Add(-time.Hour)

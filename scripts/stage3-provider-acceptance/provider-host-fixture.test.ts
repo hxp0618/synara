@@ -327,6 +327,144 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     expect(messagesFor(output, "send-input").filter(isTerminal)).toHaveLength(1);
   });
 
+  it("accepts an initial-claim snapshot when the Provider Session starts fresh", () => {
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    host.handleCommand(
+      command("StartSession", "initial-snapshot", {
+        runnerInput: {
+          workload: {
+            provider: "codex",
+            resumeSnapshot: {
+              pendingInteractions: [],
+              resumeRecordedInteractions: [],
+            },
+          },
+        },
+        runtimeEventVersion: 2,
+      }),
+    );
+    host.handleCommand(command("SendTurn", "initial-snapshot-send", { inputText: "[text]" }));
+
+    expect(messagesFor(output, "initial-snapshot")).toMatchObject([
+      { messageType: "Result", payload: { resumed: false } },
+    ]);
+    expect(messagesFor(output, "initial-snapshot-send").at(-1)).toMatchObject({
+      messageType: "Result",
+    });
+  });
+
+  it("resumes the exact pending approval from an authoritative snapshot without duplicating it", () => {
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    host.handleCommand(
+      command(
+        "ResumeSession",
+        "resume-pending",
+        {
+          runnerInput: {
+            workload: {
+              provider: "codex",
+              resumeSnapshot: {
+                pendingInteractions: [
+                  {
+                    kind: "approval",
+                    requestId: "frozen-approval-request",
+                  },
+                ],
+                resumeRecordedInteractions: [],
+              },
+            },
+          },
+          runtimeEventVersion: 2,
+        },
+        2,
+      ),
+    );
+    host.handleCommand(command("SendTurn", "send-resumed-pending", { inputText: "[approval]" }, 2));
+
+    expect(messagesFor(output, "send-resumed-pending")).toHaveLength(0);
+    host.handleCommand(
+      command(
+        "ResolveApproval",
+        "resolve-resumed-pending",
+        {
+          requestId: "frozen-approval-request",
+          resolution: { decision: "accept" },
+        },
+        2,
+      ),
+    );
+    expect(messagesFor(output, "send-resumed-pending")).toMatchObject([
+      {
+        messageType: "Result",
+        payload: {
+          output: {
+            recoveryEvidence: {
+              source: "resume-snapshot",
+              interactionKind: "approval",
+              pendingInteractionCount: 1,
+              resumeRecordedInteractionCount: 0,
+            },
+          },
+        },
+      },
+    ]);
+    expect(output.filter((message) => message.messageType === "InteractionRequest")).toHaveLength(
+      0,
+    );
+  });
+
+  it("consumes a resolution frozen while suspended without replaying the Provider callback", () => {
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    host.handleCommand(
+      command(
+        "ResumeSession",
+        "resume-recorded",
+        {
+          runnerInput: {
+            workload: {
+              provider: "codex",
+              resumeSnapshot: {
+                pendingInteractions: [],
+                resumeRecordedInteractions: [
+                  {
+                    kind: "approval",
+                    requestId: "recorded-approval-request",
+                    resolution: { decision: "accept" },
+                  },
+                ],
+              },
+            },
+          },
+          runtimeEventVersion: 2,
+        },
+        2,
+      ),
+    );
+    host.handleCommand(command("SendTurn", "send-resume-recorded", { inputText: "[approval]" }, 2));
+
+    expect(messagesFor(output, "send-resume-recorded")).toMatchObject([
+      {
+        messageType: "Result",
+        payload: {
+          output: {
+            recoveryEvidence: {
+              source: "resume-snapshot",
+              interactionKind: "approval",
+              pendingInteractionCount: 0,
+              resumeRecordedInteractionCount: 1,
+            },
+          },
+        },
+      },
+    ]);
+    expect(output.filter((message) => message.messageType === "InteractionRequest")).toHaveLength(
+      0,
+    );
+  });
+
   it("supports steer and interrupt while preserving one terminal per command", () => {
     const output: ProviderHostMessage[] = [];
     const host = fixtureHost(output);

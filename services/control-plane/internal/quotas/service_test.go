@@ -87,13 +87,99 @@ func TestTenantQuotaRejectsInvalidLimits(t *testing.T) {
 	}
 }
 
+func TestScopedExecutionQuotaUsesExactScopeAndCAS(t *testing.T) {
+	fixture := newQuotaFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	projectID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	models := []any{
+		&persistence.Project{
+			ID: projectID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			Name: "Quota Project", DefaultBranch: "main", Visibility: "private",
+			CreatedBy: fixture.owner.UserID, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.AgentSession{
+			ID: sessionID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			ProjectID: projectID, CreatedBy: fixture.owner.UserID, Title: "Quota Session",
+			Status: "active", Visibility: "private", Provider: "codex",
+			ExecutionTargetID: fixture.executionTargetID, RequestedExecutionTargetID: fixture.executionTargetID,
+			CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.Automation{
+			ID: automationID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			ProjectID: projectID, CreatedBy: fixture.owner.UserID, Name: "Quota Automation",
+			Prompt: "run", Schedule: "0 * * * *", Timezone: "UTC", Status: "active",
+			CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	for _, model := range models {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatalf("seed scoped quota %T: %v", model, err)
+		}
+	}
+
+	maxConcurrent := 2
+	maxQueued := 4
+	maxUnits := int64(8)
+	created, err := fixture.service.PutScoped(
+		ctx, fixture.owner, fixture.tenantID, ScopeAutomation, automationID,
+		PutScopedInput{
+			MaxConcurrentExecutions: &maxConcurrent, MaxQueuedExecutions: &maxQueued,
+			MaxConcurrentExecutionUnits: &maxUnits,
+		},
+		"quota-scope-create", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Version != 1 || created.ScopeID != automationID || created.ScopeKind != ScopeAutomation {
+		t.Fatalf("created scoped quota = %#v", created)
+	}
+
+	stale := int64(0)
+	_, err = fixture.service.PutScoped(
+		ctx, fixture.owner, fixture.tenantID, ScopeAutomation, automationID,
+		PutScopedInput{ExpectedVersion: &stale, MaxConcurrentExecutions: &maxConcurrent},
+		"quota-scope-stale", "127.0.0.1",
+	)
+	assertQuotaProblemCode(t, err, "execution_quota_policy_version_conflict")
+
+	expected := created.Version
+	updated, err := fixture.service.PutScoped(
+		ctx, fixture.owner, fixture.tenantID, ScopeAutomation, automationID,
+		PutScopedInput{ExpectedVersion: &expected, MaxConcurrentExecutions: &maxConcurrent},
+		"quota-scope-update", "127.0.0.1",
+	)
+	if err != nil || updated.Version != 2 || updated.MaxQueuedExecutions != nil || updated.MaxConcurrentExecutionUnits != nil {
+		t.Fatalf("updated scoped quota = %#v, %v", updated, err)
+	}
+
+	loaded, err := fixture.service.GetScoped(ctx, fixture.owner, fixture.tenantID, ScopeAutomation, automationID)
+	if err != nil || loaded.Version != updated.Version {
+		t.Fatalf("loaded scoped quota = %#v, %v", loaded, err)
+	}
+
+	expected = updated.Version
+	cleared, err := fixture.service.PutScoped(
+		ctx, fixture.owner, fixture.tenantID, ScopeAutomation, automationID,
+		PutScopedInput{ExpectedVersion: &expected}, "quota-scope-clear", "127.0.0.1",
+	)
+	if err != nil || cleared.Version != 0 {
+		t.Fatalf("cleared scoped quota = %#v, %v", cleared, err)
+	}
+}
+
 type quotaFixture struct {
-	db           *gorm.DB
-	service      *Service
-	tenantID     uuid.UUID
-	owner        identity.Principal
-	billingAdmin identity.Principal
-	member       identity.Principal
+	db                *gorm.DB
+	service           *Service
+	tenantID          uuid.UUID
+	organizationID    uuid.UUID
+	executionTargetID uuid.UUID
+	owner             identity.Principal
+	billingAdmin      identity.Principal
+	member            identity.Principal
 }
 
 func newQuotaFixture(t *testing.T) quotaFixture {
@@ -131,9 +217,11 @@ func newQuotaFixture(t *testing.T) quotaFixture {
 	}
 	return quotaFixture{
 		db: store.DB(), service: NewService(store.DB()), tenantID: domain.TenantID,
-		owner:        identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID},
-		billingAdmin: identity.Principal{UserID: billingAdminID, ActiveTenantID: &domain.TenantID},
-		member:       identity.Principal{UserID: memberID, ActiveTenantID: &domain.TenantID},
+		organizationID:    domain.OrganizationID,
+		executionTargetID: domain.ExecutionTargetID,
+		owner:             identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID},
+		billingAdmin:      identity.Principal{UserID: billingAdminID, ActiveTenantID: &domain.TenantID},
+		member:            identity.Principal{UserID: memberID, ActiveTenantID: &domain.TenantID},
 	}
 }
 

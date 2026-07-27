@@ -336,11 +336,14 @@ func verifyWorkerProcessContainmentAttestation(
 	}
 	containment := runtime.ProcessContainment
 	if containment.Mode == "cgroup-v2" &&
-		containment.SupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV2 {
+		(containment.SupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV3 ||
+			containment.ProbeVersion != executiontargets.ProtectedCgroupProbeVersionV3) {
 		err := problem.New(409, "worker_containment_supervisor_unsupported", "Strict cgroup containment requires a supported supervisor version.")
 		err.Details = map[string]any{
 			"reportedSupervisorVersion": containment.SupervisorVersion,
-			"requiredSupervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV2,
+			"requiredSupervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV3,
+			"reportedProbeVersion":      containment.ProbeVersion,
+			"requiredProbeVersion":      executiontargets.ProtectedCgroupProbeVersionV3,
 		}
 		return err
 	}

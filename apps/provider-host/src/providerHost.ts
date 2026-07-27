@@ -193,6 +193,11 @@ const CONTROLLED_PROVIDER_PROXY_ENVIRONMENT = [
   { source: "SYNARA_PROVIDER_NO_PROXY", target: "NO_PROXY", mayContainAuthentication: false },
 ] as const;
 
+const CONTROLLED_PROVIDER_PACKAGE_ENVIRONMENT = [
+  { source: "SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG", target: "NPM_CONFIG_USERCONFIG" },
+  { source: "SYNARA_PROVIDER_PIP_CONFIG_FILE", target: "PIP_CONFIG_FILE" },
+] as const;
+
 type SelectedProviderProcessEnvironment = {
   environment: NodeJS.ProcessEnv;
   proxySecrets: string[];
@@ -261,6 +266,14 @@ function selectProviderProcessEnvironment(
     if (proxy.mayContainAuthentication) {
       proxySecrets.push(...proxyAuthenticationSecrets(value));
     }
+  }
+  for (const config of CONTROLLED_PROVIDER_PACKAGE_ENVIRONMENT) {
+    const value = values.get(config.source);
+    if (value === undefined) continue;
+    if (/[\r\n\0]/u.test(value) || !isAbsolute(value)) {
+      throw new Error(`${config.source} is invalid`);
+    }
+    environment[config.target] = value;
   }
   return { environment, proxySecrets };
 }

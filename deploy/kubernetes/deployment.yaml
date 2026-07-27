@@ -116,17 +116,12 @@ spec:
             - name: SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL
               value: 5m
             - name: SYNARA_CREDENTIAL_KMS_PROVIDER
-              value: aws-kms
-            - name: SYNARA_CREDENTIAL_KMS_KEY_ID
+              value: local
+            - name: SYNARA_CREDENTIAL_MASTER_KEY
               valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: credential-kms-key-id
-            - name: SYNARA_CREDENTIAL_KMS_AWS_REGION
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: aws-region
+                secretKeyRef:
+                  name: synara-control-plane-secrets
+                  key: credential-master-key
             - name: SYNARA_ARTIFACT_BUCKET
               valueFrom:
                 configMapKeyRef:
@@ -136,7 +131,34 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   name: synara-control-plane-config
-                  key: aws-region
+                  key: artifact-region
+            - name: SYNARA_ARTIFACT_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: artifact-endpoint
+            - name: SYNARA_ARTIFACT_PUBLIC_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: artifact-public-endpoint
+            - name: SYNARA_ARTIFACT_USE_PATH_STYLE
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: artifact-use-path-style
+            - name: SYNARA_ARTIFACT_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: synara-control-plane-secrets
+                  key: artifact-access-key-id
+            - name: SYNARA_ARTIFACT_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: synara-control-plane-secrets
+                  key: artifact-secret-access-key
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
             - name: SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID
               valueFrom:
                 configMapKeyRef:
@@ -149,94 +171,14 @@ spec:
                   name: synara-control-plane-config
                   key: billing-blob-source
                   optional: true
-            - name: SYNARA_BILLING_LOCAL_BASE_DIR
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-local-base-dir
-                  optional: true
-            - name: SYNARA_BILLING_S3_BUCKET
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-bucket
-                  optional: true
-            - name: SYNARA_BILLING_S3_REGION
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-region
-                  optional: true
-            - name: SYNARA_BILLING_S3_ENDPOINT
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-endpoint
-                  optional: true
-            - name: SYNARA_BILLING_S3_USE_PATH_STYLE
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-use-path-style
-                  optional: true
-            - name: SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-allow-custom-endpoint
-                  optional: true
-            - name: SYNARA_BILLING_S3_ALLOW_HTTP
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-s3-allow-http
-                  optional: true
-            - name: SYNARA_BILLING_GCS_BUCKET
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-gcs-bucket
-                  optional: true
-            - name: SYNARA_BILLING_AZURE_CONTAINER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-azure-container-url
-                  optional: true
-            - name: SYNARA_BILLING_AZURE_ALLOW_HTTP
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-azure-allow-http
-                  optional: true
-            - name: SYNARA_BILLING_BLOB_PREFIX
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-blob-prefix
-                  optional: true
-            - name: SYNARA_BILLING_MAX_OBJECT_BYTES
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-max-object-bytes
-                  optional: true
-            - name: SYNARA_BILLING_IMPORT_MAPPINGS_JSON
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-import-mappings-json
-                  optional: true
-            - name: SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON
-              valueFrom:
-                configMapKeyRef:
-                  name: synara-control-plane-config
-                  key: billing-shared-allocation-mappings-json
-                  optional: true
             - name: SYNARA_KUBERNETES_RECONCILE_INTERVAL
               value: 5s
             - name: SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD
               value: 2m
+            - name: SYNARA_WORKER_POOL_AUTOSCALING_INTERVAL
+              value: 5s
+            - name: SYNARA_WORKER_POOL_AUTOSCALING_BATCH_SIZE
+              value: "200"
             - name: SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON
               valueFrom:
                 configMapKeyRef:
@@ -257,6 +199,16 @@ spec:
               value: 30s
             - name: SYNARA_OUTBOX_BATCH_SIZE
               value: "50"
+            - name: SYNARA_OUTBOX_MAX_BATCH_SIZE
+              value: "500"
+            - name: SYNARA_OUTBOX_MAX_CONCURRENCY
+              value: "8"
+            - name: SYNARA_OUTBOX_SCALE_UP_DEPTH
+              value: "100"
+            - name: SYNARA_OUTBOX_TARGET_DELAY
+              value: 5s
+            - name: SYNARA_OUTBOX_THROTTLE_DEPTH
+              value: "100000"
             - name: SYNARA_OUTBOX_MAX_ATTEMPTS
               value: "12"
             - name: SYNARA_OUTBOX_BASE_BACKOFF

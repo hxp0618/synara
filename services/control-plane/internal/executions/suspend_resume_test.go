@@ -247,9 +247,12 @@ func TestResourceSuspendRequiresStrictProcessContainmentCapability(t *testing.T)
 	} {
 		supervisorVersion := "supervisor-test"
 		if testCase.mode == "cgroup-v2" {
-			supervisorVersion = executiontargets.ProtectedCgroupSupervisorVersionV2
+			supervisorVersion = executiontargets.ProtectedCgroupSupervisorVersionV3
 		}
 		probeVersion := 1
+		if testCase.mode == "cgroup-v2" {
+			probeVersion = executiontargets.ProtectedCgroupProbeVersionV3
+		}
 		probeSHA256 := strings.Repeat("a", 64)
 		supervisorIdentity := "supervisor"
 		providerIdentity := "provider"
@@ -275,6 +278,26 @@ func TestResourceSuspendRequiresStrictProcessContainmentCapability(t *testing.T)
 		ProcessContainmentProviderIdentity:   &providerIdentity,
 	}) {
 		t.Fatal("persisted signed v1 cgroup supervisor retained resource-suspend authority")
+	}
+	legacySupervisor = "agentd-protected-cgroup-supervisor-v2"
+	if workerManifestSupportsStrictResourceSuspendContainment(persistence.WorkerManifest{
+		OperatingSystem: "linux", ProcessContainmentMode: "cgroup-v2",
+		ProcessContainmentSupervisorVersion: &legacySupervisor,
+		ProcessContainmentProbeVersion:      &probeVersion, ProcessContainmentProbeSHA256: &probeSHA256,
+		ProcessContainmentSupervisorIdentity: &supervisorIdentity,
+		ProcessContainmentProviderIdentity:   &providerIdentity,
+	}) {
+		t.Fatal("persisted signed v2 cgroup supervisor without resource limits retained resource-suspend authority")
+	}
+	v3Supervisor := executiontargets.ProtectedCgroupSupervisorVersionV3
+	if workerManifestSupportsStrictResourceSuspendContainment(persistence.WorkerManifest{
+		OperatingSystem: "linux", ProcessContainmentMode: "cgroup-v2",
+		ProcessContainmentSupervisorVersion: &v3Supervisor,
+		ProcessContainmentProbeVersion:      &probeVersion, ProcessContainmentProbeSHA256: &probeSHA256,
+		ProcessContainmentSupervisorIdentity: &supervisorIdentity,
+		ProcessContainmentProviderIdentity:   &providerIdentity,
+	}) {
+		t.Fatal("persisted v3 cgroup supervisor with the old probe retained resource-suspend authority")
 	}
 }
 

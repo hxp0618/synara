@@ -140,6 +140,24 @@ func NewSelectedOnlyInput(
 	}
 }
 
+// NewCompleteInput retains the caller's stable candidate order. prepare
+// validates that exactly one candidate is eligible and selected and that every
+// rejected candidate carries a bounded reason code.
+func NewCompleteInput(
+	id uuid.UUID,
+	algorithmVersion string,
+	decidedAt time.Time,
+	candidates []CandidateSnapshot,
+) Input {
+	return Input{
+		ID:                   id,
+		AlgorithmVersion:     algorithmVersion,
+		EvidenceCompleteness: EvidenceComplete,
+		DecidedAt:            decidedAt,
+		Candidates:           append([]CandidateSnapshot(nil), candidates...),
+	}
+}
+
 // CreateExecution atomically inserts an already-constructed execution and its
 // complete immutable Decision graph. It mutates SchedulingDecisionID only after
 // validation and restores the prior value if the transaction fails.
@@ -275,7 +293,7 @@ func prepare(
 	hashes := make([]string, 0, len(input.Candidates))
 	selectedOrdinal := -1
 	for ordinal, snapshot := range input.Candidates {
-		if err := validateCandidate(snapshot, input.AlgorithmVersion, legacy); err != nil {
+		if err := validateCandidate(snapshot, input.AlgorithmVersion, input.EvidenceCompleteness, legacy); err != nil {
 			return persistence.ExecutionSchedulingDecision{}, nil, fmt.Errorf("%w: candidate %d: %v", ErrInvalidEvidence, ordinal, err)
 		}
 		candidate := persistenceCandidate(execution.TenantID, input.ID, ordinal, snapshot)
@@ -352,7 +370,7 @@ func validateAlgorithm(algorithm, decisionKind string, legacy bool) error {
 	return nil
 }
 
-func validateCandidate(candidate CandidateSnapshot, algorithm string, legacy bool) error {
+func validateCandidate(candidate CandidateSnapshot, algorithm, completeness string, legacy bool) error {
 	if candidate.ExecutionTargetID == uuid.Nil || !oneOf(candidate.TargetKind, "local", "ssh", "docker", "kubernetes") {
 		return errors.New("target identity is invalid")
 	}
@@ -414,8 +432,15 @@ func validateCandidate(candidate CandidateSnapshot, algorithm string, legacy boo
 	if (algorithm == AlgorithmQueuePressureV1 || algorithm == AlgorithmReservationAwareV1) && !legacy {
 		if candidate.TargetGroupID == nil || candidate.TargetGroupVersion == nil || *candidate.TargetGroupVersion <= 0 ||
 			candidate.TargetGroupMemberID == nil || candidate.TargetGroupMemberVersion == nil || *candidate.TargetGroupMemberVersion <= 0 ||
-			candidate.Priority == nil || candidate.Weight == nil || candidate.QueuedExecutionUnits == nil || !healthPresence[0] {
+			candidate.Priority == nil || candidate.Weight == nil {
 			return errors.New("routed scheduling candidate lacks routing authority")
+		}
+		if candidate.Eligibility == EligibilityEligible && (candidate.QueuedExecutionUnits == nil || !healthPresence[0]) {
+			return errors.New("eligible routed scheduling candidate lacks replay authority")
+		}
+		if completeness == EvidenceComplete && candidate.Eligibility == EligibilityEligible &&
+			(candidate.PriorityRank == nil || candidate.RegionRank == nil || candidate.CapacityRank == nil) {
+			return errors.New("eligible routed scheduling candidate lacks ranking authority")
 		}
 	}
 	if candidate.WorkerPoolID == nil {

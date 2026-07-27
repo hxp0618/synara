@@ -58,6 +58,50 @@ func TestSelectUsesFreshHealthCapacityAndImmutableSnapshot(t *testing.T) {
 	}
 }
 
+func TestSelectRetainsStableCompleteCandidateEvaluation(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyBalanced, true, []string{"cn-shanghai"})
+	selected := fixture.createTarget(t, "trace-selected")
+	loser := fixture.createTarget(t, "trace-eligible-loser")
+	missingHealth := fixture.createTarget(t, "trace-health-missing")
+	excluded := fixture.createTarget(t, "trace-request-excluded")
+	for index, target := range []persistence.ExecutionTarget{selected, loser, missingHealth, excluded} {
+		fixture.addMember(t, group.ID, target.ID, "cn-shanghai", "cluster-"+string(rune('a'+index)), 100, 100)
+	}
+	fixture.observe(t, selected.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	fixture.observe(t, loser.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 8)
+	fixture.observe(t, excluded.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+
+	selection, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+		ExcludedTargetIDs: []uuid.UUID{excluded.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Target.ID != selected.ID || len(selection.Candidates) != 4 {
+		t.Fatalf("complete candidate selection = %#v", selection)
+	}
+	byTarget := make(map[uuid.UUID]CandidateEvaluation, len(selection.Candidates))
+	for index, candidate := range selection.Candidates {
+		if index > 0 && selection.Candidates[index-1].Member.ID.String() >= candidate.Member.ID.String() {
+			t.Fatalf("candidate trace is not stable Member-ID order: %#v", selection.Candidates)
+		}
+		byTarget[candidate.Target.ID] = candidate
+	}
+	selectedEvidence := byTarget[selected.ID]
+	loserEvidence := byTarget[loser.ID]
+	missingEvidence := byTarget[missingHealth.ID]
+	excludedEvidence := byTarget[excluded.ID]
+	if !selectedEvidence.Selected || selectedEvidence.PriorityRank == nil || *selectedEvidence.PriorityRank != 0 ||
+		loserEvidence.Selected || loserEvidence.Eligibility != CandidateEligibilityEligible ||
+		loserEvidence.PriorityRank == nil || *loserEvidence.PriorityRank != 1 ||
+		missingEvidence.RejectionCode != "health-missing" || missingEvidence.Health != nil ||
+		excludedEvidence.RejectionCode != "request-excluded" || excludedEvidence.Selected {
+		t.Fatalf("complete candidate evidence = %#v", selection.Candidates)
+	}
+}
+
 func TestSelectUsesQueuedAndRecoveringExecutionsAsBalancedSoftPressure(t *testing.T) {
 	fixture := newRoutingFixture(t)
 	group := fixture.createGroup(t, StrategyBalanced, true, []string{"cn-shanghai"})
@@ -161,6 +205,133 @@ func TestAddMemberRejectsAmbiguousDRDomainComponents(t *testing.T) {
 	}
 }
 
+func TestUpdateMemberStatusDrainsReplaysAbortsAndDisables(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	primary := fixture.createTarget(t, "member-lifecycle-primary")
+	fallback := fixture.createTarget(t, "member-lifecycle-fallback")
+	member := fixture.addMember(t, group.ID, primary.ID, "cn-shanghai", "cluster-primary", 1, 100)
+	fixture.addMember(t, group.ID, fallback.ID, "cn-shanghai", "cluster-fallback", 100, 100)
+	fixture.observe(t, primary.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	fixture.observe(t, fallback.ID, fixture.now, HealthHealthy, CapacityAvailable, 10, 0)
+	actorID := uuid.New()
+
+	drained, replayed, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 1, Status: MemberStatusDraining, ActorID: actorID, RequestID: "member-drain",
+	})
+	if err != nil || replayed || drained.Status != MemberStatusDraining || drained.Version != 2 {
+		t.Fatalf("drain result = %#v replayed=%t err=%v", drained, replayed, err)
+	}
+	selection, err := fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	})
+	if err != nil || selection.Target.ID != fallback.ID {
+		t.Fatalf("selection while draining = %#v err=%v", selection, err)
+	}
+
+	replayedMember, replayed, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 1, Status: MemberStatusDraining, ActorID: actorID, RequestID: "member-drain-replay",
+	})
+	if err != nil || !replayed || replayedMember.Version != 2 {
+		t.Fatalf("drain replay = %#v replayed=%t err=%v", replayedMember, replayed, err)
+	}
+
+	activated, replayed, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 2, Status: MemberStatusActive, ActorID: actorID, RequestID: "member-drain-abort",
+	})
+	if err != nil || replayed || activated.Status != MemberStatusActive || activated.Version != 3 {
+		t.Fatalf("abort drain = %#v replayed=%t err=%v", activated, replayed, err)
+	}
+	selection, err = fixture.service.Select(context.Background(), fixture.db, SelectRequest{
+		TenantID: fixture.tenantID, OrganizationID: fixture.organizationID, TargetGroupID: group.ID,
+	})
+	if err != nil || selection.Target.ID != primary.ID {
+		t.Fatalf("selection after abort = %#v err=%v", selection, err)
+	}
+
+	disabled, replayed, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 3, Status: MemberStatusDisabled, ActorID: actorID, RequestID: "member-disable",
+	})
+	if err != nil || replayed || disabled.Status != MemberStatusDisabled || disabled.Version != 4 {
+		t.Fatalf("disable = %#v replayed=%t err=%v", disabled, replayed, err)
+	}
+	_, _, err = fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 4, Status: MemberStatusActive, ActorID: actorID,
+	})
+	if codeOf(err) != "target_group_member_status_conflict" {
+		t.Fatalf("disabled member reactivation err = %v", err)
+	}
+
+	var audits []persistence.AuditLog
+	if err := fixture.db.Where("tenant_id = ? AND resource_id = ?", fixture.tenantID, member.ID).
+		Order("occurred_at, event_id").Find(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 3 || audits[0].Action != "execution_target_group_member.drain_started" ||
+		audits[1].Action != "execution_target_group_member.drain_aborted" ||
+		audits[2].Action != "execution_target_group_member.disabled" {
+		t.Fatalf("member lifecycle audits = %#v", audits)
+	}
+}
+
+func TestUpdateMemberStatusRequiresCASAndBlocksDisableWithNonterminalExecution(t *testing.T) {
+	fixture := newRoutingFixture(t)
+	group := fixture.createGroup(t, StrategyPriority, true, nil)
+	target := fixture.createTarget(t, "member-disable-blocked")
+	member := fixture.addMember(t, group.ID, target.ID, "cn-shanghai", "cluster-a", 10, 100)
+	actorID := uuid.New()
+
+	if _, _, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 1, Status: "retired", ActorID: actorID,
+	}); codeOf(err) != "invalid_target_group_member_status" {
+		t.Fatalf("invalid status err = %v", err)
+	}
+	if _, _, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 2, Status: MemberStatusDraining, ActorID: actorID,
+	}); codeOf(err) != "target_group_member_version_conflict" {
+		t.Fatalf("stale version err = %v", err)
+	}
+	if _, _, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 1, Status: MemberStatusDraining, ActorID: actorID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	execution := fixture.createPressureExecution(t, target.ID, "suspended")
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", execution.ID).
+		Update("target_group_id", group.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 2, Status: MemberStatusDisabled, ActorID: actorID,
+	})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "target_group_member_execution_active" ||
+		apiError.Details["activeExecutionCount"] != int64(1) {
+		t.Fatalf("active execution disable err = %#v", err)
+	}
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", execution.ID).
+		Update("status", "completed").Error; err != nil {
+		t.Fatal(err)
+	}
+	disabled, replayed, err := fixture.service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, MemberID: member.ID,
+		ExpectedVersion: 2, Status: MemberStatusDisabled, ActorID: actorID,
+	})
+	if err != nil || replayed || disabled.Status != MemberStatusDisabled || disabled.Version != 3 {
+		t.Fatalf("disable after completion = %#v replayed=%t err=%v", disabled, replayed, err)
+	}
+}
+
 func TestSelectAppliesSoftProviderAffinityAfterRegionAndHealthBeforePriorityLoadAndWeight(t *testing.T) {
 	fixture := newRoutingFixture(t)
 	group := fixture.createGroup(t, StrategyPriority, true, []string{"cn-shanghai"})
@@ -246,6 +417,25 @@ func TestSelectHardPolicyOverridesPreferredTargetAndRejectsAnEmptyAllowList(t *t
 	}
 	if selection.Target.ID != allowed.ID || selection.SchedulingPolicySnapshot.Tenant.Version != policy.Tenant.Version {
 		t.Fatalf("hard-policy selection = %#v, policy = %#v", selection, policy)
+	}
+	if len(selection.Candidates) != 2 {
+		t.Fatalf("hard-policy candidate trace = %#v", selection.Candidates)
+	}
+	var preferredEvidence, allowedEvidence *CandidateEvaluation
+	for index := range selection.Candidates {
+		candidate := &selection.Candidates[index]
+		switch candidate.Target.ID {
+		case preferred.ID:
+			preferredEvidence = candidate
+		case allowed.ID:
+			allowedEvidence = candidate
+		}
+	}
+	if preferredEvidence == nil || preferredEvidence.Eligibility != CandidateEligibilityRejected ||
+		preferredEvidence.RejectionCode != "scheduling-policy-denied" || preferredEvidence.Selected ||
+		allowedEvidence == nil || allowedEvidence.Eligibility != CandidateEligibilityEligible ||
+		!allowedEvidence.Selected || allowedEvidence.PriorityRank == nil || *allowedEvidence.PriorityRank != 0 {
+		t.Fatalf("hard-policy candidate trace = %#v", selection.Candidates)
 	}
 
 	document.Target = schedulingpolicy.Rule{Mode: schedulingpolicy.ModeAllow, Values: []string{}}
@@ -900,14 +1090,16 @@ func (f *routingFixture) createTargetWithCapabilities(
 	return target
 }
 
-func (f *routingFixture) addMember(t *testing.T, groupID, targetID uuid.UUID, region, cluster string, priority, weight int) {
+func (f *routingFixture) addMember(t *testing.T, groupID, targetID uuid.UUID, region, cluster string, priority, weight int) persistence.ExecutionTargetGroupMember {
 	t.Helper()
-	if _, err := f.service.AddMember(context.Background(), AddMemberInput{
+	member, err := f.service.AddMember(context.Background(), AddMemberInput{
 		TenantID: f.tenantID, TargetGroupID: groupID, ExecutionTargetID: targetID,
 		Region: region, ClusterID: cluster, Priority: priority, Weight: weight,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	return member
 }
 
 func (f *routingFixture) observe(
@@ -929,7 +1121,7 @@ func (f *routingFixture) observe(
 	return observation
 }
 
-func (f *routingFixture) createPressureExecution(t *testing.T, targetID uuid.UUID, status string) {
+func (f *routingFixture) createPressureExecution(t *testing.T, targetID uuid.UUID, status string) persistence.AgentExecution {
 	t.Helper()
 	execution := persistence.AgentExecution{
 		ID: uuid.New(), TenantID: f.tenantID, SessionID: uuid.New(), TurnID: uuid.New(),
@@ -939,6 +1131,7 @@ func (f *routingFixture) createPressureExecution(t *testing.T, targetID uuid.UUI
 	if err := f.db.Create(&execution).Error; err != nil {
 		t.Fatal(err)
 	}
+	return execution
 }
 
 func (f *routingFixture) observeDRReadiness(

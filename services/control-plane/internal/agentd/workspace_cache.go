@@ -483,8 +483,11 @@ func (m *WorkspaceMaterializer) buildPrivateGitGeneration(
 	}
 	if _, err := m.runGit(
 		ctx, stagingRoot, gitEnvironment(nil), "--git-dir="+repository,
-		"worktree", "add", "--relative-paths", "-b", branch, "--", checkout, resolvedCommit,
+		"worktree", "add", "-b", branch, "--", checkout, resolvedCommit,
 	); err != nil {
+		return err
+	}
+	if err := relativizeWorktreeMetadata(repository, checkout); err != nil {
 		return err
 	}
 	if err := writeWorkspaceManifest(stagingRoot, expected); err != nil {
@@ -494,6 +497,79 @@ func (m *WorkspaceMaterializer) buildPrivateGitGeneration(
 		Root: stagingRoot, Checkout: checkout, GitDir: repository, Manifest: filepath.Join(stagingRoot, "manifest.json"),
 	}
 	return m.validatePrivateGitGeneration(ctx, layout, expected)
+}
+
+// relativizeWorktreeMetadata rewrites the two absolute pointers `git worktree
+// add` leaves behind, so the generation still resolves after its staging root
+// is renamed into place. `git worktree add --relative-paths` does exactly this,
+// but that option needs git 2.48 while Ubuntu 24.04 still ships 2.43, and an
+// absolute pointer does not merely degrade — validatePrivateWorktreeFilesystem
+// rejects the generation outright. Computing the pointers here gives one
+// behaviour on every supported git; the byte output matches --relative-paths.
+// The third pointer, `commondir`, is already relative on every version.
+//
+// The written paths are derived from the caller's own layout rather than from
+// git's output, because git resolves symlinks in the staging prefix and we do
+// not: relating the two directly would emit a pointer that walks out of the
+// generation and back in through the resolved prefix.
+func relativizeWorktreeMetadata(repository, checkout string) error {
+	gitFile := filepath.Join(checkout, ".git")
+	value, err := readSmallRegularFile(gitFile, gitMetadataPointerMaxSize)
+	if err != nil {
+		return errors.New("Workspace Git file is unavailable")
+	}
+	const prefix = "gitdir: "
+	if !strings.HasPrefix(value, prefix) {
+		return errors.New("Workspace Git file is invalid")
+	}
+	pointer := filepath.Clean(strings.TrimSpace(strings.TrimPrefix(value, prefix)))
+	if !filepath.IsAbs(pointer) {
+		return nil
+	}
+	worktreeGitDir := filepath.Join(repository, "worktrees", filepath.Base(pointer))
+	if !sameExistingPath(worktreeGitDir, pointer) {
+		return errors.New("Workspace Git file escapes the private repository")
+	}
+	relativeGitDir, err := filepath.Rel(checkout, worktreeGitDir)
+	if err != nil {
+		return err
+	}
+	relativeGitFile, err := filepath.Rel(worktreeGitDir, gitFile)
+	if err != nil {
+		return err
+	}
+	if err := replaceGitMetadataPointer(gitFile, prefix+filepath.ToSlash(relativeGitDir)); err != nil {
+		return err
+	}
+	return replaceGitMetadataPointer(filepath.Join(worktreeGitDir, "gitdir"), filepath.ToSlash(relativeGitFile))
+}
+
+// replaceGitMetadataPointer writes value through a temporary file in the same
+// directory, so the destination is never opened through a symlink and never
+// observed half-written.
+func replaceGitMetadataPointer(path, value string) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".git-pointer-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.WriteString(value + "\n"); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 func (m *WorkspaceMaterializer) fetchPrivateRepositoryFromCache(

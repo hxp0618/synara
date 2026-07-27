@@ -98,10 +98,11 @@ candidate is added to the request's excluded Target set and selection continues;
 advanced only after the final candidate passes both gates. Warm Pool observations are
 matched by exact Pool ID/version, while resident and per-execution placement uses only general/unassigned Worker
 observations. This filtering is a correctness boundary. Queue-pressure-v1 supplies conservative cross-Target ranking,
-and Migration `000076` freezes the final selected Target, post-lock health/queue authority, placement, and optional DR
-readiness in an immutable `selected-only` Decision. Rejected routing/preview/capability candidates are not retained yet,
-so a truthful full candidate-set trace remains outside this contract revision. Heterogeneous CPU/memory/GPU units and
-preemption also remain outside v1; Tenant equal-share is defined separately in the Worker Pool placement contract.
+and Migration `000076` now freezes every active Group Member observed by the successful routed launch in an immutable
+`complete` Decision. Eligible losers retain rank inputs; routing, preview, policy, and capability rejections retain bounded
+codes and any observed Pool snapshot; the winner is refreshed from post-lock authority and final placement. Fixed Target
+and historical evidence remain explicitly `selected-only` and `legacy-selected-only`. Heterogeneous CPU/memory/GPU units
+and preemption remain outside v1; Tenant equal-share is defined separately in the Worker Pool placement contract.
 
 Once a Session has a previous Execution, the preferred Target bypasses DR readiness only when both its Target ID and its
 current member Region/Cluster equal the previous Execution's frozen source snapshot. Reusing the same Target ID under a
@@ -172,6 +173,8 @@ stored placement remains immutable historical truth.
 - `GET /v1/tenants/{tenantID}/execution-target-groups`
 - `POST /v1/tenants/{tenantID}/execution-target-groups`
 - `POST /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members`
+- `PATCH /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members/{targetGroupMemberID}`
+- `POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable`
 - `PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation`
 - `GET /v1/tenants/{tenantID}/location-outages`
 - `PUT /v1/tenants/{tenantID}/location-outages`
@@ -226,6 +229,49 @@ receipt response includes the committed reservation authority summary.
 The location-outage API is a narrow tenant operator authority. `PUT` upserts one `(region, optional clusterId)` row with a
 fresh observation timestamp and TTL; it does not mutate any `execution_targets` row, including platform-shared Targets.
 
+The member `PATCH` body contains only `expectedVersion` and `status`. It implements the persisted
+`active -> draining -> disabled` lifecycle, permits `draining -> active` as an explicit abort, and also permits
+`active -> disabled` when the member is already empty. `disabled` is terminal. `draining` and `disabled` members are
+immediately ineligible for every new placement, but the transition does not interrupt an existing Execution; a planned
+evacuation uses the separate location-outage authority when lease-free failover is required. Disabling fails with
+`target_group_member_execution_active` while any group-scoped Execution on that exact Target is `queued`, `leased`,
+`running`, `waiting-for-approval`, `recovering`, or `suspended`.
+
+The mutation locks the Group and Member, uses exact version CAS, advances the immutable Member version once, and writes
+one bounded Audit row in the same transaction. An exact same-status request at the expected version, or a retry that
+finds exactly `expectedVersion + 1` with the requested status, is a no-write replay and returns
+`Idempotency-Replayed: true`; any other stale version conflicts. The Member lock is the same commit authority used by
+routed launch, so a concurrent Execution either commits first and blocks disable, or observes the non-active Member and
+cannot commit its stale selection. Direct row updates are not an operator interface.
+
+The managed Kubernetes Target `disable` operation has no request body and is terminal. It applies only to a tenant-owned
+Kubernetes Target and requires Worker management authority. A successful first call changes `active -> disabled`, writes
+one `execution_target.kubernetes_disabled` Audit row in the same transaction, and returns the safe Target view. Repeating
+the operation after that commit is a no-write replay with `Idempotency-Replayed: true`; there is no reactivation path.
+
+Target disable is deliberately serialized with the complete managed Kubernetes reconciliation cycle through the same
+`synara:kubernetes-execution-reconciler` advisory lock. This fences a Reconciler that selected the Target before the
+HTTP transaction and is already approaching a Kubernetes API write; a Target row lock alone is insufficient for that
+race. A busy cycle returns `kubernetes_reconciler_busy` and the caller may retry with bounded backoff. Target Group member
+creation also locks the Target before insert, so it cannot add a new active Member behind a concurrent terminal disable.
+
+While holding the cycle lock and Target row lock, disable fails closed unless all of these conditions hold:
+
+- every Target Group Member for the Target is already `disabled`;
+- no unarchived `active | suspended` fixed-Target Session remains;
+- no `queued | recovering | leased | running | waiting-for-approval | suspended` Execution remains;
+- every Worker Pool is `disabled`;
+- every physical Workspace materialization is `cleaned`, and no cleanup command is `pending | leased | running`;
+- every Worker incarnation is authoritatively `terminated` with `terminatedAt`, and no Worker Lease remains;
+- the current health row is unexpired `healthy/available`, was emitted by the managed Kubernetes publisher with
+  `exact-active-v1`, and proves both allocated and acknowledged capacity are zero.
+
+The operation disables Control Plane placement, Worker registration, and all future Reconciler maintenance. It does not
+delete the historical Target row, encrypted configuration, Namespace, or another Kubernetes object. An operator may
+remove an exclusively Target-owned Namespace only after the terminal response, using the previously captured Namespace
+UID as a Kubernetes delete precondition and proving the exact UID absent. Shared Namespaces must be cleaned per exact
+owned object instead. Database-row deletion and direct status updates are never lifecycle APIs.
+
 Read requires tenant Worker read authority. Mutation and operator health observation require tenant Worker management
 authority and the path tenant must be the caller's active tenant.
 
@@ -250,10 +296,11 @@ immutable source placement, successor lineage, obsolete source Pod removal, and 
 clusters additionally run the production Kubernetes identity verifier against their real TokenReview and Pod GET APIs;
 the Target-audience projected token succeeds and an unbound Control Plane Kubernetes credential is rejected.
 
-This local lane does not prove independent Region or availability-zone failure domains, production metadata-store
-failover, the production Worker registration handler and persistence boundary, cloud Workload Identity, backing-store
-replication, successor consumption of the predecessor Recovery Bundle, or measured production RPO. `replicatedThroughAt`
-is an authorization assertion from the configured readiness publisher; without external replication evidence it must not
-be reported as measured RPO. Production cross-Region acceptance remains incomplete until the declared Artifact,
-Checkpoint, and Memory required set is replicated by an authenticated publisher, consumed by the successor in the
-destination failure domain, and validated with authoritative RTO/RPO evidence.
+This local lane does not prove independent physical failure domains, production metadata-store failover, the production
+Worker registration handler and persistence boundary, backing-store replication, successor consumption of the
+predecessor Recovery Bundle, or measured production RPO. `replicatedThroughAt` is an authorization assertion from the
+configured readiness publisher; without external replication evidence it must not be reported as measured RPO. A
+self-hosted operator may claim geographic DR only after the declared Artifact, Checkpoint, and Memory required set is
+replicated by an authenticated publisher, consumed by the successor in the destination failure domain, and validated
+with authoritative RTO/RPO evidence. Geographic DR is optional and does not block the supported single-site/logical
+multi-cluster product boundary.

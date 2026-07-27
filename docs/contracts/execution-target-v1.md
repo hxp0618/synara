@@ -49,6 +49,7 @@ Sessions persist a non-null `execution_target_id`. Executions copy both `executi
 GET  /v1/tenants/{tenantId}/execution-targets
 POST /v1/tenants/{tenantId}/execution-targets
 GET  /v1/tenants/{tenantId}/execution-targets/{executionTargetId}
+POST /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/kubernetes/disable
 GET  /v1/tenants/{tenantId}/workers
 POST /v1/tenants/{tenantId}/workers/{workerId}/revoke
 GET  /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases
@@ -73,6 +74,15 @@ Worker Release mutations and operator revocation also require `worker.manage` an
 Credential Binding management requires `credentials.manage`. Responses expose release/Worker identifiers,
 versions, channels, status and safe reasons; they never expose encrypted Target configuration, registry auth,
 Worker/Lease tokens or Credential plaintext.
+
+The Kubernetes `disable` endpoint is a terminal, no-body lifecycle operation for tenant-owned managed Kubernetes
+Targets. It requires `worker.manage`, returns only the safe Target view, writes one bounded Audit on the first successful
+transition, and returns `Idempotency-Replayed: true` for an exact terminal retry. It shares the full Reconciler cycle
+lock, then requires every routing Member and Worker Pool disabled, no fixed active/suspended Session, no nonterminal
+Execution, no unclean Workspace/cleanup delivery, no live Worker/Lease, and a fresh managed `exact-active-v1` health
+observation proving zero occupancy. The endpoint stops future placement, registration, and reconciliation; it does not
+delete the historical Target row or Kubernetes Namespace. Full concurrency and physical-cleanup rules are in
+[`Global Target Routing and Disaster Recovery v1`](global-target-routing-dr-v1.md).
 
 ## Managed Worker Release Revision and Policy
 
@@ -152,9 +162,13 @@ auth map. Existing node image cache is a separate platform concern and is not er
 
 ## Worker binding and claim rules
 
-Worker registration and claim requests use `executionTargetId` and `targetKind`. A worker is permanently
-bound to that target for its registration lifetime. Claims match both fields; pool names such as
-`shared_pool` and `dedicated_pool` are not v1 domain concepts.
+Worker registration and claim requests use `executionTargetId` and `targetKind`. A worker is permanently bound to that
+target for its registration lifetime. Claims match both fields; pool names such as `shared_pool` and `dedicated_pool`
+are not v1 domain concepts. Reusable `general-pool` Workers instead obey the Pool's immutable
+`tenantIsolation=pinned|shared` policy. `pinned` is the default and atomically binds the physical/logical Worker to the
+first successfully claimed Tenant across Execution and Workspace-cleanup work; `shared` explicitly retains
+cross-Tenant reuse. The binding survives re-registration and cannot be cleared or reassigned. Full rules are in
+[`Worker Pool and Placement v1`](worker-pool-placement-v1.md#reusable-worker-tenant-isolation).
 
 Remote workers must advertise:
 
@@ -184,9 +198,13 @@ The encrypted SSH configuration requires `host`, `user`, `privateKey`, pinned Op
 Plain HTTP control-plane URLs are rejected unless `allowInsecureControlPlane` is explicitly true.
 
 Protected cgroup mode is enabled by the paired `cgroupV2ProviderUid` / `cgroupV2ProviderGid` and
-`cgroupV2AttestationKeyId` / `cgroupV2AttestationPrivateKeyPath` fields together with explicit `agentdVersion`,
+the required finite-limit fields `cgroupV2ProviderPidsMax`, `cgroupV2ProviderMemoryMaxBytes`,
+`cgroupV2ProviderCpuQuotaMicros`, and `cgroupV2ProviderCpuPeriodMicros`; it also requires
+`cgroupV2AttestationKeyId` / `cgroupV2AttestationPrivateKeyPath` together with explicit `agentdVersion`,
 `agentdBuildGitSha`, and `agentdImageDigest`. It requires `serviceUser=root`. `cgroupV2Root` may be omitted and is
-derived from the target-scoped systemd service; if supplied, it must equal that exact managed ControlGroup path.
+derived from the target-scoped systemd service; if supplied, it must equal that exact managed ControlGroup path. The
+managed unit uses `Delegate=yes` plus systemd 254+ `DelegateSubgroup=synara-agentd`; the service ControlGroup itself
+must remain process-free while its supervisor leaf contains the exact MainPID.
 
 Provisioning uploads `synara-agentd`, a root-readable EnvironmentFile, and a target-specific systemd
 unit through the verified SSH connection. It never places SSH keys or Worker registration tokens in
@@ -239,12 +257,27 @@ same target-scoped named volume but remain separate trees. Multiple Workers for 
 the cache and coordinate it with filesystem locks while retaining private Workspace repositories.
 
 Reconciliation is idempotent: stable pools produce no writes or Audit rows. Configuration changes use
-the digest to replace stale containers. Scale-down and replacement skip Workers with an unexpired
-Lease; those containers are removed on a later pass after the Lease clears. A running deferred container remains
-part of the desired capacity and is first matched to an unoccupied slot with the same Release Revision/Channel, so
-a Busy promoted Worker does not consume a canary slot or make a healthy Target appear offline. A fully running
-desired pool, including safely deferred Busy containers, marks the target active; partial or failed reconciliation
-marks it offline.
+the digest to replace stale containers. Migration `000086` gives replacement and scale-down a server-authored,
+durable reconciliation Drain before the Docker Engine deletion boundary. The Drain freezes the exact Worker
+incarnation and instance UID, changes the Worker to `draining`, and cannot be cleared by a Worker heartbeat.
+Execution and Workspace-cleanup Claim both reject that Worker with `worker_reconciliation_draining`; already-held
+leases may renew, complete, or release normally. The reconciler rechecks both lease classes under the Worker lock
+before deleting the container and fails closed if the lifecycle coordinator is unavailable.
+
+At most one nonterminal reconciliation Drain may exist per Docker Target. One reconcile cycle advances at most one
+stale logical Worker, and another old Worker is not selected until every desired replacement container has registered,
+reported a fresh compatible heartbeat, and is release-active. Scale-down drains overhanging indices before
+config-mismatched survivors; a stale promoted Worker never reserves a canary slot. A Busy Worker retains its exact
+container until all Execution and Workspace-cleanup leases clear. The persisted Drain survives a Control Plane restart;
+if deletion succeeded but the process stopped before database finalization, a later successful Engine list terminalizes
+the missing exact incarnation and continues from the same fence. A same-name replacement must register with a different
+instance UID before the old fence is completed. A fully running desired pool, including safely deferred Busy containers,
+marks the Target active; partial or failed reconciliation marks it offline.
+
+`GET /v1/tenants/{tenantId}/workers` exposes `reconciliationDrainIncarnation`,
+`reconciliationDrainInstanceUid`, `reconciliationDrainRequestedAt`, and `reconciliationDrainReason` so operators can
+distinguish a planned managed replacement from caller-requested draining or operator revocation. The current bounded
+reasons are `managed-docker-stale-spec` and `managed-docker-scale-down`.
 
 Without a Release Policy the pool remains unmanaged and uses the encrypted Target `image`. With a Policy, each slot
 uses the promoted or canary Manifest Digest. Docker canary requires `desiredWorkers >= 2`; percentage rounding must
@@ -285,12 +318,17 @@ POSIX file locking. Optional `requireNodeSpread=true` adds one Pod `topologySpre
 emit required `podAntiAffinity`, so once each eligible hostname already has one Pod, additional concurrency may
 still schedule on occupied nodes while keeping per-host skew within 1. The balancing guarantee applies only when
 the scheduler sees at least two eligible `kubernetes.io/hostname` domains after `nodeSelector`, `tolerations`,
-and cluster policy are applied; the default `requireNodeSpread=false` emits no spread constraint. The registration token is referenced from a Secret;
+and cluster policy are applied; the default `requireNodeSpread=false` emits no spread constraint. Every Worker Pod also
+uses a PriorityClass whose cluster-authoritative `preemptionPolicy` is `Never`; the default
+`synara-worker-nonpreempting-v1` class is shipped in the Kustomize base, and custom Pool classes are read and rejected
+before Pod apply unless they are also non-preempting. The registration token is referenced from a Secret;
 it is not embedded in Pod labels, Audit metadata, responses, or runner arguments.
 
 The in-cluster control-plane RBAC and Kustomize base live in `deploy/kubernetes`. The reconciler role is
 cluster-scoped only because managed targets may create dedicated Namespaces; operators that disable
-Namespace management may replace it with equivalent per-Namespace Roles.
+Namespace management may replace it with equivalent per-Namespace Roles, plus cluster-scoped read-only
+`get priorityclasses.scheduling.k8s.io`. External Target clusters must pre-create the default PriorityClass (or every
+custom class selected by their Pools); the Target credential never creates, patches, or deletes PriorityClasses.
 
 ## Release and acceptance boundary
 

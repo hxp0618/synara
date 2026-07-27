@@ -138,7 +138,7 @@ DesiredIdleUnits + claimed`，clamp Max）；创建循环 `kubernetes_reconciler
 
 - [x] worktree 创建（`fast-cloud-agents` @ `4e30436c`）
 - [x] agent-sandbox 概念对齐
-- [ ] 代码勘察（进行中；A 所需锚点已自查完成）
+- [x] 代码勘察（A-D 的模型、Reconciler、Placement、Claim、agentd、Generation fact 与配置锚点已核对）
 - [x] 增量 A（SLO 告警门禁，`prometheus-rules.yaml`）
 - [x] 增量 B（已验收：codex gpt-5.6-sol 实现，18 文件 +452/-69；D1-D6 逐条核对——保证槽先于冷
       Pod 消费预算、双 pass 驱逐豁免、`000086` 迁移 + 双栈 scope 断言、
@@ -146,7 +146,9 @@ DesiredIdleUnits + claimed`，clamp Max）；创建循环 `kubernetes_reconciler
       独立验证：`go build` + 六包 `go test` 全绿。报告 `.codex-report-increment-b.md`。
       PostgreSQL 集成验证已补：disposable PostgreSQL 17 上
       `TestPostgresWorkerPoolWarmCapacityRejectsScopeAndMutation` RUN+PASS（0.63s）。
-      live OrbStack lane 留给合并前验收。）
+      合并后 Migration 已改号为 `000087`；当前源码又在真实 OrbStack kubelet + PostgreSQL 上证明两 Running warm
+      Pod、保证槽 UID 连续、best-effort exact-UID 驱逐、后续冷 Pod 创建和 version 3 deficit authority，证据见
+      [`final1`](../reports/stage-4-guaranteed-warm-orbstack-pg-20260727-final1.md)。）
 - [x] 增量 C（已验收：6 文件 +262/-55 + 新增 `provider_host_prestart.go`/测试。C1-C6 逐条核对
       ——warm-pool + 无受保护 root 门控、FD-3 采纳时才写入（`deliverCredential`/
       `closeWithoutWrite` 拆除路径零泄漏）、SHA-1 合成 prestart 身份、单槽生命周期 + 3 次
@@ -167,7 +169,17 @@ DesiredIdleUnits + claimed`，clamp Max）；创建循环 `kubernetes_reconciler
       disposable PostgreSQL 17 集成测试改号后复验 PASS。本分支迁移链 85→87 留洞合法
       （`readMigrations` 只查重复不查连续），合并时主分支 `000086` 自然补位。
       `.codex-report-increment-b.md` 保留历史原文（报告忠实记录当时创建的是 000086）。
-- [ ] 合并前：live OrbStack Kubernetes 验收 lane + 提交/PR（待操作人指示）。
+- [x] live OrbStack Kubernetes 验收 lane（合并后的 schema 87 当前源码已完成，见上述 `final1`）。
+- [x] 后续 Migration `000088` reusable Worker Tenant isolation：Pool 冻结默认 `pinned` / 显式 `shared`；
+      pinned 首个 Execution/Workspace-cleanup Claim 原子绑定 Tenant 并跨 Heartbeat/重注册保留，shared 才允许
+      fairqueue 跨 Tenant 轮转。SQLite trigger/index、PostgreSQL 双连接/负向门禁和真实 OrbStack 两物理 Pod
+      容量证据见
+      [`final1`](../reports/stage-4-worker-pool-tenant-isolation-orbstack-pg-20260727-final1.md)。
+- [x] 后续 Kubernetes non-preempting Priority：默认预置 `synara-worker-nonpreempting-v1`，自定义
+      PriorityClass 必须由 Target API 证明实际 `preemptionPolicy=Never`；缺类、读权限不足和可抢占类在 Pod apply
+      前 fail closed，cold/warm Pod 共用同一策略与 spec-revision 轮换。真实 OrbStack API/kubelet 证据见
+      [`final1`](../reports/stage-4-kubernetes-nonpreempting-priority-orbstack-20260727-final1.md)。
+- [ ] 提交/PR（待操作人指示；当前工作树未 stage、commit 或 push）。
       合并风险监测（e87cc840 时点）：主分支 14 个新提交中唯一触碰本分支修改文件的是
       `f7dafe10`（reconciler foundation map 加锁，结构体字段区）——与本分支的 warm 循环改动
       不重叠，预计干净合并；agentd 包的其余主分支改动均在本分支未动的文件。

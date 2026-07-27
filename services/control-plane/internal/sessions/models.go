@@ -90,6 +90,10 @@ type CreateTurnInput struct {
 	RuntimeMode        string                       `json:"runtimeMode"`
 	InteractionMode    string                       `json:"interactionMode"`
 	SourceProposedPlan *SourceProposedPlanReference `json:"sourceProposedPlan,omitempty"`
+	AutomationID       *uuid.UUID                   `json:"automationId,omitempty"`
+	QueueClass         string                       `json:"queueClass,omitempty"`
+	QueuePriority      int                          `json:"queuePriority,omitempty"`
+	QuotaUnits         int                          `json:"quotaUnits,omitempty"`
 }
 
 type SourceProposedPlanReference struct {

@@ -240,6 +240,13 @@ func servePinnedSSHTest(
 			_, _ = channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 			_ = channel.Close()
 			result <- nil
+			// Returning here would run the deferred Close and tear the
+			// transport down while the client is still disconnecting, which
+			// the client reports as "send disconnect: Broken pipe" and exits
+			// 255 for. Wait for the client to close first; the deadline keeps
+			// a client that never disconnects from parking this goroutine.
+			_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+			_ = serverConnection.Wait()
 			return
 		}
 	}

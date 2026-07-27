@@ -80,6 +80,7 @@ type WorkspaceMaterializer struct {
 	cacheRoot            string
 	targetID             uuid.UUID
 	resolver             gitpolicy.Resolver
+	addressPolicy        gitpolicy.AddressPolicy
 	runGit               func(context.Context, string, []string, ...string) (string, error)
 	executable           func() (string, error)
 	cleanupDirectorySync func(*os.Root, string) error
@@ -182,7 +183,7 @@ func (m *WorkspaceMaterializer) Materialize(
 		releaseOnFailure = false
 		return baseMaterialization, nil
 	}
-	remote, err := gitpolicy.ResolveRemote(ctx, m.resolver, *workload.RepositoryURL)
+	remote, err := gitpolicy.ResolveRemoteWithAddressPolicy(ctx, m.resolver, *workload.RepositoryURL, m.addressPolicy)
 	if err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
 			"workspace_invalid", "Repository URL is not allowed for a remote Workspace.", true, false,
@@ -258,9 +259,15 @@ func (m *WorkspaceMaterializer) Materialize(
 		}
 		return replaceWorkspaceGeneration(layout.Root, staging)
 	}); err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
+		// Attach the git error. Without it the operator-facing message is the only
+		// evidence, which makes an environment-specific failure — an unsupported
+		// git option, a missing binary — impossible to tell apart from a genuinely
+		// corrupt cache.
+		failure := workspaceFailure(
 			"workspace_invalid", "The Git Workspace could not be prepared from its validated cache.", true, true,
 		)
+		failure.cause = err
+		return WorkspaceMaterialization{}, failure
 	}
 	baseMaterialization.cacheFetchOutcome = cachePreparation.outcome
 	baseMaterialization.backgroundCacheRefresh = cachePreparation.backgroundRefresh
@@ -640,28 +647,6 @@ func redactGitCredentialError(err error, token string) error {
 	return errors.New(message)
 }
 
-func (m *WorkspaceMaterializer) workspaceDirectory(
-	execution executions.Execution,
-	workload executions.Workload,
-) (string, bool, error) {
-	root, err := filepath.Abs(strings.TrimSpace(m.root))
-	if err != nil || strings.TrimSpace(m.root) == "" {
-		return "", false, errors.New("Workspace root is invalid")
-	}
-	segments := []string{
-		workload.TenantID.String(), workload.ProjectID.String(), workload.SessionID.String(), execution.ID.String(),
-	}
-	managed := workload.RemoteWorkspaceID != nil
-	if managed {
-		segments[len(segments)-1] = workload.RemoteWorkspaceID.String()
-	}
-	directory := filepath.Join(append([]string{root}, segments...)...)
-	if err := ensureContainedDirectory(root, directory); err != nil {
-		return "", false, err
-	}
-	return directory, managed, nil
-}
-
 func (m *WorkspaceMaterializer) runGitCommand(ctx context.Context, directory string, environment []string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, "git", arguments...)
 	command.Dir = directory
@@ -794,27 +779,9 @@ func ensureRealDirectory(directory string) error {
 	return nil
 }
 
-func directoryEmpty(directory string) (bool, error) {
-	entries, err := os.ReadDir(directory)
-	return len(entries) == 0, err
-}
-
 func directoryContainsEntries(directory string) (bool, error) {
 	entries, err := os.ReadDir(directory)
 	return len(entries) > 0, err
-}
-
-func clearDirectory(directory string) error {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(directory, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func sessionBranch(sessionID string) string {

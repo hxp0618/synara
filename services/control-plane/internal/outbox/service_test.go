@@ -130,6 +130,41 @@ func TestStatsReportPendingRetryDeadLetterAndAge(t *testing.T) {
 	}
 }
 
+func TestOutboxPressureScalesAndThrottlesOnlyNewExecutionAdmission(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	db := testDB(t)
+	service, err := NewService(db, Config{
+		InstanceID: "pressure", BatchSize: 2, MaxBatchSize: 8, MaxConcurrency: 4,
+		ScaleUpDepth: 2, TargetDelay: time.Minute, ThrottleDepth: 5,
+		ClaimTTL: 30 * time.Second, MaxAttempts: 3,
+		BaseBackoff: time.Second, MaxBackoff: time.Minute,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		seedMessage(t, db, now, "artifact.ready", uuid.NewString())
+	}
+	decision, err := service.RefreshPressure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Status != "throttled" || decision.Concurrency != 3 || decision.BatchSize != 6 {
+		t.Fatalf("Outbox pressure decision = %#v", decision)
+	}
+	err = Enqueue(context.Background(), db, EnqueueInput{Topic: "execution.queued", MessageKey: "new-work"})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "outbox_backpressure_throttled" {
+		t.Fatalf("new Execution admission error = %v", err)
+	}
+	if err := Enqueue(context.Background(), db, EnqueueInput{
+		Topic: "execution.cancelled", MessageKey: "terminal-drain",
+	}); err != nil {
+		t.Fatalf("terminal event was throttled: %v", err)
+	}
+}
+
 func TestTenantOperatorsCanInspectAndAuditReplayWithoutPayloadExposure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	db := adminTestDB(t)
@@ -221,7 +256,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&persistence.OutboxMessage{}); err != nil {
+	if err := db.AutoMigrate(&persistence.OutboxMessage{}, &persistence.OutboxPressureState{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -235,7 +270,7 @@ func adminTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&persistence.User{}, &persistence.Tenant{}, &persistence.TenantMembership{},
-		&persistence.AuditLog{}, &persistence.OutboxMessage{},
+		&persistence.AuditLog{}, &persistence.OutboxMessage{}, &persistence.OutboxPressureState{},
 	); err != nil {
 		t.Fatal(err)
 	}

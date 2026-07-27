@@ -120,7 +120,10 @@ func (s *Service) FailoverExecution(
 			return problem.New(409, "target_failover_source_not_fenced", "Source Execution still has a Worker identity or Lease.")
 		}
 		if source.Status == "suspended" {
-			if err := s.requireExecutionQuotaAvailableAfterAuthorityLock(ctx, tx, tenantID); err != nil {
+			if err := s.requireExecutionQuotaAdmissionAfterAuthorityLock(ctx, tx, tenantID, ExecutionQuotaAdmission{
+				ProjectID: session.ProjectID, SessionID: session.ID,
+				AutomationID: source.AutomationID, QuotaUnits: source.QuotaUnits,
+			}); err != nil {
 				return err
 			}
 		}
@@ -265,6 +268,8 @@ func (s *Service) FailoverExecution(
 		provider := session.Provider
 		destination := persistence.AgentExecution{
 			ID: uuid.New(), TenantID: tenantID, SessionID: source.SessionID, TurnID: source.TurnID,
+			AutomationID: source.AutomationID, QueueClass: source.QueueClass,
+			QueuePriority: source.QueuePriority, QuotaUnits: source.QuotaUnits,
 			Attempt: source.Attempt + 1, Status: "queued", ExecutionTargetID: selection.Target.ID,
 			TargetKind: selection.Target.Kind, Provider: &provider,
 			ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,

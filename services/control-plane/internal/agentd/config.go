@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
@@ -44,11 +45,13 @@ type Config struct {
 	RunnerProtocol               RunnerProtocol
 	CgroupV2Root                 string
 	CgroupV2ProviderIdentity     *ProtectedCgroupIdentity
+	CgroupV2ProviderLimits       *ProtectedCgroupResourceLimits
 	CgroupV2Attestation          *ProtectedCgroupAttestationConfig
 	ProcessContainmentCapability map[string]any
 	WorkspaceRoot                string
 	GitCacheRoot                 string
 	WorkspaceFetchWindow         time.Duration
+	PrivateNetworkCIDRs          []string
 	PollInterval                 time.Duration
 	HeartbeatInterval            time.Duration
 	LeaseRenewInterval           time.Duration
@@ -101,6 +104,16 @@ func LoadConfig() (Config, error) {
 		cgroupV2Root,
 		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID"),
 		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cgroupV2ProviderLimits, err := parseProtectedCgroupProviderLimits(
+		cgroupV2ProviderIdentity,
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX"),
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES"),
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS"),
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS"),
 	)
 	if err != nil {
 		return Config{}, err
@@ -160,6 +173,10 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	privateNetworkCIDRs, err := parsePrivateNetworkCIDRsJSON(os.Getenv("SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON"))
+	if err != nil {
+		return Config{}, err
+	}
 	instanceUID := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_INSTANCE_UID"))
 	if instanceUID == "" {
 		if targetKind == platform.TargetKubernetes {
@@ -201,8 +218,10 @@ func LoadConfig() (Config, error) {
 		RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
 		CgroupV2Root:             cgroupV2Root,
 		CgroupV2ProviderIdentity: cgroupV2ProviderIdentity,
+		CgroupV2ProviderLimits:   cgroupV2ProviderLimits,
 		CgroupV2Attestation:      cgroupV2Attestation,
 		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot,
+		PrivateNetworkCIDRs: privateNetworkCIDRs,
 	}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
 		assignedExecutionID, parseErr := uuid.Parse(raw)
@@ -255,6 +274,27 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("agentd image digest is invalid")
 	}
 	return cfg, nil
+}
+
+func parsePrivateNetworkCIDRsJSON(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil || values == nil {
+		return nil, errors.New("SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON must be a JSON string array")
+	}
+	for index := range values {
+		values[index] = strings.TrimSpace(values[index])
+		if values[index] == "" {
+			return nil, errors.New("SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON contains an empty CIDR")
+		}
+	}
+	if _, err := gitpolicy.ParsePrivateNetworkCIDRs(values); err != nil {
+		return nil, errors.New("SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON contains an unsafe CIDR")
+	}
+	return values, nil
 }
 
 func effectiveWorkerMode(cfg Config) string {
@@ -341,6 +381,55 @@ func parseProtectedCgroupProviderIdentity(
 		return nil, err
 	}
 	return &ProtectedCgroupIdentity{UID: uid, GID: gid}, nil
+}
+
+func parseProtectedCgroupProviderLimits(
+	providerIdentity *ProtectedCgroupIdentity,
+	pidsMaxValue, memoryMaxValue, cpuQuotaValue, cpuPeriodValue string,
+) (*ProtectedCgroupResourceLimits, error) {
+	values := []struct {
+		name  string
+		value string
+	}{
+		{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX", pidsMaxValue},
+		{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES", memoryMaxValue},
+		{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS", cpuQuotaValue},
+		{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS", cpuPeriodValue},
+	}
+	configured := 0
+	for index := range values {
+		values[index].value = strings.TrimSpace(values[index].value)
+		if values[index].value != "" {
+			configured++
+		}
+	}
+	if providerIdentity == nil {
+		if configured != 0 {
+			return nil, errors.New("protected cgroup Provider resource limits require protected cgroup Provider identity configuration")
+		}
+		return nil, nil
+	}
+	if configured != len(values) {
+		return nil, errors.New(
+			"configure SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX, SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES, SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS, and SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS together",
+		)
+	}
+	parsed := make([]uint64, len(values))
+	for index, item := range values {
+		value, err := strconv.ParseUint(item.value, 10, 64)
+		if err != nil || value == 0 {
+			return nil, fmt.Errorf("%s must be a positive uint64", item.name)
+		}
+		parsed[index] = value
+	}
+	limits := ProtectedCgroupResourceLimits{
+		PidsMax: parsed[0], MemoryMaxBytes: parsed[1],
+		CPUQuotaMicros: parsed[2], CPUPeriodMicros: parsed[3],
+	}
+	if err := validateProtectedCgroupResourceLimits(limits); err != nil {
+		return nil, err
+	}
+	return &limits, nil
 }
 
 func parseProtectedCgroupAttestationConfig(

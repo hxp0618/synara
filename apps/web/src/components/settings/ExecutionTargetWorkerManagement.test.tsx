@@ -73,6 +73,21 @@ describe("ExecutionTargetWorkerManagement", () => {
     expect(renderWorkers([worker()])).toContain('maxLength="2000"');
   });
 
+  it("shows the server-authored managed reconciliation Drain", () => {
+    const markup = renderWorkers([
+      worker({
+        status: "draining",
+        reconciliationDrainIncarnation: 7,
+        reconciliationDrainInstanceUid: "pod-uid-1",
+        reconciliationDrainRequestedAt: "2026-07-22T00:02:00Z",
+        reconciliationDrainReason: "managed-docker-stale-spec",
+      }),
+    ]);
+
+    expect(markup).toContain("Reconciliation Drain");
+    expect(markup).toContain("managed-docker-stale-spec · incarnation 7");
+  });
+
   it("does not offer duplicate revocation for an already revoked Worker", () => {
     const markup = renderWorkers([
       worker({

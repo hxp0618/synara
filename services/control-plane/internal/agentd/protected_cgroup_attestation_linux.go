@@ -28,7 +28,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/containmentattestation"
 )
 
-const protectedCgroupProbeDigestInput = "synara.agentd.protected-cgroup-probe.v1\ncredential-drop\nUseCgroupFD\ncgroup.kill\nsetsid-descendant\nempty-helper-and-child-environment"
+const protectedCgroupProbeDigestInput = "synara.agentd.protected-cgroup-probe.v2\ncredential-drop\nUseCgroupFD\ncgroup.kill\nsetsid-descendant\nempty-helper-and-child-environment\nDelegateSubgroup\ncpu-memory-pids-subtree-control\nfinite-limit-readback"
 
 var (
 	protectedCgroupProbeHook    = buildProtectedCgroupPreflightReport
@@ -98,6 +98,10 @@ func buildProtectedCgroupPreflightReport(ctx context.Context, cfg Config) (*Prot
 	if err != nil {
 		return nil, err
 	}
+	if !liveProbe.ResourceLimitsApplied || liveProbe.ProviderLimits == nil || cfg.CgroupV2ProviderLimits == nil ||
+		*liveProbe.ProviderLimits != *cfg.CgroupV2ProviderLimits {
+		return nil, errors.New("protected cgroup preflight did not prove the configured Provider resource limits")
+	}
 	report := &ProtectedCgroupPreflightReport{
 		Enabled:                true,
 		Mode:                   protectedCgroupContainmentMode,
@@ -110,6 +114,8 @@ func buildProtectedCgroupPreflightReport(ctx context.Context, cfg Config) (*Prot
 		SetsidDescendantKilled: liveProbe.SetsidDescendantKilled,
 		ProviderUID:            liveProbe.ProviderUID,
 		ProviderGID:            liveProbe.ProviderGID,
+		ResourceLimitsApplied:  liveProbe.ResourceLimitsApplied,
+		ProviderLimits:         liveProbe.ProviderLimits,
 	}
 	if cfg.CgroupV2Attestation == nil {
 		return report, nil
@@ -184,6 +190,7 @@ func runProtectedCgroupLiveProbe(ctx context.Context, cfg Config) (*ProtectedCgr
 	tree, err := newProcessTree(command, processTreeOptions{
 		CgroupV2Root:              cfg.CgroupV2Root,
 		ProtectedProviderIdentity: cfg.CgroupV2ProviderIdentity,
+		ProtectedProviderLimits:   cfg.CgroupV2ProviderLimits,
 		ContainmentFence:          fence,
 		SupervisorInstance:        uuid.New(),
 		RuntimeInstance:           uuid.New(),
@@ -255,6 +262,11 @@ func runProtectedCgroupLiveProbe(ctx context.Context, cfg Config) (*ProtectedCgr
 		SetsidDescendantKilled: true,
 		ProviderUID:            identity.UID,
 		ProviderGID:            identity.GID,
+		ResourceLimitsApplied:  true,
+		ProviderLimits: func() *ProtectedCgroupResourceLimits {
+			limits := *cfg.CgroupV2ProviderLimits
+			return &limits
+		}(),
 	}, nil
 }
 

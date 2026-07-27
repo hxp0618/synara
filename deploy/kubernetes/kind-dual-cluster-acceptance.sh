@@ -31,6 +31,9 @@ role_binding="synara-dr-$name_suffix"
 namespace_cluster_role="synara-dr-namespace-$name_suffix"
 namespace_cluster_role_binding="synara-dr-namespace-$name_suffix"
 worker_image="synara-worker:dual-cluster-$name_suffix"
+worker_priority_class='synara-worker-nonpreempting-v1'
+postgres_image="${SYNARA_DUAL_CLUSTER_POSTGRES_IMAGE:-postgres:17.10-alpine}"
+postgres_container="synara-dr-postgres-$name_suffix"
 
 temp_dir=''
 secondary_kubeconfig=''
@@ -56,6 +59,8 @@ secondary_cluster_role_uid=''
 secondary_role_binding_uid=''
 secondary_namespace_cluster_role_uid=''
 secondary_namespace_binding_uid=''
+primary_priority_class_uid=''
+secondary_priority_class_uid=''
 primary_api_server=''
 primary_ca=''
 primary_token=''
@@ -87,6 +92,10 @@ worker_runtime_image_ids=''
 worker_image_json=''
 worker_image_owner=''
 worker_image_revision=''
+postgres_container_id=''
+postgres_port=''
+postgres_password=''
+postgres_database_url=''
 cleanup_status='not-run'
 cleanup_failed=0
 phase='preflight'
@@ -165,6 +174,9 @@ resource_raw_uri() {
     clusterrolebinding.rbac.authorization.k8s.io)
       printf '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/%s' "$name"
       ;;
+    priorityclass.scheduling.k8s.io)
+      printf '/apis/scheduling.k8s.io/v1/priorityclasses/%s' "$name"
+      ;;
     rolebinding.rbac.authorization.k8s.io)
       [[ -n "$namespace" ]] || return 2
       printf '/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings/%s' "$namespace" "$name"
@@ -223,7 +235,7 @@ delete_owned_resource() {
 create_auth_resources() {
   local target="$1"
   local target_namespace namespace_uid target_namespace_uid service_account_uid
-  local cluster_role_uid role_binding_uid namespace_cluster_role_uid namespace_binding_uid
+  local cluster_role_uid role_binding_uid namespace_cluster_role_uid namespace_binding_uid priority_class_uid
   local created_object
   if [[ "$target" == primary ]]; then
     target_namespace="$primary_target_namespace"
@@ -371,6 +383,10 @@ rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    resourceNames: ["$worker_priority_class"]
+    verbs: ["get"]
 EOF
 )"
   namespace_cluster_role_uid="$(jq -er '.metadata.uid' <<<"$created_object")"
@@ -404,6 +420,39 @@ EOF
     primary_namespace_binding_uid="$namespace_binding_uid"
   else
     secondary_namespace_binding_uid="$namespace_binding_uid"
+  fi
+}
+
+ensure_worker_priority_class() {
+  local target="$1" existing created uid
+  if existing="$(kube "$target" get priorityclass.scheduling.k8s.io "$worker_priority_class" -o json 2>/dev/null)"; then
+    if ! jq -e '
+      .value == 0 and .globalDefault == false and .preemptionPolicy == "Never"
+    ' >/dev/null <<<"$existing"; then
+      fail "$worker_priority_class exists in $target but is not the required non-preempting policy"
+    fi
+    return 0
+  fi
+  created="$(kube "$target" create -f - -o json <<EOF
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: $worker_priority_class
+  labels:
+    app.kubernetes.io/name: synara-dual-cluster-acceptance
+    app.kubernetes.io/part-of: synara
+    synara.io/acceptance-run-id: $run_id
+value: 0
+globalDefault: false
+preemptionPolicy: Never
+description: Run-owned non-preempting Synara Worker acceptance class.
+EOF
+)"
+  uid="$(jq -er '.metadata.uid' <<<"$created")"
+  if [[ "$target" == primary ]]; then
+    primary_priority_class_uid="$uid"
+  else
+    secondary_priority_class_uid="$uid"
   fi
 }
 
@@ -465,6 +514,7 @@ cleanup_context_resources() {
     role_binding_uid="$primary_role_binding_uid"
     namespace_cluster_role_uid="$primary_namespace_cluster_role_uid"
     namespace_binding_uid="$primary_namespace_binding_uid"
+    priority_class_uid="$primary_priority_class_uid"
   else
     target_namespace="$secondary_target_namespace"
     namespace_uid="$secondary_namespace_uid"
@@ -474,7 +524,10 @@ cleanup_context_resources() {
     role_binding_uid="$secondary_role_binding_uid"
     namespace_cluster_role_uid="$secondary_namespace_cluster_role_uid"
     namespace_binding_uid="$secondary_namespace_binding_uid"
+    priority_class_uid="$secondary_priority_class_uid"
   fi
+  delete_owned_resource "$target" priorityclass.scheduling.k8s.io \
+    "$worker_priority_class" "$priority_class_uid" || cleanup_failed=1
   delete_owned_resource "$target" rolebinding.rbac.authorization.k8s.io \
     "$role_binding" "$role_binding_uid" "$target_namespace" || cleanup_failed=1
   delete_owned_resource "$target" clusterrolebinding.rbac.authorization.k8s.io \
@@ -552,13 +605,33 @@ delete_owned_worker_image_tag() {
   docker image rm "$worker_image" >/dev/null
 }
 
+delete_owned_postgres_container() {
+  local current_id current_owner
+  [[ -n "$postgres_container_id" ]] || return 0
+  if ! current_id="$(docker inspect --format '{{.Id}}' "$postgres_container" 2>/dev/null)"; then
+    return 0
+  fi
+  current_owner="$(docker inspect --format '{{ index .Config.Labels "synara.io/acceptance-run-id" }}' "$postgres_container" 2>/dev/null)" || return 1
+  if [[ "$current_id" != "$postgres_container_id" || "$current_owner" != "$run_id" ]]; then
+    printf 'Refusing PostgreSQL cleanup: container identity or run ownership changed for %s\n' \
+      "$postgres_container" >&2
+    return 1
+  fi
+  docker rm -f "$postgres_container_id" >/dev/null
+}
+
 finalize_detail() {
   local detail_content
   local allowed_assertion_keys='[
+    "boundedChaosCyclesCompleted",
+    "concurrentControlPlaneSweepSingleCommit",
     "exactReadinessAccepted",
     "missingReadinessFailedClosed",
+    "multiClusterPressureVerified",
     "obsoletePrimaryPodAbsent",
     "podBoundWorkloadIdentityVerified",
+    "postgresSharedAuthorityVerified",
+    "reconcilerHandoffVerified",
     "recoveryBundleIntegrityVerified",
     "singleSuccessor",
     "sourcePlacementImmutable",
@@ -585,13 +658,18 @@ finalize_detail() {
     if jq -e --argjson allowed "$allowed_assertion_keys" '
       (.assertions | type) == "object" and
       ((.assertions | keys | sort) == ($allowed | sort)) and
-      all(.assertions[]; type == "boolean")
+      all(.assertions[]; type == "boolean" and . == true)
     ' "$detail_file" >/dev/null; then
       integration_assertions="$(jq -c '{
+        boundedChaosCyclesCompleted: .assertions.boundedChaosCyclesCompleted,
+        concurrentControlPlaneSweepSingleCommit: .assertions.concurrentControlPlaneSweepSingleCommit,
         exactReadinessAccepted: .assertions.exactReadinessAccepted,
         missingReadinessFailedClosed: .assertions.missingReadinessFailedClosed,
+        multiClusterPressureVerified: .assertions.multiClusterPressureVerified,
         obsoletePrimaryPodAbsent: .assertions.obsoletePrimaryPodAbsent,
         podBoundWorkloadIdentityVerified: .assertions.podBoundWorkloadIdentityVerified,
+        postgresSharedAuthorityVerified: .assertions.postgresSharedAuthorityVerified,
+        reconcilerHandoffVerified: .assertions.reconcilerHandoffVerified,
         recoveryBundleIntegrityVerified: .assertions.recoveryBundleIntegrityVerified,
         singleSuccessor: .assertions.singleSuccessor,
         sourcePlacementImmutable: .assertions.sourcePlacementImmutable,
@@ -671,6 +749,7 @@ cleanup_all() {
   if [[ "$resources_created_secondary" == 1 ]]; then cleanup_context_resources secondary; fi
   if [[ "$resources_created_primary" == 1 ]]; then cleanup_context_resources primary; fi
   delete_owned_kind_cluster || cleanup_failed=1
+  delete_owned_postgres_container || cleanup_failed=1
   delete_owned_worker_image_tag || cleanup_failed=1
   final_current_context="$(kubectl config current-context 2>/dev/null || true)"
   if [[ "$final_current_context" == "$initial_current_context" ]]; then
@@ -680,6 +759,7 @@ cleanup_all() {
   fi
   if [[ "$cleanup_failed" == 1 ]]; then cleanup_status='failed'; fi
   primary_token=''; secondary_token=''; primary_ca=''; secondary_ca=''
+  postgres_password=''; postgres_database_url=''
 }
 
 on_exit() {
@@ -747,6 +827,9 @@ fi
 if docker image inspect "$worker_image" >/dev/null 2>&1; then
   fail "Worker image tag already exists; refusing to reuse it: $worker_image"
 fi
+if docker container inspect "$postgres_container" >/dev/null 2>&1; then
+  fail "PostgreSQL container already exists; refusing to reuse it: $postgres_container"
+fi
 
 source_sha="$(git -C "$repo_root" rev-parse HEAD)"
 if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ && ! "$source_sha" =~ ^[0-9a-f]{64}$ ]]; then
@@ -803,8 +886,10 @@ KUBECONFIG="$secondary_kubeconfig" "$kind_bin" load docker-image \
 
 phase='create-primary-auth'
 create_auth_resources primary
+ensure_worker_priority_class primary
 phase='create-secondary-auth'
 create_auth_resources secondary
+ensure_worker_priority_class secondary
 phase='collect-cluster-connections'
 extract_connection primary
 extract_connection secondary
@@ -812,6 +897,40 @@ extract_connection secondary
   fail 'primary and secondary contexts resolve to the same Kubernetes API server'
 collect_cluster_metadata primary
 collect_cluster_metadata secondary
+
+phase='start-disposable-postgresql-authority'
+postgres_password="$(openssl rand -hex 24)"
+postgres_container_id="$(docker run -d \
+  --name "$postgres_container" \
+  --label "synara.io/acceptance-run-id=$run_id" \
+  -e POSTGRES_USER=synara \
+  -e POSTGRES_PASSWORD="$postgres_password" \
+  -e POSTGRES_DB=synara \
+  -p 127.0.0.1::5432 \
+  "$postgres_image")"
+if [[ ! "$postgres_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+  fail 'disposable PostgreSQL container did not return an immutable container ID'
+fi
+postgres_owner="$(docker inspect --format '{{ index .Config.Labels "synara.io/acceptance-run-id" }}' "$postgres_container_id")"
+if [[ "$postgres_owner" != "$run_id" ]]; then
+  fail 'disposable PostgreSQL container did not retain exact run ownership'
+fi
+postgres_port="$(docker port "$postgres_container_id" 5432/tcp | tail -n 1 | awk -F: '{print $NF}')"
+if [[ ! "$postgres_port" =~ ^[0-9]{1,5}$ || "$postgres_port" -lt 1 || "$postgres_port" -gt 65535 ]]; then
+  fail 'disposable PostgreSQL container did not publish a valid loopback port'
+fi
+postgres_ready=0
+for ((postgres_attempt = 1; postgres_attempt <= 60; postgres_attempt += 1)); do
+  if docker exec "$postgres_container_id" pg_isready -U synara -d synara >/dev/null 2>&1; then
+    postgres_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$postgres_ready" != 1 ]]; then
+  fail 'disposable PostgreSQL authority did not become ready within 60 seconds'
+fi
+postgres_database_url="postgres://synara:${postgres_password}@127.0.0.1:${postgres_port}/synara?sslmode=disable"
 
 phase='run-go-integration-test'
 if (cd "$control_plane_dir" && env \
@@ -831,6 +950,7 @@ if (cd "$control_plane_dir" && env \
   SYNARA_DUAL_CLUSTER_INTEGRATION_SECONDARY_WORKER_API_HOST_ALIAS="$secondary_host_alias" \
   SYNARA_DUAL_CLUSTER_INTEGRATION_EVIDENCE_DETAIL_FILE="$detail_file" \
   SYNARA_DUAL_CLUSTER_INTEGRATION_RUN_ID="$run_id" \
+  SYNARA_DUAL_CLUSTER_INTEGRATION_DATABASE_URL="$postgres_database_url" \
   SYNARA_DUAL_CLUSTER_INTEGRATION_WORKER_IMAGE="$worker_image" \
   SYNARA_DUAL_CLUSTER_INTEGRATION_WORKER_IMAGE_ID="$worker_runtime_image_ids" \
   go test -v ./internal/sessions -run "^${test_name}$" -count=1); then

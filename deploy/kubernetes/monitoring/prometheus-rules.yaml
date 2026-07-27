@@ -143,6 +143,40 @@ spec:
             description: Expired SSE leases remain and should be removed by reconnect or retention cleanup.
     - name: synara-control-plane.fast-provision-slo
       rules:
+        - record: synara:execution_target_capacity:sum
+          expr: sum by (target_kind, resource, state) (synara_execution_target_capacity)
+        - record: synara:execution_target_schedulable_units:sum
+          expr: sum by (target_kind) (synara_execution_target_schedulable_units)
+        - record: synara:execution_queue_depth:sum
+          expr: sum by (target_kind, capacity_class, queue_class) (synara_execution_queue_depth)
+        - record: synara:execution_queue_oldest_age_seconds:max
+          expr: max by (target_kind, capacity_class, queue_class) (synara_execution_queue_oldest_age_seconds)
+        - record: synara:worker_pool_autoscaling_units:sum
+          expr: sum by (capacity_class, kind) (synara_worker_pool_autoscaling_units)
+        - alert: SynaraExecutionTargetCapacityAuthorityExpired
+          expr: sum by (target_kind, resource) (synara_execution_target_capacity_authorities{freshness="expired"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution Target capacity authority is stale
+            description: At least one self-hosted Target has stopped publishing a fresh resource-capacity vector.
+        - alert: SynaraInteractiveColdStartGateViolated
+          expr: sum by (capacity_class) (synara_worker_pool_cold_start_gate{status="violated"}) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Interactive cold-start hard ceiling was violated
+            description: One or more interactive Pools have an overdue, still-unclaimed Execution and require capacity or provisioning investigation.
+        - alert: SynaraOutboxAdmissionThrottled
+          expr: synara_outbox_pressure_state{status="throttled"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: New Execution admission is throttled by Outbox pressure
+            description: Recovery and terminal events remain admissible, but new Execution admission is blocked until the durable Outbox backlog drains.
         - alert: SynaraWarmHitColdStartSLOBreach
           expr: |
             max by (target_kind, warm_pool_mode) (

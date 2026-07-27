@@ -455,10 +455,19 @@ def run_fake_leader_case(
     env["SYNARA_K8S_RESILIENCE_BOOTSTRAP_BASELINE"] = "0"
     env["SYNARA_K8S_RESILIENCE_CASES"] = "leader-takeover"
     env["SYNARA_K8S_RESILIENCE_PROBE_INTERVAL_SECONDS"] = "1"
-    env["SYNARA_K8S_RESILIENCE_CASE_TIMEOUT_SECONDS"] = "4"
+    # The positive ambiguous-write retry and the three-attempt conflict case
+    # spawn several fake kubectl/Python processes. Keep their guard deadline
+    # bounded but large enough for a loaded macOS workstation; the watchdog
+    # failure fixtures retain the tighter four-second behavior.
+    env["SYNARA_K8S_RESILIENCE_CASE_TIMEOUT_SECONDS"] = (
+        "8" if mode in {"delete-retry", "delete-conflict"} else "4"
+    )
     env["SYNARA_K8S_RESILIENCE_EVIDENCE_FILE"] = str(evidence_path)
     command = ["bash", str(SCRIPT_DIR / "resilience-acceptance.sh")]
-    completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+    # The exercised runner keeps its own bounded case/guard deadlines. The
+    # outer process budget only allows cleanup/report emission to finish on a
+    # loaded workstation and must not become the behavior under test.
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
     if not evidence_path.exists():
         fail(
             f"fake leader {mode}: resilience run omitted evidence "
@@ -725,16 +734,77 @@ def main() -> None:
             fail(f"pod RBAC rule must allow {verb}")
     if "watch" in pods_rule.group(1) or "update" in pods_rule.group(1):
         fail("pod RBAC rule must not allow watch/update")
+    priority_class_rule = require_regex(
+        rbac_text,
+        r'resources:\s*\["priorityclasses"\]\s*\n\s*verbs:\s*\[(.*?)\]',
+        "PriorityClass RBAC rule",
+    )
+    if '"get"' not in priority_class_rule.group(1) or any(
+        verb in priority_class_rule.group(1) for verb in ('"create"', '"patch"', '"delete"', '"update"')
+    ):
+        fail("PriorityClass RBAC rule must allow only get")
 
     kustomization_text = (SCRIPT_DIR / "kustomization.yaml").read_text(encoding="utf-8")
     if "pod-disruption-budget.yaml" not in kustomization_text:
         fail("kustomization.yaml must include pod-disruption-budget.yaml")
+    if "worker-priority-class.yaml" not in kustomization_text:
+        fail("kustomization.yaml must include worker-priority-class.yaml")
+    priority_class_text = (SCRIPT_DIR / "worker-priority-class.yaml").read_text(encoding="utf-8")
+    for required in (
+        "name: synara-worker-nonpreempting-v1",
+        "globalDefault: false",
+        "preemptionPolicy: Never",
+    ):
+        if required not in priority_class_text:
+            fail(f"worker-priority-class.yaml is missing {required}")
 
     deployment_text = (SCRIPT_DIR / "deployment.yaml").read_text(encoding="utf-8")
     if "topologySpreadConstraints:" not in deployment_text:
         fail("deployment.yaml must include topologySpreadConstraints")
     if "podAntiAffinity:" not in deployment_text:
         fail("deployment.yaml must include podAntiAffinity")
+    for fragment in (
+        "name: SYNARA_CREDENTIAL_KMS_PROVIDER\n              value: local",
+        "name: SYNARA_CREDENTIAL_MASTER_KEY",
+        "key: credential-master-key",
+        "name: SYNARA_ARTIFACT_ENDPOINT",
+        "name: SYNARA_ARTIFACT_ACCESS_KEY_ID",
+        "name: SYNARA_ARTIFACT_SECRET_ACCESS_KEY",
+        "name: SYNARA_BILLING_BLOB_SOURCE",
+        'name: AWS_EC2_METADATA_DISABLED\n              value: "true"',
+    ):
+        if fragment not in deployment_text:
+            fail(f"deployment.yaml omitted self-hosted default: {fragment}")
+    for forbidden in (
+        "SYNARA_CREDENTIAL_KMS_AWS_REGION",
+        "SYNARA_BILLING_GCS_BUCKET",
+        "SYNARA_BILLING_AZURE_CONTAINER_URL",
+        "SYNARA_BILLING_IMPORT_MAPPINGS_JSON",
+    ):
+        if forbidden in deployment_text:
+            fail(f"deployment.yaml exposes deferred cloud integration by default: {forbidden}")
+
+    config_example_text = (SCRIPT_DIR / "config.example.yaml").read_text(encoding="utf-8")
+    secret_example_text = (SCRIPT_DIR / "secret.example.yaml").read_text(encoding="utf-8")
+    for fragment in (
+        "artifact-region:",
+        "artifact-endpoint:",
+        "artifact-public-endpoint:",
+        'artifact-use-path-style: "true"',
+        "billing-blob-source: disabled",
+    ):
+        if fragment not in config_example_text:
+            fail(f"config.example.yaml omitted self-hosted setting: {fragment}")
+    for forbidden in ("aws-region:", "billing-gcs-bucket:", "billing-azure-container-url:"):
+        if forbidden in config_example_text:
+            fail(f"config.example.yaml exposes deferred cloud setting: {forbidden}")
+    for fragment in (
+        "credential-master-key:",
+        "artifact-access-key-id:",
+        "artifact-secret-access-key:",
+    ):
+        if fragment not in secret_example_text:
+            fail(f"secret.example.yaml omitted self-hosted secret: {fragment}")
 
     acceptance_text = (SCRIPT_DIR / "acceptance.sh").read_text(encoding="utf-8")
     if acceptance_text.count("list_ready_control_plane_pods") < 3:
@@ -838,6 +908,28 @@ exit 0
     ):
         if fragment not in resilience_text:
             fail(f"resilience-acceptance.sh omitted isolated baseline behavior: {fragment}")
+    for fragment in (
+        "SYNARA_K8S_RESILIENCE_SESSION_AUTHORITY_MODE",
+        "create_session_authority_sentinel",
+        "read_session_authority_sentinel",
+        "to_jsonb(inserted_session)",
+        "Session authority changed across Control Plane Pod failover",
+        "sentinelIdDigest",
+        "sessionAuthority",
+    ):
+        if fragment not in resilience_text:
+            fail(f"resilience-acceptance.sh omitted Session authority failover evidence: {fragment}")
+    for fragment in (
+        "SYNARA_K8S_RESILIENCE_WORKER_IMAGE",
+        "resource-lifecycle-acceptance.py",
+        "case_resource_lifecycle",
+        "synara.kubernetes.resource-lifecycle.acceptance.v1",
+        "pendingInteraction",
+        "recoveryBundle",
+        "podLifecycle",
+    ):
+        if fragment not in resilience_text:
+            fail(f"resilience-acceptance.sh omitted resource lifecycle evidence: {fragment}")
     for fragment in (
         "leader-takeover",
         "synara:kubernetes-execution-reconciler",
@@ -981,6 +1073,9 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
         'partial_file="${evidence_file}.partial.json"',
         "write_partial_snapshot",
         "record_progress_update",
+        "publish_create_only_file",
+        'ln "$temporary_file" "$destination"',
+        "Refusing to overwrite existing Kubernetes resilience evidence path",
         "commandRedacted: true",
         "SYNARA_K8S_RESILIENCE_EVIDENCE_FILE must be set explicitly when soak is enabled",
         "SYNARA_K8S_NODE_PARTITION_START_HOOK",
@@ -1057,7 +1152,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
         "wait_for_uid_absent",
         'created_object="$(kube "$target" create -f - -o json',
         "detailAssertionsAllowlistedBooleans",
-        'all(.assertions[]; type == "boolean")',
+        'all(.assertions[]; type == "boolean" and . == true)',
         '(.assertions | keys | sort) == ($allowed | sort)',
         "attempts=90",
         "tag presence could not be verified",
@@ -1101,7 +1196,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
         "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS",
         "SYNARA_MANAGED_HOOK_CHALLENGE",
         "external adapter point",
-        "does not claim real cloud or production validation",
+        "no managed-cloud claim is made",
     ):
         if fragment not in contract_text:
             fail(f"kubernetes-resilience-acceptance-v1.md omitted managed hook contract text: {fragment}")
@@ -1293,6 +1388,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
 
     with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-", delete=False) as handle:
         evidence_path = pathlib.Path(handle.name)
+    evidence_path.unlink()
     try:
         env = os.environ.copy()
         env["SYNARA_K8S_CONTEXT"] = "kind-validation"
@@ -1310,6 +1406,31 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
 
     if payload.get("status") != "dry-run":
         fail("resilience dry-run must emit status=dry-run")
+
+    for existing_suffix in ("", ".journal.jsonl", ".partial.json"):
+        with tempfile.TemporaryDirectory(prefix="synara-k8s-resilience-existing-") as existing_raw:
+            existing_root = pathlib.Path(existing_raw)
+            protected_evidence = existing_root / "evidence.json"
+            protected_path = pathlib.Path(str(protected_evidence) + existing_suffix)
+            protected_path.write_text("operator-owned-sentinel\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["SYNARA_K8S_CONTEXT"] = "kind-validation"
+            env["SYNARA_K8S_RESILIENCE_EVIDENCE_FILE"] = str(protected_evidence)
+            overwrite_run = subprocess.run(
+                ["bash", str(SCRIPT_DIR / "resilience-acceptance.sh"), "--dry-run"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if overwrite_run.returncode == 0:
+                fail(f"resilience dry-run overwrote existing evidence suffix {existing_suffix!r}")
+            if "Refusing to overwrite existing Kubernetes resilience evidence path" not in overwrite_run.stderr:
+                fail(f"resilience dry-run omitted create-only refusal for suffix {existing_suffix!r}")
+            if protected_path.read_text(encoding="utf-8") != "operator-owned-sentinel\n":
+                fail(f"resilience dry-run mutated existing evidence suffix {existing_suffix!r}")
+            if existing_suffix and protected_evidence.exists():
+                fail(f"resilience dry-run created final evidence after sidecar collision {existing_suffix!r}")
+
     if payload.get("plannedCases") != [
         "rbac",
         "topology",
@@ -1326,6 +1447,8 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
         fail("resilience dry-run must default bootstrapBaseline=true")
     if payload.get("allowedSkippedCases") != []:
         fail("resilience dry-run must fail closed on skipped required cases by default")
+    if payload.get("safety", {}).get("sessionAuthorityMode") != "stage2-postgres":
+        fail("resilience dry-run must default Session authority evidence to stage2-postgres with baseline bootstrap")
     managed_hook_override = payload.get("safety", {}).get("nodePartitionManagedHookOverride", {})
     if managed_hook_override != {
         "startHookEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK",
@@ -1340,6 +1463,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
 
     with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-isolated-", delete=False) as handle:
         isolated_evidence_path = pathlib.Path(handle.name)
+    isolated_evidence_path.unlink()
     try:
         env = os.environ.copy()
         env["SYNARA_K8S_CONTEXT"] = "kind-validation"
@@ -1363,6 +1487,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
     for invalid_timeout in ("0", "-1", "not-a-number"):
         with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-invalid-timeout-", delete=False) as handle:
             invalid_timeout_evidence = pathlib.Path(handle.name)
+        invalid_timeout_evidence.unlink()
         try:
             env = os.environ.copy()
             env["SYNARA_K8S_CONTEXT"] = "kind-validation"
@@ -1398,6 +1523,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
 
     with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-soak-", delete=False) as handle:
         soak_evidence_path = pathlib.Path(handle.name)
+    soak_evidence_path.unlink()
     try:
         env = os.environ.copy()
         env["SYNARA_K8S_CONTEXT"] = "kind-validation"
@@ -1420,6 +1546,7 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
 
     with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-managed-", delete=False) as handle:
         managed_evidence_path = pathlib.Path(handle.name)
+    managed_evidence_path.unlink()
     try:
         env = os.environ.copy()
         env["SYNARA_K8S_CONTEXT"] = "managed-validation"

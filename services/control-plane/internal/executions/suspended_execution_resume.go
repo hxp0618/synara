@@ -38,7 +38,18 @@ func (s *Service) resumeSuspendedExecutionLocked(
 	// capacity. Reacquire that admission before making recovery visible; all
 	// explicit, interaction-driven, and boundary-crossing resume paths converge
 	// here, so none can bypass the quota.
-	if err := s.sessions.RequireExecutionQuotaAvailable(ctx, tx, execution.TenantID); err != nil {
+	var session persistence.AgentSession
+	if err := tx.WithContext(ctx).Select("id", "project_id").
+		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+		Take(&session).Error; err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(
+			500, "execution_resume_session_load_failed", "The suspended Execution Session could not be loaded for quota admission.", err,
+		)
+	}
+	if err := s.sessions.RequireExecutionQuotaAvailableFor(ctx, tx, execution.TenantID, sessions.ExecutionQuotaAdmission{
+		ProjectID: session.ProjectID, SessionID: execution.SessionID,
+		AutomationID: execution.AutomationID, QuotaUnits: execution.QuotaUnits,
+	}); err != nil {
 		return persistence.SessionEvent{}, err
 	}
 	resumed := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).

@@ -34,13 +34,18 @@ var (
 )
 
 type Config struct {
-	InstanceID  string
-	BatchSize   int
-	ClaimTTL    time.Duration
-	MaxAttempts int
-	BaseBackoff time.Duration
-	MaxBackoff  time.Duration
-	Now         func() time.Time
+	InstanceID     string
+	BatchSize      int
+	MaxBatchSize   int
+	MaxConcurrency int
+	ScaleUpDepth   int64
+	TargetDelay    time.Duration
+	ThrottleDepth  int64
+	ClaimTTL       time.Duration
+	MaxAttempts    int
+	BaseBackoff    time.Duration
+	MaxBackoff     time.Duration
+	Now            func() time.Time
 }
 
 type Message struct {
@@ -60,6 +65,14 @@ type Stats struct {
 	Retrying      int64
 	DeadLettered  int64
 	OldestPending time.Duration
+}
+
+type PressureDecision struct {
+	Pending       int64
+	OldestPending time.Duration
+	BatchSize     int
+	Concurrency   int
+	Status        string
 }
 
 type AdminMessage struct {
@@ -84,15 +97,20 @@ type ListQuery struct {
 }
 
 type Service struct {
-	db          *gorm.DB
-	authorizer  *authorization.Authorizer
-	instanceID  string
-	batchSize   int
-	claimTTL    time.Duration
-	maxAttempts int
-	baseBackoff time.Duration
-	maxBackoff  time.Duration
-	now         func() time.Time
+	db             *gorm.DB
+	authorizer     *authorization.Authorizer
+	instanceID     string
+	batchSize      int
+	maxBatchSize   int
+	maxConcurrency int
+	scaleUpDepth   int64
+	targetDelay    time.Duration
+	throttleDepth  int64
+	claimTTL       time.Duration
+	maxAttempts    int
+	baseBackoff    time.Duration
+	maxBackoff     time.Duration
+	now            func() time.Time
 }
 
 func NewService(db *gorm.DB, cfg Config) (*Service, error) {
@@ -109,6 +127,27 @@ func NewService(db *gorm.DB, cfg Config) (*Service, error) {
 	if cfg.BatchSize <= 0 {
 		return nil, errors.New("outbox batch size must be positive")
 	}
+	if cfg.MaxBatchSize == 0 {
+		cfg.MaxBatchSize = min(10_000, cfg.BatchSize*10)
+	}
+	if cfg.MaxConcurrency == 0 {
+		cfg.MaxConcurrency = 8
+	}
+	if cfg.ScaleUpDepth == 0 {
+		cfg.ScaleUpDepth = int64(max(cfg.BatchSize*2, 1))
+	}
+	if cfg.TargetDelay == 0 {
+		cfg.TargetDelay = 5 * time.Second
+	}
+	if cfg.ThrottleDepth == 0 {
+		cfg.ThrottleDepth = 100_000
+	}
+	if cfg.MaxBatchSize < cfg.BatchSize || cfg.MaxBatchSize > 10_000 ||
+		cfg.MaxConcurrency < 1 || cfg.MaxConcurrency > 128 || cfg.ScaleUpDepth < 1 ||
+		cfg.TargetDelay < time.Millisecond || cfg.TargetDelay > time.Hour ||
+		cfg.ThrottleDepth <= cfg.ScaleUpDepth || cfg.ThrottleDepth > 1_000_000_000 {
+		return nil, errors.New("outbox pressure autoscaling bounds are invalid")
+	}
 	if cfg.ClaimTTL <= 0 {
 		return nil, errors.New("outbox claim TTL must be positive")
 	}
@@ -122,27 +161,40 @@ func NewService(db *gorm.DB, cfg Config) (*Service, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &Service{
+	service := &Service{
 		db: db, authorizer: authorization.NewAuthorizer(db), instanceID: instanceID,
 		batchSize: cfg.BatchSize, claimTTL: cfg.ClaimTTL,
+		maxBatchSize: cfg.MaxBatchSize, maxConcurrency: cfg.MaxConcurrency,
+		scaleUpDepth: cfg.ScaleUpDepth, targetDelay: cfg.TargetDelay, throttleDepth: cfg.ThrottleDepth,
 		maxAttempts: cfg.MaxAttempts, baseBackoff: cfg.BaseBackoff,
 		maxBackoff: cfg.MaxBackoff, now: now,
-	}, nil
+	}
+	if err := service.ensurePressureState(context.Background()); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 func (s *Service) BatchSize() int { return s.batchSize }
 
 func (s *Service) Claim(ctx context.Context) ([]Message, error) {
+	return s.ClaimLimit(ctx, s.batchSize)
+}
+
+func (s *Service) ClaimLimit(ctx context.Context, limit int) ([]Message, error) {
+	if limit < 1 || limit > s.maxBatchSize {
+		return nil, fmt.Errorf("outbox claim limit must be between 1 and %d", s.maxBatchSize)
+	}
 	now := s.now().UTC()
 	claimExpiresAt := now.Add(s.claimTTL)
-	models := make([]persistence.OutboxMessage, 0, s.batchSize)
+	models := make([]persistence.OutboxMessage, 0, limit)
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		query := tx.WithContext(ctx).
 			Where("published_at IS NULL AND dead_lettered_at IS NULL").
 			Where("available_at <= ?", now).
 			Where("claimed_by IS NULL OR claim_expires_at <= ?", now).
 			Order("available_at, created_at, id").
-			Limit(s.batchSize)
+			Limit(limit)
 		if tx.Dialector.Name() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
 		}
@@ -178,6 +230,97 @@ func (s *Service) Claim(ctx context.Context) ([]Message, error) {
 		messages = append(messages, toMessage(model))
 	}
 	return messages, nil
+}
+
+func (s *Service) RefreshPressure(ctx context.Context) (PressureDecision, error) {
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		return PressureDecision{}, err
+	}
+	decision := s.pressureDecision(stats)
+	if !s.db.Migrator().HasTable(&persistence.OutboxPressureState{}) {
+		return decision, nil
+	}
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var current persistence.OutboxPressureState
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("singleton_key = ?", "global").Take(&current).Error; err != nil {
+			return fmt.Errorf("load Outbox pressure state: %w", err)
+		}
+		now := s.now().UTC()
+		updated := tx.WithContext(ctx).Model(&persistence.OutboxPressureState{}).
+			Where("singleton_key = ? AND version = ?", "global", current.Version).
+			Updates(map[string]any{
+				"pending": decision.Pending, "oldest_pending_nanoseconds": int64(decision.OldestPending),
+				"desired_batch_size": decision.BatchSize, "desired_concurrency": decision.Concurrency,
+				"status": decision.Status, "observed_at": now,
+				"version": current.Version + 1, "updated_at": now,
+			})
+		if updated.Error != nil {
+			return fmt.Errorf("update Outbox pressure state: %w", updated.Error)
+		}
+		if updated.RowsAffected != 1 {
+			return errors.New("Outbox pressure state changed concurrently")
+		}
+		return nil
+	})
+	return decision, err
+}
+
+func (s *Service) pressureDecision(stats Stats) PressureDecision {
+	concurrency := 1
+	if stats.Pending > 0 {
+		concurrency = int((stats.Pending + s.scaleUpDepth - 1) / s.scaleUpDepth)
+		concurrency = min(max(concurrency, 1), s.maxConcurrency)
+	}
+	if stats.OldestPending >= s.targetDelay && stats.Pending > 0 {
+		concurrency = s.maxConcurrency
+	}
+	batchSize := min(s.maxBatchSize, max(s.batchSize, s.batchSize*concurrency))
+	status := "normal"
+	if stats.Pending >= s.throttleDepth {
+		status = "throttled"
+	} else if concurrency > 1 {
+		status = "scaling"
+	}
+	return PressureDecision{
+		Pending: stats.Pending, OldestPending: stats.OldestPending,
+		BatchSize: batchSize, Concurrency: concurrency, Status: status,
+	}
+}
+
+func (s *Service) ensurePressureState(ctx context.Context) error {
+	if !s.db.Migrator().HasTable(&persistence.OutboxPressureState{}) {
+		return nil
+	}
+	now := s.now().UTC()
+	return persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var current persistence.OutboxPressureState
+		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("singleton_key = ?", "global").Take(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tx.WithContext(ctx).Create(&persistence.OutboxPressureState{
+				SingletonKey: "global", BaseBatchSize: s.batchSize, MaxBatchSize: s.maxBatchSize,
+				MaxConcurrency: s.maxConcurrency, ScaleUpDepth: s.scaleUpDepth,
+				TargetDelay: s.targetDelay, ThrottleDepth: s.throttleDepth,
+				DesiredBatchSize: s.batchSize, DesiredConcurrency: 1, Status: "normal",
+				ObservedAt: now, Version: 1, UpdatedAt: now,
+			}).Error
+		}
+		if err != nil {
+			return err
+		}
+		return tx.WithContext(ctx).Model(&persistence.OutboxPressureState{}).
+			Where("singleton_key = ? AND version = ?", "global", current.Version).
+			Updates(map[string]any{
+				"base_batch_size": s.batchSize, "max_batch_size": s.maxBatchSize,
+				"max_concurrency": s.maxConcurrency, "scale_up_depth": s.scaleUpDepth,
+				"target_delay_nanoseconds": int64(s.targetDelay), "throttle_depth": s.throttleDepth,
+				"desired_batch_size":  min(max(current.DesiredBatchSize, s.batchSize), s.maxBatchSize),
+				"desired_concurrency": min(max(current.DesiredConcurrency, 1), s.maxConcurrency),
+				"version":             current.Version + 1, "updated_at": now,
+			}).Error
+	})
 }
 
 func (s *Service) Acknowledge(ctx context.Context, messageID uuid.UUID) error {

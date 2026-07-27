@@ -15,6 +15,17 @@ fi
 acceptance_owner="${SYNARA_K8S_ACCEPTANCE_OWNER:-resilience-$(date +%s)-$$}"
 baseline_script="${SYNARA_K8S_RESILIENCE_BASELINE_SCRIPT:-$script_dir/acceptance.sh}"
 bootstrap_baseline="${SYNARA_K8S_RESILIENCE_BOOTSTRAP_BASELINE:-1}"
+session_authority_mode="${SYNARA_K8S_RESILIENCE_SESSION_AUTHORITY_MODE:-}"
+if [[ -z "$session_authority_mode" ]]; then
+  if [[ "$bootstrap_baseline" == "1" ]]; then
+    session_authority_mode="stage2-postgres"
+  else
+    session_authority_mode="disabled"
+  fi
+fi
+resource_lifecycle_worker_image="${SYNARA_K8S_RESILIENCE_WORKER_IMAGE:-}"
+resource_lifecycle_worker_namespace="${SYNARA_K8S_RESILIENCE_WORKER_NAMESPACE:-synara-lifecycle-$(date +%s)-$$}"
+resource_lifecycle_runner="$script_dir/resource-lifecycle-acceptance.py"
 cases_csv="${SYNARA_K8S_RESILIENCE_CASES:-rbac,topology,leader-takeover,control-plane-failover,node-drain,node-partition}"
 allow_skipped_cases_csv="${SYNARA_K8S_RESILIENCE_ALLOW_SKIPPED_CASES:-}"
 soak_cases_csv="${SYNARA_K8S_RESILIENCE_SOAK_CASES:-control-plane-failover}"
@@ -42,11 +53,19 @@ if [[ -n "${SYNARA_K8S_RESILIENCE_EVIDENCE_FILE:-}" ]]; then
   evidence_file="$SYNARA_K8S_RESILIENCE_EVIDENCE_FILE"
   evidence_file_is_explicit=1
 else
-  evidence_file="$(mktemp "${TMPDIR:-/tmp}/synara-k8s-resilience-XXXXXX")"
+  implicit_evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/synara-k8s-resilience-XXXXXX")"
+  evidence_file="$implicit_evidence_dir/evidence.json"
   evidence_file_is_explicit=0
 fi
 journal_file="${evidence_file}.journal.jsonl"
 partial_file="${evidence_file}.partial.json"
+for reserved_evidence_path in "$evidence_file" "$journal_file" "$partial_file"; do
+  if [[ -e "$reserved_evidence_path" ]]; then
+    printf 'Refusing to overwrite existing Kubernetes resilience evidence path: %s\n' \
+      "$reserved_evidence_path" >&2
+    exit 1
+  fi
+done
 work_dir="$(mktemp -d)"
 permissions_file="$work_dir/permissions.jsonl"
 scenarios_file="$work_dir/scenarios.jsonl"
@@ -240,6 +259,17 @@ same_dir_tmp_file() {
   target_dir="$(dirname "$target")"
   target_name="$(basename "$target")"
   mktemp "$target_dir/.${target_name}.tmp.XXXXXX"
+}
+
+publish_create_only_file() {
+  local temporary_file="$1" destination="$2"
+  if ! ln "$temporary_file" "$destination"; then
+    printf 'Refusing to overwrite existing Kubernetes resilience evidence path: %s\n' \
+      "$destination" >&2
+    return 1
+  fi
+  rm -f "$temporary_file" || true
+  return 0
 }
 
 sha256_text() {
@@ -757,6 +787,176 @@ wait_for_control_plane_ready() {
 get_control_plane_pods_json() {
   "${kube[@]}" -n "$namespace" get pods \
     -l app.kubernetes.io/name=synara-control-plane -o json
+}
+
+stage2_postgres_scalar() {
+  local query="$1"
+  local attempts="${2:-10}"
+  local output=""
+  local stderr_file="$work_dir/session-authority-postgres.stderr"
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    if output="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
+      psql -U synara -d synara -v ON_ERROR_STOP=1 -At -c "$query" 2>"$stderr_file")"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    sleep 1
+  done
+  cat "$stderr_file" >&2 2>/dev/null || true
+  return 1
+}
+
+create_session_authority_sentinel() {
+  local session_id project_id user_id tenant_id organization_id suffix query row reconciled
+  session_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  project_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  user_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  tenant_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  organization_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  suffix="${session_id//-/}"
+  suffix="${suffix:0:12}"
+  query="$(cat <<SQL
+WITH selected_target AS (
+  SELECT target.id
+  FROM execution_targets AS target
+  WHERE target.tenant_id IS NULL
+    AND target.organization_id IS NULL
+    AND target.kind = 'local'
+    AND target.status = 'active'
+  ORDER BY target.id
+  LIMIT 1
+), inserted_user AS (
+  INSERT INTO users (id, email, display_name, status, email_verified_at)
+  SELECT
+    '$user_id'::uuid,
+    'session-authority-$suffix@localhost.invalid',
+    'Stage 4 Session Authority',
+    'active',
+    clock_timestamp()
+  FROM selected_target
+  RETURNING id
+), inserted_tenant AS (
+  INSERT INTO tenants (id, slug, name, status, plan_code, region, created_by)
+  SELECT
+    '$tenant_id'::uuid,
+    'sentinel-$suffix',
+    'Stage 4 Session Authority',
+    'active',
+    'acceptance',
+    'local',
+    inserted_user.id
+  FROM inserted_user
+  RETURNING id, created_by
+), inserted_tenant_membership AS (
+  INSERT INTO tenant_memberships (tenant_id, user_id, role, status, joined_at)
+  SELECT
+    inserted_tenant.id,
+    inserted_tenant.created_by,
+    'owner',
+    'active',
+    clock_timestamp()
+  FROM inserted_tenant
+  RETURNING tenant_id, user_id
+), inserted_organization AS (
+  INSERT INTO organizations (id, tenant_id, slug, name, kind, status, created_by)
+  SELECT
+    '$organization_id'::uuid,
+    inserted_tenant_membership.tenant_id,
+    'sentinel-$suffix',
+    'Stage 4 Session Authority',
+    'root',
+    'active',
+    inserted_tenant_membership.user_id
+  FROM inserted_tenant_membership
+  RETURNING id, tenant_id, created_by
+), inserted_organization_membership AS (
+  INSERT INTO organization_memberships (tenant_id, organization_id, user_id, role, status)
+  SELECT
+    inserted_organization.tenant_id,
+    inserted_organization.id,
+    inserted_organization.created_by,
+    'owner',
+    'active'
+  FROM inserted_organization
+  RETURNING tenant_id, organization_id, user_id
+), inserted_project AS (
+  INSERT INTO projects (
+    id, tenant_id, organization_id, name, default_branch, visibility, created_by
+  )
+  SELECT
+    '$project_id'::uuid,
+    inserted_organization_membership.tenant_id,
+    inserted_organization_membership.organization_id,
+    'Stage 4 Session authority sentinel',
+    'main',
+    'private',
+    inserted_organization_membership.user_id
+  FROM inserted_organization_membership
+  RETURNING id, tenant_id, organization_id, created_by
+), inserted_session AS (
+  INSERT INTO agent_sessions (
+    id, tenant_id, organization_id, project_id, created_by,
+    title, status, visibility, provider,
+    execution_target_id, requested_execution_target_id,
+    resource_state, meaningful_activity_at, resource_idle_since,
+    suspend_after_idle_seconds
+  )
+  SELECT
+    '$session_id'::uuid,
+    inserted_project.tenant_id,
+    inserted_project.organization_id,
+    inserted_project.id,
+    inserted_project.created_by,
+    'Stage 4 Session authority sentinel',
+    'active',
+    'private',
+    'codex',
+    selected_target.id,
+    selected_target.id,
+    'idle',
+    clock_timestamp(),
+    clock_timestamp(),
+    604800
+  FROM inserted_project
+  CROSS JOIN selected_target
+  RETURNING *
+)
+SELECT inserted_session.id::text || '|' ||
+       encode(digest(convert_to(to_jsonb(inserted_session)::text, 'UTF8'), 'sha256'), 'hex')
+FROM inserted_session;
+SQL
+)"
+  if row="$(stage2_postgres_scalar "$query" 1)" &&
+    [[ "$row" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\|[0-9a-f]{64}$ ]]; then
+    printf '%s\n' "$row"
+    return 0
+  fi
+  if reconciled="$(read_session_authority_sentinel "$session_id")" &&
+    [[ "$reconciled" =~ ^1\|[0-9a-f]{64}$ ]]; then
+    printf '%s|%s\n' "$session_id" "${reconciled##*|}"
+    return 0
+  fi
+  if [[ ! "$row" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\|[0-9a-f]{64}$ ]]; then
+    printf 'Session authority sentinel returned an unexpected bounded row shape: bytes=%s digest=%s\n' \
+      "${#row}" "$(sha256_text "$row")" >&2
+  fi
+  return 1
+}
+
+read_session_authority_sentinel() {
+  local session_id="$1"
+  if [[ ! "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+    return 1
+  fi
+  stage2_postgres_scalar "
+SELECT count(*)::text || '|' ||
+       COALESCE(
+         min(encode(digest(convert_to(to_jsonb(session_row)::text, 'UTF8'), 'sha256'), 'hex')),
+         '-'
+       )
+FROM agent_sessions AS session_row
+WHERE session_row.id = '$session_id'::uuid;
+"
 }
 
 read_reconciler_lease() {
@@ -2232,6 +2432,7 @@ case_rbac() {
     return 1
   fi
   run_rbac_check "$role_json" true create tokenreviews authentication.k8s.io "" || return 1
+  run_rbac_check "$role_json" true get priorityclasses scheduling.k8s.io "" || return 1
   run_rbac_check "$role_json" true get namespaces "" "" || return 1
   run_rbac_check "$role_json" true create namespaces "" "" || return 1
   run_rbac_check "$role_json" true patch namespaces "" "" || return 1
@@ -2259,6 +2460,9 @@ case_rbac() {
   run_rbac_check "$role_json" false delete networkpolicies networking.k8s.io "$namespace" || return 1
   run_rbac_check "$role_json" false update pods "" "$namespace" || return 1
   run_rbac_check "$role_json" false watch pods "" "$namespace" || return 1
+  run_rbac_check "$role_json" false create priorityclasses scheduling.k8s.io "" || return 1
+  run_rbac_check "$role_json" false patch priorityclasses scheduling.k8s.io "" || return 1
+  run_rbac_check "$role_json" false delete priorityclasses scheduling.k8s.io "" || return 1
   CASE_DETAILS_JSON="$(jq -nc \
     --argjson role "$role_json" \
     --argjson checks "$(permissions_results_json)" \
@@ -2548,6 +2752,8 @@ case_control_plane_failover() {
   local before_json after_json deleted_pod replacement_json
   local failures_file="$work_dir/failover-probe-failures"
   local probe_pid pre_hook_json post_hook_json
+  local session_authority_json sentinel_row sentinel_id before_digest sentinel_id_digest
+  local after_sentinel_row after_sentinel_count after_digest
   if ! before_json="$(get_control_plane_pods_json)"; then
     CASE_DETAILS_JSON='{"error":"failed to list control plane Pods before failover"}'
     return 1
@@ -2556,6 +2762,29 @@ case_control_plane_failover() {
   if [[ -z "$deleted_pod" || "$deleted_pod" == "null" ]]; then
     CASE_DETAILS_JSON='{"error":"no control-plane pod available for failover"}'
     return 1
+  fi
+
+  if [[ "$session_authority_mode" == "stage2-postgres" ]]; then
+    if ! sentinel_row="$(create_session_authority_sentinel)"; then
+      CASE_DETAILS_JSON='{"error":"failed to create the pre-failover Session authority sentinel","sessionAuthority":{"mode":"stage2-postgres","verified":false}}'
+      return 1
+    fi
+    sentinel_id="${sentinel_row%%|*}"
+    before_digest="${sentinel_row##*|}"
+    sentinel_id_digest="$(sha256_text "$sentinel_id")"
+    session_authority_json="$(jq -nc \
+      --arg sentinelIdDigest "$sentinel_id_digest" \
+      --arg beforeDigest "$before_digest" '
+      {
+        mode: "stage2-postgres",
+        verified: false,
+        sentinelIdDigest: $sentinelIdDigest,
+        beforeDigest: $beforeDigest,
+        afterDigest: null,
+        rowCount: null
+      }')"
+  else
+    session_authority_json='{"mode":"disabled","verified":false,"reason":"not-configured"}'
   fi
 
   pre_hook_json="$(run_hook pre-failover "${SYNARA_K8S_RESILIENCE_PRE_FAILOVER_HOOK:-}")" || {
@@ -2593,6 +2822,48 @@ case_control_plane_failover() {
       '{error: "failed to list control plane Pods after failover", deletedPod: $pod, readyProbeFailures: $failures}')"
     return 1
   fi
+  if [[ "$session_authority_mode" == "stage2-postgres" ]]; then
+    if ! after_sentinel_row="$(read_session_authority_sentinel "$sentinel_id")" ||
+      [[ ! "$after_sentinel_row" =~ ^[0-9]+\|([0-9a-f]{64}|-)$ ]]; then
+      CASE_DETAILS_JSON="$(jq -nc --arg pod "$deleted_pod" \
+        --argjson failures "$(read_probe_failures "$failures_file")" \
+        --argjson sessionAuthority "$session_authority_json" '
+        {
+          error: "failed to read the post-failover Session authority sentinel",
+          deletedPod: $pod,
+          readyProbeFailures: $failures,
+          sessionAuthority: $sessionAuthority
+        }')"
+      return 1
+    fi
+    after_sentinel_count="${after_sentinel_row%%|*}"
+    after_digest="${after_sentinel_row##*|}"
+    session_authority_json="$(jq -nc \
+      --arg sentinelIdDigest "$sentinel_id_digest" \
+      --arg beforeDigest "$before_digest" \
+      --arg afterDigest "$after_digest" \
+      --argjson rowCount "$after_sentinel_count" '
+      {
+        mode: "stage2-postgres",
+        verified: ($rowCount == 1 and $beforeDigest == $afterDigest),
+        sentinelIdDigest: $sentinelIdDigest,
+        beforeDigest: $beforeDigest,
+        afterDigest: $afterDigest,
+        rowCount: $rowCount
+      }')"
+    if [[ "$after_sentinel_count" != "1" || "$after_digest" != "$before_digest" ]]; then
+      CASE_DETAILS_JSON="$(jq -nc --arg pod "$deleted_pod" \
+        --argjson failures "$(read_probe_failures "$failures_file")" \
+        --argjson sessionAuthority "$session_authority_json" '
+        {
+          error: "Session authority changed across Control Plane Pod failover",
+          deletedPod: $pod,
+          readyProbeFailures: $failures,
+          sessionAuthority: $sessionAuthority
+        }')"
+      return 1
+    fi
+  fi
   if ! replacement_json="$(jq -nc --argjson before "$before_json" --argjson after "$after_json" '
     {
       beforePods: [($before.items // [])[] | {name: .metadata.name, node: .spec.nodeName}],
@@ -2609,12 +2880,14 @@ case_control_plane_failover() {
   fi
   post_hook_json="$(run_hook post-failover "${SYNARA_K8S_RESILIENCE_POST_FAILOVER_HOOK:-}")" || {
     CASE_DETAILS_JSON="$(jq -nc --arg pod "$deleted_pod" --argjson failures "$(read_probe_failures "$failures_file")" \
-      --argjson replacement "$replacement_json" --argjson hook "$post_hook_json" '
+      --argjson replacement "$replacement_json" --argjson hook "$post_hook_json" \
+      --argjson sessionAuthority "$session_authority_json" '
       {
         error: "post-failover hook failed",
         deletedPod: $pod,
         readyProbeFailures: $failures,
         replacement: $replacement,
+        sessionAuthority: $sessionAuthority,
         hook: $hook
       }')"
     return 1
@@ -2623,23 +2896,27 @@ case_control_plane_failover() {
   failover_failures="$(read_probe_failures "$failures_file")"
   if (( failover_failures > max_failover_ready_failures )); then
     CASE_DETAILS_JSON="$(jq -nc --arg pod "$deleted_pod" --argjson failures "$failover_failures" \
-      --argjson replacement "$replacement_json" --argjson preHook "$pre_hook_json" --argjson postHook "$post_hook_json" '
+      --argjson replacement "$replacement_json" --argjson preHook "$pre_hook_json" --argjson postHook "$post_hook_json" \
+      --argjson sessionAuthority "$session_authority_json" '
       {
         error: "readiness probe failures exceeded failover threshold",
         deletedPod: $pod,
         readyProbeFailures: $failures,
         replacement: $replacement,
+        sessionAuthority: $sessionAuthority,
         preHook: $preHook,
         postHook: $postHook
       }')"
     return 1
   fi
   CASE_DETAILS_JSON="$(jq -nc --arg pod "$deleted_pod" --argjson failures "$failover_failures" \
-    --argjson replacement "$replacement_json" --argjson preHook "$pre_hook_json" --argjson postHook "$post_hook_json" '
+    --argjson replacement "$replacement_json" --argjson preHook "$pre_hook_json" --argjson postHook "$post_hook_json" \
+    --argjson sessionAuthority "$session_authority_json" '
     {
       deletedPod: $pod,
       readyProbeFailures: $failures,
       replacement: $replacement,
+      sessionAuthority: $sessionAuthority,
       preHook: $preHook,
       postHook: $postHook
     }')"
@@ -3138,6 +3415,53 @@ case_node_partition() {
     }')"
 }
 
+case_resource_lifecycle() {
+  local result_file="$work_dir/resource-lifecycle-result.json"
+  local rc=0 payload
+  if [[ "$bootstrap_baseline" != "1" ]]; then
+    CASE_DETAILS_JSON='{"error":"resource lifecycle acceptance requires the owned Stage 2 baseline"}'
+    return 1
+  fi
+  if [[ -z "$resource_lifecycle_worker_image" ]]; then
+    CASE_DETAILS_JSON='{"error":"SYNARA_K8S_RESILIENCE_WORKER_IMAGE is required for resource-lifecycle"}'
+    return 1
+  fi
+  if [[ ! -f "$resource_lifecycle_runner" ]]; then
+    CASE_DETAILS_JSON='{"error":"resource lifecycle acceptance runner is missing"}'
+    return 1
+  fi
+  if python3 "$resource_lifecycle_runner" \
+    --context "$context" \
+    --control-plane-namespace "$namespace" \
+    --worker-namespace "$resource_lifecycle_worker_namespace" \
+    --worker-image "$resource_lifecycle_worker_image" \
+    --result-file "$result_file" \
+    --phase-timeout "$case_timeout_seconds" \
+    --command-timeout 60 \
+    --cleanup-timeout 180; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ ! -s "$result_file" ]] || ! payload="$(jq -c '
+    select(.schemaVersion == "synara.kubernetes.resource-lifecycle.acceptance.v1")
+    | {
+        status,evidenceLevel,durationSeconds,identities,lifecycle,pendingInteraction,
+        workspace,recoveryBundle,podLifecycle,cleanup,
+        reasonCode:(.reasonCode // null),message:(.message // null),details:(.details // null)
+      }
+  ' "$result_file")" || [[ -z "$payload" ]]; then
+    CASE_DETAILS_JSON='{"error":"resource lifecycle acceptance emitted invalid evidence"}'
+    return 1
+  fi
+  CASE_DETAILS_JSON="$payload"
+  if (( rc != 0 )) || [[ "$(jq -r '.status' <<<"$payload")" != "passed" ]] || \
+    [[ "$(jq -r '.cleanup.deleted // false' <<<"$payload")" != "true" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 execute_case() {
   local case_name="$1"
   case "$case_name" in
@@ -3147,6 +3471,7 @@ execute_case() {
     control-plane-failover) case_control_plane_failover ;;
     node-drain) case_node_drain ;;
     node-partition) case_node_partition ;;
+    resource-lifecycle) case_resource_lifecycle ;;
     *)
       CASE_DETAILS_JSON="$(jq -nc --arg caseName "$case_name" '{error: "unknown resilience case", case: $caseName}')"
       return 1
@@ -3343,7 +3668,7 @@ run_soak() {
 
 emit_final_report() {
   local finished_at duration_seconds overall_status
-  local final_progress_json
+  local final_progress_json final_report_tmp
   finished_at="$(iso_now)"
   duration_seconds=$(( $(date +%s) - started_epoch ))
   overall_status="passed"
@@ -3351,6 +3676,7 @@ emit_final_report() {
     overall_status="failed"
   fi
   current_phase_json='{"type":"finalizing"}'
+  final_report_tmp="$(same_dir_tmp_file "$evidence_file")"
   jq -n \
     --arg schemaVersion "synara.kubernetes.resilience.acceptance.v1" \
     --arg status "$overall_status" \
@@ -3359,6 +3685,7 @@ emit_final_report() {
     --arg context "$context" \
     --arg namespace "$namespace" \
     --arg rbacName "$rbac_name" \
+    --arg sessionAuthorityMode "$session_authority_mode" \
     --arg cases "$cases_csv" \
     --arg allowSkippedCases "$allow_skipped_cases_csv" \
     --arg evidenceFile "$evidence_file" \
@@ -3384,6 +3711,7 @@ emit_final_report() {
       safety: {
         kindOnlyByDefault: true,
         allowNonDisposableOverride: "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+        sessionAuthorityMode: $sessionAuthorityMode,
         nodePartitionManagedHookOverride: {
           startHookEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK",
           verifyHookEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
@@ -3411,7 +3739,11 @@ emit_final_report() {
       topology: $topology,
       scenarios: $scenarios,
       soak: $soak
-    }' >"$evidence_file"
+    }' >"$final_report_tmp"
+  if ! publish_create_only_file "$final_report_tmp" "$evidence_file"; then
+    rm -f "$final_report_tmp"
+    return 1
+  fi
   final_progress_json="$(jq -nc \
     --arg status "$overall_status" \
     --arg startedAt "$started_at" \
@@ -3449,6 +3781,13 @@ require_boolean_flag "$bootstrap_baseline" "SYNARA_K8S_RESILIENCE_BOOTSTRAP_BASE
 require_boolean_flag "$dry_run" "SYNARA_K8S_RESILIENCE_DRY_RUN"
 require_boolean_flag "$keep_resources" "SYNARA_K8S_KEEP_RESOURCES"
 require_boolean_flag "$allow_non_disposable" "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE"
+case "$session_authority_mode" in
+  stage2-postgres | disabled) ;;
+  *)
+    printf 'SYNARA_K8S_RESILIENCE_SESSION_AUTHORITY_MODE must be stage2-postgres or disabled\n' >&2
+    exit 1
+    ;;
+esac
 require_non_negative_int "$soak_seconds" "SYNARA_K8S_RESILIENCE_SOAK_SECONDS"
 require_positive_int "$soak_interval_seconds" "SYNARA_K8S_RESILIENCE_SOAK_INTERVAL_SECONDS"
 require_positive_int "$probe_interval_seconds" "SYNARA_K8S_RESILIENCE_PROBE_INTERVAL_SECONDS"
@@ -3467,6 +3806,12 @@ if [[ ! "$namespace" =~ ^synara-[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#names
   printf 'SYNARA_K8S_NAMESPACE must be a synara-* DNS label no longer than 63 characters\n' >&2
   exit 1
 fi
+if [[ ! "$resource_lifecycle_worker_namespace" =~ ^synara-[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || \
+  (( ${#resource_lifecycle_worker_namespace} > 63 )) || \
+  [[ "$resource_lifecycle_worker_namespace" == "$namespace" ]]; then
+  printf 'SYNARA_K8S_RESILIENCE_WORKER_NAMESPACE must be a distinct synara-* DNS label no longer than 63 characters\n' >&2
+  exit 1
+fi
 if [[ ! "$rbac_name" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || (( ${#rbac_name} > 253 )); then
   printf 'SYNARA_K8S_ACCEPTANCE_RBAC_NAME must be a DNS subdomain no longer than 253 characters\n' >&2
   exit 1
@@ -3479,18 +3824,31 @@ if (( soak_seconds > 0 )) && [[ "$evidence_file_is_explicit" != "1" ]]; then
   printf 'SYNARA_K8S_RESILIENCE_EVIDENCE_FILE must be set explicitly when soak is enabled\n' >&2
   exit 1
 fi
+normalized_cases=",${cases_csv//[[:space:]]/},"
+resource_lifecycle_worker_image_digest=""
+if [[ -n "$resource_lifecycle_worker_image" ]]; then
+  resource_lifecycle_worker_image_digest="$(sha256_text "$resource_lifecycle_worker_image")"
+fi
+if [[ "$normalized_cases" == *,resource-lifecycle,* && -z "$resource_lifecycle_worker_image" ]]; then
+  printf 'SYNARA_K8S_RESILIENCE_WORKER_IMAGE is required when resource-lifecycle is selected\n' >&2
+  exit 1
+fi
 
 if [[ "$dry_run" == "1" ]]; then
+  dry_run_report_tmp="$(same_dir_tmp_file "$evidence_file")"
   jq -n \
     --arg schemaVersion "synara.kubernetes.resilience.acceptance.v1" \
     --arg baselineScript "$baseline_script" \
     --arg context "$context" \
     --arg namespace "$namespace" \
     --arg rbacName "$rbac_name" \
+    --arg sessionAuthorityMode "$session_authority_mode" \
     --arg cases "$cases_csv" \
     --arg allowSkippedCases "$allow_skipped_cases_csv" \
     --arg soakCases "$soak_cases_csv" \
     --arg evidenceFile "$evidence_file" \
+    --arg resourceLifecycleWorkerNamespace "$resource_lifecycle_worker_namespace" \
+    --arg resourceLifecycleWorkerImageDigest "$resource_lifecycle_worker_image_digest" \
     --argjson bootstrapBaseline "$bootstrap_baseline" \
     --argjson soakSeconds "$soak_seconds" \
     --argjson soakIntervalSeconds "$soak_interval_seconds" \
@@ -3518,9 +3876,15 @@ if [[ "$dry_run" == "1" ]]; then
       partitionSeconds: $partitionSeconds,
       caseTimeoutSeconds: $caseTimeoutSeconds,
       probeIntervalSeconds: $probeIntervalSeconds,
+      resourceLifecycle: {
+        workerNamespace: $resourceLifecycleWorkerNamespace,
+        workerImageConfigured: ($resourceLifecycleWorkerImageDigest != ""),
+        workerImageDigest: $resourceLifecycleWorkerImageDigest
+      },
       safety: {
         kindOnlyByDefault: true,
         allowNonDisposableOverride: "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+        sessionAuthorityMode: $sessionAuthorityMode,
         nodePartitionManagedHookOverride: {
           startHookEnvVar: "SYNARA_K8S_NODE_PARTITION_START_HOOK",
           verifyHookEnvVar: "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
@@ -3532,7 +3896,11 @@ if [[ "$dry_run" == "1" ]]; then
         }
       },
       evidenceFile: $evidenceFile
-    }' >"$evidence_file"
+    }' >"$dry_run_report_tmp"
+  if ! publish_create_only_file "$dry_run_report_tmp" "$evidence_file"; then
+    rm -f "$dry_run_report_tmp"
+    exit 1
+  fi
   printf 'Kubernetes resilience acceptance dry-run wrote %s\n' "$evidence_file"
   exit 0
 fi

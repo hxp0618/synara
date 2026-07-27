@@ -35,10 +35,12 @@ const placementState: ControlPlaneExecutionPlacementState = {
       name: "default",
       mode: "per-execution",
       capacityClass: "standard",
+      tenantIsolation: "pinned",
       clusterId: "",
       region: "",
       namespace: "",
       desiredIdleUnits: 0,
+      minIdleUnits: 0,
       maxActiveUnits: 1,
       schedulingTemplate: {},
       status: "active",
@@ -53,10 +55,12 @@ const placementState: ControlPlaneExecutionPlacementState = {
       name: "interactive-warm",
       mode: "warm",
       capacityClass: "interactive",
+      tenantIsolation: "pinned",
       clusterId: "",
       region: "",
       namespace: "",
       desiredIdleUnits: 2,
+      minIdleUnits: 0,
       maxActiveUnits: 6,
       schedulingTemplate: {},
       status: "active",
@@ -71,10 +75,12 @@ const placementState: ControlPlaneExecutionPlacementState = {
       name: "maintenance",
       mode: "warm",
       capacityClass: "interactive",
+      tenantIsolation: "pinned",
       clusterId: "",
       region: "",
       namespace: "",
       desiredIdleUnits: 1,
+      minIdleUnits: 0,
       maxActiveUnits: 2,
       schedulingTemplate: {},
       status: "draining",
@@ -95,14 +101,17 @@ const placementState: ControlPlaneExecutionPlacementState = {
   },
 };
 
-function renderPlacementControls(state: ControlPlaneExecutionPlacementState): string {
+function renderPlacementControls(
+  state: ControlPlaneExecutionPlacementState,
+  renderedTarget: ControlPlaneExecutionTarget = target,
+): string {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { staleTime: Number.POSITIVE_INFINITY } },
   });
-  queryClient.setQueryData(workerPoolPlacementQueryKey("tenant-1", target.id), state);
+  queryClient.setQueryData(workerPoolPlacementQueryKey("tenant-1", renderedTarget.id), state);
   return renderToStaticMarkup(
     <QueryClientProvider client={queryClient}>
-      <WorkerPoolPlacementControls canManage enabled target={target} tenantId="tenant-1" />
+      <WorkerPoolPlacementControls canManage enabled target={renderedTarget} tenantId="tenant-1" />
     </QueryClientProvider>,
   );
 }
@@ -123,6 +132,33 @@ describe("WorkerPoolPlacementControls", () => {
     expect(markup).toContain("v3");
   });
 
+  it("shows operator-owned shared Target isolation state without tenant mutation controls", () => {
+    const sharedTarget = { ...target, id: "target-shared", tenantId: null };
+    const sharedState: ControlPlaneExecutionPlacementState = {
+      pools: placementState.pools.slice(0, 1).map((pool) => ({
+        ...pool,
+        id: "pool-shared",
+        tenantId: null,
+        executionTargetId: sharedTarget.id,
+        tenantIsolation: "shared",
+      })),
+      policy: {
+        ...placementState.policy,
+        tenantId: null,
+        executionTargetId: sharedTarget.id,
+        defaultPoolId: "pool-shared",
+        balancedPoolId: null,
+        lowLatencyPoolId: null,
+      },
+    };
+
+    const markup = renderPlacementControls(sharedState, sharedTarget);
+
+    expect(markup).toContain("shared");
+    expect(markup).not.toContain("Save capacity");
+    expect(markup).not.toContain("Create warm pool");
+  });
+
   it("builds a warm pool create payload with explicit interactive capacity", () => {
     expect(
       buildWarmPoolInput({
@@ -134,10 +170,12 @@ describe("WorkerPoolPlacementControls", () => {
       name: "interactive-warm",
       mode: "warm",
       capacityClass: "interactive",
+      tenantIsolation: "pinned",
       clusterId: "",
       region: "",
       namespace: "",
       desiredIdleUnits: 2,
+      minIdleUnits: 0,
       maxActiveUnits: 6,
       schedulingTemplate: {},
       status: "active",
@@ -165,10 +203,12 @@ describe("WorkerPoolPlacementControls", () => {
       name: "interactive-warm",
       mode: "warm",
       capacityClass: "interactive",
+      tenantIsolation: "pinned",
       clusterId: "",
       region: "",
       namespace: "",
       desiredIdleUnits: 3,
+      minIdleUnits: 0,
       maxActiveUnits: 8,
       schedulingTemplate: {},
       status: "draining",

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,21 +39,26 @@ type protectedCgroupLiveEvidence struct {
 }
 
 type protectedCgroupLiveSystemdProof struct {
-	Unit         string `json:"unit"`
-	Delegate     string `json:"delegate"`
-	KillMode     string `json:"killMode"`
-	ControlGroup string `json:"controlGroup"`
-	ActiveState  string `json:"activeState"`
-	SubState     string `json:"subState"`
+	Unit               string   `json:"unit"`
+	Delegate           string   `json:"delegate"`
+	DelegateSubgroup   string   `json:"delegateSubgroup"`
+	KillMode           string   `json:"killMode"`
+	ControlGroup       string   `json:"controlGroup"`
+	ActiveState        string   `json:"activeState"`
+	SubState           string   `json:"subState"`
+	ParentProcessCount int      `json:"parentProcessCount"`
+	SupervisorPIDs     []int    `json:"supervisorPids"`
+	EnabledControllers []string `json:"enabledControllers"`
 }
 
 type protectedCgroupLiveProof struct {
-	Status        string `json:"status"`
-	Mutation      string `json:"mutation,omitempty"`
-	Bundle        string `json:"bundle,omitempty"`
-	ProviderPID   int    `json:"providerPid,omitempty"`
-	DescendantPID int    `json:"descendantPid,omitempty"`
-	Detail        string `json:"detail,omitempty"`
+	Status         string                         `json:"status"`
+	Mutation       string                         `json:"mutation,omitempty"`
+	Bundle         string                         `json:"bundle,omitempty"`
+	ProviderPID    int                            `json:"providerPid,omitempty"`
+	DescendantPID  int                            `json:"descendantPid,omitempty"`
+	Detail         string                         `json:"detail,omitempty"`
+	ProviderLimits *ProtectedCgroupResourceLimits `json:"providerLimits,omitempty"`
 }
 
 type protectedCgroupLiveCrashRecord struct {
@@ -74,10 +80,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestProtectedCgroupV2LiveIntegration is intentionally absent from ordinary
+// TestProtectedCgroupV3LiveIntegration is intentionally absent from ordinary
 // test runs. The host runner starts this exact test as the only MainPID in a
 // real systemd Delegate=yes service cgroup on unified cgroup v2.
-func TestProtectedCgroupV2LiveIntegration(t *testing.T) {
+func TestProtectedCgroupV3LiveIntegration(t *testing.T) {
 	if os.Getenv(protectedCgroupLiveEnabledEnv) != "1" {
 		t.Skip("set SYNARA_CGROUP_V2_LIVE=1 only inside the dedicated disposable Linux host lane")
 	}
@@ -91,7 +97,7 @@ func TestProtectedCgroupV2LiveIntegration(t *testing.T) {
 	assertLiveCgroupRoot(t, root, os.Getpid())
 
 	evidence := protectedCgroupLiveEvidence{
-		SchemaVersion: "synara.protected-cgroup-v2-live-test.v1",
+		SchemaVersion: "synara.protected-cgroup-v3-live-test.v1",
 		CgroupRoot:    root,
 		MainPID:       os.Getpid(),
 		Systemd:       assertLiveSystemdService(t, root),
@@ -101,9 +107,10 @@ func TestProtectedCgroupV2LiveIntegration(t *testing.T) {
 	t.Run("runtime-diagnostic-overlap-and-fence", func(t *testing.T) {
 		evidence.Scenarios["runtimeDiagnosticOverlapAndFence"] = testProtectedCgroupLiveRuntime(t, root)
 	})
+	evidence.Systemd = assertLiveSystemdService(t, root, true)
 	assertLiveCgroupRoot(t, root, os.Getpid())
-	t.Run("parent-extra-pid-zero-mutation", func(t *testing.T) {
-		evidence.Scenarios["parentExtraPidZeroMutation"] = testProtectedCgroupLiveParentExtraPID(t, root)
+	t.Run("supervisor-subgroup-extra-pid-zero-mutation", func(t *testing.T) {
+		evidence.Scenarios["supervisorSubgroupExtraPidZeroMutation"] = testProtectedCgroupLiveParentExtraPID(t, root)
 	})
 	assertLiveCgroupRoot(t, root, os.Getpid())
 	t.Run("legacy-v1-zero-mutation", func(t *testing.T) {
@@ -138,12 +145,14 @@ func testProtectedCgroupLiveRuntime(t *testing.T, root string) protectedCgroupLi
 	fence := ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 101, WorkerIncarnation: uuid.New()}
 	runtime, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: identities[0], ProviderIdentity: identities[1], Fence: fence,
+		ProviderLimits:     liveProtectedCgroupResourceLimits(),
 		SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(), RootLease: lease,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	paths := runtime.Paths()
+	observedLimits := assertLiveProviderLimits(t, paths.ProviderPath, liveProtectedCgroupResourceLimits())
 	provider, descendantPID := startLiveProviderTree(t, runtime, fence)
 	defer reapLiveCommand(provider)
 	assertPIDInCgroup(t, provider.Process.Pid, paths.ProviderPath)
@@ -155,15 +164,21 @@ func testProtectedCgroupLiveRuntime(t *testing.T, root string) protectedCgroupLi
 		Config{
 			CgroupV2Root:             root,
 			CgroupV2ProviderIdentity: &identities[1],
-			InstanceUID:              uuid.NewString(),
-			RequestTimeout:           10 * time.Second,
+			CgroupV2ProviderLimits: func() *ProtectedCgroupResourceLimits {
+				limits := liveProtectedCgroupResourceLimits()
+				return &limits
+			}(),
+			InstanceUID:    uuid.NewString(),
+			RequestTimeout: 10 * time.Second,
 		},
 	)
 	if err != nil {
 		t.Fatalf("standalone live preflight beside active runtime: %v", err)
 	}
 	if !preflight.Enabled || !preflight.UseCgroupFD || !preflight.SetsidDescendantKilled ||
-		preflight.ProviderUID != identities[1].UID || preflight.ProviderGID != identities[1].GID {
+		preflight.ProviderUID != identities[1].UID || preflight.ProviderGID != identities[1].GID ||
+		!preflight.ResourceLimitsApplied || preflight.ProviderLimits == nil ||
+		*preflight.ProviderLimits != liveProtectedCgroupResourceLimits() {
 		t.Fatalf("standalone live preflight report = %#v", preflight)
 	}
 	assertPIDAlive(t, provider.Process.Pid)
@@ -181,6 +196,7 @@ func testProtectedCgroupLiveRuntime(t *testing.T, root string) protectedCgroupLi
 	}
 	if duplicate, duplicateErr := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: identities[0], ProviderIdentity: identities[1], Fence: fence,
+		ProviderLimits:     liveProtectedCgroupResourceLimits(),
 		SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(), RootLease: lease,
 	}); duplicateErr == nil {
 		_ = duplicate.Cleanup(fence)
@@ -193,7 +209,7 @@ func testProtectedCgroupLiveRuntime(t *testing.T, root string) protectedCgroupLi
 	if err := runtime.AttachProviderPID(wrongFence, os.Getpid()); err == nil || !strings.Contains(err.Error(), "fence mismatch") {
 		t.Fatalf("same-runtime wrong-fence attach error = %v", err)
 	}
-	assertPIDInCgroup(t, os.Getpid(), root)
+	assertPIDInCgroup(t, os.Getpid(), filepath.Join(root, protectedCgroupSupervisorSubgroup))
 
 	if err := runtime.Cleanup(fence); err != nil {
 		t.Fatalf("real cgroup.kill cleanup: %v", err)
@@ -204,7 +220,8 @@ func testProtectedCgroupLiveRuntime(t *testing.T, root string) protectedCgroupLi
 	return protectedCgroupLiveProof{
 		Status: "pass", Mutation: "real cgroup.kill removed the active bundle", Bundle: filepath.Base(paths.BundlePath),
 		ProviderPID: provider.Process.Pid, DescendantPID: descendantPID,
-		Detail: "standalone live preflight proved UseCgroupFD, uid/gid drop, and setsid kill while preserving the runtime; overlap and same-fence activation failed closed",
+		Detail:         "standalone live preflight proved UseCgroupFD, uid/gid drop, exact finite pids/memory/cpu limits, and setsid kill while preserving the runtime; overlap and same-fence activation failed closed",
+		ProviderLimits: &observedLimits,
 	}
 }
 
@@ -217,23 +234,23 @@ func testProtectedCgroupLiveParentExtraPID(t *testing.T, root string) protectedC
 		t.Fatal(err)
 	}
 	defer reapLiveCommand(extra)
-	assertPIDInCgroup(t, extra.Process.Pid, root)
+	assertPIDInCgroup(t, extra.Process.Pid, filepath.Join(root, protectedCgroupSupervisorSubgroup))
 	identities := liveProtectedCgroupIdentities()
 	lease, err := AcquireProtectedCgroupRootLease(ProtectedCgroupRootLeaseConfig{
 		ParentPath: root, SupervisorIdentity: identities[0], ProviderIdentity: identities[1], SupervisorInstance: uuid.New(),
 	})
 	if err == nil {
 		_ = lease.Close()
-		t.Fatal("root lease accepted an extra parent PID")
+		t.Fatal("root lease accepted an extra supervisor-subgroup PID")
 	}
 	if !strings.Contains(err.Error(), "must contain only current agentd pid") {
-		t.Fatalf("extra parent PID error = %v", err)
+		t.Fatalf("extra supervisor-subgroup PID error = %v", err)
 	}
 	assertPIDAlive(t, process.Process.Pid)
 	assertCgroupPopulated(t, fixture.BundlePath, true)
 	return protectedCgroupLiveProof{
 		Status: "pass", Mutation: "zero", Bundle: filepath.Base(fixture.BundlePath), ProviderPID: process.Process.Pid,
-		Detail: "extra parent PID rejected before recovery and the populated v2 fixture remained alive",
+		Detail: "extra supervisor-subgroup PID rejected before recovery and the populated v3 fixture remained alive",
 	}
 }
 
@@ -258,7 +275,7 @@ func testProtectedCgroupLiveLegacy(t *testing.T, root string) protectedCgroupLiv
 	assertCgroupPopulated(t, fixture.BundlePath, true)
 	return protectedCgroupLiveProof{
 		Status: "pass", Mutation: "zero", Bundle: filepath.Base(fixture.BundlePath), ProviderPID: process.Process.Pid,
-		Detail: "legacy v1 entry rejected the complete recovery set before the live v2 fixture was killed",
+		Detail: "legacy v1 entry rejected the complete recovery set before the live v3 fixture was killed",
 	}
 }
 
@@ -319,17 +336,19 @@ Description=Synara protected cgroup v2 live crash fixture
 
 [Service]
 Type=exec
-ExecStart=%s -test.run=^TestProtectedCgroupV2LiveHelper$ -test.v -test.timeout=90s
+ExecStart=%s -test.run=^TestProtectedCgroupV3LiveHelper$ -test.v -test.timeout=90s
 Environment=%s=1
 Environment=%s=crash-holder
 Environment=%s=%s
 Environment=%s=%s
 Delegate=yes
+DelegateSubgroup=%s
 KillMode=process
 Restart=no
 TimeoutStopSec=2s
-`, binary, protectedCgroupLiveEnabledEnv, protectedCgroupLiveHelperModeEnv,
-		protectedCgroupLiveRootEnv, root, protectedCgroupLiveStateDirEnv, stateDir)
+	`, binary, protectedCgroupLiveEnabledEnv, protectedCgroupLiveHelperModeEnv,
+		protectedCgroupLiveRootEnv, root, protectedCgroupLiveStateDirEnv, stateDir,
+		protectedCgroupSupervisorSubgroup)
 	if err := os.WriteFile(unitPath, []byte(unitPayload), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -362,10 +381,10 @@ TimeoutStopSec=2s
 	}
 }
 
-// TestProtectedCgroupV2LiveHelper is selected only by the live lane's exact
+// TestProtectedCgroupV3LiveHelper is selected only by the live lane's exact
 // helper command. It supports a Provider process tree and a restartable
 // systemd crash holder without adding production-only hooks.
-func TestProtectedCgroupV2LiveHelper(t *testing.T) {
+func TestProtectedCgroupV3LiveHelper(t *testing.T) {
 	if os.Getenv(protectedCgroupLiveEnabledEnv) != "1" {
 		t.Skip("live helper")
 	}
@@ -429,6 +448,7 @@ func runProtectedCgroupLiveCrashHolder(t *testing.T) {
 	fence := ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 501, WorkerIncarnation: uuid.New()}
 	supervisor, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: identities[0], ProviderIdentity: identities[1], Fence: fence,
+		ProviderLimits:     liveProtectedCgroupResourceLimits(),
 		SupervisorInstance: lease.supervisorInstance, RuntimeInstance: uuid.New(), RootLease: lease,
 	})
 	if err != nil {
@@ -458,6 +478,35 @@ func liveProtectedCgroupIdentities() [2]ProtectedCgroupIdentity {
 	return [2]ProtectedCgroupIdentity{{UID: 0, GID: 0}, {UID: 65534, GID: 65534}}
 }
 
+func liveProtectedCgroupResourceLimits() ProtectedCgroupResourceLimits {
+	return ProtectedCgroupResourceLimits{
+		PidsMax: 128, MemoryMaxBytes: 512 << 20, CPUQuotaMicros: 200_000, CPUPeriodMicros: 100_000,
+	}
+}
+
+func assertLiveProviderLimits(
+	t *testing.T,
+	providerPath string,
+	limits ProtectedCgroupResourceLimits,
+) ProtectedCgroupResourceLimits {
+	t.Helper()
+	want := map[string]string{
+		"pids.max":   strconv.FormatUint(limits.PidsMax, 10),
+		"memory.max": strconv.FormatUint(limits.MemoryMaxBytes, 10),
+		"cpu.max":    fmt.Sprintf("%d %d", limits.CPUQuotaMicros, limits.CPUPeriodMicros),
+	}
+	for _, name := range []string{"pids.max", "memory.max", "cpu.max"} {
+		data, err := os.ReadFile(filepath.Join(providerPath, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual := strings.Join(strings.Fields(string(data)), " "); actual != want[name] {
+			t.Fatalf("live Provider %s = %q, want %q", name, actual, want[name])
+		}
+	}
+	return limits
+}
+
 func acquireLiveRootLease(t *testing.T, root string, identities [2]ProtectedCgroupIdentity, instance uuid.UUID) *ProtectedCgroupRootLease {
 	t.Helper()
 	lease, err := AcquireProtectedCgroupRootLease(ProtectedCgroupRootLeaseConfig{
@@ -483,7 +532,7 @@ func startLiveProviderTree(t *testing.T, supervisor *ProtectedCgroupSupervisor, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestProtectedCgroupV2LiveHelper$", "-test.v", "-test.timeout=60s")
+	command := exec.Command(os.Args[0], "-test.run=^TestProtectedCgroupV3LiveHelper$", "-test.v", "-test.timeout=60s")
 	command.Env = append(os.Environ(),
 		protectedCgroupLiveEnabledEnv+"=1",
 		protectedCgroupLiveHelperModeEnv+"=provider",
@@ -558,23 +607,31 @@ func assertLiveCgroupRoot(t *testing.T, root string, pid int) {
 	if uint64(stats.Type) != linuxCgroup2SuperMagic {
 		t.Fatalf("%s is not cgroup2", root)
 	}
-	assertPIDInCgroup(t, pid, root)
+	supervisorPath := filepath.Join(root, protectedCgroupSupervisorSubgroup)
+	assertPIDInCgroup(t, pid, supervisorPath)
 	data, err := os.ReadFile(filepath.Join(root, "cgroup.procs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields := strings.Fields(string(data)); len(fields) != 0 {
+		t.Fatalf("live root cgroup.procs = %q, want process-free delegated root", fields)
+	}
+	data, err = os.ReadFile(filepath.Join(supervisorPath, "cgroup.procs"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fields := strings.Fields(string(data))
 	if len(fields) != 1 || fields[0] != strconv.Itoa(pid) {
-		t.Fatalf("live root cgroup.procs = %q, want only %d", fields, pid)
+		t.Fatalf("live supervisor subgroup cgroup.procs = %q, want only %d", fields, pid)
 	}
 }
 
-func assertLiveSystemdService(t *testing.T, root string) protectedCgroupLiveSystemdProof {
+func assertLiveSystemdService(t *testing.T, root string, requireControllers ...bool) protectedCgroupLiveSystemdProof {
 	t.Helper()
 	unit := filepath.Base(root)
 	command := exec.Command(
 		"systemctl", "show", unit,
-		"--property=Delegate", "--property=KillMode", "--property=ControlGroup",
+		"--property=Delegate", "--property=DelegateSubgroup", "--property=KillMode", "--property=ControlGroup",
 		"--property=MainPID", "--property=ActiveState", "--property=SubState",
 	)
 	output, err := command.Output()
@@ -589,15 +646,60 @@ func assertLiveSystemdService(t *testing.T, root string) protectedCgroupLiveSyst
 		}
 	}
 	wantControlGroup := "/system.slice/" + unit
-	if values["Delegate"] != "yes" || values["KillMode"] != "process" ||
+	if values["Delegate"] != "yes" || values["DelegateSubgroup"] != protectedCgroupSupervisorSubgroup ||
+		values["KillMode"] != "process" ||
 		values["ControlGroup"] != wantControlGroup || values["MainPID"] != strconv.Itoa(os.Getpid()) ||
 		values["ActiveState"] != "active" || values["SubState"] != "running" {
 		t.Fatalf("live systemd service properties = %#v", values)
 	}
-	return protectedCgroupLiveSystemdProof{
-		Unit: unit, Delegate: values["Delegate"], KillMode: values["KillMode"],
-		ControlGroup: values["ControlGroup"], ActiveState: values["ActiveState"], SubState: values["SubState"],
+	parentPIDs := readLiveCgroupPIDs(t, root)
+	if len(parentPIDs) != 0 {
+		t.Fatalf("live delegated root contains processes: %v", parentPIDs)
 	}
+	supervisorPIDs := readLiveCgroupPIDs(t, filepath.Join(root, protectedCgroupSupervisorSubgroup))
+	if len(supervisorPIDs) != 1 || supervisorPIDs[0] != os.Getpid() {
+		t.Fatalf("live supervisor subgroup processes = %v, want only %d", supervisorPIDs, os.Getpid())
+	}
+	controllerData, err := os.ReadFile(filepath.Join(root, "cgroup.subtree_control"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllers := strings.Fields(string(controllerData))
+	slices.Sort(controllers)
+	controllerSet := make(map[string]struct{}, len(controllers))
+	for _, controller := range controllers {
+		controllerSet[controller] = struct{}{}
+	}
+	if len(requireControllers) > 0 && requireControllers[0] {
+		for _, required := range protectedCgroupRequiredControllers {
+			if _, found := controllerSet[required]; !found {
+				t.Fatalf("live delegated root enabled controllers = %v, missing %s", controllers, required)
+			}
+		}
+	}
+	return protectedCgroupLiveSystemdProof{
+		Unit: unit, Delegate: values["Delegate"], DelegateSubgroup: values["DelegateSubgroup"], KillMode: values["KillMode"],
+		ControlGroup: values["ControlGroup"], ActiveState: values["ActiveState"], SubState: values["SubState"],
+		ParentProcessCount: len(parentPIDs), SupervisorPIDs: supervisorPIDs, EnabledControllers: controllers,
+	}
+}
+
+func readLiveCgroupPIDs(t *testing.T, path string) []int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(path, "cgroup.procs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(data))
+	result := make([]int, 0, len(fields))
+	for _, field := range fields {
+		pid, parseErr := strconv.Atoi(field)
+		if parseErr != nil || pid <= 0 {
+			t.Fatalf("invalid PID %q in %s/cgroup.procs", field, path)
+		}
+		result = append(result, pid)
+	}
+	return result
 }
 
 func assertPIDInCgroup(t *testing.T, pid int, expected string) {

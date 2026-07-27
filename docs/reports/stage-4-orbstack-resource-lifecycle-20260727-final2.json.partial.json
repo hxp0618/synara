@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "passed",
+  "startedAt": "2026-07-26T16:55:38Z",
+  "updatedAt": "2026-07-26T16:59:46Z",
+  "finishedAt": "2026-07-26T16:59:46Z",
+  "context": "orbstack",
+  "namespace": "synara-stage4-lifecycle-final2",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-lifecycle-final2",
+  "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final2.json",
+  "journalFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final2.json.journal.jsonl",
+  "partialFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final2.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 124
+  },
+  "plannedCases": [
+    "resource-lifecycle"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": [
+    {
+      "name": "resource-lifecycle",
+      "status": "passed",
+      "startedAt": "2026-07-26T16:57:42Z",
+      "finishedAt": "2026-07-26T16:59:46Z",
+      "details": {
+        "status": "passed",
+        "evidenceLevel": "E3",
+        "durationSeconds": 102,
+        "identities": {
+          "executionIdDigest": "fbf271dc8e33d31deab3a2723e53139034ee5040ffb561988059b798126c2cca",
+          "originalPodUidDigest": "fc9c7e4cb0d4d6cf1f20176d808e33fba44cf2a6ccc42021b0d1b1bd1ef3dfd3",
+          "physicalPodUidDistinct": true,
+          "replacementPodUidDigest": "fbfc390f2ee2863a7c3e991e6dc09a078cc9bb3c9b1495e7d9bb459bd7110c7e",
+          "sessionIdDigest": "389fb2b2accaf7bb3d69842b4078a967ace2dcc59b7b998f32d14a05ca6d8d19",
+          "targetIdDigest": "d1a22de7a1ce06811cff5f1e2cc238bcd3f8336236ebd1cbc04f343bf58fac12"
+        },
+        "lifecycle": {
+          "completedAt": "2026-07-26T16:59:25Z",
+          "completionMode": "kubernetes-pod-terminal-v1",
+          "firstGeneration": 1,
+          "leaseReleasedWhileSuspended": true,
+          "pendingAt": "2026-07-26T16:58:18Z",
+          "podTerminalPhase": "Succeeded",
+          "resumedAt": "2026-07-26T16:59:22Z",
+          "resumedGeneration": 2,
+          "sessionStateAfterCompletion": "idle",
+          "suspendedAt": "2026-07-26T16:59:22Z",
+          "waitingKeepAliveSeconds": 60
+        },
+        "pendingInteraction": {
+          "deliveryStatusBeforeRecovery": "resume-recorded",
+          "kind": "approval",
+          "preservedAcrossSuspension": true,
+          "providerCallbackReplayed": false,
+          "requestIdDigest": "86d8176d9bd14eb8234731db2603ac7129435e1f6ab1ec5f37e455492a038e3f",
+          "resolvedWhileSuspended": true
+        },
+        "workspace": {
+          "readyCheckpointCount": 3,
+          "recoveryEvidenceEventCount": 1,
+          "restoredArtifactVerifiedByReplacement": true
+        },
+        "recoveryBundle": {
+          "bundleCount": 2,
+          "coverage": {
+            "configuration": true,
+            "conversationContext": true,
+            "memoryReferencesField": true,
+            "pendingInteractionResolution": true,
+            "schedulingDecision": true,
+            "workspaceCheckpoint": true
+          },
+          "initialPayloadSHA256": "7a949ebe983b83cbeb142e24d511b4c291784b1a27151d7abdc6522cf3b3d7ac",
+          "lineageVerified": true,
+          "resumedPayloadSHA256": "b2668320e9c6150dc3b62927befa3fb70b33f2cee460f22923fd165f4572c229"
+        },
+        "podLifecycle": {
+          "originalPodAbsentBeforeResume": true,
+          "originalPodNameDigest": "d1c73af0564fa86adad90b6e15c4d255c6665d8f5cc486fe1b565e79df8d3aa4",
+          "originalPodTerminalSucceeded": true,
+          "replacementPodObserved": true,
+          "workerIncarnationCount": 2
+        },
+        "cleanup": {
+          "alreadyAbsent": false,
+          "attempted": true,
+          "deleted": true,
+          "uidPrecondition": true
+        },
+        "reasonCode": null,
+        "message": null,
+        "details": null
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "passed",
+    "startedAt": "2026-07-26T16:55:38Z",
+    "finishedAt": "2026-07-26T16:59:46Z",
+    "durationSeconds": 248,
+    "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final2.json",
+    "unexpectedExitStatus": null
+  }
+}

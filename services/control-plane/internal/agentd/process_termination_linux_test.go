@@ -104,9 +104,11 @@ func TestProtectedLinuxCgroupPreparesProviderCredentialAndAttachFD(t *testing.T)
 		t.Fatal(err)
 	}
 	command := exec.Command("true")
+	providerLimits := testProtectedCgroupResourceLimits()
 	tree, err := newProcessTree(command, processTreeOptions{
 		CgroupV2Root:              root,
 		ProtectedProviderIdentity: &providerIdentity,
+		ProtectedProviderLimits:   &providerLimits,
 		ContainmentFence:          fence,
 		SupervisorInstance:        supervisorInstance,
 		RuntimeInstance:           runtimeInstance,
@@ -238,7 +240,7 @@ func linuxCgroupTestChildren(t *testing.T, root string) []string {
 	}
 	children := make([]string, 0)
 	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "synara-") {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "synara-") && entry.Name() != protectedCgroupSupervisorSubgroup {
 			children = append(children, filepath.Clean(entry.Name()))
 		}
 	}

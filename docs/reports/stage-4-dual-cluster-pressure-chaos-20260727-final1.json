@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "synara.kubernetes-dual-cluster-acceptance.v1",
+  "runID": "20260727095456-18242-22403",
+  "startedAt": "2026-07-27T09:54:56Z",
+  "finishedAt": "2026-07-27T10:01:53Z",
+  "status": "failed",
+  "exitCode": 1,
+  "phase": "run-go-integration-test",
+  "failure": "Go integration test failed with exit code 1",
+  "contexts": {
+    "primary": {
+      "name": "orbstack",
+      "kubernetesVersion": "v1.34.8+orb1",
+      "nodeCount": 1
+    },
+    "secondary": {
+      "name": "kind-synara-dr-20260727095456-18242-22403",
+      "kubernetesVersion": "v1.33.1",
+      "nodeCount": 1
+    }
+  },
+  "test": {
+    "name": "TestStage4DualClusterDisasterRecoveryAgainstRealAPIServers",
+    "status": "failed",
+    "exitCode": 1
+  },
+  "checks": {
+    "currentContextUnchanged": true,
+    "detailProduced": false,
+    "detailValidJSON": false,
+    "detailWithin65536Bytes": false,
+    "detailContainsNoConnectionMaterial": false,
+    "detailAssertionsAllowlistedBooleans": false,
+    "integrationAssertions": {}
+  },
+  "detail": {
+    "bytes": 0,
+    "sha256": null
+  },
+  "source": {
+    "gitSHA": "b0182cf6436683a32a25b3905d57c1936d20564e",
+    "worktreeDirty": true
+  },
+  "workerImage": {
+    "tag": "synara-worker:dual-cluster-20260727095456-18242-22403",
+    "configID": "sha256:b7a3154bf31078339aa2e1d2806ccac3bf0f69bef2678898e3fa170515e697cd",
+    "manifestDigest": "sha256:b7a3154bf31078339aa2e1d2806ccac3bf0f69bef2678898e3fa170515e697cd",
+    "acceptanceBoundary": {
+      "workerAPI": "bounded-stub-with-production-kubernetes-identity-verifier",
+      "podBoundWorkloadIdentityVerified": false,
+      "fullWorkerRegistrationPersistenceVerified": false
+    }
+  },
+  "cleanup": {
+    "status": "passed"
+  },
+  "safety": {
+    "tokenRequestCredentialsPersisted": false,
+    "touchedSynaraSystem": false,
+    "kindKubeconfigIsolated": true
+  }
+}

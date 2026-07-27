@@ -59,7 +59,11 @@ and run labels still match the current run.
 
 ## Boundary
 
-This is local S3-compatible evidence, not AWS/GCP/Azure deployment acceptance. It intentionally reports
-`cloudWorkloadIdentityVerified=false`; managed-cloud workload identity, native billing-export objects, multi-account
-allocation, and production retention/soak remain external gates. The combined lane also uses time-based resource
+This lane is repository/runtime evidence for the billing core, not a supported cloud-provider integration. Synara's
+current product boundary is self-hosted Kubernetes with operator-managed versioned tariffs and durable
+requested-resource accounting. Native AWS/GCP/Azure billing exports, provider Workload Identity, cross-account billing,
+and managed-cloud acceptance are deferred and do not block Stage 4.
+
+The provider-shaped parsers and versioned Blob adapters remain internal compatibility surfaces and test fixtures; they
+must not be advertised as a supported AWS, GCP, or Azure billing connector. The combined lane uses time-based resource
 charges only. Request-charge claim-ledger behavior is covered by the separate migrated PostgreSQL concurrency tests.

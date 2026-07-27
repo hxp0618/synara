@@ -77,6 +77,8 @@ type Config struct {
 	DockerReconcileInterval              time.Duration
 	KubernetesReconcileInterval          time.Duration
 	KubernetesPodPendingFailureThreshold time.Duration
+	WorkerPoolAutoscalingInterval        time.Duration
+	WorkerPoolAutoscalingBatchSize       int
 	PlatformRoutingPublishers            []routing.PlatformAuthorityPublisherConfig
 	ResourceLifecycleSweepInterval       time.Duration
 	WorkerAutoRollbackEnabled            bool
@@ -87,6 +89,11 @@ type Config struct {
 	OutboxPollInterval                   time.Duration
 	OutboxClaimTTL                       time.Duration
 	OutboxBatchSize                      int
+	OutboxMaxBatchSize                   int
+	OutboxMaxConcurrency                 int
+	OutboxScaleUpDepth                   int
+	OutboxTargetDelay                    time.Duration
+	OutboxThrottleDepth                  int
 	OutboxMaxAttempts                    int
 	OutboxBaseBackoff                    time.Duration
 	OutboxMaxBackoff                     time.Duration
@@ -263,6 +270,12 @@ func Load() (Config, error) {
 	if cfg.KubernetesPodPendingFailureThreshold, err = envDurationStrict("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD", 2*time.Minute); err != nil {
 		return Config{}, err
 	}
+	if cfg.WorkerPoolAutoscalingInterval, err = envDurationStrict("SYNARA_WORKER_POOL_AUTOSCALING_INTERVAL", 5*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkerPoolAutoscalingBatchSize, err = envInt("SYNARA_WORKER_POOL_AUTOSCALING_BATCH_SIZE", 200); err != nil {
+		return Config{}, err
+	}
 	if rawPublishers, ok := nonEmptyEnv("SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON"); ok {
 		cfg.PlatformRoutingPublishers, err = parsePlatformRoutingPublishers(rawPublishers)
 		if err != nil {
@@ -294,6 +307,21 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.OutboxBatchSize, err = envInt("SYNARA_OUTBOX_BATCH_SIZE", 50); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxMaxBatchSize, err = envInt("SYNARA_OUTBOX_MAX_BATCH_SIZE", 500); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxMaxConcurrency, err = envInt("SYNARA_OUTBOX_MAX_CONCURRENCY", 8); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxScaleUpDepth, err = envInt("SYNARA_OUTBOX_SCALE_UP_DEPTH", 100); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxTargetDelay, err = envDurationStrict("SYNARA_OUTBOX_TARGET_DELAY", 5*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxThrottleDepth, err = envInt("SYNARA_OUTBOX_THROTTLE_DEPTH", 100000); err != nil {
 		return Config{}, err
 	}
 	if cfg.OutboxMaxAttempts, err = envInt("SYNARA_OUTBOX_MAX_ATTEMPTS", 12); err != nil {
@@ -523,6 +551,18 @@ func Load() (Config, error) {
 	}
 	if cfg.OutboxBatchSize <= 0 || cfg.OutboxBatchSize > 1000 {
 		return Config{}, errors.New("SYNARA_OUTBOX_BATCH_SIZE must be between 1 and 1000")
+	}
+	if cfg.OutboxMaxBatchSize < cfg.OutboxBatchSize || cfg.OutboxMaxBatchSize > 10000 {
+		return Config{}, errors.New("SYNARA_OUTBOX_MAX_BATCH_SIZE must be between SYNARA_OUTBOX_BATCH_SIZE and 10000")
+	}
+	if cfg.OutboxMaxConcurrency < 1 || cfg.OutboxMaxConcurrency > 128 {
+		return Config{}, errors.New("SYNARA_OUTBOX_MAX_CONCURRENCY must be between 1 and 128")
+	}
+	if cfg.OutboxScaleUpDepth < 1 || cfg.OutboxThrottleDepth <= cfg.OutboxScaleUpDepth {
+		return Config{}, errors.New("SYNARA_OUTBOX_SCALE_UP_DEPTH must be positive and SYNARA_OUTBOX_THROTTLE_DEPTH must be greater")
+	}
+	if cfg.OutboxTargetDelay < time.Millisecond || cfg.OutboxTargetDelay > time.Hour {
+		return Config{}, errors.New("SYNARA_OUTBOX_TARGET_DELAY must be between 1ms and 1h")
 	}
 	if cfg.OutboxMaxAttempts <= 0 {
 		return Config{}, errors.New("SYNARA_OUTBOX_MAX_ATTEMPTS must be positive")

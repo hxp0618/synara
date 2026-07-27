@@ -471,7 +471,10 @@ func schemaScopedDatabaseURL(t *testing.T, databaseURL, schemaName string) strin
 		t.Fatalf("parse SYNARA_TEST_DATABASE_URL: %v", err)
 	}
 	query := parsed.Query()
-	query.Set("search_path", schemaName)
+	// Keep the isolated schema first so every unqualified table is created and
+	// resolved there, while retaining access to extensions installed in public
+	// (for example pgcrypto.digest used by scheduling-decision migrations).
+	query.Set("search_path", schemaName+",public")
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/cgroupv2limits"
 )
 
 // ProtectedCgroupIdentity identifies the OS principal that must own the
@@ -11,6 +13,14 @@ import (
 type ProtectedCgroupIdentity struct {
 	UID uint32
 	GID uint32
+}
+
+// ProtectedCgroupResourceLimits are finite hard limits applied to every
+// untrusted Provider cgroup before the Provider process can start.
+type ProtectedCgroupResourceLimits = cgroupv2limits.Limits
+
+func validateProtectedCgroupResourceLimits(limits ProtectedCgroupResourceLimits) error {
+	return cgroupv2limits.Validate(limits)
 }
 
 // ProtectedCgroupFence binds a protected cgroup subtree to one execution
@@ -28,6 +38,7 @@ type ProtectedCgroupSupervisorConfig struct {
 	ParentPath         string
 	SupervisorIdentity ProtectedCgroupIdentity
 	ProviderIdentity   ProtectedCgroupIdentity
+	ProviderLimits     ProtectedCgroupResourceLimits
 	Fence              ProtectedCgroupFence
 	SupervisorInstance uuid.UUID
 	RuntimeInstance    uuid.UUID

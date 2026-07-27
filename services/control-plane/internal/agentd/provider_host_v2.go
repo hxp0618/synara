@@ -32,6 +32,14 @@ const (
 	providerHostCommandLimit        = 2 << 20
 	providerHostRuntimeEventVersion = executions.RuntimeEventVersionV2
 	providerHostExperimentalEnv     = "SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS"
+
+	// providerHostCommandWriteGrace bounds how long a cancelled command waits
+	// for its own write to report back. The write goroutine can stay unscheduled
+	// well after stdin accepted the bytes, so a cancellation that arrives just
+	// then would otherwise tear down a Turn the Provider had already started.
+	// Only a write the Provider has genuinely stopped reading reaches the
+	// deadline, and that one still needs the Host failed to unblock it.
+	providerHostCommandWriteGrace = 250 * time.Millisecond
 )
 
 var providerHostProviders = append([]string(nil), stage3ProviderNames...)
@@ -46,6 +54,11 @@ var providerHostProxyEnvironmentAllowlist = []string{
 	"SYNARA_PROVIDER_HTTPS_PROXY",
 	"SYNARA_PROVIDER_ALL_PROXY",
 	"SYNARA_PROVIDER_NO_PROXY",
+}
+
+var providerHostPackageEnvironmentAllowlist = []string{
+	providerNPMConfigAlias,
+	providerPIPConfigAlias,
 }
 
 type providerHostProtocolVersion struct {
@@ -141,6 +154,10 @@ type runnerFailure struct {
 	canReconstructFromHistory bool
 	canMoveWorker             bool
 	persistedTerminal         bool
+	// cause carries the underlying error for logs and errors.Is/As. It is
+	// deliberately kept out of Error(): the message is surfaced to operators and
+	// must stay free of paths, remotes and command output.
+	cause error
 }
 
 func runnerFailurePersisted(err error) bool {
@@ -149,6 +166,20 @@ func runnerFailurePersisted(err error) bool {
 }
 
 func (e *runnerFailure) Error() string { return e.message }
+
+func (e *runnerFailure) Unwrap() error { return e.cause }
+
+// runnerFailureCause returns the underlying error a runnerFailure carries. It
+// exists because Error() intentionally omits it: callers that report towards
+// the control plane must keep the generic message, while the Worker's own log
+// needs the detail. Sanitize the result before logging it.
+func runnerFailureCause(err error) error {
+	var failure *runnerFailure
+	if errors.As(err, &failure) {
+		return failure.cause
+	}
+	return nil
+}
 
 func runnerFailureCode(err error) string {
 	var exposure *secretguard.ExposureError
@@ -246,11 +277,12 @@ func (r *Runner) runProviderHostV2(
 		)
 	}
 	if process == nil {
-		process, err = r.startProviderHostV2(
+		process, err = r.startProviderHostV2WithEnvironment(
 			ctx,
 			credential,
 			input.Execution.ID,
 			input.Execution.Generation,
+			input.ProviderEnvironment,
 		)
 		if err != nil {
 			return RunnerResult{}, err
@@ -1009,11 +1041,6 @@ type runnerControlExecutionResult struct {
 	suspended     *runnerSuspended
 }
 
-func (e *providerHostCommandExecution) wait() (providerHostMessage, error) {
-	outcome := <-e.result
-	return outcome.message, outcome.err
-}
-
 func (e *providerHostCommandExecution) waitContext(ctx context.Context) (providerHostMessage, error) {
 	select {
 	case outcome := <-e.result:
@@ -1029,7 +1056,17 @@ func (r *Runner) startProviderHostV2(
 	executionID uuid.UUID,
 	generation int64,
 ) (*providerHostV2Process, error) {
-	return r.startProviderHostV2WithCredential(ctx, credential, false, executionID, generation)
+	return r.startProviderHostV2WithEnvironment(ctx, credential, executionID, generation, nil)
+}
+
+func (r *Runner) startProviderHostV2WithEnvironment(
+	ctx context.Context,
+	credential *RunnerCredential,
+	executionID uuid.UUID,
+	generation int64,
+	environment map[string]string,
+) (*providerHostV2Process, error) {
+	return r.startProviderHostV2WithCredential(ctx, credential, false, executionID, generation, environment)
 }
 
 func (r *Runner) startProviderHostV2DeferredCredential(
@@ -1037,7 +1074,7 @@ func (r *Runner) startProviderHostV2DeferredCredential(
 	executionID uuid.UUID,
 	generation int64,
 ) (*providerHostV2Process, error) {
-	return r.startProviderHostV2WithCredential(ctx, nil, true, executionID, generation)
+	return r.startProviderHostV2WithCredential(ctx, nil, true, executionID, generation, nil)
 }
 
 func (r *Runner) startProviderHostV2WithCredential(
@@ -1046,6 +1083,7 @@ func (r *Runner) startProviderHostV2WithCredential(
 	deferCredential bool,
 	executionID uuid.UUID,
 	generation int64,
+	executionEnvironment map[string]string,
 ) (*providerHostV2Process, error) {
 	if len(r.command) == 0 {
 		return nil, &runnerFailure{code: "provider_unavailable", message: "Provider Host command is empty", canMoveWorker: true}
@@ -1068,7 +1106,12 @@ func (r *Runner) startProviderHostV2WithCredential(
 			_ = processTree.release()
 		}
 	}()
-	command.Env = providerHostEnvironment(os.Environ(), r.experimentalProviderList())
+	command.Env, err = providerHostEnvironmentForExecution(
+		os.Environ(), r.experimentalProviderList(), executionEnvironment,
+	)
+	if err != nil {
+		return nil, err
+	}
 	var credentialHandoff *providerHostCredentialHandoff
 	credentialHandoffOwned := false
 	defer func() {
@@ -1158,26 +1201,44 @@ func providerHostEnvironment(source []string, experimentalProviders []string) []
 	allowlist := make([]string, 0, len(runnerEnvironmentAllowlist)+len(providerHostProxyEnvironmentAllowlist))
 	allowlist = append(allowlist, runnerEnvironmentAllowlist...)
 	allowlist = append(allowlist, providerHostProxyEnvironmentAllowlist...)
+	// Package-manager config paths carry per-Execution credentials. Never inherit
+	// them from agentd's ambient environment; they are added only from the
+	// generation-fenced RunnerInput below.
 	result := selectProcessEnvironment(source, allowlist)
 	result = append(result, providerHostExperimentalEnv+"="+strings.Join(experimentalProviders, ","))
 	return result
+}
+
+func providerHostEnvironmentForExecution(
+	source []string,
+	experimentalProviders []string,
+	executionEnvironment map[string]string,
+) ([]string, error) {
+	result := providerHostEnvironment(source, experimentalProviders)
+	if len(executionEnvironment) == 0 {
+		return result, nil
+	}
+	allowed := make(map[string]struct{}, len(providerHostPackageEnvironmentAllowlist))
+	for _, name := range providerHostPackageEnvironmentAllowlist {
+		allowed[name] = struct{}{}
+	}
+	for name, value := range executionEnvironment {
+		if _, ok := allowed[name]; !ok || !filepath.IsAbs(value) || strings.ContainsAny(value, "\r\n\x00") {
+			return nil, errors.New("Provider execution environment contains an unsupported value")
+		}
+	}
+	for _, name := range providerHostPackageEnvironmentAllowlist {
+		if value, found := executionEnvironment[name]; found {
+			result = replaceEnvironmentValue(result, name, value)
+		}
+	}
+	return result, nil
 }
 
 func closeProviderHostFiles(command *exec.Cmd) {
 	for _, file := range command.ExtraFiles {
 		_ = file.Close()
 	}
-}
-
-func (p *providerHostV2Process) execute(
-	command providerHostCommand,
-	handle func(RunnerMessage) error,
-) (providerHostMessage, error) {
-	execution, err := p.startCommand(context.Background(), command, handle)
-	if err != nil {
-		return providerHostMessage{}, err
-	}
-	return execution.wait()
 }
 
 func (p *providerHostV2Process) executeContext(
@@ -1263,8 +1324,7 @@ func (p *providerHostV2Process) startCommandBeforeWrite(
 		p.writeMu.Unlock()
 		writeResult <- err
 	}()
-	select {
-	case err := <-writeResult:
+	written := func(err error) (*providerHostCommandExecution, error) {
 		if err == nil {
 			return &providerHostCommandExecution{result: state.result}, nil
 		}
@@ -1274,7 +1334,23 @@ func (p *providerHostV2Process) startCommandBeforeWrite(
 		}
 		p.fail(failure)
 		return nil, failure
+	}
+	select {
+	case err := <-writeResult:
+		return written(err)
 	case <-ctx.Done():
+		// A cancellation racing a completed write must not win: the Provider has
+		// the command and has started the Turn, so failing the Host here would
+		// abandon it and the caller would lose both the Turn's residual failure
+		// and its chance to quiesce gracefully. Give the write its grace period
+		// before treating the cancellation as authoritative.
+		grace := time.NewTimer(providerHostCommandWriteGrace)
+		defer grace.Stop()
+		select {
+		case err := <-writeResult:
+			return written(err)
+		case <-grace.C:
+		}
 		p.fail(&runnerFailure{
 			code: "cancelled", message: "Provider Host command write was cancelled",
 			requiresNewExecution: true, canReconstructFromHistory: true, canMoveWorker: true,

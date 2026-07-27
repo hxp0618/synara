@@ -304,7 +304,8 @@ Control Plane 权威和四 Target Acceptance 均已完成。最终 clean runtime
 - 为每种 Execution Target 维护独立 Provider 实现。
 - 强制引入 gRPC、NATS 或 Kafka 才能完成 Provider Runtime。
 - 多集群调度、Warm Pool、跨 Region Placement 和公平调度；这些属于 Stage 4。
-- 企业计费、成本分摊、完整运营后台和 GA 合规；这些属于 Stage 5。
+- 企业计费、成本分摊、完整运营后台和 GA 合规；这些属于 Stage 6（原 Stage 5，因新增沙箱隔离
+  加固阶段而顺延）。
 - 实时双向同步用户本地目录。
 - 把完整 Terminal Stream、仓库内容或生成文件直接写入 Session Event JSON。
 - 承诺所有 Provider 都具有相同的原生能力。
@@ -2302,6 +2303,7 @@ Stage 3 完成后：
 
 - Stage 4 可以把已经稳定的 Worker/Provider Runtime 当作调度单元，专注多集群、容量、Warm
   Pool、Placement、隔离和灾难恢复。
-- Stage 5 可以基于稳定的 Provider/Worker Manifest 统计用量、成本、SLO、安全和企业运维能力。
+- 企业 GA 阶段（Stage 6，原 Stage 5）可以基于稳定的 Provider/Worker Manifest 统计用量、成本、
+  SLO、安全和企业运维能力。
 - 新增 Provider 应主要实现 Provider Adapter/Host Contract 并运行统一 Acceptance Suite，不应再
   修改 Control Plane Session/Execution 核心状态机。

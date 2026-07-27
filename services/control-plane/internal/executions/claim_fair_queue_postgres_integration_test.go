@@ -38,7 +38,7 @@ func TestClaimFairShareOrderPostgresPrefersTenantWithFewerActiveServiceUnits(t *
 		Where("agent_executions.execution_target_id = ?", target.ID).
 		Where("agent_executions.target_kind = ?", target.Kind).
 		Where("agent_executions.status IN ?", []string{"queued", "recovering"})
-	if err := applyClaimFairShareOrder(tx, query, false).Take(&selected).Error; err != nil {
+	if err := applyClaimFairShareOrder(tx, query, false, time.Now().UTC()).Take(&selected).Error; err != nil {
 		t.Fatal(err)
 	}
 	if selected.ID != tenantB.QueuedExecutionID {

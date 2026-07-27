@@ -104,10 +104,10 @@ Agentd owns the Host process and its managed process scope. Windows starts the H
 kill-on-close Job Object, then resumes it. Unix starts an isolated process group and terminates descendants that
 remain in that group on normal exit, protocol failure, cancellation or Drain. Linux can additionally bind the Host
 before its first instruction to a delegated cgroup-v2 child and verify `cgroup.kill -> populated=0` during cleanup.
-That primitive is not a strict Suspend attestation while Provider and supervisor share an identity that can write
-the parent cgroup hierarchy: a Provider could actively migrate out. The Stage 4 production gate therefore requires
-an escape-resistant supervisor/security boundary, and agentd must not advertise strict containment until that gate
-is proven. Control Plane eligibility does not trust the transient Worker capability map: the current Execution and
+Strict Linux attestation requires protected supervisor v3/probe 2: agentd and Provider use different UIDs, the
+delegated service root is process-free through `DelegateSubgroup=synara-agentd`, and the Provider child has exact
+finite `pids.max`, `memory.max`, and `cpu.max` values written and read back before launch. Same-identity, unbounded,
+v1/v2-supervisor, or v3/probe-1 evidence remains untrusted. Control Plane eligibility does not trust the transient Worker capability map: the current Execution and
 Worker must reference the same immutable Worker Manifest, and that Manifest must contain a valid OS-specific
 containment mode plus supervisor version, escape-probe SHA-256, and distinct supervisor/Provider identities. A
 same-identity or unprobed Worker remains fail closed even if operator-provided capability JSON claims otherwise.

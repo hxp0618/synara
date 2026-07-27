@@ -29,7 +29,8 @@ func WorkerManifestHasSupportedStrictProcessContainment(manifest persistence.Wor
 	switch mode {
 	case "cgroup-v2":
 		return manifest.OperatingSystem == "linux" &&
-			supervisorVersion == ProtectedCgroupSupervisorVersionV2
+			supervisorVersion == ProtectedCgroupSupervisorVersionV3 &&
+			*manifest.ProcessContainmentProbeVersion == ProtectedCgroupProbeVersionV3
 	case "job-object":
 		return manifest.OperatingSystem == "windows" && supervisorVersion != ""
 	default:
@@ -42,10 +43,12 @@ func WorkerManifestHasSupportedStrictCgroupV2Containment(manifest persistence.Wo
 		WorkerManifestHasSupportedStrictProcessContainment(manifest)
 }
 
-func WorkerManifestReportsUnsupportedCgroupSupervisor(manifest persistence.WorkerManifest) bool {
+func WorkerManifestReportsUnsupportedCgroupEvidence(manifest persistence.WorkerManifest) bool {
 	return strings.TrimSpace(manifest.ProcessContainmentMode) == "cgroup-v2" &&
 		(manifest.ProcessContainmentSupervisorVersion == nil ||
-			strings.TrimSpace(*manifest.ProcessContainmentSupervisorVersion) != ProtectedCgroupSupervisorVersionV2)
+			strings.TrimSpace(*manifest.ProcessContainmentSupervisorVersion) != ProtectedCgroupSupervisorVersionV3 ||
+			manifest.ProcessContainmentProbeVersion == nil ||
+			*manifest.ProcessContainmentProbeVersion != ProtectedCgroupProbeVersionV3)
 }
 
 func validStoredProcessContainmentSHA256(value string) bool {

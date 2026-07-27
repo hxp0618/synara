@@ -72,6 +72,7 @@ type CommandRecord = {
 type FixtureSession = {
   readonly provider: "codex" | "claudeAgent";
   readonly workspaceDirectory?: string;
+  recoveredInteraction?: RecoveredInteraction;
 };
 
 type PendingTurnKind = "approval" | "user-input" | "steer";
@@ -83,6 +84,20 @@ type PendingTurn = {
   readonly outputText: string;
   readonly credentialEvidence?: CredentialEvidence;
   readonly workspaceEvidence?: WorkspaceEvidence;
+  readonly recoveryEvidence?: RecoveryEvidence;
+};
+
+type RecoveredInteraction = {
+  readonly kind: "approval" | "user-input";
+  readonly requestId: string;
+  readonly resolutionRecorded: boolean;
+};
+
+type RecoveryEvidence = {
+  readonly source: "resume-snapshot";
+  readonly interactionKind: "approval" | "user-input";
+  readonly pendingInteractionCount: number;
+  readonly resumeRecordedInteractionCount: number;
 };
 
 type CredentialEvidence = {
@@ -498,8 +513,23 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
 
+    const recoveredInteraction = recoveredInteractionFromWorkload(
+      workload,
+      command.commandType === "ResumeSession",
+    );
+    if (recoveredInteraction === undefined) {
+      this.#terminalError(
+        command,
+        protocolError("ResumeSession contains an unsupported interaction recovery snapshot."),
+      );
+      return;
+    }
     const workspaceDirectory = optionalString(runnerInput.workspaceDirectory);
-    this.#session = { provider, ...(workspaceDirectory ? { workspaceDirectory } : {}) };
+    this.#session = {
+      provider,
+      ...(workspaceDirectory ? { workspaceDirectory } : {}),
+      ...(recoveredInteraction ? { recoveredInteraction } : {}),
+    };
     this.#terminalResult(command, {
       provider,
       resumed: command.commandType === "ResumeSession",
@@ -684,6 +714,43 @@ export class Stage3ProviderAcceptanceHost {
     }
 
     const outputText = `fixture ${this.#session.provider} turn ${this.#turnSequence} complete`;
+    const recoveredInteraction = this.#session.recoveredInteraction;
+    if (recoveredInteraction) {
+      delete this.#session.recoveredInteraction;
+      if (blocking[0] !== recoveredInteraction.kind) {
+        this.#terminalError(
+          command,
+          protocolError("Recovered interaction does not match the resumed SendTurn input."),
+        );
+        return;
+      }
+      const recoveryEvidence: RecoveryEvidence = {
+        source: "resume-snapshot",
+        interactionKind: recoveredInteraction.kind,
+        pendingInteractionCount: recoveredInteraction.resolutionRecorded ? 0 : 1,
+        resumeRecordedInteractionCount: recoveredInteraction.resolutionRecorded ? 1 : 0,
+      };
+      if (recoveredInteraction.resolutionRecorded) {
+        this.#terminalResult(
+          command,
+          this.#turnResult(outputText, credentialEvidence, workspaceEvidence, recoveryEvidence),
+        );
+        return;
+      }
+      this.#pendingTurn = {
+        command,
+        kind: recoveredInteraction.kind,
+        requestId: recoveredInteraction.requestId,
+        outputText,
+        ...(credentialEvidence ? { credentialEvidence } : {}),
+        ...(workspaceEvidence ? { workspaceEvidence } : {}),
+        recoveryEvidence,
+      };
+      // The Control Plane already owns and exposes the frozen pending
+      // interaction. Re-emitting it would create a second request instead of
+      // resuming the exact one bound into the Recovery Bundle.
+      return;
+    }
     if (blocking[0] === "approval") {
       const requestId = `fixture-approval-generation-${command.generation}-${this.#turnSequence}`;
       this.#pendingTurn = {
@@ -832,7 +899,12 @@ export class Stage3ProviderAcceptanceHost {
     this.#terminalResult(command, { acknowledged: true, requestId });
     this.#terminalResult(
       pending.command,
-      this.#turnResult(pending.outputText, pending.credentialEvidence, pending.workspaceEvidence),
+      this.#turnResult(
+        pending.outputText,
+        pending.credentialEvidence,
+        pending.workspaceEvidence,
+        pending.recoveryEvidence,
+      ),
     );
   }
 
@@ -916,12 +988,14 @@ export class Stage3ProviderAcceptanceHost {
     outputText: string,
     credentialEvidence?: CredentialEvidence,
     workspaceEvidence?: WorkspaceEvidence,
+    recoveryEvidence?: RecoveryEvidence,
   ): Record<string, unknown> {
     return {
       output: {
         text: outputText,
         ...(credentialEvidence ? { credentialEvidence } : {}),
         ...(workspaceEvidence ? { workspaceEvidence } : {}),
+        ...(recoveryEvidence ? { recoveryEvidence } : {}),
       },
       providerResumeCursor: this.#resumeCursor(),
     };
@@ -1231,6 +1305,57 @@ function hasResumeData(
   if (Array.isArray(workload.conversationHistory) && workload.conversationHistory.length > 0)
     return true;
   return asRecord(workload.resumeSnapshot) !== undefined;
+}
+
+// A rebuilt Provider Host must not invent a replacement prompt for an
+// interaction already frozen by the Control Plane. Pending interactions stay
+// active under their original request ID; resolutions recorded while the
+// runtime was suspended are treated as already applied by authoritative
+// history and are never delivered as a second Provider side effect.
+//
+// null means there is no interaction recovery state. undefined means the
+// snapshot is present but outside the deterministic fixture's one-interaction
+// acceptance contract and must fail closed.
+function recoveredInteractionFromWorkload(
+  workload: Record<string, unknown>,
+  resumed: boolean,
+): RecoveredInteraction | null | undefined {
+  const snapshot = asRecord(workload.resumeSnapshot);
+  // Initial claims also carry a frozen Resume Snapshot inside their Recovery
+  // Bundle. When there is no Provider history/cursor the Runner correctly
+  // starts a fresh Provider Session; the snapshot remains Control Plane
+  // evidence and does not make that StartSession a recovery replay.
+  if (!resumed) return null;
+  if (!snapshot) return null;
+
+  const pending = Array.isArray(snapshot.pendingInteractions) ? snapshot.pendingInteractions : [];
+  const recorded = Array.isArray(snapshot.resumeRecordedInteractions)
+    ? snapshot.resumeRecordedInteractions
+    : [];
+  if (pending.length + recorded.length === 0) return null;
+  if (pending.length + recorded.length !== 1) return undefined;
+
+  const resolutionRecorded = recorded.length === 1;
+  const interaction = asRecord((resolutionRecorded ? recorded : pending)[0]);
+  const requestId = optionalString(interaction?.requestId);
+  const kind = optionalString(interaction?.kind);
+  if (!interaction || !requestId || (kind !== "approval" && kind !== "user-input")) {
+    return undefined;
+  }
+  if (resolutionRecorded) {
+    const resolution = asRecord(interaction.resolution);
+    if (!resolution) return undefined;
+    if (kind === "approval") {
+      const decision = optionalString(resolution.decision);
+      if (decision !== "accept" && decision !== "decline") return undefined;
+    } else {
+      const answers = asRecord(resolution.answers);
+      if (answers?.["fixture-choice"] !== "Continue" || Object.keys(answers).length !== 1) {
+        return undefined;
+      }
+    }
+  }
+  return { kind, requestId, resolutionRecorded };
 }
 
 function matchesTargetCommand(command: ProviderHostCommand, activeCommandId: string): boolean {

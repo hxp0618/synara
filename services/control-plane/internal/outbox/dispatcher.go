@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -68,7 +70,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if count >= d.service.BatchSize() {
+		if count > 0 {
 			continue
 		}
 		timer := time.NewTimer(d.pollInterval)
@@ -84,27 +86,76 @@ func (d *Dispatcher) Run(ctx context.Context) {
 }
 
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
-	messages, err := d.service.Claim(ctx)
-	if err != nil {
-		return 0, err
+	decision, pressureErr := d.service.RefreshPressure(ctx)
+	if decision.BatchSize == 0 {
+		return 0, pressureErr
 	}
-	var failures []error
+	messages, err := d.service.ClaimLimit(ctx, decision.BatchSize)
+	if err != nil {
+		return 0, errors.Join(pressureErr, err)
+	}
+	if len(messages) == 0 {
+		return 0, pressureErr
+	}
+	concurrency := min(max(decision.Concurrency, 1), len(messages))
+	lanes := make([][]Message, concurrency)
 	for _, message := range messages {
-		if err := d.publisher.Publish(ctx, message); err != nil {
-			if ctx.Err() != nil {
-				_ = d.service.Release(context.WithoutCancel(ctx), message.ID)
-				return len(messages), ctx.Err()
-			}
-			if failErr := d.service.Fail(ctx, message, err); failErr != nil {
-				failures = append(failures, failErr)
-			} else {
-				failures = append(failures, fmt.Errorf("publish outbox message %s topic %s: %s", message.ID, message.Topic, errorSummary(err)))
-			}
+		lane := outboxDispatchLane(message.MessageKey, concurrency)
+		lanes[lane] = append(lanes[lane], message)
+	}
+	var wait sync.WaitGroup
+	var mu sync.Mutex
+	failures := make([]error, 0)
+	if pressureErr != nil {
+		failures = append(failures, pressureErr)
+	}
+	for _, lane := range lanes {
+		if len(lane) == 0 {
 			continue
 		}
-		if err := d.service.Acknowledge(ctx, message.ID); err != nil {
-			failures = append(failures, err)
-		}
+		lane := lane
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for _, message := range lane {
+				if err := d.dispatchMessage(ctx, message); err != nil {
+					mu.Lock()
+					failures = append(failures, err)
+					mu.Unlock()
+				}
+			}
+		}()
 	}
+	wait.Wait()
 	return len(messages), errors.Join(failures...)
+}
+
+func (d *Dispatcher) dispatchMessage(ctx context.Context, message Message) error {
+	if ctx.Err() != nil {
+		_ = d.service.Release(context.WithoutCancel(ctx), message.ID)
+		return ctx.Err()
+	}
+	if err := d.publisher.Publish(ctx, message); err != nil {
+		if ctx.Err() != nil {
+			_ = d.service.Release(context.WithoutCancel(ctx), message.ID)
+			return ctx.Err()
+		}
+		if failErr := d.service.Fail(ctx, message, err); failErr != nil {
+			return failErr
+		}
+		return fmt.Errorf("publish outbox message %s topic %s: %s", message.ID, message.Topic, errorSummary(err))
+	}
+	if err := d.service.Acknowledge(ctx, message.ID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func outboxDispatchLane(messageKey string, lanes int) int {
+	if lanes <= 1 {
+		return 0
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(messageKey))
+	return int(hash.Sum32() % uint32(lanes))
 }

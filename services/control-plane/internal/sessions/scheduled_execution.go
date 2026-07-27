@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/executionqueue"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
@@ -14,10 +15,9 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
-// ScheduledExecution freezes the execution row and the exact selected
-// scheduling evidence in the caller's transaction. The first evidence format
-// is deliberately selected-only: rejected candidates are not available from
-// the current routing and capability-gate APIs and must not be invented.
+// ScheduledExecution freezes the execution row and its scheduling evidence in
+// the caller's transaction. Routed launches retain the complete bounded
+// candidate trace; an explicit fixed Target honestly remains selected-only.
 type ScheduledExecution struct {
 	Execution         persistence.AgentExecution
 	Decision          persistence.ExecutionSchedulingDecision
@@ -32,6 +32,10 @@ func (s ScheduledExecution) SchedulingEvidencePayload() map[string]any {
 	execution := s.Execution
 	decision := s.Decision
 	return map[string]any{
+		"automationId":                        execution.AutomationID,
+		"queueClass":                          execution.QueueClass,
+		"queuePriority":                       execution.QueuePriority,
+		"quotaUnits":                          execution.QuotaUnits,
 		"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
 		"workerReleaseChannel":                execution.WorkerReleaseChannel,
 		"workerPoolId":                        execution.WorkerPoolID,
@@ -89,6 +93,21 @@ func CreateScheduledExecution(
 			"Execution scheduling evidence does not match the selected Execution Target.",
 		)
 	}
+	queueSnapshot, err := executionqueue.Normalize(executionqueue.Snapshot{
+		Class: execution.QueueClass, Priority: execution.QueuePriority,
+		QuotaUnits: execution.QuotaUnits, AutomationID: execution.AutomationID,
+	})
+	if err != nil {
+		return ScheduledExecution{}, problem.New(
+			500,
+			"execution_queue_snapshot_invalid",
+			"Execution scheduling requires a valid immutable queue class, priority, Automation identity, and quota-unit snapshot.",
+		)
+	}
+	execution.QueueClass = queueSnapshot.Class
+	execution.QueuePriority = queueSnapshot.Priority
+	execution.QuotaUnits = queueSnapshot.QuotaUnits
+	execution.AutomationID = queueSnapshot.AutomationID
 
 	ApplyExecutionLaunchTarget(&execution, launchTarget)
 	releaseSelection, err := workerreleases.SelectExecution(ctx, tx, execution.ExecutionTargetID, execution.ID)
@@ -113,40 +132,31 @@ func CreateScheduledExecution(
 	}
 
 	algorithm := schedulingdecision.AlgorithmFixedTargetV1
-	candidate := schedulingdecision.CandidateFromExecution(execution)
+	input := schedulingdecision.NewSelectedOnlyInput(
+		uuid.New(),
+		algorithm,
+		decidedAt,
+		schedulingdecision.CandidateFromExecution(execution),
+	)
 	if selection := launchTarget.RoutingSelection; selection != nil {
 		algorithm = schedulingdecision.AlgorithmQueuePressureV1
 		if selection.QueuePressure.ReservationAuthorityMode == routing.ReservationAuthorityExactActiveV1 {
 			algorithm = schedulingdecision.AlgorithmReservationAwareV1
 		}
-		candidate.Region = selection.Member.Region
-		candidate.ClusterID = selection.Member.ClusterID
-		candidate.TargetGroupMemberID = &selection.Member.ID
-		candidate.HealthVersion = &selection.Health.Version
-		candidate.HealthStatus = &selection.Health.Status
-		candidate.CapacityStatus = &selection.Health.CapacityStatus
-		candidate.HealthObservedAt = &selection.Health.ObservedAt
-		candidate.HealthExpiresAt = &selection.Health.ExpiresAt
-		candidate.AvailableCapacityUnits = selection.Health.AvailableCapacityUnits
-		candidate.AllocatedCapacityUnits = &selection.Health.AllocatedCapacityUnits
-		candidate.QueuedExecutionUnits = &selection.QueuePressure.QueuedExecutionUnits
-		candidate.EffectiveLoadRank = &selection.QueuePressure.EffectiveLoadRank
-		candidate.Priority = &selection.Member.Priority
-		candidate.Weight = &selection.Member.Weight
-		if readiness := selection.DRReadiness; readiness != nil {
-			candidate.DRReadinessVersion = &readiness.Version
-			candidate.SourceDRDomain = &readiness.SourceDRDomain
-			candidate.DRDomain = &readiness.DRDomain
-			candidate.DRReplicatedThroughAt = &readiness.ReplicatedThroughAt
-			candidate.DRArtifactsReady = &readiness.ArtifactsReady
-			candidate.DRCheckpointsReady = &readiness.CheckpointsReady
-			candidate.DRMemoryReady = &readiness.MemoryReady
-			candidate.DRObservedAt = &readiness.ObservedAt
-			candidate.DRExpiresAt = &readiness.ExpiresAt
+		if len(launchTarget.CandidateEvidence) == 0 {
+			return ScheduledExecution{}, problem.New(
+				500,
+				"execution_scheduling_candidate_trace_missing",
+				"A routed launch completed without its bounded scheduling candidate trace.",
+			)
 		}
+		candidates := make([]schedulingdecision.CandidateSnapshot, 0, len(launchTarget.CandidateEvidence))
+		for _, evidence := range launchTarget.CandidateEvidence {
+			candidates = append(candidates, schedulingCandidateFromLaunchEvidence(execution, evidence))
+		}
+		input = schedulingdecision.NewCompleteInput(uuid.New(), algorithm, decidedAt, candidates)
 	}
 
-	input := schedulingdecision.NewSelectedOnlyInput(uuid.New(), algorithm, decidedAt, candidate)
 	decision, err := schedulingdecision.CreateExecution(ctx, tx, &execution, input)
 	if err != nil {
 		return ScheduledExecution{}, problem.Wrap(
@@ -162,4 +172,96 @@ func CreateScheduledExecution(
 	return ScheduledExecution{
 		Execution: execution, Decision: decision, CapacityAdmission: capacityAdmission.Evidence,
 	}, nil
+}
+
+func schedulingCandidateFromLaunchEvidence(
+	execution persistence.AgentExecution,
+	evidence ExecutionLaunchCandidateEvidence,
+) schedulingdecision.CandidateSnapshot {
+	route := evidence.Routing
+	memberID := route.Member.ID
+	memberVersion := route.Member.Version
+	priority := route.Member.Priority
+	weight := route.Member.Weight
+	candidate := schedulingdecision.CandidateSnapshot{
+		ExecutionTargetID:        route.Target.ID,
+		TargetKind:               route.Target.Kind,
+		TargetGroupID:            execution.TargetGroupID,
+		TargetGroupVersion:       execution.TargetGroupVersion,
+		TargetGroupMemberID:      &memberID,
+		TargetGroupMemberVersion: &memberVersion,
+		Region:                   route.Member.Region,
+		ClusterID:                route.Member.ClusterID,
+		Priority:                 &priority,
+		Weight:                   &weight,
+		PriorityRank:             cloneInt(route.PriorityRank),
+		RegionRank:               cloneInt(route.RegionRank),
+		CapacityRank:             cloneInt(route.CapacityRank),
+		Eligibility:              route.Eligibility,
+		Selected:                 route.Selected,
+	}
+	if route.RejectionCode != "" {
+		rejectionCode := route.RejectionCode
+		candidate.RejectionCode = &rejectionCode
+	}
+	if health := route.Health; health != nil {
+		healthVersion := health.Version
+		healthStatus := health.Status
+		capacityStatus := health.CapacityStatus
+		healthObservedAt := health.ObservedAt
+		healthExpiresAt := health.ExpiresAt
+		allocatedCapacityUnits := health.AllocatedCapacityUnits
+		candidate.HealthVersion = &healthVersion
+		candidate.HealthStatus = &healthStatus
+		candidate.CapacityStatus = &capacityStatus
+		candidate.HealthObservedAt = &healthObservedAt
+		candidate.HealthExpiresAt = &healthExpiresAt
+		candidate.AvailableCapacityUnits = cloneInt(health.AvailableCapacityUnits)
+		candidate.AllocatedCapacityUnits = &allocatedCapacityUnits
+	}
+	if queuePressure := route.QueuePressure; queuePressure != nil {
+		queuedExecutionUnits := queuePressure.QueuedExecutionUnits
+		effectiveLoadRank := queuePressure.EffectiveLoadRank
+		candidate.QueuedExecutionUnits = &queuedExecutionUnits
+		candidate.EffectiveLoadRank = &effectiveLoadRank
+	}
+	if readiness := route.DRReadiness; readiness != nil {
+		readinessVersion := readiness.Version
+		sourceDRDomain := readiness.SourceDRDomain
+		drDomain := readiness.DRDomain
+		replicatedThroughAt := readiness.ReplicatedThroughAt
+		artifactsReady := readiness.ArtifactsReady
+		checkpointsReady := readiness.CheckpointsReady
+		memoryReady := readiness.MemoryReady
+		observedAt := readiness.ObservedAt
+		expiresAt := readiness.ExpiresAt
+		candidate.DRReadinessVersion = &readinessVersion
+		candidate.SourceDRDomain = &sourceDRDomain
+		candidate.DRDomain = &drDomain
+		candidate.DRReplicatedThroughAt = &replicatedThroughAt
+		candidate.DRArtifactsReady = &artifactsReady
+		candidate.DRCheckpointsReady = &checkpointsReady
+		candidate.DRMemoryReady = &memoryReady
+		candidate.DRObservedAt = &observedAt
+		candidate.DRExpiresAt = &expiresAt
+	}
+	if selection := evidence.PlacementSelection; selection != nil {
+		poolID := selection.Pool.ID
+		poolVersion := selection.Pool.Version
+		capacityClass := selection.CapacityClass
+		policyVersion := selection.PolicyVersion
+		candidate.WorkerPoolID = &poolID
+		candidate.WorkerPoolVersion = &poolVersion
+		candidate.CapacityClass = &capacityClass
+		candidate.PlacementPolicyVersion = &policyVersion
+	}
+	return candidate
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }

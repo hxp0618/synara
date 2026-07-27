@@ -17,16 +17,17 @@ import (
 )
 
 type kubernetesWarmPool struct {
-	ID                 uuid.UUID      `gorm:"column:id"`
-	Version            int64          `gorm:"column:version"`
-	CapacityClass      string         `gorm:"column:capacity_class"`
-	ClusterID          string         `gorm:"column:cluster_id"`
-	Namespace          string         `gorm:"column:namespace"`
-	DesiredIdleUnits   int            `gorm:"column:desired_idle_units"`
-	MinIdleUnits       int            `gorm:"column:min_idle_units"`
-	MaxActiveUnits     int            `gorm:"column:max_active_units"`
-	SchedulingTemplate map[string]any `gorm:"column:scheduling_template"`
-	Status             string         `gorm:"column:status"`
+	ID                         uuid.UUID      `gorm:"column:id"`
+	Version                    int64          `gorm:"column:version"`
+	CapacityClass              string         `gorm:"column:capacity_class"`
+	ClusterID                  string         `gorm:"column:cluster_id"`
+	Namespace                  string         `gorm:"column:namespace"`
+	ConfiguredDesiredIdleUnits int            `gorm:"column:configured_desired_idle_units"`
+	DesiredIdleUnits           int            `gorm:"column:desired_idle_units"`
+	MinIdleUnits               int            `gorm:"column:min_idle_units"`
+	MaxActiveUnits             int            `gorm:"column:max_active_units"`
+	SchedulingTemplate         map[string]any `gorm:"column:scheduling_template"`
+	Status                     string         `gorm:"column:status"`
 }
 
 type kubernetesWarmWorkerState struct {
@@ -106,14 +107,17 @@ func managedKubernetesWarmCapacityObservations(
 		if claimed < 0 {
 			claimed = 0
 		}
+		effectiveDesiredIdleUnits := pool.DesiredIdleUnits
 		observation := ManagedKubernetesWarmCapacityObservation{
-			TenantID:          tenantID,
-			ExecutionTargetID: executionTargetID,
-			WorkerPoolID:      pool.ID,
-			WorkerPoolVersion: pool.Version,
-			WarmSupported:     warmPoolsSupported,
-			MinIdleUnits:      pool.MinIdleUnits,
-			ClaimedUnits:      claimed,
+			TenantID:                   tenantID,
+			ExecutionTargetID:          executionTargetID,
+			WorkerPoolID:               pool.ID,
+			WorkerPoolVersion:          pool.Version,
+			WarmSupported:              warmPoolsSupported,
+			MinIdleUnits:               pool.MinIdleUnits,
+			ConfiguredDesiredIdleUnits: pool.ConfiguredDesiredIdleUnits,
+			EffectiveDesiredIdleUnits:  &effectiveDesiredIdleUnits,
+			ClaimedUnits:               claimed,
 		}
 		if !warmPoolsSupported {
 			observation.Reason = managedKubernetesRoutingReasonPointer(

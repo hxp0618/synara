@@ -496,12 +496,22 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 		Take(&decision).Error; err != nil {
 		t.Fatal(err)
 	}
-	var candidate persistence.ExecutionSchedulingCandidate
+	var candidates []persistence.ExecutionSchedulingCandidate
 	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
-		Take(&candidate).Error; err != nil {
+		Order("ordinal ASC").Find(&candidates).Error; err != nil {
 		t.Fatal(err)
 	}
-	if decision.AlgorithmVersion != "queue-pressure-v1" || decision.EvidenceCompleteness != "selected-only" ||
+	if len(candidates) != 2 {
+		t.Fatalf("cross-domain scheduling candidates = %#v", candidates)
+	}
+	candidateByTarget := make(map[uuid.UUID]persistence.ExecutionSchedulingCandidate, len(candidates))
+	for _, value := range candidates {
+		candidateByTarget[value.ExecutionTargetID] = value
+	}
+	candidate := candidateByTarget[destination.ID]
+	rejectedSource := candidateByTarget[source.ID]
+	if decision.AlgorithmVersion != "queue-pressure-v1" || decision.EvidenceCompleteness != "complete" ||
+		decision.CandidateCount != 2 ||
 		candidate.DRReadinessVersion == nil || candidate.SourceDRDomain == nil ||
 		*candidate.SourceDRDomain != sourceDRDomain || candidate.DRDomain == nil ||
 		*candidate.DRDomain != routing.DRDomainForLocation("cn-beijing", "cluster-b") ||
@@ -509,7 +519,9 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 		candidate.DRArtifactsReady == nil || *candidate.DRArtifactsReady ||
 		candidate.DRCheckpointsReady == nil || !*candidate.DRCheckpointsReady ||
 		candidate.DRMemoryReady == nil || *candidate.DRMemoryReady ||
-		candidate.DRObservedAt == nil || candidate.DRExpiresAt == nil {
+		candidate.DRObservedAt == nil || candidate.DRExpiresAt == nil ||
+		rejectedSource.Eligibility != "rejected" || rejectedSource.RejectionCode == nil ||
+		*rejectedSource.RejectionCode != "health-status-ineligible" {
 		t.Fatalf("cross-domain scheduling evidence = decision %#v candidate %#v", decision, candidate)
 	}
 

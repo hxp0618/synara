@@ -25,42 +25,47 @@ const (
 )
 
 type Worker struct {
-	ID                      uuid.UUID      `json:"id"`
-	Incarnation             int64          `json:"incarnation"`
-	InstanceUID             string         `json:"instanceUid"`
-	ExecutionTargetID       uuid.UUID      `json:"executionTargetId"`
-	TargetKind              string         `json:"targetKind"`
-	WorkerMode              string         `json:"workerMode"`
-	AssignedExecutionID     *uuid.UUID     `json:"assignedExecutionId,omitempty"`
-	WorkerPoolID            *uuid.UUID     `json:"workerPoolId,omitempty"`
-	WorkerPoolVersion       *int64         `json:"workerPoolVersion,omitempty"`
-	CapacityClass           *string        `json:"capacityClass,omitempty"`
-	ClusterID               string         `json:"clusterId"`
-	Namespace               string         `json:"namespace"`
-	PodName                 string         `json:"podName"`
-	Version                 string         `json:"version"`
-	ProtocolVersion         int            `json:"protocolVersion"`
-	Capabilities            map[string]any `json:"capabilities"`
-	CurrentManifestID       *uuid.UUID     `json:"currentManifestId,omitempty"`
-	CompatibilityStatus     string         `json:"compatibilityStatus"`
-	CompatibilityReason     *string        `json:"compatibilityReason,omitempty"`
-	CompatibilityCheckedAt  *time.Time     `json:"compatibilityCheckedAt,omitempty"`
-	WorkerReleaseRevisionID *uuid.UUID     `json:"workerReleaseRevisionId,omitempty"`
-	WorkerReleaseChannel    *string        `json:"workerReleaseChannel,omitempty"`
-	WorkerReleaseStatus     string         `json:"workerReleaseStatus"`
-	WorkerReleaseReason     *string        `json:"workerReleaseReason,omitempty"`
-	WorkerReleaseCheckedAt  *time.Time     `json:"workerReleaseCheckedAt,omitempty"`
-	LeaseSupported          bool           `json:"leaseSupported"`
-	FencingSupported        bool           `json:"fencingSupported"`
-	Status                  string         `json:"status"`
-	AdministrativeStatus    string         `json:"administrativeStatus"`
-	RegisteredAt            time.Time      `json:"registeredAt"`
-	LastHeartbeatAt         time.Time      `json:"lastHeartbeatAt"`
-	DrainingAt              *time.Time     `json:"drainingAt"`
-	TerminatedAt            *time.Time     `json:"terminatedAt"`
-	RevokedAt               *time.Time     `json:"revokedAt,omitempty"`
-	RevokedBy               *uuid.UUID     `json:"revokedBy,omitempty"`
-	RevocationReason        *string        `json:"revocationReason,omitempty"`
+	ID                             uuid.UUID      `json:"id"`
+	Incarnation                    int64          `json:"incarnation"`
+	InstanceUID                    string         `json:"instanceUid"`
+	ExecutionTargetID              uuid.UUID      `json:"executionTargetId"`
+	TargetKind                     string         `json:"targetKind"`
+	WorkerMode                     string         `json:"workerMode"`
+	AssignedExecutionID            *uuid.UUID     `json:"assignedExecutionId,omitempty"`
+	WorkerPoolID                   *uuid.UUID     `json:"workerPoolId,omitempty"`
+	WorkerPoolVersion              *int64         `json:"workerPoolVersion,omitempty"`
+	CapacityClass                  *string        `json:"capacityClass,omitempty"`
+	TenantBindingID                *uuid.UUID     `json:"tenantBindingId,omitempty"`
+	ClusterID                      string         `json:"clusterId"`
+	Namespace                      string         `json:"namespace"`
+	PodName                        string         `json:"podName"`
+	Version                        string         `json:"version"`
+	ProtocolVersion                int            `json:"protocolVersion"`
+	Capabilities                   map[string]any `json:"capabilities"`
+	CurrentManifestID              *uuid.UUID     `json:"currentManifestId,omitempty"`
+	CompatibilityStatus            string         `json:"compatibilityStatus"`
+	CompatibilityReason            *string        `json:"compatibilityReason,omitempty"`
+	CompatibilityCheckedAt         *time.Time     `json:"compatibilityCheckedAt,omitempty"`
+	WorkerReleaseRevisionID        *uuid.UUID     `json:"workerReleaseRevisionId,omitempty"`
+	WorkerReleaseChannel           *string        `json:"workerReleaseChannel,omitempty"`
+	WorkerReleaseStatus            string         `json:"workerReleaseStatus"`
+	WorkerReleaseReason            *string        `json:"workerReleaseReason,omitempty"`
+	WorkerReleaseCheckedAt         *time.Time     `json:"workerReleaseCheckedAt,omitempty"`
+	LeaseSupported                 bool           `json:"leaseSupported"`
+	FencingSupported               bool           `json:"fencingSupported"`
+	Status                         string         `json:"status"`
+	AdministrativeStatus           string         `json:"administrativeStatus"`
+	RegisteredAt                   time.Time      `json:"registeredAt"`
+	LastHeartbeatAt                time.Time      `json:"lastHeartbeatAt"`
+	DrainingAt                     *time.Time     `json:"drainingAt"`
+	ReconciliationDrainIncarnation *int64         `json:"reconciliationDrainIncarnation,omitempty"`
+	ReconciliationDrainInstanceUID *string        `json:"reconciliationDrainInstanceUid,omitempty"`
+	ReconciliationDrainRequestedAt *time.Time     `json:"reconciliationDrainRequestedAt,omitempty"`
+	ReconciliationDrainReason      *string        `json:"reconciliationDrainReason,omitempty"`
+	TerminatedAt                   *time.Time     `json:"terminatedAt"`
+	RevokedAt                      *time.Time     `json:"revokedAt,omitempty"`
+	RevokedBy                      *uuid.UUID     `json:"revokedBy,omitempty"`
+	RevocationReason               *string        `json:"revocationReason,omitempty"`
 }
 
 type RegisteredWorker struct {
@@ -69,41 +74,46 @@ type RegisteredWorker struct {
 }
 
 type ManagedWorker struct {
-	ID                      uuid.UUID  `json:"id"`
-	Incarnation             int64      `json:"incarnation"`
-	InstanceUID             string     `json:"instanceUid"`
-	ExecutionTargetID       uuid.UUID  `json:"executionTargetId"`
-	TargetKind              string     `json:"targetKind"`
-	WorkerMode              string     `json:"workerMode"`
-	AssignedExecutionID     *uuid.UUID `json:"assignedExecutionId,omitempty"`
-	WorkerPoolID            *uuid.UUID `json:"workerPoolId,omitempty"`
-	WorkerPoolVersion       *int64     `json:"workerPoolVersion,omitempty"`
-	CapacityClass           *string    `json:"capacityClass,omitempty"`
-	ClusterID               string     `json:"clusterId"`
-	Namespace               string     `json:"namespace"`
-	PodName                 string     `json:"podName"`
-	Version                 string     `json:"version"`
-	ProtocolVersion         int        `json:"protocolVersion"`
-	CurrentManifestID       *uuid.UUID `json:"currentManifestId,omitempty"`
-	CompatibilityStatus     string     `json:"compatibilityStatus"`
-	CompatibilityReason     *string    `json:"compatibilityReason,omitempty"`
-	CompatibilityCheckedAt  *time.Time `json:"compatibilityCheckedAt,omitempty"`
-	WorkerReleaseRevisionID *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
-	WorkerReleaseChannel    *string    `json:"workerReleaseChannel,omitempty"`
-	WorkerReleaseStatus     string     `json:"workerReleaseStatus"`
-	WorkerReleaseReason     *string    `json:"workerReleaseReason,omitempty"`
-	WorkerReleaseCheckedAt  *time.Time `json:"workerReleaseCheckedAt,omitempty"`
-	LeaseSupported          bool       `json:"leaseSupported"`
-	FencingSupported        bool       `json:"fencingSupported"`
-	Status                  string     `json:"status"`
-	AdministrativeStatus    string     `json:"administrativeStatus"`
-	RegisteredAt            time.Time  `json:"registeredAt"`
-	LastHeartbeatAt         time.Time  `json:"lastHeartbeatAt"`
-	DrainingAt              *time.Time `json:"drainingAt,omitempty"`
-	TerminatedAt            *time.Time `json:"terminatedAt,omitempty"`
-	RevokedAt               *time.Time `json:"revokedAt,omitempty"`
-	RevokedBy               *uuid.UUID `json:"revokedBy,omitempty"`
-	RevocationReason        *string    `json:"revocationReason,omitempty"`
+	ID                             uuid.UUID  `json:"id"`
+	Incarnation                    int64      `json:"incarnation"`
+	InstanceUID                    string     `json:"instanceUid"`
+	ExecutionTargetID              uuid.UUID  `json:"executionTargetId"`
+	TargetKind                     string     `json:"targetKind"`
+	WorkerMode                     string     `json:"workerMode"`
+	AssignedExecutionID            *uuid.UUID `json:"assignedExecutionId,omitempty"`
+	WorkerPoolID                   *uuid.UUID `json:"workerPoolId,omitempty"`
+	WorkerPoolVersion              *int64     `json:"workerPoolVersion,omitempty"`
+	CapacityClass                  *string    `json:"capacityClass,omitempty"`
+	TenantBindingID                *uuid.UUID `json:"tenantBindingId,omitempty"`
+	ClusterID                      string     `json:"clusterId"`
+	Namespace                      string     `json:"namespace"`
+	PodName                        string     `json:"podName"`
+	Version                        string     `json:"version"`
+	ProtocolVersion                int        `json:"protocolVersion"`
+	CurrentManifestID              *uuid.UUID `json:"currentManifestId,omitempty"`
+	CompatibilityStatus            string     `json:"compatibilityStatus"`
+	CompatibilityReason            *string    `json:"compatibilityReason,omitempty"`
+	CompatibilityCheckedAt         *time.Time `json:"compatibilityCheckedAt,omitempty"`
+	WorkerReleaseRevisionID        *uuid.UUID `json:"workerReleaseRevisionId,omitempty"`
+	WorkerReleaseChannel           *string    `json:"workerReleaseChannel,omitempty"`
+	WorkerReleaseStatus            string     `json:"workerReleaseStatus"`
+	WorkerReleaseReason            *string    `json:"workerReleaseReason,omitempty"`
+	WorkerReleaseCheckedAt         *time.Time `json:"workerReleaseCheckedAt,omitempty"`
+	LeaseSupported                 bool       `json:"leaseSupported"`
+	FencingSupported               bool       `json:"fencingSupported"`
+	Status                         string     `json:"status"`
+	AdministrativeStatus           string     `json:"administrativeStatus"`
+	RegisteredAt                   time.Time  `json:"registeredAt"`
+	LastHeartbeatAt                time.Time  `json:"lastHeartbeatAt"`
+	DrainingAt                     *time.Time `json:"drainingAt,omitempty"`
+	ReconciliationDrainIncarnation *int64     `json:"reconciliationDrainIncarnation,omitempty"`
+	ReconciliationDrainInstanceUID *string    `json:"reconciliationDrainInstanceUid,omitempty"`
+	ReconciliationDrainRequestedAt *time.Time `json:"reconciliationDrainRequestedAt,omitempty"`
+	ReconciliationDrainReason      *string    `json:"reconciliationDrainReason,omitempty"`
+	TerminatedAt                   *time.Time `json:"terminatedAt,omitempty"`
+	RevokedAt                      *time.Time `json:"revokedAt,omitempty"`
+	RevokedBy                      *uuid.UUID `json:"revokedBy,omitempty"`
+	RevocationReason               *string    `json:"revocationReason,omitempty"`
 }
 
 type RevokeWorkerInput struct {
@@ -125,6 +135,10 @@ type Execution struct {
 	TenantID                            uuid.UUID  `json:"tenantId"`
 	SessionID                           uuid.UUID  `json:"sessionId"`
 	TurnID                              uuid.UUID  `json:"turnId"`
+	AutomationID                        *uuid.UUID `json:"automationId,omitempty"`
+	QueueClass                          string     `json:"queueClass"`
+	QueuePriority                       int        `json:"queuePriority"`
+	QuotaUnits                          int        `json:"quotaUnits"`
 	Attempt                             int        `json:"attempt"`
 	Status                              string     `json:"status"`
 	ExecutionTargetID                   uuid.UUID  `json:"executionTargetId"`
@@ -941,6 +955,7 @@ func toWorker(model persistence.WorkerInstance) Worker {
 		WorkerPoolID:        model.WorkerPoolID,
 		WorkerPoolVersion:   model.WorkerPoolVersion,
 		CapacityClass:       model.CapacityClass,
+		TenantBindingID:     model.TenantBindingID,
 		ClusterID:           model.ClusterID,
 		Namespace:           model.Namespace, PodName: model.PodName, Version: model.Version,
 		ProtocolVersion: model.ProtocolVersion, Capabilities: capabilities, LeaseSupported: model.LeaseSupported,
@@ -952,7 +967,11 @@ func toWorker(model persistence.WorkerInstance) Worker {
 		FencingSupported:       model.FencingSupported, Status: model.Status, RegisteredAt: model.RegisteredAt,
 		AdministrativeStatus: model.AdministrativeStatus,
 		LastHeartbeatAt:      model.LastHeartbeatAt, DrainingAt: model.DrainingAt,
-		TerminatedAt: model.TerminatedAt, RevokedAt: model.RevokedAt,
+		ReconciliationDrainIncarnation: model.ReconciliationDrainIncarnation,
+		ReconciliationDrainInstanceUID: model.ReconciliationDrainInstanceUID,
+		ReconciliationDrainRequestedAt: model.ReconciliationDrainRequestedAt,
+		ReconciliationDrainReason:      model.ReconciliationDrainReason,
+		TerminatedAt:                   model.TerminatedAt, RevokedAt: model.RevokedAt,
 		RevokedBy: model.RevokedBy, RevocationReason: model.RevocationReason,
 	}
 }
@@ -1018,6 +1037,8 @@ func toControlCommand(model persistence.ExecutionControlCommand) ControlCommand 
 func toExecution(model persistence.AgentExecution) Execution {
 	return Execution{
 		ID: model.ID, TenantID: model.TenantID, SessionID: model.SessionID, TurnID: model.TurnID,
+		AutomationID: model.AutomationID, QueueClass: model.QueueClass,
+		QueuePriority: model.QueuePriority, QuotaUnits: model.QuotaUnits,
 		Attempt: model.Attempt, Status: model.Status, ExecutionTargetID: model.ExecutionTargetID,
 		TargetKind: model.TargetKind, WorkerPoolID: model.WorkerPoolID,
 		WorkerPoolVersion: model.WorkerPoolVersion,

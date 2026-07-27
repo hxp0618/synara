@@ -241,6 +241,22 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 					"Active SSH Targets only allow restart registration for the current logical Worker identity.",
 				)
 			}
+			var previousBinding struct {
+				TenantBindingID *uuid.UUID `gorm:"column:tenant_binding_id"`
+			}
+			previousBindingErr := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+				Select("tenant_binding_id").
+				Where(
+					"execution_target_id = ? AND cluster_id = ? AND namespace = ? AND pod_name = ? AND tenant_binding_id IS NOT NULL",
+					normalized.ExecutionTargetID, normalized.ClusterID, normalized.Namespace, normalized.PodName,
+				).
+				Order("registered_at DESC, id DESC").Take(&previousBinding).Error
+			if previousBindingErr != nil && !errors.Is(previousBindingErr, gorm.ErrRecordNotFound) {
+				return problem.Wrap(500, "worker_tenant_binding_lookup_failed", "Failed to inspect the logical Worker Tenant binding.", previousBindingErr)
+			}
+			if previousBinding.TenantBindingID != nil && normalized.WorkerMode != WorkerModeGeneralPool {
+				return problem.New(409, "worker_tenant_binding_mode_mismatch", "A Tenant-bound logical Worker can only return as a general-pool Worker.")
+			}
 			model = persistence.WorkerInstance{
 				ID: uuid.New(), Incarnation: 1, InstanceUID: normalized.InstanceUID,
 				SSHBootstrapGeneration: normalized.SSHBootstrapGeneration,
@@ -250,6 +266,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 				WorkerPoolID:          normalized.WorkerPoolID,
 				WorkerPoolVersion:     normalized.WorkerPoolVersion,
 				CapacityClass:         normalized.CapacityClass,
+				TenantBindingID:       previousBinding.TenantBindingID,
 				RegistrationTrustMode: normalized.RegistrationTrustMode,
 				ClusterID:             normalized.ClusterID,
 				Namespace:             normalized.Namespace, PodName: normalized.PodName, Version: normalized.Version,
@@ -284,6 +301,9 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		if model.AdministrativeStatus == "revoked" {
 			return problem.New(409, "worker_identity_revoked", "The logical Worker identity was administratively revoked and cannot be registered again.")
 		}
+		if model.TenantBindingID != nil && normalized.WorkerMode != WorkerModeGeneralPool {
+			return problem.New(409, "worker_tenant_binding_mode_mismatch", "A Tenant-bound logical Worker can only re-register as a general-pool Worker.")
+		}
 		if targetKind == platform.TargetSSH && target.Status == "active" &&
 			(model.InstanceUID != normalized.InstanceUID ||
 				!equalOptionalInt64(model.SSHBootstrapGeneration, normalized.SSHBootstrapGeneration)) {
@@ -307,6 +327,15 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		); err != nil {
 			return err
 		}
+		replacementStatus := "online"
+		var replacementDrainingAt *time.Time
+		if model.ReconciliationDrainRequestedAt != nil {
+			replacementStatus = "draining"
+			replacementDrainingAt = model.DrainingAt
+			if replacementDrainingAt == nil {
+				replacementDrainingAt = model.ReconciliationDrainRequestedAt
+			}
+		}
 		updates := persistence.WorkerInstance{
 			Incarnation: model.Incarnation + 1, InstanceUID: normalized.InstanceUID,
 			SSHBootstrapGeneration: normalized.SSHBootstrapGeneration,
@@ -319,7 +348,8 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			RegistrationTrustMode: normalized.RegistrationTrustMode,
 			Capabilities:          normalized.Capabilities, AuthTokenHash: tokenHash,
 			LeaseSupported: normalized.LeaseSupported, FencingSupported: normalized.FencingSupported,
-			Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
+			Status: replacementStatus, RegisteredAt: now, LastHeartbeatAt: now,
+			DrainingAt: replacementDrainingAt,
 		}
 		result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ?", model.ID).
@@ -347,10 +377,10 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.LeaseSupported = normalized.LeaseSupported
 		model.FencingSupported = normalized.FencingSupported
 		model.AuthTokenHash = tokenHash
-		model.Status = "online"
+		model.Status = replacementStatus
 		model.RegisteredAt = now
 		model.LastHeartbeatAt = now
-		model.DrainingAt = nil
+		model.DrainingAt = replacementDrainingAt
 		model.TerminatedAt = nil
 		if err := persistWorkerManifest(
 			ctx, tx, &model, normalized.Version, normalized.Capabilities, target.Capabilities, targetKind, now,
@@ -467,7 +497,14 @@ func (s *Service) Heartbeat(
 		}
 		updates := persistence.WorkerInstance{LastHeartbeatAt: now}
 		fields := []string{"last_heartbeat_at"}
-		if input.Draining != nil && *input.Draining {
+		if current.ReconciliationDrainRequestedAt != nil {
+			updates.Status = "draining"
+			updates.DrainingAt = current.DrainingAt
+			if updates.DrainingAt == nil {
+				updates.DrainingAt = current.ReconciliationDrainRequestedAt
+			}
+			fields = append(fields, "status", "draining_at")
+		} else if input.Draining != nil && *input.Draining {
 			updates.Status = "draining"
 			updates.DrainingAt = &now
 			fields = append(fields, "status", "draining_at")

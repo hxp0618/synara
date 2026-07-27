@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "failed",
+  "startedAt": "2026-07-26T14:59:16Z",
+  "finishedAt": "2026-07-26T15:02:39Z",
+  "durationSeconds": 203,
+  "context": "orbstack",
+  "namespace": "synara-stage4-session-authority-2",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-session-authority-2",
+  "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final2.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+    "sessionAuthorityMode": "stage2-postgres",
+    "nodePartitionManagedHookOverride": {
+      "startHookEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+      "verifyHookEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
+      "stopHookEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
+      "timeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
+      "startTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+      "verifyTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
+      "stopTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
+    }
+  },
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 173
+  },
+  "unexpectedExitStatus": null,
+  "plannedCases": [
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "permissions": [],
+  "topology": null,
+  "scenarios": [
+    {
+      "name": "control-plane-failover",
+      "status": "failed",
+      "startedAt": "2026-07-26T15:02:09Z",
+      "finishedAt": "2026-07-26T15:02:39Z",
+      "details": {
+        "error": "failed to create the pre-failover Session authority sentinel",
+        "sessionAuthority": {
+          "mode": "stage2-postgres",
+          "verified": false
+        }
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled"
+  }
+}

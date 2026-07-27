@@ -16,6 +16,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingdecision"
 )
 
 func TestSelectExecutionLaunchTargetRechecksCapabilitiesAfterPlacementLock(t *testing.T) {
@@ -271,15 +272,24 @@ func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T
 		t.Fatal(err)
 	}
 	if decision.ID != *execution.SchedulingDecisionID || decision.AlgorithmVersion != "reservation-aware-v1" ||
-		decision.EvidenceCompleteness != "selected-only" || decision.CandidateCount != 1 ||
+		decision.EvidenceCompleteness != "complete" || decision.CandidateCount != 2 ||
 		decision.SelectedExecutionTargetID != destination.ID {
 		t.Fatalf("routed scheduling decision = %#v", decision)
 	}
-	var candidate persistence.ExecutionSchedulingCandidate
+	var candidates []persistence.ExecutionSchedulingCandidate
 	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
-		Take(&candidate).Error; err != nil {
+		Order("ordinal ASC").Find(&candidates).Error; err != nil {
 		t.Fatal(err)
 	}
+	if len(candidates) != 2 {
+		t.Fatalf("routed scheduling candidates = %#v", candidates)
+	}
+	candidateByTarget := make(map[uuid.UUID]persistence.ExecutionSchedulingCandidate, len(candidates))
+	for _, candidate := range candidates {
+		candidateByTarget[candidate.ExecutionTargetID] = candidate
+	}
+	candidate := candidateByTarget[destination.ID]
+	rejected := candidateByTarget[source.ID]
 	var member persistence.ExecutionTargetGroupMember
 	if err := fixture.db.Where("tenant_id = ? AND target_group_id = ? AND execution_target_id = ?",
 		fixture.tenantID, group.ID, destination.ID).Take(&member).Error; err != nil {
@@ -294,7 +304,11 @@ func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T
 		candidate.QueuedExecutionUnits == nil || candidate.EffectiveLoadRank == nil ||
 		candidate.Priority == nil || *candidate.Priority != member.Priority ||
 		candidate.Weight == nil || *candidate.Weight != member.Weight ||
-		candidate.WorkerPoolID == nil || *candidate.WorkerPoolID != destinationPool.ID {
+		candidate.PriorityRank == nil || *candidate.PriorityRank != 0 ||
+		candidate.WorkerPoolID == nil || *candidate.WorkerPoolID != destinationPool.ID ||
+		rejected.Selected || rejected.Eligibility != schedulingdecision.EligibilityRejected ||
+		rejected.RejectionCode == nil || *rejected.RejectionCode != "capability_unsupported" ||
+		rejected.WorkerPoolID == nil || *rejected.WorkerPoolID != sourcePool.ID {
 		t.Fatalf("routed scheduling candidate = %#v, member = %#v, health = %#v", candidate, member, health)
 	}
 	var capacityAdmission persistence.ExecutionCapacityAdmission

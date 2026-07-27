@@ -504,12 +504,107 @@ func TestLocationOutageRoutesEnforceReadManageAndProjectCurrentAuthority(t *test
 	}
 }
 
+func TestTargetGroupMemberLifecycleRouteUsesManagePermissionCASAndAudit(t *testing.T) {
+	fixture := newWorkerManifestHTTPFixture(t)
+	routingService := routing.NewService(fixture.db)
+	group, err := routingService.CreateGroup(context.Background(), routing.CreateGroupInput{
+		TenantID: fixture.tenantID, Name: "member lifecycle", Strategy: routing.StrategyPriority,
+		AllowCrossRegion: true, HealthMaxStalenessSeconds: 90,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := routingService.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: fixture.targetID,
+		Region: "cn-shanghai", ClusterID: "cluster-a", Priority: 10, Weight: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fixture.ownerRoutingGroupMemberPath(group.ID, member.ID)
+	drainBody := routingHTTPJSON(t, map[string]any{
+		"expectedVersion": 1,
+		"status":          routing.MemberStatusDraining,
+	})
+
+	for _, test := range []struct {
+		name   string
+		token  string
+		status int
+		code   string
+	}{
+		{name: "unauthenticated", status: http.StatusUnauthorized, code: "authentication_required"},
+		{name: "active tenant mismatch", token: fixture.crossTenantToken, status: http.StatusConflict, code: "active_tenant_mismatch"},
+		{name: "missing worker manage", token: fixture.readOnlyToken, status: http.StatusForbidden, code: "tenant_forbidden"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertProblemResponse(
+				t,
+				fixture.routingRequest(t, http.MethodPatch, path, test.token, drainBody),
+				test.status,
+				test.code,
+			)
+		})
+	}
+
+	drained := fixture.routingRequest(t, http.MethodPatch, path, fixture.ownerToken, drainBody)
+	if drained.Code != http.StatusOK {
+		t.Fatalf("drain status = %d body=%s", drained.Code, drained.Body.String())
+	}
+	var view routing.ExecutionTargetGroupMemberView
+	if err := json.Unmarshal(drained.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != member.ID || view.Status != routing.MemberStatusDraining || view.Version != 2 {
+		t.Fatalf("drained member = %#v", view)
+	}
+
+	replayed := fixture.routingRequest(t, http.MethodPatch, path, fixture.ownerToken, drainBody)
+	if replayed.Code != http.StatusOK || replayed.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("drain replay status=%d headers=%v body=%s", replayed.Code, replayed.Header(), replayed.Body.String())
+	}
+	staleAbort := fixture.routingRequest(t, http.MethodPatch, path, fixture.ownerToken, routingHTTPJSON(t, map[string]any{
+		"expectedVersion": 1,
+		"status":          routing.MemberStatusActive,
+	}))
+	assertProblemResponse(t, staleAbort, http.StatusConflict, "target_group_member_version_conflict")
+
+	aborted := fixture.routingRequest(t, http.MethodPatch, path, fixture.ownerToken, routingHTTPJSON(t, map[string]any{
+		"expectedVersion": 2,
+		"status":          routing.MemberStatusActive,
+	}))
+	if aborted.Code != http.StatusOK {
+		t.Fatalf("abort drain status = %d body=%s", aborted.Code, aborted.Body.String())
+	}
+	if err := json.Unmarshal(aborted.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Status != routing.MemberStatusActive || view.Version != 3 {
+		t.Fatalf("reactivated member = %#v", view)
+	}
+
+	var audits []persistence.AuditLog
+	if err := fixture.db.Where("tenant_id = ? AND resource_id = ?", fixture.tenantID, member.ID).
+		Order("occurred_at, event_id").Find(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 2 || audits[0].Action != "execution_target_group_member.drain_started" ||
+		audits[1].Action != "execution_target_group_member.drain_aborted" {
+		t.Fatalf("member lifecycle audits = %#v", audits)
+	}
+}
+
 func (f workerManifestHTTPFixture) ownerRoutingGroupsPath() string {
 	return "/v1/tenants/" + f.tenantID.String() + "/execution-target-groups"
 }
 
 func (f workerManifestHTTPFixture) ownerTargetHealthPath(targetID uuid.UUID) string {
 	return "/v1/tenants/" + f.tenantID.String() + "/execution-targets/" + targetID.String() + "/health-observation"
+}
+
+func (f workerManifestHTTPFixture) ownerRoutingGroupMemberPath(groupID, memberID uuid.UUID) string {
+	return "/v1/tenants/" + f.tenantID.String() + "/execution-target-groups/" + groupID.String() +
+		"/members/" + memberID.String()
 }
 
 func (f workerManifestHTTPFixture) ownerLocationOutagesPath() string {

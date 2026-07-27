@@ -208,6 +208,9 @@ func TestRunnerProcessTreeOptionsIncludeProtectedIdentityAndFence(t *testing.T) 
 			UID: 1234,
 			GID: 2345,
 		},
+		cgroupV2ProviderLimits: &ProtectedCgroupResourceLimits{
+			PidsMax: 512, MemoryMaxBytes: 8 << 30, CPUQuotaMicros: 400_000, CPUPeriodMicros: 100_000,
+		},
 		instanceUID:        instanceUID,
 		supervisorInstance: supervisorInstance,
 	}
@@ -224,6 +227,13 @@ func TestRunnerProcessTreeOptionsIncludeProtectedIdentityAndFence(t *testing.T) 
 	if *first.ProtectedProviderIdentity != *runner.cgroupV2ProviderIdentity ||
 		*second.ProtectedProviderIdentity != *runner.cgroupV2ProviderIdentity {
 		t.Fatalf("protected provider identity mismatch: %#v %#v", first, second)
+	}
+	if first.ProtectedProviderLimits == nil || second.ProtectedProviderLimits == nil ||
+		first.ProtectedProviderLimits == runner.cgroupV2ProviderLimits ||
+		second.ProtectedProviderLimits == runner.cgroupV2ProviderLimits ||
+		*first.ProtectedProviderLimits != *runner.cgroupV2ProviderLimits ||
+		*second.ProtectedProviderLimits != *runner.cgroupV2ProviderLimits {
+		t.Fatalf("protected provider limits mismatch: %#v %#v", first, second)
 	}
 	if first.ContainmentFence.WorkerIncarnation != instanceUID ||
 		second.ContainmentFence.WorkerIncarnation != instanceUID {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/executionqueue"
 )
 
 var ErrInvalidCandidate = errors.New("fair queue candidate is invalid")
@@ -37,9 +39,16 @@ func IsQueuedStatus(status string) bool {
 // Candidate is the immutable identity and FIFO authority used by equal-share
 // scheduling. Each candidate consumes one service unit in v1.
 type Candidate struct {
-	TenantID uuid.UUID
-	ID       uuid.UUID
-	QueuedAt time.Time
+	TenantID      uuid.UUID
+	ID            uuid.UUID
+	QueueClass    string
+	QueuePriority int
+	QueuedAt      time.Time
+}
+
+type Policy struct {
+	Now                 time.Time
+	StarvationThreshold time.Duration
 }
 
 // Order returns a new deterministic service order without mutating candidates
@@ -47,10 +56,25 @@ type Candidate struct {
 // active service units, takes that Tenant's oldest candidate, and increments a
 // transaction-local unit for subsequent choices in the same batch.
 func Order(candidates []Candidate, activeServiceUnits map[uuid.UUID]int64) ([]Candidate, error) {
+	return OrderWithPolicy(candidates, activeServiceUnits, Policy{})
+}
+
+func OrderWithPolicy(
+	candidates []Candidate,
+	activeServiceUnits map[uuid.UUID]int64,
+	policy Policy,
+) ([]Candidate, error) {
+	if policy.StarvationThreshold < 0 || (policy.StarvationThreshold > 0 && policy.Now.IsZero()) {
+		return nil, ErrInvalidCandidate
+	}
 	queues := make(map[uuid.UUID][]Candidate)
 	seenCandidateIDs := make(map[uuid.UUID]struct{}, len(candidates))
 	for _, candidate := range candidates {
-		if candidate.TenantID == uuid.Nil || candidate.ID == uuid.Nil || candidate.QueuedAt.IsZero() {
+		if candidate.TenantID == uuid.Nil || candidate.ID == uuid.Nil || candidate.QueuedAt.IsZero() ||
+			candidate.QueuePriority < executionqueue.MinimumPriority || candidate.QueuePriority > executionqueue.MaximumPriority {
+			return nil, ErrInvalidCandidate
+		}
+		if _, valid := executionqueue.ClassRank(candidate.QueueClass); !valid {
 			return nil, ErrInvalidCandidate
 		}
 		if _, duplicate := seenCandidateIDs[candidate.ID]; duplicate {
@@ -62,6 +86,19 @@ func Order(candidates []Candidate, activeServiceUnits map[uuid.UUID]int64) ([]Ca
 	for tenantID := range queues {
 		tenantQueue := queues[tenantID]
 		sort.Slice(tenantQueue, func(left, right int) bool {
+			leftStarved := candidateStarved(tenantQueue[left], policy)
+			rightStarved := candidateStarved(tenantQueue[right], policy)
+			if leftStarved != rightStarved {
+				return leftStarved
+			}
+			leftRank, _ := executionqueue.ClassRank(tenantQueue[left].QueueClass)
+			rightRank, _ := executionqueue.ClassRank(tenantQueue[right].QueueClass)
+			if !leftStarved && leftRank != rightRank {
+				return leftRank < rightRank
+			}
+			if !leftStarved && tenantQueue[left].QueuePriority != tenantQueue[right].QueuePriority {
+				return tenantQueue[left].QueuePriority > tenantQueue[right].QueuePriority
+			}
 			if !tenantQueue[left].QueuedAt.Equal(tenantQueue[right].QueuedAt) {
 				return tenantQueue[left].QueuedAt.Before(tenantQueue[right].QueuedAt)
 			}
@@ -79,7 +116,7 @@ func Order(candidates []Candidate, activeServiceUnits map[uuid.UUID]int64) ([]Ca
 	}
 	ordered := make([]Candidate, 0, len(candidates))
 	for len(ordered) < len(candidates) {
-		selectedTenantID, ok := nextTenant(queues, serviceUnits)
+		selectedTenantID, ok := nextTenant(queues, serviceUnits, policy)
 		if !ok {
 			return nil, ErrInvalidCandidate
 		}
@@ -94,6 +131,7 @@ func Order(candidates []Candidate, activeServiceUnits map[uuid.UUID]int64) ([]Ca
 func nextTenant(
 	queues map[uuid.UUID][]Candidate,
 	serviceUnits map[uuid.UUID]int64,
+	policy Policy,
 ) (uuid.UUID, bool) {
 	var selectedTenantID uuid.UUID
 	var selectedHead Candidate
@@ -109,6 +147,7 @@ func nextTenant(
 			selectedTenantID,
 			selectedHead,
 			serviceUnits[selectedTenantID],
+			policy,
 		) {
 			selectedTenantID = tenantID
 			selectedHead = queue[0]
@@ -125,9 +164,23 @@ func tenantBefore(
 	rightTenantID uuid.UUID,
 	rightHead Candidate,
 	rightServiceUnits int64,
+	policy Policy,
 ) bool {
+	leftStarved := candidateStarved(leftHead, policy)
+	rightStarved := candidateStarved(rightHead, policy)
+	if leftStarved != rightStarved {
+		return leftStarved
+	}
 	if leftServiceUnits != rightServiceUnits {
 		return leftServiceUnits < rightServiceUnits
+	}
+	leftRank, _ := executionqueue.ClassRank(leftHead.QueueClass)
+	rightRank, _ := executionqueue.ClassRank(rightHead.QueueClass)
+	if !leftStarved && leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	if !leftStarved && leftHead.QueuePriority != rightHead.QueuePriority {
+		return leftHead.QueuePriority > rightHead.QueuePriority
 	}
 	if !leftHead.QueuedAt.Equal(rightHead.QueuedAt) {
 		return leftHead.QueuedAt.Before(rightHead.QueuedAt)
@@ -136,4 +189,9 @@ func tenantBefore(
 		return leftHead.ID.String() < rightHead.ID.String()
 	}
 	return leftTenantID.String() < rightTenantID.String()
+}
+
+func candidateStarved(candidate Candidate, policy Policy) bool {
+	return policy.StarvationThreshold > 0 &&
+		!candidate.QueuedAt.After(policy.Now.Add(-policy.StarvationThreshold))
 }

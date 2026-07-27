@@ -37,7 +37,43 @@ const (
 	dockerReleaseRevisionLabel = "synara.io/worker-release-revision-id"
 	dockerReleaseChannelLabel  = "synara.io/worker-release-channel"
 	dockerContainerSpecVersion = 5
+
+	ManagedDockerDrainReasonStaleSpec = "managed-docker-stale-spec"
+	ManagedDockerDrainReasonScaleDown = "managed-docker-scale-down"
 )
+
+type ManagedDockerWorkerDrainRequest struct {
+	ExecutionTargetID uuid.UUID
+	ContainerName     string
+	Reason            string
+	ObservedAt        time.Time
+}
+
+type ManagedDockerWorkerDrainDecision struct {
+	WorkerFound           bool
+	DeletionAllowed       bool
+	ExecutionLeaseCount   int64
+	WorkspaceCleanupCount int64
+}
+
+type ManagedDockerWorkerDrainState struct {
+	ContainerName      string
+	DrainInstanceUID   string
+	CurrentInstanceUID string
+}
+
+// ManagedDockerWorkerLifecycleCoordinator owns the durable database half of
+// a managed Docker replacement. The reconciler owns only the external Engine
+// snapshot and mutation; both halves are deliberately joined through this
+// fail-closed interface so a Control Plane restart cannot forget a Drain.
+type ManagedDockerWorkerLifecycleCoordinator interface {
+	RecoverMissingManagedDockerDrains(context.Context, uuid.UUID, []string, time.Time) (bool, error)
+	ActiveManagedDockerDrain(context.Context, uuid.UUID) (*ManagedDockerWorkerDrainState, error)
+	ManagedDockerDesiredWorkersReady(context.Context, uuid.UUID, []string, time.Time) (bool, error)
+	PrepareManagedDockerDrain(context.Context, ManagedDockerWorkerDrainRequest) (ManagedDockerWorkerDrainDecision, error)
+	FinalizeManagedDockerDrain(context.Context, ManagedDockerWorkerDrainRequest) error
+	CompleteManagedDockerReplacement(context.Context, uuid.UUID, string, string, time.Time) (bool, error)
+}
 
 type DockerPoolReconcilerConfig struct {
 	RegistrationToken     string
@@ -105,11 +141,12 @@ type dockerEngineFactory interface {
 }
 
 type DockerPoolReconciler struct {
-	targets     *Service
-	config      DockerPoolReconcilerConfig
-	factory     dockerEngineFactory
-	logger      *slog.Logger
-	busyWorkers func(context.Context, uuid.UUID) (map[string]bool, error)
+	targets         *Service
+	config          DockerPoolReconcilerConfig
+	factory         dockerEngineFactory
+	logger          *slog.Logger
+	workerLifecycle ManagedDockerWorkerLifecycleCoordinator
+	now             func() time.Time
 }
 
 func NewDockerPoolReconciler(
@@ -119,9 +156,13 @@ func NewDockerPoolReconciler(
 ) *DockerPoolReconciler {
 	reconciler := &DockerPoolReconciler{
 		targets: targets, config: config, factory: dockerHTTPFactory{}, logger: logger,
+		now: func() time.Time { return time.Now().UTC() },
 	}
-	reconciler.busyWorkers = reconciler.busyWorkerNames
 	return reconciler
+}
+
+func (r *DockerPoolReconciler) SetWorkerLifecycleCoordinator(coordinator ManagedDockerWorkerLifecycleCoordinator) {
+	r.workerLifecycle = coordinator
 }
 
 func (r *DockerPoolReconciler) Run(ctx context.Context) {
@@ -199,14 +240,23 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 		r.setStatus(ctx, target, "offline", false, "list_failed", 0, 0)
 		return problem.Wrap(502, "docker_containers_load_failed", "Docker Worker containers could not be listed.", err)
 	}
-	busy, err := r.busyWorkers(ctx, target.ID)
-	if err != nil {
-		return err
-	}
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
+	presentNames := make([]string, 0, len(containers))
+	for _, container := range containers {
+		presentNames = append(presentNames, container.Name)
+	}
+	observedAt := r.now()
+	rolloutAdvanced := false
+	if r.workerLifecycle != nil {
+		recovered, err := r.workerLifecycle.RecoverMissingManagedDockerDrains(ctx, target.ID, presentNames, observedAt)
+		if err != nil {
+			return err
+		}
+		rolloutAdvanced = recovered
+	}
 	current := make(map[int]dockerContainer, len(specs))
 	deferred := make(map[int]dockerContainer, len(specs))
-	busyStale := make([]dockerContainer, 0)
+	stale := make([]dockerContainer, 0)
 	changed := false
 	for _, container := range containers {
 		index, indexErr := strconv.Atoi(container.Labels[dockerIndexLabel])
@@ -219,33 +269,57 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 				continue
 			}
 		}
-		if busy[container.Name] {
-			busyStale = append(busyStale, container)
-			continue
-		}
-		if err := engine.Remove(ctx, container.ID); err != nil {
-			return problem.Wrap(502, "docker_container_remove_failed", "A stale Docker Worker could not be removed.", err)
-		}
-		changed = true
+		stale = append(stale, container)
 	}
-	for _, container := range busyStale {
-		reserved := false
-		for index := range specs {
-			if _, occupied := current[index]; occupied {
-				continue
+	sortStaleForDrain(stale, specs)
+	validNames := make([]string, 0, len(current))
+	for _, container := range current {
+		validNames = append(validNames, container.Name)
+	}
+	sort.Strings(validNames)
+
+	selectedDrainName := ""
+	if len(stale) > 0 && r.workerLifecycle == nil {
+		return problem.New(503, "docker_worker_lifecycle_unavailable", "Managed Docker Worker lifecycle coordination is unavailable.")
+	}
+	if r.workerLifecycle != nil {
+		activeDrain, err := r.workerLifecycle.ActiveManagedDockerDrain(ctx, target.ID)
+		if err != nil {
+			return err
+		}
+		if activeDrain != nil {
+			if _, found := dockerContainerByName(current, activeDrain.ContainerName); found {
+				completed, err := r.workerLifecycle.CompleteManagedDockerReplacement(
+					ctx,
+					target.ID,
+					activeDrain.ContainerName,
+					activeDrain.DrainInstanceUID,
+					observedAt,
+				)
+				if err != nil {
+					return err
+				}
+				if completed {
+					activeDrain = nil
+					rolloutAdvanced = true
+				}
 			}
-			if _, reserved := deferred[index]; reserved {
-				continue
-			}
-			if dockerReleaseClassMatches(container.Labels, specs[index].Labels) {
-				deferred[index] = container
-				reserved = true
-				break
+			if activeDrain != nil {
+				selectedDrainName = activeDrain.ContainerName
 			}
 		}
-		if reserved {
-			continue
+		if selectedDrainName == "" && len(stale) > 0 && !rolloutAdvanced {
+			ready, err := r.workerLifecycle.ManagedDockerDesiredWorkersReady(ctx, target.ID, validNames, observedAt)
+			if err != nil {
+				return err
+			}
+			if ready {
+				selectedDrainName = stale[0].Name
+			}
 		}
+	}
+
+	reserveDeferred := func(container dockerContainer, allowAny bool) {
 		for index := range specs {
 			if specs[index].Name != container.Name {
 				continue
@@ -255,9 +329,69 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 			if _, alreadyReserved := deferred[index]; !alreadyReserved {
 				deferred[index] = container
+				return
 			}
-			break
 		}
+		for index := range specs {
+			if _, occupied := current[index]; occupied {
+				continue
+			}
+			if _, reserved := deferred[index]; reserved {
+				continue
+			}
+			if dockerReleaseClassMatches(container.Labels, specs[index].Labels) {
+				deferred[index] = container
+				return
+			}
+		}
+		if !allowAny {
+			return
+		}
+		for index := range specs {
+			if _, occupied := current[index]; occupied {
+				continue
+			}
+			if _, alreadyReserved := deferred[index]; alreadyReserved {
+				continue
+			}
+			deferred[index] = container
+			return
+		}
+	}
+
+	for _, container := range stale {
+		if container.Name != selectedDrainName {
+			// A rollout advances at most one stale logical Worker per cycle.
+			// Reserve every other old container against an unoccupied desired
+			// slot, even across a full naming/config transition, so the pass
+			// cannot accidentally become an all-at-once replacement.
+			reserveDeferred(container, !dockerReleaseClassIsDesired(container.Labels, specs))
+			continue
+		}
+		request := ManagedDockerWorkerDrainRequest{
+			ExecutionTargetID: target.ID,
+			ContainerName:     container.Name,
+			Reason:            dockerManagedDrainReason(container, specs),
+			ObservedAt:        observedAt,
+		}
+		decision, err := r.workerLifecycle.PrepareManagedDockerDrain(ctx, request)
+		if err != nil {
+			return err
+		}
+		if !decision.DeletionAllowed {
+			// A busy old Worker is now durably draining and therefore cannot
+			// acquire another Execution or cleanup delivery. Keep its exact
+			// container until both existing lease classes clear.
+			reserveDeferred(container, false)
+			continue
+		}
+		if err := engine.Remove(ctx, container.ID); err != nil {
+			return problem.Wrap(502, "docker_container_remove_failed", "A stale Docker Worker could not be removed.", err)
+		}
+		if err := r.workerLifecycle.FinalizeManagedDockerDrain(ctx, request); err != nil {
+			return err
+		}
+		changed = true
 	}
 	missing := make([]int, 0)
 	for index := range specs {
@@ -602,23 +736,6 @@ func (r *DockerPoolReconciler) resolveImagePullCredential(
 	return r.config.ResolveImagePull(ctx, *target.TenantID, target.ID, registryComparisonAuthority(authority))
 }
 
-func (r *DockerPoolReconciler) busyWorkerNames(ctx context.Context, targetID uuid.UUID) (map[string]bool, error) {
-	var names []string
-	err := r.targets.db.WithContext(ctx).Table("worker_instances AS w").
-		Select("w.pod_name").
-		Joins("JOIN worker_leases AS l ON l.worker_id = w.id").
-		Where("w.execution_target_id = ? AND l.expires_at > ?", targetID, time.Now().UTC()).
-		Pluck("w.pod_name", &names).Error
-	if err != nil {
-		return nil, problem.Wrap(500, "docker_busy_workers_load_failed", "Active Docker Worker leases could not be loaded.", err)
-	}
-	result := make(map[string]bool, len(names))
-	for _, name := range names {
-		result[name] = true
-	}
-	return result, nil
-}
-
 func (r *DockerPoolReconciler) setStatus(
 	ctx context.Context,
 	target persistence.ExecutionTarget,
@@ -860,4 +977,51 @@ func (e *dockerHTTPEngine) doWithHeaders(
 		return nil
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(output)
+}
+
+// sortStaleForDrain orders stale containers so overhanging indices (scale-down
+// survivors) drain before config-mismatched containers that still occupy a
+// valid logical Worker slot. Within each group higher indices drain first
+// so the Reconciler converges in the fewest cycles.
+func sortStaleForDrain(stale []dockerContainer, specs []dockerContainerSpec) {
+	sort.Slice(stale, func(i, j int) bool {
+		iIndex, iErr := strconv.Atoi(stale[i].Labels[dockerIndexLabel])
+		jIndex, jErr := strconv.Atoi(stale[j].Labels[dockerIndexLabel])
+		iOverhanging := iErr != nil || iIndex < 0 || iIndex >= len(specs)
+		jOverhanging := jErr != nil || jIndex < 0 || jIndex >= len(specs)
+		if iOverhanging != jOverhanging {
+			return iOverhanging
+		}
+		if iIndex != jIndex {
+			return iIndex > jIndex
+		}
+		return stale[i].Name < stale[j].Name
+	})
+}
+
+func dockerContainerByName(containers map[int]dockerContainer, name string) (dockerContainer, bool) {
+	for _, container := range containers {
+		if container.Name == name {
+			return container, true
+		}
+	}
+	return dockerContainer{}, false
+}
+
+func dockerManagedDrainReason(container dockerContainer, specs []dockerContainerSpec) string {
+	for _, spec := range specs {
+		if spec.Name == container.Name {
+			return ManagedDockerDrainReasonStaleSpec
+		}
+	}
+	return ManagedDockerDrainReasonScaleDown
+}
+
+func dockerReleaseClassIsDesired(current map[string]string, specs []dockerContainerSpec) bool {
+	for _, spec := range specs {
+		if dockerReleaseClassMatches(current, spec.Labels) {
+			return true
+		}
+	}
+	return false
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/secretguard"
 )
 
@@ -81,6 +82,7 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 func newConfiguredWorkspaceMaterializer(cfg Config) *WorkspaceMaterializer {
 	materializer := NewWorkspaceMaterializerWithCache(cfg.WorkspaceRoot, cfg.GitCacheRoot, cfg.ExecutionTargetID)
 	materializer.fetchFreshnessWindow = cfg.WorkspaceFetchWindow
+	materializer.addressPolicy, _ = gitpolicy.ParsePrivateNetworkCIDRs(cfg.PrivateNetworkCIDRs)
 	return materializer
 }
 
@@ -715,6 +717,16 @@ func (d *Daemon) runExecution(
 				return renewErr
 			}
 		}
+		// The operator-facing message is deliberately generic, so on its own it
+		// cannot separate an environment fault from a genuinely broken Workspace.
+		// Log the underlying cause here — sanitized, and only on the Worker, never
+		// towards the control plane.
+		if cause := runnerFailureCause(err); cause != nil {
+			d.logger.Error(
+				"Workspace preparation failed", "executionId", execution.ID, "generation", lease.Generation,
+				"code", runnerFailureCode(err), "error", err, "cause", executionGuard.SanitizeError(cause),
+			)
+		}
 		err = executionGuard.SanitizeError(err)
 		failureMessage := err.Error()
 		if len(failureMessage) > 10_000 {
@@ -862,6 +874,26 @@ func (d *Daemon) runExecution(
 			)
 		}
 	}()
+	providerEnvironment, err := resolvePackageCredentialEnvironment(
+		executionContext,
+		d.client,
+		execution.ID,
+		lease,
+		workload.CredentialGrants,
+		executionGuard,
+		runtimeOutputRoot.directory,
+	)
+	if err != nil {
+		if !secretguard.IsExposure(err) {
+			err = &runnerFailure{
+				code: "credential_invalid", message: "The Project Package Registry Credential could not be resolved or materialized.",
+				requiresNewExecution: true, requiresUserAction: true,
+				canReconstructFromHistory: true, canMoveWorker: true,
+			}
+		}
+		failErr := d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, err)
+		return errors.Join(failErr, stopRenewal())
+	}
 	if err := prepareProtectedProviderExecutionFilesystem(
 		d.config,
 		materialized,
@@ -960,6 +992,7 @@ func (d *Daemon) runExecution(
 		ProviderResumeCursor: resumeCursor,
 		WorkspaceDirectory:   materialized.Directory, ProviderStateDirectory: providerStateDirectory,
 		RuntimeOutputDirectory: runtimeOutputRoot.directory,
+		ProviderEnvironment:    providerEnvironment,
 	}, credential, primaryControl, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
 		case "event":

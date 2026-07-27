@@ -50,14 +50,14 @@ func TestExecutionQueueMetricsAreDurableBoundedAndCurrent(t *testing.T) {
 	}
 	metrics := first.String()
 	for _, expected := range []string{
-		`synara_execution_queue_depth{capacity_class="interactive",target_kind="docker"} 1`,
-		`synara_execution_queue_oldest_age_seconds{capacity_class="interactive",target_kind="docker"} 20`,
-		`synara_execution_queue_depth{capacity_class="unknown",target_kind="docker"} 1`,
-		`synara_execution_queue_oldest_age_seconds{capacity_class="unknown",target_kind="docker"} 40`,
-		`synara_execution_queue_depth{capacity_class="standard",target_kind="kubernetes"} 2`,
-		`synara_execution_queue_oldest_age_seconds{capacity_class="standard",target_kind="kubernetes"} 90`,
-		`synara_execution_queue_depth{capacity_class="unknown",target_kind="ssh"} 1`,
-		`synara_execution_queue_depth{capacity_class="other",target_kind="other"} 1`,
+		`synara_execution_queue_depth{capacity_class="interactive",queue_class="interactive",target_kind="docker"} 1`,
+		`synara_execution_queue_oldest_age_seconds{capacity_class="interactive",queue_class="interactive",target_kind="docker"} 20`,
+		`synara_execution_queue_depth{capacity_class="unknown",queue_class="interactive",target_kind="docker"} 1`,
+		`synara_execution_queue_oldest_age_seconds{capacity_class="unknown",queue_class="interactive",target_kind="docker"} 40`,
+		`synara_execution_queue_depth{capacity_class="standard",queue_class="interactive",target_kind="kubernetes"} 2`,
+		`synara_execution_queue_oldest_age_seconds{capacity_class="standard",queue_class="interactive",target_kind="kubernetes"} 90`,
+		`synara_execution_queue_depth{capacity_class="unknown",queue_class="interactive",target_kind="ssh"} 1`,
+		`synara_execution_queue_depth{capacity_class="other",queue_class="interactive",target_kind="other"} 1`,
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)
@@ -118,6 +118,7 @@ func queueMetricFixture(
 	return persistence.AgentExecution{
 		ID: uuid.New(), TenantID: uuid.New(), SessionID: uuid.New(), TurnID: uuid.New(),
 		Status: status, ExecutionTargetID: uuid.New(), TargetKind: targetKind,
-		CapacityClass: capacityClass, Generation: 1, RequestedBy: uuid.New(), QueuedAt: queuedAt,
+		CapacityClass: capacityClass, QueueClass: "interactive", QuotaUnits: 1,
+		Generation: 1, RequestedBy: uuid.New(), QueuedAt: queuedAt,
 	}
 }

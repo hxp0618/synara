@@ -2617,6 +2617,10 @@ func seedExecutionFixtureWithoutCleanup(t *testing.T, db *gorm.DB) executionFixt
 }
 
 func seedExecutionFixtureWithCleanup(t *testing.T, db *gorm.DB, registerCleanup bool) executionFixture {
+	return seedExecutionFixtureForTargetKind(t, db, registerCleanup, "kubernetes")
+}
+
+func seedExecutionFixtureForTargetKind(t *testing.T, db *gorm.DB, registerCleanup bool, targetKind string) executionFixture {
 	t.Helper()
 	now := time.Now().UTC()
 	userID := uuid.New()
@@ -2663,7 +2667,7 @@ func seedExecutionFixtureWithCleanup(t *testing.T, db *gorm.DB, registerCleanup 
 			CredentialID: gitCredentialID, BindingKind: "git_fetch", SelectorValue: repositoryURL,
 			CreatedBy: userID, CreatedAt: now,
 		},
-		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: workerManifestTestTargetCapabilities()},
+		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: targetKind, Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: workerManifestTestTargetCapabilities()},
 		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: provider, ProviderCredentialID: &providerCredentialID, ExecutionTargetID: targetID, CurrentRuntimeBindingID: &runtimeBindingID},
 		&persistence.ProviderRuntimeBinding{
 			ID: runtimeBindingID, TenantID: tenantID, SessionID: sessionID, Provider: provider,
@@ -2675,7 +2679,7 @@ func seedExecutionFixtureWithCleanup(t *testing.T, db *gorm.DB, registerCleanup 
 			Status: "queued", InputText: "Run integration test",
 			RuntimeMode: "approval-required", InteractionMode: "plan",
 		},
-		&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: targetID, TargetKind: "kubernetes", Provider: &provider, ProviderRuntimeBindingID: &runtimeBindingID, Generation: 0, RequestedBy: userID, QueuedAt: now},
+		&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: targetID, TargetKind: targetKind, Provider: &provider, ProviderRuntimeBindingID: &runtimeBindingID, Generation: 0, RequestedBy: userID, QueuedAt: now},
 		&persistence.OutboxMessage{ID: uuid.New(), TenantID: &tenantID, Topic: "execution.queued", MessageKey: executionID.String(), Payload: map[string]any{"executionId": executionID}, Headers: map[string]any{"eventVersion": 1}, CreatedAt: now, AvailableAt: now},
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
@@ -2698,7 +2702,7 @@ func seedExecutionFixtureWithCleanup(t *testing.T, db *gorm.DB, registerCleanup 
 	return executionFixture{
 		UserID: userID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
 		ExecutionID: executionID, ProviderCredentialID: providerCredentialID, GitCredentialID: gitCredentialID,
-		TargetID: targetID, TargetKind: "kubernetes",
+		TargetID: targetID, TargetKind: targetKind,
 	}
 }
 

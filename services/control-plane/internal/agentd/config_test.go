@@ -100,6 +100,7 @@ func TestLoadConfigParsesProtectedCgroupProviderIdentity(t *testing.T) {
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_ROOT", "/sys/fs/cgroup/synara")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", "1234")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", "2345")
+	setProtectedCgroupResourceLimitEnvironment(t)
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -176,6 +177,7 @@ func TestLoadConfigRejectsProtectedCgroupProviderIdentityOutsideLinux(t *testing
 	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", "1234")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", "2345")
+	setProtectedCgroupResourceLimitEnvironment(t)
 	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "only supported on Linux") {
 		t.Fatalf("non-Linux protected cgroup provider identity was accepted: %v", err)
 	}
@@ -189,6 +191,7 @@ func TestLoadConfigParsesProtectedCgroupAttestationConfig(t *testing.T) {
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_ROOT", "/sys/fs/cgroup/synara")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", "1234")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", "2345")
+	setProtectedCgroupResourceLimitEnvironment(t)
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID", "test-key")
 	t.Setenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE", "/etc/synara/keys/process-containment.ed25519")
 
@@ -255,12 +258,34 @@ func TestLoadConfigRejectsIncompleteProtectedCgroupAttestationConfig(t *testing.
 			t.Setenv("SYNARA_AGENTD_CGROUP_V2_ROOT", test.root)
 			t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", test.uid)
 			t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", test.gid)
+			if test.uid == "1234" && test.gid == "2345" {
+				setProtectedCgroupResourceLimitEnvironment(t)
+			}
 			t.Setenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID", test.keyID)
 			t.Setenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE", test.keyPath)
 			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), test.message) {
 				t.Fatalf("invalid protected cgroup attestation config was accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRejectsIncompleteProtectedCgroupProviderResourceLimits(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only protected cgroup resource-limit validation")
+	}
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_ROOT", "/sys/fs/cgroup/synara")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", "1234")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", "2345")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX", "512")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "configure SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX") {
+		t.Fatalf("incomplete protected cgroup resource limits were accepted: %v", err)
+	}
+	setProtectedCgroupResourceLimitEnvironment(t)
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS", "999")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "period") {
+		t.Fatalf("invalid protected cgroup cpu period was accepted: %v", err)
 	}
 }
 
@@ -586,6 +611,10 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_CAPABILITIES_JSON", "SYNARA_AGENTD_CLUSTER_ID",
 		"SYNARA_AGENTD_CGROUP_V2_ROOT",
 		"SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", "SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID",
+		"SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX",
+		"SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES",
+		"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS",
+		"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS",
 		"SYNARA_AGENTD_DRAIN_TIMEOUT", "SYNARA_AGENTD_HEARTBEAT_INTERVAL",
 		"SYNARA_AGENTD_IMAGE_DIGEST", "SYNARA_AGENTD_INSTANCE_ID",
 		"SYNARA_AGENTD_INSTANCE_UID",
@@ -608,4 +637,12 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 	t.Setenv("SYNARA_AGENTD_RUNNER_COMMAND_JSON", `["runner"]`)
 	t.Setenv("SYNARA_AGENTD_WORKSPACE_ROOT", workspaceRoot)
 	t.Setenv("SYNARA_AGENTD_GIT_CACHE_ROOT", gitCacheRoot)
+}
+
+func setProtectedCgroupResourceLimitEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX", "512")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES", "8589934592")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS", "400000")
+	t.Setenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS", "100000")
 }

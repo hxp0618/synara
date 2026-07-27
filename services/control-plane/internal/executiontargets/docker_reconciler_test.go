@@ -29,14 +29,8 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	fixture := newDockerReconcileFixture(t, 2)
 	engine := newFakeDockerEngine()
 	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
-	busy := map[string]bool{}
-	fixture.reconciler.busyWorkers = func(context.Context, uuid.UUID) (map[string]bool, error) {
-		copy := make(map[string]bool, len(busy))
-		for name, value := range busy {
-			copy[name] = value
-		}
-		return copy, nil
-	}
+	lifecycle := &fakeDockerLifecycle{}
+	fixture.reconciler.SetWorkerLifecycleCoordinator(lifecycle)
 
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -103,20 +97,19 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	}
 
 	busyName := fmt.Sprintf("synara-agentd-%s-1", fixture.targetID)
-	busy[busyName] = true
 	fixture.updateDesiredWorkers(t, 1)
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists := engine.containers[busyName]; !exists {
-		t.Fatal("Docker reconciler removed a Worker with a current Lease")
+		t.Fatal("Docker reconciler removed a Worker before its replacement became ready")
 	}
-	delete(busy, busyName)
+	lifecycle.ready = true
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists := engine.containers[busyName]; exists {
-		t.Fatal("Docker reconciler did not remove the obsolete Worker after its Lease cleared")
+		t.Fatal("Docker reconciler did not remove the obsolete Worker after its replacement became ready")
 	}
 	if len(engine.containers) != 1 {
 		t.Fatalf("Docker scale-down left %d containers", len(engine.containers))
@@ -158,10 +151,8 @@ func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *t
 	fixture := newDockerReconcileFixture(t, 1)
 	engine := newFakeDockerEngine()
 	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
-	busy := map[string]bool{}
-	fixture.reconciler.busyWorkers = func(context.Context, uuid.UUID) (map[string]bool, error) {
-		return busy, nil
-	}
+	lifecycle := &fakeDockerLifecycle{}
+	fixture.reconciler.SetWorkerLifecycleCoordinator(lifecycle)
 
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -172,7 +163,6 @@ func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *t
 		t.Fatalf("initial Worker was not created: %#v", engine.containers)
 	}
 
-	busy[workerName] = true
 	configuration := dockerTestConfiguration(1)
 	configuration["image"] = "synara-agentd:next"
 	fixture.updateConfiguration(t, configuration)
@@ -180,28 +170,28 @@ func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *t
 		t.Fatal(err)
 	}
 	if len(engine.createdSpecs) != 1 {
-		t.Fatalf("busy stale Worker caused a conflicting replacement create: %d", len(engine.createdSpecs))
+		t.Fatalf("unready replacement caused a conflicting create: %d", len(engine.createdSpecs))
 	}
 	if current := engine.containers[workerName]; current.ID != first.ID {
-		t.Fatalf("busy stale Worker was replaced before its Lease cleared: before=%s after=%s", first.ID, current.ID)
+		t.Fatalf("stale Worker was replaced before its replacement was ready: before=%s after=%s", first.ID, current.ID)
 	}
 	var target persistence.ExecutionTarget
 	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; err != nil {
 		t.Fatal(err)
 	}
 	if target.Status != "active" {
-		t.Fatalf("running busy Worker did not keep its Target active: %q", target.Status)
+		t.Fatalf("deferred Worker did not keep its Target active: %q", target.Status)
 	}
 
-	delete(busy, workerName)
+	lifecycle.ready = true
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(engine.createdSpecs) != 2 {
-		t.Fatalf("cleared Lease did not create the desired replacement: %d", len(engine.createdSpecs))
+		t.Fatalf("ready replacement did not create the desired Worker: %d", len(engine.createdSpecs))
 	}
 	if current := engine.containers[workerName]; current.ID == first.ID {
-		t.Fatalf("stale Worker was not replaced after its Lease cleared: %#v", current)
+		t.Fatalf("stale Worker was not replaced after its replacement became ready: %#v", current)
 	}
 }
 
@@ -285,8 +275,8 @@ func TestDockerPoolReconcilerBusyPromotedWorkerDoesNotReserveCanarySlot(t *testi
 	}
 	engine := newFakeDockerEngine()
 	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
-	busy := map[string]bool{}
-	fixture.reconciler.busyWorkers = func(context.Context, uuid.UUID) (map[string]bool, error) { return busy, nil }
+	lifecycle := &fakeDockerLifecycle{}
+	fixture.reconciler.SetWorkerLifecycleCoordinator(lifecycle)
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +285,6 @@ func TestDockerPoolReconcilerBusyPromotedWorkerDoesNotReserveCanarySlot(t *testi
 	if busyContainer.ID == "" {
 		t.Fatalf("baseline promoted Worker %q was not created", busyName)
 	}
-	busy[busyName] = true
 	if err := fixture.db.Model(&persistence.WorkerReleasePolicy{}).
 		Where("execution_target_id = ? AND policy_version = ?", fixture.targetID, 1).
 		Updates(map[string]any{
@@ -590,4 +579,50 @@ func (e *fakeDockerEngine) Remove(_ context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+type fakeDockerLifecycle struct {
+	ready     bool
+	prepared  []ManagedDockerWorkerDrainRequest
+	finalized []ManagedDockerWorkerDrainRequest
+}
+
+func (f *fakeDockerLifecycle) RecoverMissingManagedDockerDrains(
+	context.Context, uuid.UUID, []string, time.Time,
+) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeDockerLifecycle) ActiveManagedDockerDrain(
+	context.Context, uuid.UUID,
+) (*ManagedDockerWorkerDrainState, error) {
+	return nil, nil
+}
+
+func (f *fakeDockerLifecycle) ManagedDockerDesiredWorkersReady(
+	_ context.Context, _ uuid.UUID, _ []string, _ time.Time,
+) (bool, error) {
+	return f.ready, nil
+}
+
+func (f *fakeDockerLifecycle) PrepareManagedDockerDrain(
+	_ context.Context, request ManagedDockerWorkerDrainRequest,
+) (ManagedDockerWorkerDrainDecision, error) {
+	f.prepared = append(f.prepared, request)
+	return ManagedDockerWorkerDrainDecision{
+		WorkerFound: true, DeletionAllowed: true,
+	}, nil
+}
+
+func (f *fakeDockerLifecycle) FinalizeManagedDockerDrain(
+	_ context.Context, request ManagedDockerWorkerDrainRequest,
+) error {
+	f.finalized = append(f.finalized, request)
+	return nil
+}
+
+func (f *fakeDockerLifecycle) CompleteManagedDockerReplacement(
+	context.Context, uuid.UUID, string, string, time.Time,
+) (bool, error) {
+	return false, nil
 }

@@ -25,9 +25,18 @@ type ExecutionLaunchTarget struct {
 	Target                   persistence.ExecutionTarget
 	RoutingSelection         *routing.Selection
 	PlacementSelection       placement.Selection
+	CandidateEvidence        []ExecutionLaunchCandidateEvidence
 	SchedulingPolicySnapshot schedulingpolicy.Snapshot
 	PlacementRegion          string
 	PlacementClusterID       string
+}
+
+// ExecutionLaunchCandidateEvidence joins routing evaluation with the optional
+// Worker Pool preview observed before a candidate was rejected. Successful
+// routed launches persist this bounded slice as one complete Decision graph.
+type ExecutionLaunchCandidateEvidence struct {
+	Routing            routing.CandidateEvaluation
+	PlacementSelection *placement.Selection
 }
 
 type PoolCapabilityGate func(
@@ -94,6 +103,7 @@ func SelectExecutionLaunchTarget(
 		}
 	}
 	excluded := cloneExcludedTargets(routeRequest)
+	candidateTrace := newExecutionLaunchCandidateTrace()
 	var lastRejected error
 	for {
 		target, selection, err := nextExecutionLaunchCandidate(ctx, tx, fixedTarget, routeRequest, excluded)
@@ -103,11 +113,15 @@ func SelectExecutionLaunchTarget(
 			}
 			return ExecutionLaunchTarget{}, err
 		}
+		if selection != nil {
+			candidateTrace.merge(selection.Candidates)
+		}
 
 		previewSelection, err := planner.PreviewExecution(ctx, tx, target, warmPoolMode)
 		if err != nil {
 			if routeRequest != nil && isRetryableExecutionLaunchCandidateError(err) {
 				lastRejected = err
+				candidateTrace.reject(target.ID, executionLaunchProblemCode(err), nil)
 				excluded = appendExcludedTarget(excluded, target.ID)
 				continue
 			}
@@ -121,6 +135,7 @@ func SelectExecutionLaunchTarget(
 		if err != nil {
 			if routeRequest != nil && isRetryableExecutionLaunchCandidateError(err) {
 				lastRejected = err
+				candidateTrace.reject(target.ID, executionLaunchProblemCode(err), &previewSelection)
 				excluded = appendExcludedTarget(excluded, target.ID)
 				continue
 			}
@@ -132,6 +147,7 @@ func SelectExecutionLaunchTarget(
 			err := executionSchedulingPolicyDenied(policySnapshot)
 			if routeRequest != nil {
 				lastRejected = err
+				candidateTrace.reject(target.ID, executionLaunchProblemCode(err), &previewSelection)
 				excluded = appendExcludedTarget(excluded, target.ID)
 				continue
 			}
@@ -141,6 +157,7 @@ func SelectExecutionLaunchTarget(
 			if err := capabilityGate(ctx, tx, target, previewSelection, selection); err != nil {
 				if routeRequest != nil && isRetryableExecutionLaunchCandidateError(err) {
 					lastRejected = err
+					candidateTrace.reject(target.ID, executionLaunchProblemCode(err), &previewSelection)
 					excluded = appendExcludedTarget(excluded, target.ID)
 					continue
 				}
@@ -218,6 +235,7 @@ func SelectExecutionLaunchTarget(
 			Target:                   target,
 			RoutingSelection:         selection,
 			PlacementSelection:       finalSelection,
+			CandidateEvidence:        candidateTrace.finalize(selection, finalSelection),
 			SchedulingPolicySnapshot: policySnapshot,
 			PlacementRegion:          placementRegion,
 			PlacementClusterID:       placementClusterID,
@@ -354,6 +372,119 @@ func nextExecutionLaunchCandidate(
 		return persistence.ExecutionTarget{}, nil, err
 	}
 	return selection.Target, &selection, nil
+}
+
+type executionLaunchCandidateTrace struct {
+	order    []uuid.UUID
+	byTarget map[uuid.UUID]*executionLaunchCandidateTraceEntry
+}
+
+type executionLaunchCandidateTraceEntry struct {
+	evidence            ExecutionLaunchCandidateEvidence
+	coordinatorRejected bool
+}
+
+func newExecutionLaunchCandidateTrace() *executionLaunchCandidateTrace {
+	return &executionLaunchCandidateTrace{
+		byTarget: make(map[uuid.UUID]*executionLaunchCandidateTraceEntry),
+	}
+}
+
+func (trace *executionLaunchCandidateTrace) merge(candidates []routing.CandidateEvaluation) {
+	if trace == nil {
+		return
+	}
+	for _, candidate := range candidates {
+		targetID := candidate.Target.ID
+		if targetID == uuid.Nil {
+			continue
+		}
+		entry, exists := trace.byTarget[targetID]
+		if !exists {
+			entry = &executionLaunchCandidateTraceEntry{}
+			trace.byTarget[targetID] = entry
+			trace.order = append(trace.order, targetID)
+		}
+		if entry.coordinatorRejected && candidate.RejectionCode == "request-excluded" {
+			continue
+		}
+		entry.evidence.Routing = candidate
+		entry.evidence.PlacementSelection = nil
+		entry.coordinatorRejected = false
+	}
+}
+
+func (trace *executionLaunchCandidateTrace) reject(
+	targetID uuid.UUID,
+	rejectionCode string,
+	preview *placement.Selection,
+) {
+	if trace == nil || targetID == uuid.Nil || rejectionCode == "" {
+		return
+	}
+	entry, ok := trace.byTarget[targetID]
+	if !ok {
+		return
+	}
+	entry.evidence.Routing.Eligibility = routing.CandidateEligibilityRejected
+	entry.evidence.Routing.RejectionCode = rejectionCode
+	entry.evidence.Routing.Selected = false
+	entry.evidence.PlacementSelection = clonePlacementSelection(preview)
+	entry.coordinatorRejected = true
+}
+
+func (trace *executionLaunchCandidateTrace) finalize(
+	selection *routing.Selection,
+	finalPlacement placement.Selection,
+) []ExecutionLaunchCandidateEvidence {
+	if trace == nil || selection == nil {
+		return nil
+	}
+	selectedID := selection.Target.ID
+	for _, targetID := range trace.order {
+		entry := trace.byTarget[targetID]
+		entry.evidence.Routing.Selected = false
+	}
+	entry, ok := trace.byTarget[selectedID]
+	if !ok {
+		return nil
+	}
+	health := selection.Health
+	queuePressure := selection.QueuePressure
+	entry.evidence.Routing.Target = selection.Target
+	entry.evidence.Routing.Member = selection.Member
+	entry.evidence.Routing.Health = &health
+	entry.evidence.Routing.DRReadiness = cloneDRReadiness(selection.DRReadiness)
+	entry.evidence.Routing.QueuePressure = &queuePressure
+	entry.evidence.Routing.Eligibility = routing.CandidateEligibilityEligible
+	entry.evidence.Routing.RejectionCode = ""
+	entry.evidence.Routing.Selected = true
+	entry.evidence.PlacementSelection = clonePlacementSelection(&finalPlacement)
+	entry.coordinatorRejected = false
+
+	result := make([]ExecutionLaunchCandidateEvidence, 0, len(trace.order))
+	for _, targetID := range trace.order {
+		result = append(result, trace.byTarget[targetID].evidence)
+	}
+	return result
+}
+
+func clonePlacementSelection(selection *placement.Selection) *placement.Selection {
+	if selection == nil {
+		return nil
+	}
+	clone := *selection
+	return &clone
+}
+
+func cloneDRReadiness(
+	readiness *persistence.ExecutionTargetDRReadiness,
+) *persistence.ExecutionTargetDRReadiness {
+	if readiness == nil {
+		return nil
+	}
+	clone := *readiness
+	return &clone
 }
 
 func cloneExcludedTargets(request *routing.SelectRequest) []uuid.UUID {

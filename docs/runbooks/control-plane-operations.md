@@ -230,22 +230,30 @@ deploy/saas/failure-acceptance.sh
 预期行为：Control Plane 进程保持存活，但 Artifact Store 预检失败时 `/ready=503`；Pending Artifact
 Metadata 保留，不能伪造为 Ready。
 
-1. 检查 Endpoint、DNS、TLS、Bucket、Region、Workload Identity 和对象存储配额。
+1. 检查自建 Endpoint、DNS、TLS、Bucket、Region、受控 Secret/Vault 凭证和对象存储配额。
 2. 禁止把 Access Key、Secret、Session Token 或完整 Presigned URL 写入日志。
 3. 对象存储恢复后等待 `/ready=200`。
 4. 对仍在有效期内的 Pending Artifact 重试上传和 Complete；过期记录由分布式清理任务封存。
 5. 不复制临时 Object Key 到最终 Key；只有 Control Plane 在重新读取并校验 Size、SHA-256、
    Content-Type 后才能提升。
 
-真实 AWS S3 验证必须使用明确授权的可写测试 Bucket，并通过 `SYNARA_TEST_S3_*` 变量运行共享
-Live Store 测试。没有授权时只记录为未执行，不能用 MinIO 结果冒充 AWS 结果。
+当前支持边界使用 MinIO 或其他 operator 管理的 S3-compatible storage。真实 AWS S3 Live Store 属于 deferred
+云集成，不是发布检查项；也不得把 MinIO 结果描述成 AWS 兼容性声明。
 
 ## 8. Kubernetes Reconciler 或 RBAC 失败
+
+Cluster 接入、Group Member drain/disable、计划升级、路由下线、Credential 轮换和事故 evacuation 的完整流程见
+[`kubernetes-cluster-lifecycle.md`](kubernetes-cluster-lifecycle.md)。tenant-owned managed Kubernetes Target
+现可在所有 durable blocker 清零且 fresh managed health 证明零占用后，通过与 Reconciler 同锁的终态 disable API
+停止 placement/maintenance；它不删除历史 Target 行或 Namespace。物理资源只能在 API 成功后使用精确 UID
+precondition 清理，不得用直接数据库更新或先删 Namespace 替代。
 
 ```bash
 kubectl auth can-i create pods \
   --as=system:serviceaccount:synara-system:synara-control-plane
 kubectl auth can-i create secrets \
+  --as=system:serviceaccount:synara-system:synara-control-plane
+kubectl auth can-i get priorityclasses.scheduling.k8s.io \
   --as=system:serviceaccount:synara-system:synara-control-plane
 kubectl -n synara-system describe pod -l app.kubernetes.io/name=synara-control-plane
 ```
@@ -254,12 +262,17 @@ kubectl -n synara-system describe pod -l app.kubernetes.io/name=synara-control-p
 - Operator 预建 Namespace 时应使用 namespaced Role，并关闭 Namespace 管理。
 - Worker Pod 使用独立 ServiceAccount，默认关闭 Service Account Token 自动挂载。
 - 不向 Worker Pod 注入 Control Plane ServiceAccount Token。
+- `worker_pool_priority_class_not_found` 表示目标集群尚未预置默认/自定义类；
+  `worker_pool_preemption_unsupported` 表示真实类不是 `Never`；`kubernetes_priority_class_read_failed` 表示
+  Target Credential 缺少 cluster-scoped `get` 或 API 不可判定；`kubernetes_default_priority_class_invalid` 表示
+  默认类的 value/globalDefault 已漂移。以上情况都禁止绕过为 Kubernetes 默认抢占策略。
 
 ## 9. Provider Credential KMS 失败
 
-1. 确认 KMS Provider、Key ID、Region、Workload Identity 和 Encrypt/Decrypt 权限。
+1. 确认受支持的 Local KMS、独立 32-byte KEK，以及 Secret Manager/Vault 到 Kubernetes Secret 的受控交付权限。
 2. 本地 KEK 轮换必须执行显式重加密流程；不能直接覆盖现有 Key。
-3. AWS KMS 不设置 `SYNARA_CREDENTIAL_MASTER_KEY`；Local KMS 必须提供 32-byte Key。
+3. Local KMS 必须提供 32-byte Key；Vault 可负责保管/投递该 Secret，但当前 Control Plane 不把 Vault Transit
+   作为 Provider Credential KMS。云厂商 KMS 当前也不在支持范围。
 4. KMS 不可用时拒绝新的 Credential 读取/写入，不将密文降级为明文或写入磁盘。
 5. 恢复后使用专用测试 Credential 验证 Envelope 解密，不读取真实用户 Credential 做探测。
 

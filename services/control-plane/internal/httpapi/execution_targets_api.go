@@ -119,6 +119,26 @@ func (s *Server) updateExecutionTargetProcessContainmentPolicy(w http.ResponseWr
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) disableManagedKubernetesExecutionTarget(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	item, replayed, err := s.targets.DisableManagedKubernetesTarget(
+		r.Context(), mustPrincipal(r), tenantID, targetID, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (s *Server) installSSHExecutionTarget(w http.ResponseWriter, r *http.Request) {
 	s.provisionSSHExecutionTarget(w, r, "install")
 }

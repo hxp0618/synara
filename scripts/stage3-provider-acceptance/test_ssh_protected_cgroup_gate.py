@@ -39,8 +39,8 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         preflight = {
             "enabled": True,
             "mode": "cgroup-v2",
-            "supervisorVersion": "agentd-protected-cgroup-supervisor-v2",
-            "probeVersion": 1,
+            "supervisorVersion": "agentd-protected-cgroup-supervisor-v3",
+            "probeVersion": 2,
             "probeSha256": probe_sha256,
             "supervisorIdentity": "uid:0 gid:0",
             "providerIdentity": "uid:10001 gid:10002",
@@ -48,6 +48,13 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
             "setsidDescendantKilled": True,
             "providerUid": 10001,
             "providerGid": 10002,
+            "resourceLimitsApplied": True,
+            "providerLimits": {
+                "pidsMax": 512,
+                "memoryMaxBytes": 8589934592,
+                "cpuQuotaMicros": 400000,
+                "cpuPeriodMicros": 100000,
+            },
             "attestationKeyId": "policy-key",
             "attestationPublicKeySha256": hashlib.sha256(public_key).hexdigest(),
             "attestationPublicKeyBase64": public_key_base64,
@@ -162,6 +169,10 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
                 ) + "'",
                 "SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID='10001'",
                 "SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID='10002'",
+                "SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX='512'",
+                "SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES='8589934592'",
+                "SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS='400000'",
+                "SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS='100000'",
                 "SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID='policy-key'",
                 "SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE='/etc/synara/keys/process-containment.ed25519'",
                 "SYNARA_AGENTD_BUILD_GIT_SHA='abcdef0'",
@@ -182,6 +193,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         environment_file: str | None = None,
         process_executable: str | None = None,
         parent_processes: str | None = None,
+        supervisor_processes: str | None = None,
         final_overrides: Mapping[str, Any] | None = None,
         final_bracket_overrides: Mapping[str, Any] | None = None,
     ) -> Any:
@@ -208,6 +220,8 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
                 return str(current("env_payload", env_payload))
             if "--property=User" in command:
                 return str(current("service_user", "root")) + "\n"
+            if "--property=DelegateSubgroup" in command:
+                return str(current("delegate_subgroup", "synara-agentd")) + "\n"
             if "--property=Delegate" in command:
                 return str(current("delegate", "yes")) + "\n"
             if "--property=ActiveState" in command:
@@ -235,15 +249,25 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
             if command.startswith("readlink -f /proc/"):
                 return str(current("process_executable", process_executable or options.remote_agentd_binary)) + "\n"
             if command.startswith("awk -F:"):
-                return str(current("process_control_group", current("control_group", control_group))) + "\n"
+                return str(current(
+                    "process_control_group",
+                    current("control_group", control_group) + "/synara-agentd",
+                )) + "\n"
             if command.startswith("tr '") and "/environ" in command:
                 return str(current("process_env_payload", current("env_payload", env_payload)))
             if command.startswith("stat -fc %T "):
                 return str(current("cgroup_filesystem", "cgroup2fs")) + "\n"
             if command.startswith("stat -Lc '%d:%i' "):
                 return str(current("cgroup_root_identity", "42:84")) + "\n"
+            if command.startswith("cat -- ") and command.endswith("/synara-agentd/cgroup.procs"):
+                return str(current(
+                    "supervisor_processes",
+                    supervisor_processes or f"{current('main_pid', 4242)}\n",
+                ))
             if command.startswith("cat -- ") and command.endswith("/cgroup.procs"):
-                return str(current("parent_processes", parent_processes or f"{current('main_pid', 4242)}\n"))
+                return str(current("parent_processes", parent_processes or ""))
+            if command.startswith("cat -- ") and command.endswith("/cgroup.subtree_control"):
+                return str(current("enabled_controllers", "cpu memory pids\n"))
             if "protected-cgroup-preflight" in command:
                 after_preflight = True
                 return json.dumps(preflight)
@@ -366,6 +390,8 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         preflight = {
             "enabled": True,
             "mode": "cgroup-v2",
+            "supervisorVersion": "agentd-protected-cgroup-supervisor-v3",
+            "probeVersion": 2,
             "useCgroupFD": True,
             "setsidDescendantKilled": True,
             "probeSha256": "ab" * 32,
@@ -379,7 +405,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
             "attestation": {"schemaVersion": 1, "keyId": "policy-key", "signature": "c2ln"},
         }
         with self.assertRaisesRegex(ValueError, "supervisor is not root|share a UID"):
-            ssh_protected_cgroup_gate.validate_live_preflight("root", "yes", env_values, preflight)
+            ssh_protected_cgroup_gate.validate_live_preflight("root", "yes", "synara-agentd", env_values, preflight)
 
     def test_validate_manifest_trusted_rejects_signed_legacy_supervisor(self) -> None:
         temporary_directory, options, fixture = self.make_fixture()
@@ -478,7 +504,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
             fixture["preflight"],
             parent_processes="4242\n5252\n",
         )
-        with self.assertRaisesRegex(ValueError, "service parent must contain only the systemd MainPID"):
+        with self.assertRaisesRegex(ValueError, "service parent must be process-free"):
             ssh_protected_cgroup_gate.run_gate(
                 options,
                 remote_runner=remote_runner,
@@ -491,7 +517,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         remote_runner = self.successful_remote_runner(
             options,
             fixture["preflight"],
-            final_overrides={"main_pid": 5252, "parent_processes": "5252\n"},
+            final_overrides={"main_pid": 5252, "supervisor_processes": "5252\n"},
         )
         with self.assertRaisesRegex(ValueError, "incarnation changed.*mainPid"):
             ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
@@ -524,9 +550,9 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
         remote_runner = self.successful_remote_runner(
             options,
             fixture["preflight"],
-            final_bracket_overrides={"main_pid": 6262, "parent_processes": "6262\n"},
+            final_bracket_overrides={"main_pid": 6262, "supervisor_processes": "6262\n"},
         )
-        with self.assertRaisesRegex(ValueError, "service parent must contain only|within core snapshot.*mainPid"):
+        with self.assertRaisesRegex(ValueError, "supervisor subgroup must contain only|within core snapshot.*mainPid"):
             ssh_protected_cgroup_gate.run_gate(options, remote_runner=remote_runner, attestation_verifier=lambda *_: None)
 
     def test_final_snapshot_bracket_rejects_user_delegate_and_root_inode_changes(self) -> None:
@@ -584,7 +610,7 @@ class SSHProtectedCgroupGateTest(unittest.TestCase):
             fixture["preflight"],
             final_overrides={
                 "control_group": changed_control_group,
-                "process_control_group": changed_control_group,
+                "process_control_group": changed_control_group + "/synara-agentd",
                 "env_payload": changed_env,
                 "process_env_payload": changed_env,
             },

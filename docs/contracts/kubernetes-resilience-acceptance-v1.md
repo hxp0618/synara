@@ -2,7 +2,8 @@
 
 This document defines the additive Kubernetes resilience acceptance assets under
 `deploy/kubernetes`. They extend the existing disposable Stage 2 Kind gate; they
-do not replace it and they do not claim real cloud or production validation.
+form the checked-in acceptance path for self-hosted Kubernetes. Target-hardware
+production soak remains operator-run; no managed-cloud claim is made.
 
 ## Scope
 
@@ -10,6 +11,7 @@ Entry points:
 
 - `deploy/kubernetes/kind-resilience-acceptance.sh`
 - `deploy/kubernetes/resilience-acceptance.sh`
+- `deploy/kubernetes/resource-lifecycle-acceptance.py`
 - `deploy/kubernetes/validate-resilience-assets.sh`
 
 The resilience lane is production-oriented in structure, but safe by default:
@@ -20,6 +22,8 @@ The resilience lane is production-oriented in structure, but safe by default:
   (role, binding, roleRef, ServiceAccount subject) change together; the namespace and both RBAC identities carry an
   exact run-owner label, existing identities are never overwritten, and cleanup deletes only an exact owner match;
 - it reuses the existing Stage 2 bootstrap unless explicitly disabled;
+- the optional `resource-lifecycle` case creates a distinct managed Worker namespace, requires its exact
+  `synara.io/execution-target-id` ownership label, and deletes it only with the observed namespace UID precondition;
 - every disruption is bounded by explicit timeouts;
 - node drain is simulated narrowly by cordoning a selected node and replacing
   only the targeted Synara control-plane Pod;
@@ -130,13 +134,44 @@ observed PID.
 
 `control-plane-failover` must support optional operator-provided hook commands
 before and after the Pod replacement so external leader or reconciliation checks
-can be layered without changing the script.
+can be layered without changing the script. When the runner bootstraps its owned Stage 2 PostgreSQL dependency,
+`SYNARA_K8S_RESILIENCE_SESSION_AUTHORITY_MODE` defaults to `stage2-postgres`: before disruption it atomically inserts an
+isolated Project and Session through the current PostgreSQL constraints and hashes the complete Session row as canonical
+`to_jsonb`; after the replacement replica is Ready it requires exactly one row with the byte-identical SHA-256. Persistent
+evidence retains only a digest of the sentinel ID, the before/after row digests, exact row count, and verification result.
+The raw Tenant, Organization, Project, Session, User, and Target IDs are not reported. Each soak cycle uses a new sentinel.
+External-database runs with baseline bootstrap disabled default to `disabled` and must supply their own production
+authority verification; local Stage 2 PostgreSQL evidence must not be reclassified as target-hardware database evidence.
+
+`resource-lifecycle` is additive and is not part of the default case set. It may run only with the owned Stage 2
+baseline, an explicit `SYNARA_K8S_RESILIENCE_WORKER_IMAGE`, and a Worker namespace distinct from the Control Plane
+namespace. The case must:
+
+1. create an isolated authority, Project, managed Kubernetes Target, and Session with a frozen 60-second
+   `waitingKeepAliveSeconds` policy;
+2. complete an artifact-producing Turn and retain a ready Workspace Checkpoint;
+3. enter `waiting-for-approval` on Generation 1 with exactly one durable pending approval;
+4. require the exact Generation 1 Pod to reach the `kubernetes-pod-terminal-v1` `Succeeded` proof, release every Lease,
+   commit the lease-free `suspended` boundary, and disappear by immutable Pod UID before recovery;
+5. resolve the approval while suspended as `resume-recorded`, without replaying a callback into the fenced Provider;
+6. require Generation 2 to use a different physical Pod UID, restore and verify the original Workspace artifact, and
+   complete the same Session/Turn; and
+7. validate exactly two immutable Recovery Bundles with linear predecessor lineage and exact configuration,
+   conversation, Memory, Workspace Checkpoint, Interaction resolution, Kubernetes Target, and Scheduling Decision
+   coverage.
+
+The child evidence schema is `synara.kubernetes.resource-lifecycle.acceptance.v1`. It retains only digests for Target,
+Session, Execution, interaction, Pod name, and Pod UIDs. Login tokens and raw domain identities must never enter the
+result. API failures may retain only status, bounded operation name, HTTP method, and the stable nested problem code.
+The parent projects this bounded result into the top-level scenario details and requires both `status=passed` and an
+exact-UID Worker namespace cleanup result before the case can pass. Local real-kubelet execution is E3, not managed-cloud
+or target-hardware production evidence.
 
 `node-drain` and `node-partition` are bounded smoke scenarios. They are useful
-for disposable pre-production rehearsal, not as evidence of a cloud provider's
-node-controller timing, storage behavior, or managed load-balancer semantics.
-The managed node-partition hooks are a trusted external adapter point for cloud-
-or platform-specific network isolation drills. The runner generates one
+for disposable pre-production rehearsal, not as evidence of physical switch,
+storage, or ingress behavior on the operator's target hardware.
+The non-Kind node-partition hooks are a trusted external adapter point for self-hosted
+network-isolation drills. The runner generates one
 operation ID and challenge for the case, and each start, verify, and stop phase
 must create a fresh `synara.managed-hook-transition.v1` artifact bound to that
 operation, phase, exact context/namespace, immutable Node/Pod UIDs, and
@@ -180,6 +215,13 @@ under the target cluster's runtime, in addition to API apply, scheduling, image-
 The runner keeps the existing final report shape and adds two sidecars beside the
 configured evidence path:
 
+The configured final path, `<evidence>.journal.jsonl`, and `<evidence>.partial.json`
+must all be absent before the run starts. Any collision is rejected before a
+disruption begins. Final evidence is rendered into a mode-restricted temporary
+file in the same directory and published with a create-only hard link; it is never
+truncated or replaced. The journal remains append-only during the owned run, while
+the partial snapshot is intentionally updated atomically until final completion.
+
 - `<evidence>.journal.jsonl`: append-only progress records for baseline
   completion, each top-level case completion, each soak-cycle completion, and
   final report completion. Journal entries are intentionally narrow: status,
@@ -197,14 +239,16 @@ report, with:
 - `startedAt`, `finishedAt`, `durationSeconds`
 - `context`, `namespace`, `rbacName`
 - `evidenceFile`
-- `safety`: static guardrail metadata
+- `safety`: static guardrail metadata, including the effective bounded Session-authority mode
 - `baseline`: whether Stage 2 bootstrap ran and its status/duration
 - `plannedCases`: the configured top-level case order
 - `caseCounts`: passed/failed/skipped counts for recorded cases
 - `permissions`: machine-readable `kubectl auth can-i` results
 - `topology`: node counts, control-plane placement, and PodDisruptionBudget data
 - `scenarios`: per-case records with `name`, `status`, `startedAt`,
-  `finishedAt`, and case-specific `details`
+  `finishedAt`, and case-specific `details`; successful `control-plane-failover` details include the redacted Session
+  authority verification object described above, while `resource-lifecycle` details contain the bounded child evidence
+  described above
 - `soak`: soak configuration and per-cycle results when enabled
 
 ## Soak behavior
@@ -240,14 +284,15 @@ signal and therefore cannot execute the hook.
 Local namespace/RBAC isolation, schema-81 two-replica bootstrap, exact Leader takeover, Control Plane failover, and a
 120-second six-cycle bounded soak are recorded in
 [`stage-4-orbstack-isolated-resilience-20260726-final2.md`](../reports/stage-4-orbstack-isolated-resilience-20260726-final2.md).
-This is E3 single-node evidence and does not replace managed multi-AZ or production-duration E4 acceptance.
+This is E3 single-node evidence. Multi-node Kind complements it, while target-hardware production-duration acceptance
+is run by the self-hosted operator; managed multi-AZ E4 is outside the supported scope.
 
 Optional failover hooks remain supported, but recorded hook evidence is
 redacted-by-default: command text, stdout, and stderr are replaced with
 redaction markers while digests and byte counts are retained for correlation.
-Managed node-partition hooks return only the controller's sanitized JSON result;
+Non-Kind node-partition hooks return only the controller's sanitized JSON result;
 hook command text, stdout, stderr, scope text, challenge, process identifiers,
-and check names are not persisted. Real managed contexts require the
+and check names are not persisted. Real self-hosted non-Kind contexts require the
 `systemd-user` backend with `securityBoundary=true`. It must reject unsupported
 Linux/cgroup-v2/systemd-user environments with exit 125 before hook execution,
 run the hook in an exact transient unit with `ExitType=cgroup`,
@@ -278,8 +323,8 @@ idempotent and safe to retry.
 
 This acceptance lane does not prove:
 
-- managed cloud control-plane failover;
-- multi-zone storage recovery;
+- physical multi-site control-plane failover;
+- operator storage replication across independent failure domains;
 - real production ingress, DNS, or load-balancer behavior;
 - node-controller eviction timing outside the bounded Kind smoke window; or
 - any production result on a shared cluster where the safety override was used.

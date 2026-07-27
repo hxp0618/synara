@@ -294,7 +294,8 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Version != 1 || created.Mode != PoolModeWarm || created.CapacityClass != CapacityClassInteractive || created.MinIdleUnits != 1 {
+	if created.Version != 1 || created.Mode != PoolModeWarm || created.CapacityClass != CapacityClassInteractive ||
+		created.TenantIsolation != TenantIsolationPinned || created.MinIdleUnits != 1 {
 		t.Fatalf("created pool = %#v", created)
 	}
 
@@ -341,6 +342,17 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 		t.Fatalf("identity update err = %v", err)
 	}
 
+	if _, err := fixture.service.UpdatePool(ctx, fixture.owner, fixture.tenantID, target.ID, created.ID, UpdatePoolInput{
+		ExpectedVersion: 2,
+		CreatePoolInput: CreatePoolInput{
+			Name: "isolation change", Mode: PoolModeWarm, CapacityClass: CapacityClassInteractive,
+			TenantIsolation:  TenantIsolationShared,
+			DesiredIdleUnits: 0, MaxActiveUnits: 2, SchedulingTemplate: map[string]any{}, Status: PoolStatusActive,
+		},
+	}); problemCode(err) != "worker_pool_identity_immutable" {
+		t.Fatalf("Tenant isolation update err = %v", err)
+	}
+
 	member := fixture.createMember(t, "member")
 	if _, err := fixture.service.CreatePool(ctx, member, fixture.tenantID, target.ID, CreatePoolInput{
 		Name: "forbidden", Mode: PoolModeWarm, CapacityClass: CapacityClassStandard,
@@ -370,6 +382,52 @@ func TestCreateAndUpdatePoolValidateAndEnforceCAS(t *testing.T) {
 		DesiredIdleUnits: 0, MaxActiveUnits: 1, SchedulingTemplate: map[string]any{}, Status: PoolStatusActive,
 	}); problemCode(err) != "worker_pool_mode_target_unsupported" {
 		t.Fatalf("ssh warm create err = %v", err)
+	}
+}
+
+func TestKubernetesWorkerPoolRejectsPreemptingSchedulingTemplateAtWriteTime(t *testing.T) {
+	fixture := newPlacementFixture(t)
+	ctx := context.Background()
+	target := fixture.createTarget(t, "kubernetes", false)
+	input := CreatePoolInput{
+		Name: "non-preempting", Mode: PoolModeWarm, CapacityClass: CapacityClassInteractive,
+		DesiredIdleUnits: 0, MaxActiveUnits: 1,
+		SchedulingTemplate: map[string]any{
+			"priorityClassName": "interactive-high",
+			"preemptionPolicy":  KubernetesPreemptionPolicyNever,
+		},
+		Status: PoolStatusActive,
+	}
+
+	preempting := input
+	preempting.Name = "preempting"
+	preempting.SchedulingTemplate = map[string]any{
+		"priorityClassName": "interactive-high",
+		"preemptionPolicy":  "PreemptLowerPriority",
+	}
+	if _, err := fixture.service.CreatePool(ctx, fixture.owner, fixture.tenantID, target.ID, preempting); problemCode(err) != "worker_pool_preemption_unsupported" {
+		t.Fatalf("preempting create err = %v", err)
+	}
+
+	created, err := fixture.service.CreatePool(ctx, fixture.owner, fixture.tenantID, target.ID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Version != 1 || created.SchedulingTemplate["preemptionPolicy"] != KubernetesPreemptionPolicyNever {
+		t.Fatalf("created non-preempting pool = %#v", created)
+	}
+	if _, err := fixture.service.UpdatePool(ctx, fixture.owner, fixture.tenantID, target.ID, created.ID, UpdatePoolInput{
+		ExpectedVersion: 1,
+		CreatePoolInput: preempting,
+	}); problemCode(err) != "worker_pool_preemption_unsupported" {
+		t.Fatalf("preempting update err = %v", err)
+	}
+	var persisted persistence.WorkerPool
+	if err := fixture.db.Where("id = ?", created.ID).Take(&persisted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Version != 1 || persisted.SchedulingTemplate["preemptionPolicy"] != KubernetesPreemptionPolicyNever {
+		t.Fatalf("rejected update changed persisted pool = %#v", persisted)
 	}
 }
 
@@ -404,6 +462,40 @@ func TestNormalizePoolInputValidatesMinIdleUnits(t *testing.T) {
 			}
 			if normalized.MinIdleUnits == nil || *normalized.MinIdleUnits != test.wantMin {
 				t.Fatalf("normalized minIdleUnits = %#v, want %d", normalized.MinIdleUnits, test.wantMin)
+			}
+		})
+	}
+}
+
+func TestNormalizePoolInputValidatesTenantIsolation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		value     string
+		want      string
+		wantError string
+	}{
+		{name: "omitted is safely pinned", want: TenantIsolationPinned},
+		{name: "pinned", value: " PINNED ", want: TenantIsolationPinned},
+		{name: "explicit shared", value: TenantIsolationShared, want: TenantIsolationShared},
+		{name: "invalid", value: "dedicated", wantError: "invalid_worker_pool_tenant_isolation"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			normalized, err := normalizePoolInput(CreatePoolInput{
+				Name: "resident", Mode: PoolModeResident, CapacityClass: CapacityClassStandard,
+				TenantIsolation: test.value, DesiredIdleUnits: 0, MaxActiveUnits: 1,
+				SchedulingTemplate: map[string]any{}, Status: PoolStatusActive,
+			})
+			if test.wantError != "" {
+				if code := problemCode(err); code != test.wantError {
+					t.Fatalf("problem code = %q, want %q (error: %v)", code, test.wantError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if normalized.TenantIsolation != test.want {
+				t.Fatalf("tenantIsolation = %q, want %q", normalized.TenantIsolation, test.want)
 			}
 		})
 	}

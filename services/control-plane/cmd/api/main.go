@@ -36,6 +36,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/poolautoscaling"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
 	"github.com/synara-ai/synara/services/control-plane/internal/reconcilerleadership"
@@ -114,7 +115,10 @@ func main() {
 	}
 	outboxService, err := outbox.NewService(db, outbox.Config{
 		BatchSize: cfg.OutboxBatchSize, ClaimTTL: cfg.OutboxClaimTTL,
-		MaxAttempts: cfg.OutboxMaxAttempts, BaseBackoff: cfg.OutboxBaseBackoff,
+		MaxBatchSize: cfg.OutboxMaxBatchSize, MaxConcurrency: cfg.OutboxMaxConcurrency,
+		ScaleUpDepth: int64(cfg.OutboxScaleUpDepth), TargetDelay: cfg.OutboxTargetDelay,
+		ThrottleDepth: int64(cfg.OutboxThrottleDepth),
+		MaxAttempts:   cfg.OutboxMaxAttempts, BaseBackoff: cfg.OutboxBaseBackoff,
 		MaxBackoff: cfg.OutboxMaxBackoff,
 	})
 	if err != nil {
@@ -215,6 +219,20 @@ func main() {
 		executions.WithProviderCredentialAccessTTL(cfg.ProviderCredentialAccessTTL),
 		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
 	)
+	workerPoolAutoscalingService := poolautoscaling.NewService(
+		db,
+		poolautoscaling.WithColdStartExpirer(func(
+			ctx context.Context,
+			input poolautoscaling.ColdStartExpiry,
+		) (int, error) {
+			return executionService.ExpireInteractiveColdStarts(ctx, executions.ColdStartDeadlineScope{
+				TenantID: input.TenantID, ExecutionTargetID: input.ExecutionTargetID,
+				WorkerPoolID: input.WorkerPoolID, WorkerPoolVersion: input.WorkerPoolVersion,
+				Cutoff: input.Cutoff, Limit: input.Limit,
+			})
+		}),
+	)
+	dockerReconciler.SetWorkerLifecycleCoordinator(executionService)
 	sshProvisioner.SetWorkerAuthorityRevoker(executionService.RevokeExecutionTargetWorkersInTransaction)
 	billingAdapter, billingImports, billingCloser, err := billing.NewAdapterFromRuntime(ctx, cfg.Billing)
 	if err != nil {
@@ -266,6 +284,13 @@ func main() {
 			ObservationTTL:    managedKubernetesObservationTTL,
 		},
 	)
+	managedKubernetesTargetCapacityPublisher := executiontargets.NewManagedKubernetesTargetCapacityPublisher(
+		executionTargetService,
+		executiontargets.ManagedKubernetesTargetCapacityPublisherConfig{
+			PublisherIdentity: "managed-kubernetes-target-capacity-publisher:" + reconcilerLeadershipConfig.HolderID,
+			ObservationTTL:    managedKubernetesObservationTTL,
+		},
+	)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{
 		PublicControlPlaneURL: cfg.PublicControlPlaneURL,
 		WorkerLeaseTTL:        cfg.WorkerLeaseTTL, WorkerHeartbeatTimeout: cfg.WorkerHeartbeatTimeout,
@@ -285,6 +310,7 @@ func main() {
 		PodPendingFailureThreshold: cfg.KubernetesPodPendingFailureThreshold,
 		PublishRoutingHealth:       managedKubernetesRoutingPublisher.PublishReconcile,
 		PublishWarmCapacity:        managedKubernetesWarmCapacityPublisher.PublishReconcile,
+		PublishTargetCapacity:      managedKubernetesTargetCapacityPublisher.PublishReconcile,
 		Observer:                   metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	workerReleaseAutoRollback := workerreleases.NewAutoRollbackController(
@@ -401,6 +427,18 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("failed to configure metric rollup leadership runner", "error", err)
+		os.Exit(1)
+	}
+	workerPoolAutoscalingLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:worker-pool-autoscaling",
+		CycleInterval:     cfg.WorkerPoolAutoscalingInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure Worker Pool autoscaling leadership runner", "error", err)
 		os.Exit(1)
 	}
 	var billingImportLeaderRunner *reconcilerleadership.Runner
@@ -524,6 +562,21 @@ func main() {
 					"processedPodFailureFacts", summary.ProcessedPodFailureFacts,
 					"updatedBuckets", summary.UpdatedBuckets,
 					"error", err,
+				)
+				return err
+			})
+		})
+	})
+	startBackground(func() {
+		workerPoolAutoscalingLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "worker-pool-autoscaling", func() error {
+				summary, err := workerPoolAutoscalingService.RunOnce(run.Context, cfg.WorkerPoolAutoscalingBatchSize)
+				logger.Debug(
+					"Worker Pool autoscaling cycle completed",
+					"evaluated", summary.Evaluated, "scaledUp", summary.ScaledUp,
+					"scaledDown", summary.ScaledDown,
+					"coldStartViolated", summary.ColdStartViolated,
+					"expiredExecutions", summary.ExpiredExecutions, "error", err,
 				)
 				return err
 			})

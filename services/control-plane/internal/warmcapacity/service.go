@@ -28,21 +28,22 @@ const (
 )
 
 type Observation struct {
-	TenantID                uuid.UUID
-	ExecutionTargetID       uuid.UUID
-	WorkerPoolID            uuid.UUID
-	WorkerPoolVersion       int64
-	WarmSupported           bool
-	WorkerReleaseRevisionID *uuid.UUID
-	WorkerReleaseChannel    *string
-	MinIdleUnits            int
-	DesiredTotalUnits       int
-	ClaimedUnits            int
-	ReadyIdleUnits          int
-	Source                  string
-	Reason                  *string
-	ObservedAt              time.Time
-	TTL                     time.Duration
+	TenantID                  uuid.UUID
+	ExecutionTargetID         uuid.UUID
+	WorkerPoolID              uuid.UUID
+	WorkerPoolVersion         int64
+	WarmSupported             bool
+	WorkerReleaseRevisionID   *uuid.UUID
+	WorkerReleaseChannel      *string
+	EffectiveDesiredIdleUnits *int
+	MinIdleUnits              int
+	DesiredTotalUnits         int
+	ClaimedUnits              int
+	ReadyIdleUnits            int
+	Source                    string
+	Reason                    *string
+	ObservedAt                time.Time
+	TTL                       time.Duration
 }
 
 type FreshLookup struct {
@@ -121,6 +122,33 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		if input.MinIdleUnits != pool.MinIdleUnits {
 			return problem.New(409, "warm_capacity_pool_shape_invalid", "Warm capacity min idle units do not match the Worker Pool.")
 		}
+		effectiveDesiredIdleUnits := pool.DesiredIdleUnits
+		if input.EffectiveDesiredIdleUnits != nil {
+			effectiveDesiredIdleUnits = *input.EffectiveDesiredIdleUnits
+		}
+		if effectiveDesiredIdleUnits < pool.MinIdleUnits || effectiveDesiredIdleUnits > pool.MaxActiveUnits {
+			return problem.New(409, "warm_capacity_effective_desired_invalid", "Warm capacity effective desired idle units are outside the Worker Pool bounds.")
+		}
+		if effectiveDesiredIdleUnits != pool.DesiredIdleUnits {
+			var authority struct {
+				Enabled          bool  `gorm:"column:enabled"`
+				PolicyVersion    int64 `gorm:"column:policy_version"`
+				StateVersion     int64 `gorm:"column:state_policy_version"`
+				DesiredIdleUnits int   `gorm:"column:desired_idle_units"`
+			}
+			err := tx.WithContext(ctx).Table("worker_pool_autoscaling_policies AS policy").
+				Select(`policy.enabled, policy.version AS policy_version,
+					state.policy_version AS state_policy_version, state.desired_idle_units`).
+				Joins(`JOIN worker_pool_autoscaling_state AS state
+					ON state.worker_pool_id = policy.worker_pool_id
+				   AND state.worker_pool_version = policy.worker_pool_version`).
+				Where("policy.worker_pool_id = ? AND policy.worker_pool_version = ?", pool.ID, pool.Version).
+				Take(&authority).Error
+			if err != nil || !authority.Enabled || authority.PolicyVersion != authority.StateVersion ||
+				authority.DesiredIdleUnits != effectiveDesiredIdleUnits {
+				return problem.New(409, "warm_capacity_autoscaling_authority_invalid", "Warm capacity effective desired idle units do not match the current autoscaling authority.")
+			}
+		}
 		if input.DesiredTotalUnits > pool.MaxActiveUnits {
 			return problem.New(400, "invalid_warm_capacity_counters", "Warm desired total units must not exceed the Worker Pool max active units.")
 		}
@@ -144,26 +172,27 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		now := s.now()
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			result = persistence.WorkerPoolWarmCapacity{
-				WorkerPoolID:            input.WorkerPoolID,
-				WorkerPoolVersion:       input.WorkerPoolVersion,
-				TenantID:                input.TenantID,
-				ExecutionTargetID:       input.ExecutionTargetID,
-				CapacityClass:           pool.CapacityClass,
-				WarmSupported:           input.WarmSupported,
-				WorkerReleaseRevisionID: releaseRevisionID,
-				WorkerReleaseChannel:    releaseChannel,
-				DesiredIdleUnits:        pool.DesiredIdleUnits,
-				MinIdleUnits:            input.MinIdleUnits,
-				MaxActiveUnits:          pool.MaxActiveUnits,
-				DesiredTotalUnits:       input.DesiredTotalUnits,
-				ClaimedUnits:            input.ClaimedUnits,
-				ReadyIdleUnits:          input.ReadyIdleUnits,
-				Source:                  source,
-				Reason:                  reason,
-				ObservedAt:              observedAt,
-				ExpiresAt:               observedAt.Add(input.TTL),
-				Version:                 1,
-				UpdatedAt:               now,
+				WorkerPoolID:              input.WorkerPoolID,
+				WorkerPoolVersion:         input.WorkerPoolVersion,
+				TenantID:                  input.TenantID,
+				ExecutionTargetID:         input.ExecutionTargetID,
+				CapacityClass:             pool.CapacityClass,
+				WarmSupported:             input.WarmSupported,
+				WorkerReleaseRevisionID:   releaseRevisionID,
+				WorkerReleaseChannel:      releaseChannel,
+				DesiredIdleUnits:          pool.DesiredIdleUnits,
+				EffectiveDesiredIdleUnits: effectiveDesiredIdleUnits,
+				MinIdleUnits:              input.MinIdleUnits,
+				MaxActiveUnits:            pool.MaxActiveUnits,
+				DesiredTotalUnits:         input.DesiredTotalUnits,
+				ClaimedUnits:              input.ClaimedUnits,
+				ReadyIdleUnits:            input.ReadyIdleUnits,
+				Source:                    source,
+				Reason:                    reason,
+				ObservedAt:                observedAt,
+				ExpiresAt:                 observedAt.Add(input.TTL),
+				Version:                   1,
+				UpdatedAt:                 now,
 			}
 			if err := tx.WithContext(ctx).Create(&result).Error; err != nil {
 				return problem.Wrap(409, "warm_capacity_create_rejected", "Warm capacity authority could not be created.", err)
@@ -182,6 +211,7 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		result.WorkerReleaseRevisionID = releaseRevisionID
 		result.WorkerReleaseChannel = releaseChannel
 		result.DesiredIdleUnits = pool.DesiredIdleUnits
+		result.EffectiveDesiredIdleUnits = effectiveDesiredIdleUnits
 		result.MinIdleUnits = input.MinIdleUnits
 		result.MaxActiveUnits = pool.MaxActiveUnits
 		result.DesiredTotalUnits = input.DesiredTotalUnits
@@ -195,22 +225,23 @@ func (s *Service) Observe(ctx context.Context, input Observation) (persistence.W
 		result.UpdatedAt = now
 
 		updates := map[string]any{
-			"capacity_class":             result.CapacityClass,
-			"warm_supported":             result.WarmSupported,
-			"worker_release_revision_id": result.WorkerReleaseRevisionID,
-			"worker_release_channel":     result.WorkerReleaseChannel,
-			"desired_idle_units":         result.DesiredIdleUnits,
-			"min_idle_units":             result.MinIdleUnits,
-			"max_active_units":           result.MaxActiveUnits,
-			"desired_total_units":        result.DesiredTotalUnits,
-			"claimed_units":              result.ClaimedUnits,
-			"ready_idle_units":           result.ReadyIdleUnits,
-			"source":                     result.Source,
-			"reason":                     result.Reason,
-			"observed_at":                result.ObservedAt,
-			"expires_at":                 result.ExpiresAt,
-			"version":                    result.Version,
-			"updated_at":                 result.UpdatedAt,
+			"capacity_class":               result.CapacityClass,
+			"warm_supported":               result.WarmSupported,
+			"worker_release_revision_id":   result.WorkerReleaseRevisionID,
+			"worker_release_channel":       result.WorkerReleaseChannel,
+			"desired_idle_units":           result.DesiredIdleUnits,
+			"effective_desired_idle_units": result.EffectiveDesiredIdleUnits,
+			"min_idle_units":               result.MinIdleUnits,
+			"max_active_units":             result.MaxActiveUnits,
+			"desired_total_units":          result.DesiredTotalUnits,
+			"claimed_units":                result.ClaimedUnits,
+			"ready_idle_units":             result.ReadyIdleUnits,
+			"source":                       result.Source,
+			"reason":                       result.Reason,
+			"observed_at":                  result.ObservedAt,
+			"expires_at":                   result.ExpiresAt,
+			"version":                      result.Version,
+			"updated_at":                   result.UpdatedAt,
 		}
 		update := tx.WithContext(ctx).Model(&persistence.WorkerPoolWarmCapacity{}).
 			Where("tenant_id = ? AND execution_target_id = ? AND worker_pool_id = ? AND worker_pool_version = ? AND version = ?",

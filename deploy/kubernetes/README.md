@@ -1,8 +1,12 @@
-# Kubernetes enterprise control plane
+# Self-hosted Kubernetes control plane
 
 This Kustomize base runs two stateless control-plane replicas and grants only the
 cluster permissions required by the managed Kubernetes Execution Target reconciler.
-PostgreSQL, S3, ingress/TLS, and AWS workload identity remain operator-managed.
+The supported deployment boundary is operator-managed, self-hosted Kubernetes.
+PostgreSQL, S3-compatible object storage, ingress/TLS, private Registry, and
+Secret/local-KEK management remain operator-managed. EKS/GKE/AKS-specific identity,
+native cloud billing exports, and cloud-provider availability guarantees are not
+part of the current product claim.
 Set `trusted-proxy-cidrs` to only the ingress or load-balancer network ranges that append
 `X-Forwarded-For`; leaving it empty records the direct peer address and ignores forwarded client IPs.
 
@@ -17,10 +21,19 @@ kubectl apply -f /tmp/synara-config.yaml -f /tmp/synara-secret.yaml
 kubectl apply -k deploy/kubernetes
 ```
 
+Generate `provider-cursor-key` and `credential-master-key` independently with
+`openssl rand -base64 32`; never reuse one value for both purposes. Store the
+self-hosted object-storage access key and secret only in the Secret (or have the
+operator's Secret manager materialize that Secret). The checked-in Deployment uses
+`SYNARA_CREDENTIAL_KMS_PROVIDER=local`; rotation requires the explicit credential
+re-encryption workflow, not replacing the Secret value in place.
+
 Before applying, replace `synara-control-plane:local` in `deployment.yaml` with an
-immutable image digest available to the cluster. Configure AWS IRSA, EKS Pod Identity,
-or the equivalent workload identity on the `synara-control-plane` ServiceAccount so
-the process can access S3 and the configured KMS key without static AWS credentials.
+immutable image digest available from the operator's Registry. Configure the Control
+Plane to use the self-hosted PostgreSQL, S3-compatible storage, and key-management
+endpoints through protected runtime configuration; do not place credentials in a
+ConfigMap or image. Cloud-provider Workload Identity is deliberately outside this
+deployment profile.
 
 The ClusterRole is cluster-scoped because a Target may request a dedicated Namespace.
 If every Target uses an operator-created Namespace with `manageNamespace=false`, create
@@ -30,11 +43,52 @@ the target configuration before narrowing the supplied ClusterRole.
 `deploy/kubernetes/rbac.yaml` is intentionally least-privilege for the current
 implementation surface: namespace apply, managed Pod lifecycle, namespaced
 foundation objects, and `authentication.k8s.io` `TokenReview` for workload
-identity verification.
+identity verification. Here, workload identity means the Pod-bound Synara Worker
+ServiceAccount verified by the Kubernetes API; it is not AWS/GCP/Azure Workload
+Identity. The role also grants read-only `get` on cluster-scoped
+PriorityClasses so the Reconciler can prove that every selected class is
+non-preempting before Pod creation; it cannot create, patch, or delete those
+classes.
+
+The Kustomize base installs `synara-worker-nonpreempting-v1` with value `0`,
+`globalDefault=false`, and `preemptionPolicy=Never`. Install
+`worker-priority-class.yaml` in every external Kubernetes Execution Target
+cluster as well, or pre-create a custom non-preempting PriorityClass named by
+the Worker Pool. Kubernetes admission does not allow a Pod to override a
+preempting class with `Never`, so a missing or preempting class is an explicit
+reconciliation failure rather than a fallback to the Kubernetes default.
 
 Managed Worker Pods get a separate ServiceAccount with token automount disabled. The
 control-plane ServiceAccount token is used only by the reconciler and is never copied
 into Worker Pods or execution events.
+
+## Managed Worker network and storage boundary
+
+Each managed Kubernetes Target owns an explicit `egressCidrs` allowlist and optional `egressTcpPorts`. The generated
+NetworkPolicy permits DNS only to `kube-system` Pods labelled `k8s-app=kube-dns`, permits the declared CIDRs only on
+the declared TCP ports, and subtracts link-local and known metadata endpoints from broad CIDRs. The Control Plane
+URL and configured proxy ports are always included so a narrow policy cannot strand agentd. Operators should use
+the smallest provider, Git, package, registry, Object Store, and Control Plane ranges that their self-hosted network
+allows.
+
+`privateNetworkCidrs` is a second, narrower authority used by agentd when resolving private Git remotes. It accepts
+only an explicitly declared subset of RFC1918, CGNAT, or IPv6 ULA space and must be covered by `egressCidrs`;
+loopback, link-local, metadata, and public ranges remain rejected. Credential-free proxy authorities can be set with
+`providerHttpProxy`, `providerHttpsProxy`, and `providerAllProxy`, plus a bounded `providerNoProxy` list. They are
+projected through `SYNARA_PROVIDER_*` aliases and only then mapped inside Provider Host, so ambient host proxy
+variables are not inherited. Proxy credentials belong in a purpose-specific Credential integration, not in Target
+configuration.
+
+Private Worker images use the existing tenant/Target-scoped `worker_image_pull` binding and a generated
+`dockerconfigjson` Secret. Private npm and PyPI reads use immutable per-generation `package_read` grants; agentd
+writes execution-local 0600 config files and passes only their controlled absolute paths to Provider Host. Private
+Git continues to use exact-host HTTPS AskPass or pinned-host SSH credentials.
+
+The live Kubernetes Workspace always uses a size-bounded `emptyDir`. A PVC may be configured only for the
+rebuildable Git cache through `gitCachePersistentVolumeClaim`; it is never a shared writable Workspace or a recovery
+authority. Durable recovery uses a Ready Checkpoint/Artifact in the operator's S3-compatible Object Store, or an
+exact Git reference for clean tracked state. CSI snapshots are not part of RecoveryBundle v1. See
+[Workspace Storage Boundary v1](../../docs/contracts/workspace-storage-boundary-v1.md).
 
 `GET /metrics` is available on the existing `http` Service port. Prometheus Operator
 users can apply the optional `deploy/kubernetes/monitoring` ServiceMonitor and alert
@@ -90,22 +144,42 @@ Kind by default. Override these DNS hostnames with
 `SYNARA_DUAL_CLUSTER_SECONDARY_HOST_ALIAS` when the local runtime uses
 different container-to-host aliases.
 
+The wrapper also starts a run-owned PostgreSQL 17 container on a random
+loopback port and applies the current Control Plane migrations. The Go lane
+constructs two independent `sessions.Service` and Kubernetes Reconciler
+instances against that shared database authority. These are concurrent
+in-process Control Plane service/Reconciler instances, not two deployed HTTP
+Control Plane Pods; the separate resilience lane below covers the real
+two-replica Control Plane deployment and database/dependency disruption path.
+
 Each cluster receives a random, run-labelled authentication Namespace,
 ServiceAccount, namespaced workload ClusterRole/RoleBinding, exact-name
-Namespace ClusterRole/ClusterRoleBinding, and a distinct pre-created target
-Namespace. The test uses those exact target Namespace names; the wrapper owns
+Namespace ClusterRole/ClusterRoleBinding, a distinct pre-created target
+Namespace, and a non-preempting Worker PriorityClass. An existing
+PriorityClass is accepted only when its value, global-default flag, and
+`preemptionPolicy=Never` match the frozen policy; otherwise the lane fails
+closed. The test uses those exact target Namespace names; the wrapper owns
 their cleanup. Kubernetes creates return each UID in the same response. Cleanup
 first verifies that UID and run label, then submits a raw `DeleteOptions` with
 an API-server-enforced UID precondition and waits for that original UID to
 disappear; it never performs an ordinary name-only delete. The test receives
-only short-lived TokenRequest credentials through its process
-environment; tokens and CA material are never written to the final evidence or
-the test-detail file. Cleanup verifies both UID and run label before deleting
-any Kubernetes object, and verifies the Kind node ownership label before
-deleting the secondary cluster. It never creates, changes, or deletes anything
-in `synara-system`. Set `SYNARA_DUAL_CLUSTER_KEEP_KIND_CLUSTER=1` only when the
+only short-lived TokenRequest credentials through its process environment;
+tokens and CA material are never written to the final evidence or the
+test-detail file. Cleanup verifies both UID and run label before deleting any
+Kubernetes object, and verifies the Kind node ownership label before deleting
+the secondary cluster. It never creates, changes, or deletes anything in
+`synara-system`. Set `SYNARA_DUAL_CLUSTER_KEEP_KIND_CLUSTER=1` only when the
 disposable secondary must be retained for diagnosis; run-owned Kubernetes auth
 objects are still removed.
+
+After proving destination readiness and a single failover successor under two
+concurrent sweeps, the pressure phase runs eight additional interactive
+Executions per cluster with `maxActivePods=4`. Both clusters therefore execute
+two bounded waves. Three chaos cycles then delete one exact Pod UID in each
+cluster with an API-server UID precondition and require the same logical
+Execution to return through a different Running/Ready UID. The lane finally
+requires all sixteen pressure Executions to reach its terminal boundary and
+both target Namespaces to be empty.
 
 The bounded final JSON records only context labels, server versions, node
 counts, test and cleanup status, source SHA/dirty state, local Worker image
@@ -118,7 +192,9 @@ TokenReview, ServiceAccount/Pod name/UID claims, live Pod GET, Target ownership,
 and rejection of the unbound Control Plane Kubernetes credential. It does not
 claim the production `/v1/workers/register` handler or Worker-row persistence.
 A failure or interrupt writes the same evidence shape when the output path was
-successfully reserved.
+successfully reserved. The checked-in passing run and its precise limitations
+are recorded in
+[`stage-4-dual-cluster-pressure-chaos-20260727-final7.md`](../../docs/reports/stage-4-dual-cluster-pressure-chaos-20260727-final7.md).
 
 ## Disposable Kind resilience lane
 
@@ -177,6 +253,10 @@ overall evidence.
 
 The final evidence report remains the existing JSON document written to
 `SYNARA_K8S_RESILIENCE_EVIDENCE_FILE` (or a temporary path for non-soak runs).
+An explicit final path and both sidecar paths must not already exist. The runner
+checks this before any disruption and publishes the final report with a same-directory
+create-only hard link, so a concurrent or stale operator-owned report cannot be
+overwritten at completion.
 The harness also keeps two additive sidecars beside that path:
 
 - `<evidence>.journal.jsonl`: append-only progress events for baseline

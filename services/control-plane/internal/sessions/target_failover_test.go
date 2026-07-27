@@ -101,7 +101,7 @@ func TestFailoverExecutionCreatesSuccessorWithoutRewritingSourcePlacement(t *tes
 		t.Fatal(err)
 	}
 	if decision.ID != *destination.SchedulingDecisionID || decision.AlgorithmVersion != "queue-pressure-v1" ||
-		decision.EvidenceCompleteness != "selected-only" || decision.CandidateCount != 1 ||
+		decision.EvidenceCompleteness != "complete" || decision.CandidateCount != 2 ||
 		decision.SelectedExecutionTargetID != destinationTarget.ID {
 		t.Fatalf("failover successor scheduling decision = %#v", decision)
 	}
@@ -110,14 +110,25 @@ func TestFailoverExecutionCreatesSuccessorWithoutRewritingSourcePlacement(t *tes
 		fixture.tenantID, group.ID, destinationTarget.ID).Take(&destinationMember).Error; err != nil {
 		t.Fatal(err)
 	}
-	var candidate persistence.ExecutionSchedulingCandidate
+	var candidates []persistence.ExecutionSchedulingCandidate
 	if err := fixture.db.Where("tenant_id = ? AND decision_id = ?", fixture.tenantID, decision.ID).
-		Take(&candidate).Error; err != nil {
+		Order("ordinal ASC").Find(&candidates).Error; err != nil {
 		t.Fatal(err)
 	}
+	if len(candidates) != 2 {
+		t.Fatalf("failover scheduling candidates = %#v", candidates)
+	}
+	candidateByTarget := make(map[uuid.UUID]persistence.ExecutionSchedulingCandidate, len(candidates))
+	for _, value := range candidates {
+		candidateByTarget[value.ExecutionTargetID] = value
+	}
+	candidate := candidateByTarget[destinationTarget.ID]
+	rejectedSource := candidateByTarget[sourceTarget.ID]
 	if !candidate.Selected || candidate.TargetGroupMemberID == nil ||
 		*candidate.TargetGroupMemberID != destinationMember.ID || candidate.HealthVersion == nil ||
-		candidate.QueuedExecutionUnits == nil || candidate.EffectiveLoadRank == nil {
+		candidate.QueuedExecutionUnits == nil || candidate.EffectiveLoadRank == nil ||
+		rejectedSource.Selected || rejectedSource.Eligibility != "rejected" ||
+		rejectedSource.RejectionCode == nil || *rejectedSource.RejectionCode != "request-excluded" {
 		t.Fatalf("failover successor scheduling candidate = %#v", candidate)
 	}
 	var session persistence.AgentSession

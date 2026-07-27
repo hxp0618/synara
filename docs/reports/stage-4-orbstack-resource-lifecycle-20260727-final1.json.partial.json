@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "failed",
+  "startedAt": "2026-07-26T16:34:44Z",
+  "updatedAt": "2026-07-26T16:36:26Z",
+  "finishedAt": "2026-07-26T16:36:26Z",
+  "context": "orbstack",
+  "namespace": "synara-stage4-lifecycle-1",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-lifecycle-1",
+  "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final1.json",
+  "journalFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final1.json.journal.jsonl",
+  "partialFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final1.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 102
+  },
+  "plannedCases": [
+    "resource-lifecycle"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "scenarios": [
+    {
+      "name": "resource-lifecycle",
+      "status": "failed",
+      "startedAt": "2026-07-26T16:36:26Z",
+      "finishedAt": "2026-07-26T16:36:26Z",
+      "details": {
+        "status": "failed",
+        "evidenceLevel": "E3",
+        "durationSeconds": 0,
+        "identities": null,
+        "lifecycle": null,
+        "pendingInteraction": null,
+        "workspace": null,
+        "recoveryBundle": null,
+        "podLifecycle": null,
+        "cleanup": null,
+        "reasonCode": "postgres_json_invalid",
+        "message": "The acceptance state query returned malformed JSON",
+        "details": {
+          "resultBytes": 181,
+          "resultDigest": "f812ec0e2cf6929c800f64313dcf99009b30b8602180759572b884041eda03e3"
+        }
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "failed",
+    "startedAt": "2026-07-26T16:34:44Z",
+    "finishedAt": "2026-07-26T16:36:26Z",
+    "durationSeconds": 102,
+    "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final1.json",
+    "unexpectedExitStatus": null
+  }
+}

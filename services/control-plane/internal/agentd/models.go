@@ -20,6 +20,7 @@ type RunnerInput struct {
 	WorkspaceDirectory     string               `json:"workspaceDirectory"`
 	ProviderStateDirectory string               `json:"providerStateDirectory,omitempty"`
 	RuntimeOutputDirectory string               `json:"runtimeOutputDirectory,omitempty"`
+	ProviderEnvironment    map[string]string    `json:"-"`
 }
 
 type MemoryDocument struct {

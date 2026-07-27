@@ -185,6 +185,10 @@ func (m *providerHostV2PrestartManager) take(
 	}
 	m.cancel()
 	<-m.done
+	if len(input.ProviderEnvironment) > 0 {
+		_ = host.process.abort()
+		return providerHostV2Adoption{}, "execution-environment-required"
+	}
 	if !host.process.availableForAdoption() {
 		_ = host.process.abort()
 		return providerHostV2Adoption{}, "process-exited"

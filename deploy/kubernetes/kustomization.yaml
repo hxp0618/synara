@@ -4,6 +4,7 @@ namespace: synara-system
 resources:
   - namespace.yaml
   - service-account.yaml
+  - worker-priority-class.yaml
   - rbac.yaml
   - pod-disruption-budget.yaml
   - deployment.yaml

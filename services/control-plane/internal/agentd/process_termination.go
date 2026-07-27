@@ -16,6 +16,7 @@ const resourceSuspendContainmentCapabilityKey = "resourceSuspendContainment"
 type processTreeOptions struct {
 	CgroupV2Root              string
 	ProtectedProviderIdentity *ProtectedCgroupIdentity
+	ProtectedProviderLimits   *ProtectedCgroupResourceLimits
 	ContainmentFence          ProtectedCgroupFence
 	SupervisorInstance        uuid.UUID
 	RuntimeInstance           uuid.UUID

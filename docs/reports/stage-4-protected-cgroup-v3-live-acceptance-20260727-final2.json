@@ -1,0 +1,541 @@
+{
+  "binary": {
+    "bytes": 52722644,
+    "goarch": "arm64",
+    "goos": "linux",
+    "sha256": "ba022b175031befc23a1e9bf3d86f09cd13337daaa3aa11fe0e44276bcbf2778",
+    "transfer": "stdin"
+  },
+  "completedAt": "2026-07-27T06:32:24.401491+00:00",
+  "error": "live systemd test failed (1): Running as unit: synara-cgroup-v2-live-20260727v3a2.service\n=== RUN   TestProtectedCgroupV3LiveIntegration\n    protected_cgroup_live_integration_test.go:103: live delegated root enabled controllers = [], missing cpu\n--- FAIL: TestProtectedCgroupV3LiveIntegration (0.00s)\nFAIL\nFinished with result: exit-code\nMain processes terminated with: code=exited/status=1\nService runtime: 19ms\nCPU time consumed: 20ms\nMemory peak: 45.1M\nMemory swap peak: 0B\n",
+  "evidenceBoundary": {
+    "containmentScenariosProved": false,
+    "hostPrerequisitesObserved": [
+      "Ubuntu 24.04 arm64 disposable VM",
+      "systemd 255 (255.4-1ubuntu8.16)",
+      "unified cgroup2fs"
+    ],
+    "notProved": "real Codex or Claude Provider execution, cloud target, signed Control Plane projection, deployment, or release"
+  },
+  "host": {
+    "architecture": "aarch64",
+    "cgroupFilesystem": "cgroup2fs",
+    "cgroupMode": "unified",
+    "kernel": "Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64 GNU/Linux",
+    "systemd": "systemd 255 (255.4-1ubuntu8.16)"
+  },
+  "preservedVm": {
+    "after": {
+      "architecture": "arm64",
+      "distro": "debian",
+      "id": "01KXWKJDF238XYZ6HFPYGQ09VF",
+      "name": "debian",
+      "state": "running",
+      "version": "trixie"
+    },
+    "before": {
+      "architecture": "arm64",
+      "distro": "debian",
+      "id": "01KXWKJDF238XYZ6HFPYGQ09VF",
+      "name": "debian",
+      "state": "running",
+      "version": "trixie"
+    },
+    "unchanged": true
+  },
+  "repository": {
+    "dirty": true,
+    "gitHead": "79a9067a2b92d91e70c76023c55fa8761d128064"
+  },
+  "schemaVersion": "synara.protected-cgroup-v3-live-gate.v1",
+  "source": {
+    "files": [
+      {
+        "bytes": 12744,
+        "path": "services/control-plane/internal/agentd/artifact_source.go",
+        "sha256": "6d3bd2c19a251de8eb2570791702277515b2cd228f76bd2b4250b94f30edce8f"
+      },
+      {
+        "bytes": 3020,
+        "path": "services/control-plane/internal/agentd/artifact_source_secret_guard_test.go",
+        "sha256": "b4744d112e0a8e20de38bb297376533ff024e3f4037c171c2daae5d6c62e8767"
+      },
+      {
+        "bytes": 9509,
+        "path": "services/control-plane/internal/agentd/checkpoint.go",
+        "sha256": "6321796bae6247fd1bda533b5d9148728e521796c72b22518ecd51dff77f99fa"
+      },
+      {
+        "bytes": 51282,
+        "path": "services/control-plane/internal/agentd/checkpoint_patch.go",
+        "sha256": "535da000959f7096dc2e47df4af22f38064318f76e180c828b2a74f4436cc464"
+      },
+      {
+        "bytes": 41654,
+        "path": "services/control-plane/internal/agentd/checkpoint_test.go",
+        "sha256": "f32f66001e08a2c288666c5400f5b8c7252c6394c49353459f3eede16859da72"
+      },
+      {
+        "bytes": 48385,
+        "path": "services/control-plane/internal/agentd/client.go",
+        "sha256": "737158f125d847680ca421a4016545cf6f50a234619377dc4cb0dfb2a536cc47"
+      },
+      {
+        "bytes": 3973,
+        "path": "services/control-plane/internal/agentd/client_lifecycle_receipt_test.go",
+        "sha256": "bbad6c4b1c0eaabff3ac661df467912669d97eae73febf4df21aa401055f138b"
+      },
+      {
+        "bytes": 6055,
+        "path": "services/control-plane/internal/agentd/client_secret_guard_test.go",
+        "sha256": "b06483ba3781fc1adcfe33a2fef3eba5b8b69bd12374d09277fa726a853081bb"
+      },
+      {
+        "bytes": 6731,
+        "path": "services/control-plane/internal/agentd/client_test.go",
+        "sha256": "db8ad52fcdc98dd1ad573efed67e76929bc742cd4feec5a8f6574d9cacb316e3"
+      },
+      {
+        "bytes": 21016,
+        "path": "services/control-plane/internal/agentd/config.go",
+        "sha256": "e0a6443469b94a3e2537a6c03f476f510c96cd7db168ef9d25a672dd9a991d41"
+      },
+      {
+        "bytes": 23639,
+        "path": "services/control-plane/internal/agentd/config_test.go",
+        "sha256": "49225425c37bbbdc667abddfde041ed7708b48fd79741a09196bf61860bbe5f4"
+      },
+      {
+        "bytes": 8098,
+        "path": "services/control-plane/internal/agentd/credential_access_monitor_test.go",
+        "sha256": "e2aa7d7b07bd74a6f097a7dd6808ed311864fca998be7a210d94b688fba3889e"
+      },
+      {
+        "bytes": 3342,
+        "path": "services/control-plane/internal/agentd/credential_grants.go",
+        "sha256": "a77a947363f96fc55f2726d2cf0e95396bc89f31adb33c139393f87476f28762"
+      },
+      {
+        "bytes": 8171,
+        "path": "services/control-plane/internal/agentd/credential_grants_test.go",
+        "sha256": "14545714878613e36142d99e3b885d82c0caeae460a85e260f8388bf40f28034"
+      },
+      {
+        "bytes": 66229,
+        "path": "services/control-plane/internal/agentd/daemon.go",
+        "sha256": "c7eb3995f0fb108037b843d393bd61b908bb05624106577f3fc729afd2fe449b"
+      },
+      {
+        "bytes": 23756,
+        "path": "services/control-plane/internal/agentd/daemon_active_suspend_test.go",
+        "sha256": "04a2a8465b859a703d213d5551cc5709bb13f7c745ea2f8043e19f380bda7e2f"
+      },
+      {
+        "bytes": 12109,
+        "path": "services/control-plane/internal/agentd/daemon_cleanup_test.go",
+        "sha256": "87f3166ab2f2e2fc11bb0944c2a4a9fbe55753ed4ac949c839151b18ee174e85"
+      },
+      {
+        "bytes": 7134,
+        "path": "services/control-plane/internal/agentd/daemon_control_updates_test.go",
+        "sha256": "d017de29f1382eeb892fb832e2d0cfddee306459f7c13f06f68d1964cdca0690"
+      },
+      {
+        "bytes": 11820,
+        "path": "services/control-plane/internal/agentd/daemon_diff_artifact_test.go",
+        "sha256": "2dba07072ff2db33c62201adff1d5218d3e1f861a34970d38db4d4898e00992d"
+      },
+      {
+        "bytes": 26150,
+        "path": "services/control-plane/internal/agentd/daemon_drain_test.go",
+        "sha256": "1b44449805a5895481f763c9eba0940e8da99a552426bb55d84154ecec6f692c"
+      },
+      {
+        "bytes": 25025,
+        "path": "services/control-plane/internal/agentd/daemon_interaction_test.go",
+        "sha256": "485075a60d3976981c334e1469ddb1e8e08d87e9641fb488dfd79139f3505431"
+      },
+      {
+        "bytes": 5957,
+        "path": "services/control-plane/internal/agentd/daemon_primary_operation_test.go",
+        "sha256": "ba08c943da6ad4c275a5203222727222ffae853bcdd7f38a6914cad75fca656f"
+      },
+      {
+        "bytes": 11520,
+        "path": "services/control-plane/internal/agentd/daemon_renewal_test.go",
+        "sha256": "494bba59382eedcd422159cb1ba0472a8cef2d54a933789feb5538fb9e22a580"
+      },
+      {
+        "bytes": 18926,
+        "path": "services/control-plane/internal/agentd/daemon_resource_suspend.go",
+        "sha256": "439c86ae51d76bb354354e09342b8244d8889ccb8be7fe8d262e7f8cddb9aea0"
+      },
+      {
+        "bytes": 5986,
+        "path": "services/control-plane/internal/agentd/daemon_revocation_test.go",
+        "sha256": "84a8074cc0a36b46e3e6c9c470e024091bc9cb203a3e4ae1cf4ec3acfdd029b8"
+      },
+      {
+        "bytes": 26046,
+        "path": "services/control-plane/internal/agentd/daemon_workspace_test.go",
+        "sha256": "c883da228e0a0e6ad32a31ce2ee6e3edf6038224461db1175b9fd56f656bebda"
+      },
+      {
+        "bytes": 6446,
+        "path": "services/control-plane/internal/agentd/git_askpass.go",
+        "sha256": "3a1ddc3516bc2bb78c6415518cde7fbd5e78462c91b2905699b6e6b8d8bee82c"
+      },
+      {
+        "bytes": 4320,
+        "path": "services/control-plane/internal/agentd/git_askpass_test.go",
+        "sha256": "4f85c286881344639fccd97338bc4328472b9ba024457557e598c01c9ec31805"
+      },
+      {
+        "bytes": 7446,
+        "path": "services/control-plane/internal/agentd/git_ssh_agent.go",
+        "sha256": "b2951a3f0f96d9e8840ce5c8ce4404ff71fd7346d54db4cae6efacbd83a46e0a"
+      },
+      {
+        "bytes": 7744,
+        "path": "services/control-plane/internal/agentd/git_ssh_agent_test.go",
+        "sha256": "21f91d5ebbbc9b3a5d6b7a0f46039df91038b9abd5a476cb6b94c72479234edb"
+      },
+      {
+        "bytes": 3085,
+        "path": "services/control-plane/internal/agentd/memory_test.go",
+        "sha256": "9966d57bcc376fa4ceab6d6b5682f228899c78679f9d87543b5000a589922303"
+      },
+      {
+        "bytes": 3975,
+        "path": "services/control-plane/internal/agentd/models.go",
+        "sha256": "a9e076101599f4387a774a28bd98c2d5a5cc39603d8035edca843f666637ab76"
+      },
+      {
+        "bytes": 3064,
+        "path": "services/control-plane/internal/agentd/process_termination.go",
+        "sha256": "6670ffdece5e79cd00ae9549f0cc64621664a1a3b3908288cbcf83c3b04ba6a4"
+      },
+      {
+        "bytes": 13157,
+        "path": "services/control-plane/internal/agentd/process_termination_linux.go",
+        "sha256": "56a845365cae30653da89ae64bb01f4b6b7e3fa4b9d7e8dfba065c0eaec4cd64"
+      },
+      {
+        "bytes": 8351,
+        "path": "services/control-plane/internal/agentd/process_termination_linux_test.go",
+        "sha256": "7340d33f8c59a580fb4aab846d4c79961b64f3c56a31eef9694ded0072998968"
+      },
+      {
+        "bytes": 13299,
+        "path": "services/control-plane/internal/agentd/process_termination_test.go",
+        "sha256": "1a626e23adf8342bc90ec4e665784f0e6ab9945b12b8dc88b3f087e3bffe5e9f"
+      },
+      {
+        "bytes": 1349,
+        "path": "services/control-plane/internal/agentd/process_termination_unix.go",
+        "sha256": "fb6a4e009222af43140c306d71fdb6bcf327e0cb4eb95bea791f3d38d0ad000c"
+      },
+      {
+        "bytes": 545,
+        "path": "services/control-plane/internal/agentd/process_termination_unsupported.go",
+        "sha256": "a7f2f1b2decc1df71dcb4a0da2d4897067ea1fb396af663e151e6f5640de5279"
+      },
+      {
+        "bytes": 3006,
+        "path": "services/control-plane/internal/agentd/process_termination_windows.go",
+        "sha256": "0fbd2a61be0d6fffb293b20bd0a682573ae0932b378d755acf4479028f27a455"
+      },
+      {
+        "bytes": 3546,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_attestation.go",
+        "sha256": "a5554edbd19b20b7479e5377345f0ab5d6b17b88a4a93b1b8be0c9405697da9b"
+      },
+      {
+        "bytes": 18867,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_attestation_linux.go",
+        "sha256": "528dd2b759fe9ab93e21d2d921c7b1755a27076d694a218babaa83b9777f5a6c"
+      },
+      {
+        "bytes": 2600,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_attestation_linux_test.go",
+        "sha256": "9d7d836c74c099b51fe8629e0d268a810539b19490585b96077fbbb1dec9cad6"
+      },
+      {
+        "bytes": 758,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_attestation_unsupported.go",
+        "sha256": "0aeec48c9fdc03942c76994567e03daf9686b8d53ecbe7ebc3777bab729944ec"
+      },
+      {
+        "bytes": 4418,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_filesystem.go",
+        "sha256": "956da74ce43afbc7031d6592ecdbce72da181af507baa1e952d4e70bdfbf2a20"
+      },
+      {
+        "bytes": 5220,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_filesystem_test.go",
+        "sha256": "24424cfa7c85ba82558f7f1cbcc82835a6a22b94063c6c49d01e37039f3c0f0a"
+      },
+      {
+        "bytes": 32822,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_live_integration_test.go",
+        "sha256": "bedb874aef57598318d89a10a2946b0b943704c47a75c6dba45f767b6f0266d5"
+      },
+      {
+        "bytes": 2731,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_supervisor.go",
+        "sha256": "c9a99206c79e28c57d9f46b5a0ca393d85d58c2f2987826eb5673cc8b1b9d364"
+      },
+      {
+        "bytes": 47447,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_supervisor_linux.go",
+        "sha256": "addbf78e10ae53604fa70d06d4f0cc5b3eab3da511d771d4f7675ec3a0506bef"
+      },
+      {
+        "bytes": 50999,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_supervisor_linux_test.go",
+        "sha256": "6210f27eeab121a5f3629588507283d1c3ddedbf50b385a34d756fecf8c49220"
+      },
+      {
+        "bytes": 1623,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_supervisor_unsupported.go",
+        "sha256": "3616105abcc565f24061eddf70c66a863600587ff83068f310a0875502de3372"
+      },
+      {
+        "bytes": 716,
+        "path": "services/control-plane/internal/agentd/protected_cgroup_supervisor_unsupported_test.go",
+        "sha256": "89c3f81aa0093cb2d0be1085f564ccd57c4d4fa08d54c90784adb9443c823728"
+      },
+      {
+        "bytes": 11040,
+        "path": "services/control-plane/internal/agentd/provider_credential_access.go",
+        "sha256": "d59874d69f790ec4e5fffa118d55133792ce3aee7b0be3684223b1ba8272beb9"
+      },
+      {
+        "bytes": 6372,
+        "path": "services/control-plane/internal/agentd/provider_host_prestart.go",
+        "sha256": "77546926cece89d7550a7a8ef8209ecc70afa9ae78bc9318e40c23090ed907f9"
+      },
+      {
+        "bytes": 7493,
+        "path": "services/control-plane/internal/agentd/provider_host_prestart_test.go",
+        "sha256": "a0c343a83cc5ae549de327a60d13e30a29b1238781c69f09535725af295cd841"
+      },
+      {
+        "bytes": 65546,
+        "path": "services/control-plane/internal/agentd/provider_host_v2.go",
+        "sha256": "ba894620c1dfed746f0532330d7fb8103d910369401a4a3d0724128020452e1f"
+      },
+      {
+        "bytes": 68148,
+        "path": "services/control-plane/internal/agentd/provider_host_v2_test.go",
+        "sha256": "0cf9cf1ee95d8fe1ac4b713d78413174f733b4f70cbfbe2ea95bd710dc58283f"
+      },
+      {
+        "bytes": 12466,
+        "path": "services/control-plane/internal/agentd/runner.go",
+        "sha256": "e5cc27a664314d49eed9a7548353eda6567acc2cc8630559a34609f28ed59d27"
+      },
+      {
+        "bytes": 22251,
+        "path": "services/control-plane/internal/agentd/runner_test.go",
+        "sha256": "ca8edc71c3760ddfaf30f56b705040467028d60888f7a7fe8cda12a82190f2fe"
+      },
+      {
+        "bytes": 11504,
+        "path": "services/control-plane/internal/agentd/secret_guard.go",
+        "sha256": "fcc34701546e1efa20990639f977f44b8e5fa11e86ced80ddc651264d2c64c24"
+      },
+      {
+        "bytes": 10201,
+        "path": "services/control-plane/internal/agentd/secret_guard_test.go",
+        "sha256": "8be00008a492d48e41cc888428e335985a9d111b6c71b2ba4c82d50385f58825"
+      },
+      {
+        "bytes": 4891,
+        "path": "services/control-plane/internal/agentd/supervisor.go",
+        "sha256": "781d5b4085d61b62d6fe77c01b6a3954381022c1b3c5f54a313707dc4be58d9c"
+      },
+      {
+        "bytes": 7000,
+        "path": "services/control-plane/internal/agentd/supervisor_test.go",
+        "sha256": "1281f76a27b19b280a03ff900d133ad7fff23aa169d0ab258509996e42a835de"
+      },
+      {
+        "bytes": 30559,
+        "path": "services/control-plane/internal/agentd/terminal_log_collector.go",
+        "sha256": "c91c7b402e1d459da920bfffcb2f8f3879bc978b8662d79245632a2f6186a8ff"
+      },
+      {
+        "bytes": 36914,
+        "path": "services/control-plane/internal/agentd/terminal_log_collector_test.go",
+        "sha256": "a2fb685e9a2c1c197d2a47f6f7afe46db129ece2ead09452ad527abacf8808f2"
+      },
+      {
+        "bytes": 17479,
+        "path": "services/control-plane/internal/agentd/worker_image_manifest.go",
+        "sha256": "9e7051affc2d78656df04c5afd8701d90fe512b273807bce7499445844bf261d"
+      },
+      {
+        "bytes": 9925,
+        "path": "services/control-plane/internal/agentd/worker_image_manifest_test.go",
+        "sha256": "a29a7277baad668851e4f68e86baae5c6d8d6b7118b287e8ea047ddef8f2d63c"
+      },
+      {
+        "bytes": 30680,
+        "path": "services/control-plane/internal/agentd/workspace.go",
+        "sha256": "92742c543509f9d2b9d2795876331b3aa9ca31fa20a1f7caf3e336d637059152"
+      },
+      {
+        "bytes": 23561,
+        "path": "services/control-plane/internal/agentd/workspace_cache.go",
+        "sha256": "06c3c4c1287d08c6e3d31e36066a34573f995b41f77433586397768760758628"
+      },
+      {
+        "bytes": 27941,
+        "path": "services/control-plane/internal/agentd/workspace_cache_test.go",
+        "sha256": "f1528ca75fda16bafae3d465fbe5153853cf09d8afef507c5023f774697da9db"
+      },
+      {
+        "bytes": 53936,
+        "path": "services/control-plane/internal/agentd/workspace_cleanup.go",
+        "sha256": "fed01390c731c388001734e7f471014dfe246fbbe7db7485f3861f0e3d85e202"
+      },
+      {
+        "bytes": 538,
+        "path": "services/control-plane/internal/agentd/workspace_cleanup_durability_unix.go",
+        "sha256": "e18dac65c73a0dbf1bce83dc669403bd7e1823958b6b5921c05fd820a6608790"
+      },
+      {
+        "bytes": 555,
+        "path": "services/control-plane/internal/agentd/workspace_cleanup_durability_unsupported.go",
+        "sha256": "fed2379a7d119eb803c7bdbfaa036c2f9a985766e2f5720d816f8bc6a8e5c1cb"
+      },
+      {
+        "bytes": 1714,
+        "path": "services/control-plane/internal/agentd/workspace_cleanup_durability_windows.go",
+        "sha256": "4d578c1c485a50195bfb92f8ef8456b1d2358d74b383fe90f5fa6e2f298a1e82"
+      },
+      {
+        "bytes": 34310,
+        "path": "services/control-plane/internal/agentd/workspace_cleanup_test.go",
+        "sha256": "f30256225b52033b288b8bffb07281c0619d2cfedc8d2951b58c984f58744bfa"
+      },
+      {
+        "bytes": 17383,
+        "path": "services/control-plane/internal/agentd/workspace_credentials.go",
+        "sha256": "411e2628662f454620b30334a9668228f7c5565e135ac5bfce8b4806d78ce5f0"
+      },
+      {
+        "bytes": 9621,
+        "path": "services/control-plane/internal/agentd/workspace_credentials_test.go",
+        "sha256": "542fd6cb2bfe8f53a7f2ed138fa7da7fe31217917fed00335cad1420cf164e25"
+      },
+      {
+        "bytes": 28503,
+        "path": "services/control-plane/internal/agentd/workspace_layout.go",
+        "sha256": "cb9f717c2c71c815ba79ab806ce52974de12f830f598f72877ebfe69b8d799d9"
+      },
+      {
+        "bytes": 2720,
+        "path": "services/control-plane/internal/agentd/workspace_lock.go",
+        "sha256": "fb0787433fbe49cc60d895732d2d1a953d55b4a905636c97f8e90eeb2ffc84f2"
+      },
+      {
+        "bytes": 521,
+        "path": "services/control-plane/internal/agentd/workspace_lock_unix.go",
+        "sha256": "09ca049f0a0a542adb3e737234744746b23ce7dac0efd4f15ddf914397fa282a"
+      },
+      {
+        "bytes": 347,
+        "path": "services/control-plane/internal/agentd/workspace_lock_unsupported.go",
+        "sha256": "6c64a2994ea3d81e98b09687e0fbf5b5524f14151d7a3a0d88c55eee9c073c96"
+      },
+      {
+        "bytes": 666,
+        "path": "services/control-plane/internal/agentd/workspace_lock_windows.go",
+        "sha256": "d48c383d9b007baae2950d65d82b12a197835dc7ca2a1aa0ad020bd2413f1fdc"
+      },
+      {
+        "bytes": 16179,
+        "path": "services/control-plane/internal/agentd/workspace_restore.go",
+        "sha256": "f9d4aabdae0df4534a8b62374b1a9764a76a80fe89ec560447aa4dbd5191a183"
+      },
+      {
+        "bytes": 32457,
+        "path": "services/control-plane/internal/agentd/workspace_restore_generation_test.go",
+        "sha256": "c59f22bbbc9d3fe6ece8b95badd1ec9e5b7977a6c088dcf3502eab7ad07adb5a"
+      },
+      {
+        "bytes": 5181,
+        "path": "services/control-plane/internal/agentd/workspace_ssh_test.go",
+        "sha256": "0e74a4e65a3f9102048fd13821e23c11034c7e2326ce8b157b9ebbdf05a33723"
+      },
+      {
+        "bytes": 15463,
+        "path": "services/control-plane/internal/agentd/workspace_test.go",
+        "sha256": "ff0137a1e4a1f11cc8baaba7b264eca6a9bae5e922f379e66e75056e243baf5e"
+      },
+      {
+        "bytes": 1100,
+        "path": "services/control-plane/internal/cgroupv2limits/limits.go",
+        "sha256": "408d706559896157713458884ca79b12f0877a86a85f52de79b37ce1d2fbebf0"
+      },
+      {
+        "bytes": 1311,
+        "path": "services/control-plane/internal/cgroupv2limits/limits_test.go",
+        "sha256": "d4884b7d9647b377fd4da53004708152978daffab23620b7b5057ece4ce3061a"
+      },
+      {
+        "bytes": 5943,
+        "path": "services/control-plane/go.mod",
+        "sha256": "ae008219c9e6daf1f9f89120423c854084b7ea7590c01da279891bc22d318d5b"
+      },
+      {
+        "bytes": 26502,
+        "path": "services/control-plane/go.sum",
+        "sha256": "7b1e699dee9d48b47cd2f1c9e289a890c90a9677986b9fe3bc49e4f11a07098a"
+      },
+      {
+        "bytes": 50489,
+        "path": "scripts/stage3-provider-acceptance/protected_cgroup_live_gate.py",
+        "sha256": "4d3d99363936b96afaa6b102ceb4f1f61c293582ffc7e74bf9c6e92e125a4e77"
+      }
+    ],
+    "sha256": "33a343e616b27b551f8c681603d1c84ba035554f7eccb2111f938f3b49e1773c"
+  },
+  "startedAt": "2026-07-27T06:31:45.462122+00:00",
+  "status": "fail",
+  "vm": {
+    "architecture": "arm64",
+    "createOutcome": "success-marker-proved",
+    "deleteAttempted": true,
+    "deleteMode": "opaque-id-cli-panic-sconrpc-exact-id",
+    "deleted": true,
+    "distro": "ubuntu",
+    "exactIdRpc": {
+      "method": "ContainerDelete",
+      "parameters": "captured-opaque-id-only",
+      "socketDevice": 16777231,
+      "socketInode": 60745338,
+      "socketPathSha256": "b703f213e3f72665e543338c681e5170b1aea8ed2cac00a86db1f5abb2689456",
+      "status": "acknowledged",
+      "transport": "owner-controlled-unix-http-jsonrpc"
+    },
+    "id": "01KYH4BDN6Y0ZV77W8S62SPXQY",
+    "idDeleteCompatibility": {
+      "build": 2020100,
+      "commit": "0e182b501fcd9e05b99ffb363fce03610390c400",
+      "panicSite": "github.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141",
+      "version": "2.2.1"
+    },
+    "idDeleteFailure": {
+      "observation": "panic: runtime error: invalid memory address or nil pointer dereference [recovered, repanicked]\n[signal SIGSEGV: segmentation violation code=0x2 addr=0x10 pc=0x102e9753c]\n\ngoroutine 1 [running]:\ngithub.com/orbstack/macvirt/scon/cmd/scli/cmd.RecoverCLI()\n\tgithub.com/orbstack/macvirt/scon/cmd/scli/cmd/utils.go:43 +0x78\npanic({0x103651940?, 0x10380eaf0?})\n\truntime/panic.go:860 +0x100\ngithub.com/orbstack/macvirt/scon/cmd/scli/cmd.init.func25(0x1038275a0, {0x1f17e23b5a40, 0x1, 0x102fcdba2?})\n\tgithub.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141 +0x84c\ngithub.com/spf13/cobra.(*Command).execute(0x1038275a0, {0x1f17e23b5a00, 0x2, 0x2})\n\tgithub.com/spf13/cobra@v1.9.1/command.go:1015 +0x814\ngithub.com/spf13/cobra.(*Command).ExecuteC(0x103823ea0)\n\tgithub.com/spf13/cobra@v1.9.1/command.go:1148 +0x350\ngithub.com/spf13/cobra.(*Command).Execute(...)\n\tgithub.com/spf13/cobra@v1.9.1/command.go:1071\ngithub.com/orbstack/macvirt/scon/cmd/scli/cmd.Execute(...)\n\tgithub.com/orbstack/macvirt/scon/cmd/scli/cmd/root.go:73\nmain.r\n[output truncated]\n",
+      "outputSha256": "fb7c0ca4d8c817bc56e583d958e873993e5288e317833611305a0f5562bb55c0",
+      "returnCode": 2
+    },
+    "name": "synara-cgroup-v2-live-20260727v3a2",
+    "ownedByThisRun": true,
+    "state": "running",
+    "version": "noble"
+  }
+}

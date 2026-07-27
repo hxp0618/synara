@@ -233,7 +233,7 @@ func (r *Registry) ObserveBackground(kind string, started time.Time, err error) 
 	switch kind {
 	case "docker", "kubernetes", "target-failover", "resource-lifecycle",
 		"worker-release-auto-rollback", "retention", "billing-import-scheduler",
-		"billing-shared-allocation-scheduler", "metric-rollup", "outbox":
+		"billing-shared-allocation-scheduler", "metric-rollup", "worker-pool-autoscaling", "outbox":
 	default:
 		kind = "other"
 	}
@@ -707,6 +707,20 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	fmt.Fprintf(output, "synara_outbox_dead_letter %d\n", outboxDeadLetter)
 	writeHelp(output, "synara_outbox_oldest_pending_seconds", "Age of the oldest pending outbox message.", "gauge")
 	fmt.Fprintf(output, "synara_outbox_oldest_pending_seconds %s\n", formatFloat(oldestOutboxSeconds))
+	if r.db.Migrator().HasTable(&persistence.OutboxPressureState{}) {
+		var pressure persistence.OutboxPressureState
+		err := r.db.WithContext(ctx).Where("singleton_key = ?", "global").Take(&pressure).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("collect Outbox pressure autoscaling metrics: %w", err)
+		}
+		if err == nil {
+			writeHelp(output, "synara_outbox_pressure_state", "Authoritative Outbox pressure state; throttling applies only to new Execution admission.", "gauge")
+			fmt.Fprintf(output, "synara_outbox_pressure_state%s 1\n", labels(map[string]string{"status": boundedOutboxPressureStatus(pressure.Status)}))
+			writeHelp(output, "synara_outbox_dispatch_autoscaling", "Current adaptive Outbox dispatch batch and concurrency decisions.", "gauge")
+			fmt.Fprintf(output, "synara_outbox_dispatch_autoscaling%s %d\n", labels(map[string]string{"kind": "batch_size"}), pressure.DesiredBatchSize)
+			fmt.Fprintf(output, "synara_outbox_dispatch_autoscaling%s %d\n", labels(map[string]string{"kind": "concurrency"}), pressure.DesiredConcurrency)
+		}
+	}
 	writeExecutionGenerationOutcomeGauge(
 		output,
 		startupSamples,
@@ -835,6 +849,15 @@ func valueCountsWhere(
 	err := query.Select(column + " AS value, COUNT(*) AS count").
 		Group(column).Order(column).Scan(&rows).Error
 	return rows, err
+}
+
+func boundedOutboxPressureStatus(value string) string {
+	switch value {
+	case "normal", "scaling", "throttled":
+		return value
+	default:
+		return "unknown"
+	}
 }
 
 func pairedCountsWhere(

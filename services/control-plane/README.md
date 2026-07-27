@@ -128,9 +128,12 @@ remain raw inputs in the same consistent snapshot. Monitor
 `synara_execution_generation_metric_rollup_pending_facts{kind}` and
 `synara_execution_generation_metric_rollup_buckets{kind}` for this path.
 
-## Billing runtime
+## Cost accounting runtime
 
 Cloud cost accounting is defined in `docs/contracts/cloud-cost-accounting-v1.md`.
+The supported product path for self-hosted Kubernetes is operator-managed versioned
+tariffs plus durable requested-resource facts, estimates, and reconciliation. Native
+AWS/GCP/Azure billing exports and cloud Workload Identity are deferred.
 
 - `billing_provider_tariffs` is a shared global provider catalog. Rows are append-only and immutable after insert.
 - `GET /v1/tenants/{tenantID}/billing/tariffs` requires the caller's active tenant plus `billing.manage`.
@@ -140,14 +143,17 @@ Cloud cost accounting is defined in `docs/contracts/cloud-cost-accounting-v1.md`
   billing operations to their bootstrapped Tenant automatically.
 - Provider/region/currency mutations are serialized both by the service and by a PostgreSQL transaction advisory
   lock inside the overlap trigger. SQLite enforces the same insert-time non-overlap boundary.
-- Actual invoice imports and reconciliation remain tenant-owned through
+- Provider-shaped actual invoice imports and reconciliation remain implemented as an
+  internal compatibility surface through
   `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}` and
-  `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`.
-- Runtime import is disabled by default with `SYNARA_BILLING_BLOB_SOURCE=disabled`. Set it to `s3`, `gcs`, or `azure`,
-  configure the corresponding bucket/container and `SYNARA_BILLING_IMPORT_MAPPINGS_JSON`, and pin every mapping to an
-  immutable `objectVersion`. The cloud SDK default credential chain is authoritative; production Kubernetes should use
-  Pod Workload Identity and must not place long-lived cloud keys in the mapping or ConfigMap. Custom S3 endpoints and
-  plain HTTP require separate explicit opt-ins and exist for controlled S3-compatible environments such as local MinIO.
+  `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`; it is not an
+  advertised cloud connector in the current release.
+- Runtime import stays disabled in the supported profile with
+  `SYNARA_BILLING_BLOB_SOURCE=disabled`. The `s3`, `gcs`, and `azure` sources and
+  provider-shaped mappings are retained for compatibility/testing only. Controlled
+  self-hosted MinIO exercises may use the explicit custom-S3 endpoint opt-in, but
+  production cost estimates do not depend on a native cloud export or cloud SDK
+  credential chain.
 - Shared-target allocation requires an operator-sealed Claim/Release coverage cutover and an explicit closed-period
   sweep. Exact sweep replay is idempotent, partial Worker failures return `retry-required`, and unavailable history
   remains fail-closed; the control plane does not invent cloud cost history that the Worker facts do not provide.
@@ -236,12 +242,37 @@ authorized Tenant operators. Configure the loop with:
 SYNARA_OUTBOX_POLL_INTERVAL
 SYNARA_OUTBOX_CLAIM_TTL
 SYNARA_OUTBOX_BATCH_SIZE
+SYNARA_OUTBOX_MAX_BATCH_SIZE
+SYNARA_OUTBOX_MAX_CONCURRENCY
+SYNARA_OUTBOX_SCALE_UP_DEPTH
+SYNARA_OUTBOX_TARGET_DELAY
+SYNARA_OUTBOX_THROTTLE_DEPTH
 SYNARA_OUTBOX_MAX_ATTEMPTS
 SYNARA_OUTBOX_BASE_BACKOFF
 SYNARA_OUTBOX_MAX_BACKOFF
 ```
 
-The `/metrics` endpoint exposes pending count, retry count, dead-letter count and oldest pending age.
+The Dispatcher persists a pressure snapshot and raises its claim batch/concurrency only when pending depth or oldest
+age crosses the configured scale boundary. Messages sharing one `message_key` stay in one ordered lane. New
+`execution.queued` writes are rejected with `outbox_backpressure_throttled` at the hard threshold, while recovery,
+terminal, cancellation, and cleanup messages remain admissible so pressure can drain. The `/metrics` endpoint
+exposes pending count, retry count, dead-letter count, oldest pending age, and the effective pressure state.
+
+## Worker Pool autoscaling
+
+Worker Pool desired capacity is server-authoritative and persisted. The leader-elected controller evaluates Queue
+Depth and oldest queued age against each Pool's target start delay, scales up immediately within min/max bounds,
+and uses cooldown plus a stabilization window for scale-down. Configure its bounded sweep with:
+
+```text
+SYNARA_WORKER_POOL_AUTOSCALING_INTERVAL
+SYNARA_WORKER_POOL_AUTOSCALING_BATCH_SIZE
+```
+
+Interactive queues also have a hard cold-start deadline. Only the exact still-unclaimed Execution can be cancelled
+when that deadline expires; claimed, batch, other-Pool, or newer-generation work is untouched. Kubernetes warm
+capacity consumes the effective autoscaled desired units from PostgreSQL rather than deriving authority from a
+browser heartbeat or a local controller cache.
 
 SSE uses PostgreSQL-backed expiring leases so connection limits remain exact across Control Plane replicas.
 Slow clients are disconnected by a per-write deadline; PostgreSQL Session Events remain authoritative and the

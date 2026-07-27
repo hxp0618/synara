@@ -217,7 +217,9 @@ func (s *Service) requestPrimaryOperation(
 		if active != 0 {
 			return QueuedSessionOperation{}, problem.New(409, "session_execution_active", "The Session already has an active Turn execution.")
 		}
-		if err := s.sessions.RequireExecutionQuotaAvailable(ctx, tx, tenantID); err != nil {
+		if err := s.sessions.RequireExecutionQuotaAvailableFor(ctx, tx, tenantID, sessions.ExecutionQuotaAdmission{
+			ProjectID: session.ProjectID, SessionID: session.ID, QuotaUnits: 1,
+		}); err != nil {
 			return QueuedSessionOperation{}, err
 		}
 		var target persistence.ExecutionTarget
@@ -293,6 +295,7 @@ func (s *Service) requestPrimaryOperation(
 		provider := session.Provider
 		execution := persistence.AgentExecution{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
+			QueueClass: "interactive", QueuePriority: 0, QuotaUnits: 1,
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID,
 			RemoteWorkspaceID: &resources.WorkspaceID, WorkspaceMaterializationID: &resources.MaterializationID,

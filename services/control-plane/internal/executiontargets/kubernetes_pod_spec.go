@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
@@ -36,10 +38,16 @@ func (r *KubernetesReconciler) foundationHash(
 		return "", err
 	}
 	payload, err := json.Marshal(struct {
-		Configuration kubernetesTargetConfiguration
-		Capabilities  json.RawMessage
-		LeaseRenew    time.Duration
-	}{configuration, capabilities, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
+		Configuration   kubernetesTargetConfiguration
+		Capabilities    json.RawMessage
+		LeaseRenew      time.Duration
+		PodSpecRevision string
+	}{
+		Configuration:   configuration,
+		Capabilities:    capabilities,
+		LeaseRenew:      workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL),
+		PodSpecRevision: kubernetesWorkerPodSpecRevision,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +101,11 @@ func (r *KubernetesReconciler) applyFoundation(
 			hard[key] = value
 		}
 	}
-	quotaName := "synara-agentd-" + strings.ReplaceAll(target.ID.String(), "-", "")[:12]
+	if configuration.GPUResourceName != "" {
+		hard["requests."+configuration.GPUResourceName] = configuration.QuotaGPURequests
+		hard["limits."+configuration.GPUResourceName] = configuration.QuotaGPURequests
+	}
+	quotaName := kubernetesResourceQuotaName(target.ID)
 	quota := map[string]any{
 		"apiVersion": "v1", "kind": "ResourceQuota",
 		"metadata": map[string]any{"name": quotaName, "namespace": configuration.Namespace, "labels": labels},
@@ -104,7 +116,11 @@ func (r *KubernetesReconciler) applyFoundation(
 	}
 	ipBlocks := make([]any, 0, len(configuration.EgressCIDRs))
 	for _, cidr := range configuration.EgressCIDRs {
-		ipBlocks = append(ipBlocks, map[string]any{"ipBlock": map[string]any{"cidr": strings.TrimSpace(cidr)}})
+		ipBlocks = append(ipBlocks, map[string]any{"ipBlock": kubernetesEgressIPBlock(strings.TrimSpace(cidr))})
+	}
+	egressPorts := make([]any, 0, len(configuration.EgressTCPPorts))
+	for _, port := range configuration.EgressTCPPorts {
+		egressPorts = append(egressPorts, map[string]any{"protocol": "TCP", "port": port})
 	}
 	networkPolicy := map[string]any{
 		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
@@ -113,8 +129,14 @@ func (r *KubernetesReconciler) applyFoundation(
 			"podSelector": map[string]any{"matchLabels": map[string]any{kubernetesTargetLabel: target.ID.String()}},
 			"policyTypes": []any{"Ingress", "Egress"}, "ingress": []any{},
 			"egress": []any{
-				map[string]any{"ports": []any{map[string]any{"protocol": "UDP", "port": 53}, map[string]any{"protocol": "TCP", "port": 53}}},
-				map[string]any{"to": ipBlocks},
+				map[string]any{
+					"to": []any{map[string]any{
+						"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
+						"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "kube-dns"}},
+					}},
+					"ports": []any{map[string]any{"protocol": "UDP", "port": 53}, map[string]any{"protocol": "TCP", "port": 53}},
+				},
+				map[string]any{"to": ipBlocks, "ports": egressPorts},
 			},
 		},
 	}
@@ -122,6 +144,67 @@ func (r *KubernetesReconciler) applyFoundation(
 		return problem.Wrap(502, "kubernetes_network_policy_apply_failed", "Kubernetes Worker NetworkPolicy could not be applied.", err)
 	}
 	return nil
+}
+
+func kubernetesEgressIPBlock(cidr string) map[string]any {
+	result := map[string]any{"cidr": cidr}
+	_, allowed, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return result
+	}
+	except := make([]any, 0, len(kubernetesForbiddenEgressCIDRs))
+	for _, deniedCIDR := range kubernetesForbiddenEgressCIDRs {
+		_, denied, _ := net.ParseCIDR(deniedCIDR)
+		if cidrContainsCIDR(allowed, denied) && allowed.String() != denied.String() {
+			except = append(except, denied.String())
+		}
+	}
+	if len(except) > 0 {
+		result["except"] = except
+	}
+	return result
+}
+
+var kubernetesForbiddenEgressCIDRs = []string{
+	"169.254.0.0/16",
+	"100.100.100.200/32",
+	"fe80::/10",
+	"fd00:ec2::254/128",
+}
+
+func cidrContainsCIDR(parent, child *net.IPNet) bool {
+	parentOnes, parentBits := parent.Mask.Size()
+	childOnes, childBits := child.Mask.Size()
+	return parentBits == childBits && parentOnes <= childOnes && parent.Contains(child.IP)
+}
+
+func kubernetesTenantNetworkEnvironment(configuration kubernetesTargetConfiguration) []any {
+	result := make([]any, 0, 5)
+	if len(configuration.PrivateNetworkCIDRs) > 0 {
+		encoded, _ := json.Marshal(configuration.PrivateNetworkCIDRs)
+		result = append(result, map[string]any{
+			"name": "SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON", "value": string(encoded),
+		})
+	}
+	for _, item := range []struct{ name, value string }{
+		{name: "SYNARA_PROVIDER_HTTP_PROXY", value: configuration.ProviderHTTPProxy},
+		{name: "SYNARA_PROVIDER_HTTPS_PROXY", value: configuration.ProviderHTTPSProxy},
+		{name: "SYNARA_PROVIDER_ALL_PROXY", value: configuration.ProviderAllProxy},
+	} {
+		if item.value != "" {
+			result = append(result, map[string]any{"name": item.name, "value": item.value})
+		}
+	}
+	if len(configuration.ProviderNoProxy) > 0 {
+		result = append(result, map[string]any{
+			"name": "SYNARA_PROVIDER_NO_PROXY", "value": strings.Join(configuration.ProviderNoProxy, ","),
+		})
+	}
+	return result
+}
+
+func kubernetesResourceQuotaName(targetID uuid.UUID) string {
+	return "synara-agentd-" + strings.ReplaceAll(targetID.String(), "-", "")[:12]
 }
 
 func (r *KubernetesReconciler) executionPod(
@@ -173,6 +256,10 @@ func (r *KubernetesReconciler) executionPod(
 			limits[key] = value
 		}
 	}
+	if configuration.GPUResourceName != "" {
+		requests[configuration.GPUResourceName] = configuration.GPURequest
+		limits[configuration.GPUResourceName] = configuration.GPURequest
+	}
 	gitCacheRoot := "/data/git-cache"
 	if configuration.GitCachePersistentVolumeClaim != "" {
 		gitCacheRoot = "/git-cache"
@@ -195,6 +282,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 	}
+	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
 	}
@@ -249,8 +337,10 @@ func (r *KubernetesReconciler) executionPod(
 		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
 		"enableServiceLinks": false, "hostNetwork": false, "hostPID": false, "hostIPC": false,
 		"restartPolicy": "Never", "terminationGracePeriodSeconds": 30,
-		"securityContext": map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":      []any{container}, "volumes": volumes,
+		"priorityClassName": kubernetesWorkerDefaultPriorityClassName,
+		"preemptionPolicy":  placement.KubernetesPreemptionPolicyNever,
+		"securityContext":   map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
+		"containers":        []any{container}, "volumes": volumes,
 	}
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
@@ -382,6 +472,10 @@ func (r *KubernetesReconciler) warmPoolPod(
 			limits[key] = value
 		}
 	}
+	if configuration.GPUResourceName != "" {
+		requests[configuration.GPUResourceName] = configuration.GPURequest
+		limits[configuration.GPUResourceName] = configuration.GPURequest
+	}
 	gitCacheRoot := "/data/git-cache"
 	if configuration.GitCachePersistentVolumeClaim != "" {
 		gitCacheRoot = "/git-cache"
@@ -404,6 +498,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 	}
+	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
 	}
@@ -458,8 +553,10 @@ func (r *KubernetesReconciler) warmPoolPod(
 		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
 		"enableServiceLinks": false, "hostNetwork": false, "hostPID": false, "hostIPC": false,
 		"restartPolicy": "Never", "terminationGracePeriodSeconds": 30,
-		"securityContext": map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":      []any{container}, "volumes": volumes,
+		"priorityClassName": kubernetesWorkerDefaultPriorityClassName,
+		"preemptionPolicy":  placement.KubernetesPreemptionPolicyNever,
+		"securityContext":   map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
+		"containers":        []any{container}, "volumes": volumes,
 	}
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
@@ -502,81 +599,32 @@ func (r *KubernetesReconciler) warmPoolPod(
 }
 
 func applyKubernetesWorkerPoolSchedulingTemplate(podSpec map[string]any, template map[string]any) error {
-	if len(template) == 0 {
-		return nil
+	normalized, err := placement.NormalizeKubernetesSchedulingTemplate(template)
+	if err != nil {
+		return err
 	}
-	for key, value := range template {
-		switch key {
-		case "priorityClassName":
-			text, ok := value.(string)
-			if !ok || strings.TrimSpace(text) == "" || strings.ContainsAny(text, "\r\n\t") {
-				return problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool priorityClassName must be a non-empty string.")
-			}
-			podSpec["priorityClassName"] = strings.TrimSpace(text)
-		case "nodeSelector":
-			nodeSelector, err := normalizeSchedulingTemplateStringMap(value, "nodeSelector")
-			if err != nil {
-				return err
-			}
-			merged := map[string]string{}
-			if existing, ok := podSpec["nodeSelector"].(map[string]string); ok {
-				merged = cloneStringMap(existing)
-			}
-			for nodeKey, nodeValue := range nodeSelector {
-				merged[nodeKey] = nodeValue
-			}
-			podSpec["nodeSelector"] = merged
-		case "tolerations":
-			tolerations, err := normalizeSchedulingTemplateTolerations(value)
-			if err != nil {
-				return err
-			}
-			existing := make([]any, 0)
-			if current, ok := podSpec["tolerations"].([]any); ok {
-				existing = append(existing, current...)
-			}
-			podSpec["tolerations"] = append(existing, tolerations...)
-		default:
-			return problem.New(409, "worker_pool_scheduling_template_unsupported", "Worker pool schedulingTemplate contains an unsupported field.")
+	podSpec["preemptionPolicy"] = placement.KubernetesPreemptionPolicyNever
+	if normalized.PriorityClassName != "" {
+		podSpec["priorityClassName"] = normalized.PriorityClassName
+	}
+	if len(normalized.NodeSelector) > 0 {
+		merged := map[string]string{}
+		if existing, ok := podSpec["nodeSelector"].(map[string]string); ok {
+			merged = cloneStringMap(existing)
 		}
+		for nodeKey, nodeValue := range normalized.NodeSelector {
+			merged[nodeKey] = nodeValue
+		}
+		podSpec["nodeSelector"] = merged
+	}
+	if len(normalized.Tolerations) > 0 {
+		existing := make([]any, 0)
+		if current, ok := podSpec["tolerations"].([]any); ok {
+			existing = append(existing, current...)
+		}
+		podSpec["tolerations"] = append(existing, normalized.Tolerations...)
 	}
 	return nil
-}
-
-func normalizeSchedulingTemplateStringMap(value any, field string) (map[string]string, error) {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool "+field+" must be an object.")
-	}
-	normalized := make(map[string]string, len(raw))
-	for key, item := range raw {
-		text, ok := item.(string)
-		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(text) == "" || strings.ContainsAny(key+text, "\r\n\t") {
-			return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool "+field+" values must be non-empty strings.")
-		}
-		normalized[strings.TrimSpace(key)] = strings.TrimSpace(text)
-	}
-	return normalized, nil
-}
-
-func normalizeSchedulingTemplateTolerations(value any) ([]any, error) {
-	items, ok := value.([]any)
-	if !ok {
-		return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool tolerations must be an array.")
-	}
-	normalized := make([]any, 0, len(items))
-	for _, item := range items {
-		object, ok := item.(map[string]any)
-		if !ok {
-			return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool tolerations must contain objects.")
-		}
-		clone := make(map[string]any, len(object))
-		for key, value := range object {
-			clone[key] = value
-		}
-		normalized = append(normalized, clone)
-	}
-	return normalized, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

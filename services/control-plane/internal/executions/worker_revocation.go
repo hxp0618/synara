@@ -489,6 +489,7 @@ func toManagedWorker(model persistence.WorkerInstance) ManagedWorker {
 		WorkerPoolID:        model.WorkerPoolID,
 		WorkerPoolVersion:   model.WorkerPoolVersion,
 		CapacityClass:       model.CapacityClass,
+		TenantBindingID:     model.TenantBindingID,
 		ClusterID:           model.ClusterID, Namespace: model.Namespace, PodName: model.PodName,
 		Version: model.Version, ProtocolVersion: model.ProtocolVersion,
 		CurrentManifestID: model.CurrentManifestID, CompatibilityStatus: model.CompatibilityStatus,
@@ -500,6 +501,10 @@ func toManagedWorker(model persistence.WorkerInstance) ManagedWorker {
 		Status: model.Status, AdministrativeStatus: model.AdministrativeStatus,
 		RegisteredAt: model.RegisteredAt, LastHeartbeatAt: model.LastHeartbeatAt,
 		DrainingAt: model.DrainingAt, TerminatedAt: model.TerminatedAt,
-		RevokedAt: model.RevokedAt, RevokedBy: model.RevokedBy, RevocationReason: model.RevocationReason,
+		ReconciliationDrainIncarnation: model.ReconciliationDrainIncarnation,
+		ReconciliationDrainInstanceUID: model.ReconciliationDrainInstanceUID,
+		ReconciliationDrainRequestedAt: model.ReconciliationDrainRequestedAt,
+		ReconciliationDrainReason:      model.ReconciliationDrainReason,
+		RevokedAt:                      model.RevokedAt, RevokedBy: model.RevokedBy, RevocationReason: model.RevocationReason,
 	}
 }

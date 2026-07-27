@@ -157,6 +157,8 @@ func currentWorkerFactStateLocked(
 	switch {
 	case worker.Status == "terminated":
 		return workerFactStateTerminated, nil
+	case worker.ReconciliationDrainRequestedAt != nil:
+		return workerFactStateDraining, nil
 	case worker.AdministrativeStatus == "revoked", worker.AdministrativeStatus == "draining", worker.Status == "draining":
 		return workerFactStateDraining, nil
 	case worker.Status == "offline":

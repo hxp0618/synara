@@ -10,8 +10,8 @@ import (
 
 const (
 	protectedCgroupContainmentMode    = "cgroup-v2"
-	protectedCgroupSupervisorVersion  = "agentd-protected-cgroup-supervisor-v2"
-	protectedCgroupProbeVersion       = 1
+	protectedCgroupSupervisorVersion  = "agentd-protected-cgroup-supervisor-v3"
+	protectedCgroupProbeVersion       = 2
 	protectedCgroupProbeHelperCommand = "protected-cgroup-probe-helper"
 	protectedCgroupProbeChildCommand  = "protected-cgroup-probe-child"
 	protectedCgroupPreflightCommand   = "protected-cgroup-preflight"
@@ -34,6 +34,8 @@ type ProtectedCgroupPreflightReport struct {
 	SetsidDescendantKilled     bool                             `json:"setsidDescendantKilled"`
 	ProviderUID                uint32                           `json:"providerUid,omitempty"`
 	ProviderGID                uint32                           `json:"providerGid,omitempty"`
+	ResourceLimitsApplied      bool                             `json:"resourceLimitsApplied"`
+	ProviderLimits             *ProtectedCgroupResourceLimits   `json:"providerLimits,omitempty"`
 	AttestationKeyID           string                           `json:"attestationKeyId,omitempty"`
 	AttestationPublicKeySHA256 string                           `json:"attestationPublicKeySha256,omitempty"`
 	AttestationPublicKeyBase64 string                           `json:"attestationPublicKeyBase64,omitempty"`

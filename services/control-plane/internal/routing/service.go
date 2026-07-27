@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
@@ -21,6 +22,8 @@ import (
 )
 
 const (
+	MaxSchedulingCandidates = 4096
+
 	StrategyPriority = "priority"
 	StrategyBalanced = "balanced"
 	StrategyLatency  = "latency"
@@ -46,6 +49,9 @@ const (
 
 	LocationStatusDraining    = "draining"
 	LocationStatusUnreachable = "unreachable"
+
+	CandidateEligibilityEligible = "eligible"
+	CandidateEligibilityRejected = "rejected"
 )
 
 type CreateGroupInput struct {
@@ -69,6 +75,17 @@ type AddMemberInput struct {
 	ClusterID         string
 	Priority          int
 	Weight            int
+}
+
+type UpdateMemberStatusInput struct {
+	TenantID        uuid.UUID
+	TargetGroupID   uuid.UUID
+	MemberID        uuid.UUID
+	ExpectedVersion int64
+	Status          string
+	ActorID         uuid.UUID
+	RequestID       string
+	IPAddress       string
 }
 
 type HealthObservation struct {
@@ -174,7 +191,28 @@ type Selection struct {
 	DRReadiness              *persistence.ExecutionTargetDRReadiness
 	SchedulingPolicySnapshot schedulingpolicy.Snapshot
 	QueuePressure            QueuePressureSnapshot
+	Candidates               []CandidateEvaluation
 	RoutingReason            string
+}
+
+// CandidateEvaluation is the bounded, immutable input observed for one active
+// Target Group member during a successful routing decision. Slice order is
+// stable Member-ID order and is deliberately independent of winner ranking.
+// PriorityRank is the route algorithm's zero-based total rank among candidates
+// that reached ranking; RegionRank and CapacityRank retain the preferred-region
+// and health-status components used to explain that ordering.
+type CandidateEvaluation struct {
+	Target        persistence.ExecutionTarget
+	Member        persistence.ExecutionTargetGroupMember
+	Health        *persistence.ExecutionTargetHealth
+	DRReadiness   *persistence.ExecutionTargetDRReadiness
+	QueuePressure *QueuePressureSnapshot
+	PriorityRank  *int
+	RegionRank    *int
+	CapacityRank  *int
+	Eligibility   string
+	RejectionCode string
+	Selected      bool
 }
 
 // QueuePressureSnapshot freezes the durable, not-yet-serviced Execution
@@ -484,17 +522,17 @@ func (s *Service) AddMember(ctx context.Context, input AddMemberInput) (persiste
 	}
 	var member persistence.ExecutionTargetGroupMember
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var target persistence.ExecutionTarget
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("id = ? AND status <> ? AND (tenant_id IS NULL OR tenant_id = ?)", input.ExecutionTargetID, "disabled", input.TenantID).
+			Take(&target).Error; err != nil {
+			return problem.Wrap(404, "target_group_member_target_not_found", "Execution Target is not available to this tenant.", err)
+		}
 		var group persistence.ExecutionTargetGroup
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND id = ? AND status <> ?", input.TenantID, input.TargetGroupID, GroupStatusDisabled).
 			Take(&group).Error; err != nil {
 			return problem.Wrap(404, "target_group_not_found", "Execution Target Group not found.", err)
-		}
-		var target persistence.ExecutionTarget
-		if err := tx.WithContext(ctx).
-			Where("id = ? AND status <> ? AND (tenant_id IS NULL OR tenant_id = ?)", input.ExecutionTargetID, "disabled", input.TenantID).
-			Take(&target).Error; err != nil {
-			return problem.Wrap(404, "target_group_member_target_not_found", "Execution Target is not available to this tenant.", err)
 		}
 		if group.OrganizationID != nil && target.OrganizationID != nil && *group.OrganizationID != *target.OrganizationID {
 			return problem.New(409, "target_group_member_organization_mismatch", "Execution Target belongs to another organization.")
@@ -515,6 +553,145 @@ func (s *Service) AddMember(ctx context.Context, input AddMemberInput) (persiste
 		return nil
 	})
 	return member, err
+}
+
+var memberBlockingExecutionStatuses = []string{
+	"queued", "leased", "running", "waiting-for-approval", "recovering", "suspended",
+}
+
+func (s *Service) UpdateMemberStatus(
+	ctx context.Context,
+	input UpdateMemberStatusInput,
+) (persistence.ExecutionTargetGroupMember, bool, error) {
+	if input.TenantID == uuid.Nil || input.TargetGroupID == uuid.Nil || input.MemberID == uuid.Nil || input.ActorID == uuid.Nil {
+		return persistence.ExecutionTargetGroupMember{}, false,
+			problem.New(400, "target_group_member_scope_required", "Tenant, Target Group, member, and actor are required.")
+	}
+	if input.ExpectedVersion < 1 {
+		return persistence.ExecutionTargetGroupMember{}, false,
+			problem.New(400, "invalid_target_group_member_version", "expectedVersion must be positive.")
+	}
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if !slices.Contains([]string{MemberStatusActive, MemberStatusDraining, MemberStatusDisabled}, status) {
+		return persistence.ExecutionTargetGroupMember{}, false,
+			problem.New(400, "invalid_target_group_member_status", "Execution Target Group member status is invalid.")
+	}
+
+	var member persistence.ExecutionTargetGroupMember
+	replayed := false
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var group persistence.ExecutionTargetGroup
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Select("id", "tenant_id", "organization_id", "status").
+			Where("tenant_id = ? AND id = ? AND status <> ?", input.TenantID, input.TargetGroupID, GroupStatusDisabled).
+			Take(&group).Error; err != nil {
+			return problem.Wrap(404, "target_group_not_found", "Execution Target Group not found.", err)
+		}
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND target_group_id = ? AND id = ?", input.TenantID, input.TargetGroupID, input.MemberID).
+			Take(&member).Error; err != nil {
+			return problem.Wrap(404, "target_group_member_not_found", "Execution Target Group member not found.", err)
+		}
+
+		if member.Status == status &&
+			(member.Version == input.ExpectedVersion || member.Version == input.ExpectedVersion+1) {
+			replayed = true
+			return nil
+		}
+		if member.Version != input.ExpectedVersion {
+			return targetGroupMemberVersionConflict(input.ExpectedVersion, member.Version)
+		}
+		if !validMemberStatusTransition(member.Status, status) {
+			return problem.New(
+				409,
+				"target_group_member_status_conflict",
+				"Execution Target Group member cannot transition from its current status.",
+			)
+		}
+		if status == MemberStatusDisabled {
+			var activeExecutions int64
+			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+				Where(
+					"tenant_id = ? AND target_group_id = ? AND execution_target_id = ? AND status IN ?",
+					input.TenantID,
+					input.TargetGroupID,
+					member.ExecutionTargetID,
+					memberBlockingExecutionStatuses,
+				).
+				Count(&activeExecutions).Error; err != nil {
+				return problem.Wrap(500, "target_group_member_execution_check_failed", "Failed to inspect member Executions.", err)
+			}
+			if activeExecutions > 0 {
+				return &problem.Error{
+					Status:  409,
+					Code:    "target_group_member_execution_active",
+					Message: "Execution Target Group member still owns nonterminal Executions.",
+					Details: map[string]any{"activeExecutionCount": activeExecutions},
+				}
+			}
+		}
+
+		previousStatus := member.Status
+		nextVersion := member.Version + 1
+		updatedAt := s.now()
+		result := tx.WithContext(ctx).Model(&persistence.ExecutionTargetGroupMember{}).
+			Where(
+				"tenant_id = ? AND target_group_id = ? AND id = ? AND version = ?",
+				input.TenantID,
+				input.TargetGroupID,
+				input.MemberID,
+				input.ExpectedVersion,
+			).
+			Updates(map[string]any{"status": status, "version": nextVersion, "updated_at": updatedAt})
+		if result.Error != nil {
+			return problem.Wrap(409, "target_group_member_update_rejected", "Execution Target Group member update was rejected.", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return targetGroupMemberVersionConflict(input.ExpectedVersion, member.Version)
+		}
+		member.Status = status
+		member.Version = nextVersion
+		member.UpdatedAt = updatedAt
+		action := "execution_target_group_member.status_changed"
+		switch status {
+		case MemberStatusDraining:
+			action = "execution_target_group_member.drain_started"
+		case MemberStatusActive:
+			action = "execution_target_group_member.drain_aborted"
+		case MemberStatusDisabled:
+			action = "execution_target_group_member.disabled"
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: input.TenantID, ActorType: "user", ActorID: &input.ActorID,
+			Action: action, ResourceType: "execution_target_group_member", ResourceID: &member.ID,
+			OrganizationID: group.OrganizationID, RequestID: input.RequestID, IPAddress: input.IPAddress,
+			Metadata: map[string]any{
+				"targetGroupId": member.TargetGroupID, "executionTargetId": member.ExecutionTargetID,
+				"fromStatus": previousStatus, "toStatus": status, "version": nextVersion,
+			},
+		})
+	})
+	return member, replayed, err
+}
+
+func validMemberStatusTransition(current, next string) bool {
+	switch current {
+	case MemberStatusActive:
+		return next == MemberStatusDraining || next == MemberStatusDisabled
+	case MemberStatusDraining:
+		return next == MemberStatusActive || next == MemberStatusDisabled
+	default:
+		return false
+	}
+}
+
+func targetGroupMemberVersionConflict(expected, current int64) *problem.Error {
+	return &problem.Error{
+		Status:  409,
+		Code:    "target_group_member_version_conflict",
+		Message: "Execution Target Group member version has changed.",
+		Details: map[string]any{"expectedVersion": expected, "currentVersion": current},
+	}
 }
 
 func (s *Service) ObserveHealth(ctx context.Context, input HealthObservation) (persistence.ExecutionTargetHealth, error) {
@@ -991,11 +1168,19 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	var members []persistence.ExecutionTargetGroupMember
 	if err := db.WithContext(ctx).
 		Where("tenant_id = ? AND target_group_id = ? AND status = ?", request.TenantID, group.ID, MemberStatusActive).
+		Order("id ASC").
 		Find(&members).Error; err != nil {
 		return Selection{}, problem.Wrap(500, "target_group_members_load_failed", "Execution Target Group members could not be loaded.", err)
 	}
 	if len(members) == 0 {
 		return Selection{}, problem.New(409, "target_group_has_no_members", "Execution Target Group has no active members.")
+	}
+	if len(members) > MaxSchedulingCandidates {
+		return Selection{}, problem.New(
+			409,
+			"target_group_candidate_limit_exceeded",
+			"Execution Target Group exceeds the bounded scheduling candidate limit.",
+		)
 	}
 	targetIDs := make([]uuid.UUID, 0, len(members))
 	for _, member := range members {
@@ -1003,8 +1188,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	}
 	var targets []persistence.ExecutionTarget
 	if err := db.WithContext(ctx).
-		Where("id IN ? AND status = ?", targetIDs, "active").
-		Where("tenant_id IS NULL OR tenant_id = ?", request.TenantID).
+		Where("id IN ?", targetIDs).
 		Find(&targets).Error; err != nil {
 		return Selection{}, problem.Wrap(500, "target_group_targets_load_failed", "Execution Targets could not be loaded.", err)
 	}
@@ -1063,19 +1247,50 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	}
 	locationOutages := buildLocationOutageIndex(locationOutageRows)
 	candidates := make([]routeCandidate, 0, len(members))
+	evaluations := make([]CandidateEvaluation, 0, len(members))
 	blockedLocationCandidates := make([]blockedLocationCandidate, 0, len(members))
 	blockedCandidates := make([]blockedDRCandidate, 0, len(members))
 	policyCandidateCount := 0
 	policyBlockedCandidateCount := 0
 	for _, member := range members {
+		target, ok := targetByID[member.ExecutionTargetID]
+		if !ok {
+			return Selection{}, problem.New(
+				500,
+				"target_group_member_target_missing",
+				"An active Target Group member references a missing Execution Target.",
+			)
+		}
+		reservationUnits := reservationUnitsByTarget[member.ExecutionTargetID]
+		evaluation := CandidateEvaluation{
+			Target:      target,
+			Member:      member,
+			Eligibility: CandidateEligibilityRejected,
+		}
+		health, hasHealth := healthByID[member.ExecutionTargetID]
+		if hasHealth {
+			queuePressure := reservationAwareQueuePressure(health, reservationUnits, member.Weight)
+			evaluation.Health = &health
+			evaluation.QueuePressure = &queuePressure
+		}
 		if _, skip := excluded[member.ExecutionTargetID]; skip {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "request-excluded"))
 			continue
 		}
-		target, ok := targetByID[member.ExecutionTargetID]
-		if !ok || (target.OrganizationID != nil && *target.OrganizationID != request.OrganizationID) {
+		if target.Status != "active" {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "target-inactive"))
+			continue
+		}
+		if target.TenantID != nil && *target.TenantID != request.TenantID {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "tenant-scope-mismatch"))
+			continue
+		}
+		if target.OrganizationID != nil && *target.OrganizationID != request.OrganizationID {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "organization-scope-mismatch"))
 			continue
 		}
 		if request.RequiredTargetKind != "" && target.Kind != request.RequiredTargetKind {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "target-kind-mismatch"))
 			continue
 		}
 		policyCandidateCount++
@@ -1083,28 +1298,39 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 			ID: target.ID, Region: member.Region, Cluster: member.ClusterID, Provider: request.Provider,
 		}) {
 			policyBlockedCandidateCount++
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "scheduling-policy-denied"))
 			continue
 		}
-		health, ok := healthByID[member.ExecutionTargetID]
-		reservationUnits := reservationUnitsByTarget[member.ExecutionTargetID]
-		if !ok || !healthEligible(health, group, now, reservationUnits) {
+		if !hasHealth {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "health-missing"))
+			continue
+		}
+		if rejectionCode := healthIneligibilityCode(health, group, now, reservationUnits); rejectionCode != "" {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, rejectionCode))
 			continue
 		}
 		regionRank := indexOrMax(preferredRegions, member.Region)
 		if !group.AllowCrossRegion {
 			requiredRegion := strings.TrimSpace(request.SourceRegion)
 			if requiredRegion != "" && member.Region != requiredRegion {
+				evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "region-policy-denied"))
 				continue
 			}
 			if requiredRegion == "" && len(preferredRegions) > 0 && regionRank == math.MaxInt {
+				evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "region-policy-denied"))
 				continue
 			}
 		}
 		queuePressure := reservationAwareQueuePressure(health, reservationUnits, member.Weight)
+		regionRankSnapshot := boundedRegionRank(regionRank, len(preferredRegions))
+		healthRank := healthStatusRank(health.Status)
+		evaluation.QueuePressure = &queuePressure
+		evaluation.RegionRank = &regionRankSnapshot
+		evaluation.CapacityRank = &healthRank
 		candidate := routeCandidate{
 			member: member, target: target, health: health,
 			preferred:  request.PreferredTargetID != nil && member.ExecutionTargetID == *request.PreferredTargetID,
-			regionRank: regionRank, healthRank: healthStatusRank(health.Status), queuePressure: queuePressure,
+			regionRank: regionRank, healthRank: healthRank, queuePressure: queuePressure,
 		}
 		affinityRank, err := providerAffinityRank(target.Capabilities, request.Provider)
 		if err != nil {
@@ -1116,6 +1342,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 				candidate: candidate,
 				outage:    outage,
 			})
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "location-outage-active"))
 			continue
 		}
 		requirement := drReadinessRequirement(request, member)
@@ -1126,6 +1353,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 					requirement:   requirement,
 					blockedReason: "dr-readiness-context-missing",
 				})
+				evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "dr-readiness-context-missing"))
 				continue
 			}
 			readinessBySource := readinessByTargetAndSource[member.ExecutionTargetID]
@@ -1136,9 +1364,11 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 					requirement:   requirement,
 					blockedReason: "dr-readiness-missing",
 				})
+				evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "dr-readiness-missing"))
 				continue
 			}
 			if blockedReason, unreadyStores := drReadinessBlockedReason(readiness, requirement, now); blockedReason != "" {
+				evaluation.DRReadiness = &readiness
 				blockedCandidates = append(blockedCandidates, blockedDRCandidate{
 					candidate:     candidate,
 					requirement:   requirement,
@@ -1146,10 +1376,16 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 					readiness:     &readiness,
 					unreadyStores: unreadyStores,
 				})
+				evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, blockedReason))
 				continue
 			}
 			candidate.drReadiness = &readiness
+			evaluation.DRReadiness = &readiness
 		}
+		evaluation.Eligibility = CandidateEligibilityEligible
+		evaluation.RejectionCode = ""
+		candidate.traceIndex = len(evaluations)
+		evaluations = append(evaluations, evaluation)
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
@@ -1167,6 +1403,11 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	sort.SliceStable(candidates, func(left, right int) bool {
 		return candidateLess(candidates[left], candidates[right], group.Strategy)
 	})
+	for rank, candidate := range candidates {
+		routeRank := rank
+		evaluations[candidate.traceIndex].PriorityRank = &routeRank
+		evaluations[candidate.traceIndex].Selected = rank == 0
+	}
 	selected := candidates[0]
 	reason := group.Strategy
 	if selected.preferred {
@@ -1183,6 +1424,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 		DRReadiness:              selected.drReadiness,
 		SchedulingPolicySnapshot: policySnapshot,
 		QueuePressure:            selected.queuePressure,
+		Candidates:               evaluations,
 		RoutingReason:            reason,
 	}, nil
 }
@@ -1522,11 +1764,26 @@ type routeCandidate struct {
 	target               persistence.ExecutionTarget
 	health               persistence.ExecutionTargetHealth
 	drReadiness          *persistence.ExecutionTargetDRReadiness
+	traceIndex           int
 	preferred            bool
 	regionRank           int
 	healthRank           int
 	providerAffinityRank int
 	queuePressure        QueuePressureSnapshot
+}
+
+func rejectCandidateEvaluation(candidate CandidateEvaluation, code string) CandidateEvaluation {
+	candidate.Eligibility = CandidateEligibilityRejected
+	candidate.RejectionCode = code
+	candidate.Selected = false
+	return candidate
+}
+
+func boundedRegionRank(rank, preferredRegionCount int) int {
+	if rank == math.MaxInt {
+		return preferredRegionCount
+	}
+	return rank
 }
 
 type drReadinessRequirementState struct {
@@ -1649,23 +1906,41 @@ func healthEligible(
 	now time.Time,
 	reservationUnits reservationUnitCounts,
 ) bool {
+	return healthIneligibilityCode(health, group, now, reservationUnits) == ""
+}
+
+func healthIneligibilityCode(
+	health persistence.ExecutionTargetHealth,
+	group persistence.ExecutionTargetGroup,
+	now time.Time,
+	reservationUnits reservationUnitCounts,
+) string {
 	if health.Status != HealthHealthy && health.Status != HealthDegraded {
-		return false
+		return "health-status-ineligible"
 	}
-	if health.ObservedAt.After(now) || !health.ExpiresAt.After(now) || health.ObservedAt.Add(time.Duration(group.HealthMaxStalenessSeconds)*time.Second).Before(now) {
-		return false
+	if health.ObservedAt.After(now) {
+		return "health-observed-in-future"
+	}
+	if !health.ExpiresAt.After(now) {
+		return "health-expired"
+	}
+	if health.ObservedAt.Add(time.Duration(group.HealthMaxStalenessSeconds) * time.Second).Before(now) {
+		return "health-stale"
 	}
 	if health.CapacityStatus == CapacitySaturated {
-		return false
+		return "capacity-saturated"
 	}
 	if health.AvailableCapacityUnits == nil {
-		return true
+		return ""
 	}
 	used := int64(health.AllocatedCapacityUnits)
 	if health.ReservationAuthorityMode != nil && *health.ReservationAuthorityMode == ReservationAuthorityExactActiveV1 {
 		used = strictCapacityUsedUnits(health.AllocatedCapacityUnits, reservationUnits.Unacknowledged)
 	}
-	return used < int64(*health.AvailableCapacityUnits)
+	if used >= int64(*health.AvailableCapacityUnits) {
+		return "capacity-exhausted"
+	}
+	return ""
 }
 
 func drReadinessRequirement(
@@ -1763,10 +2038,6 @@ func drReadinessBlockedReason(
 	return "", nil
 }
 
-func effectiveLoadRank(health persistence.ExecutionTargetHealth, queuedExecutionUnits int64, weight int) int64 {
-	return effectiveLoadRankForPressure(health, queuedExecutionUnits, weight)
-}
-
 func effectiveLoadRankForPressure(health persistence.ExecutionTargetHealth, pressureUnits int64, weight int) int64 {
 	if weight <= 0 {
 		weight = 1
@@ -1791,37 +2062,6 @@ func effectiveLoadRankForPressure(health persistence.ExecutionTargetHealth, pres
 		return math.MaxInt64
 	}
 	return pressure * 1_000_000 / denominator
-}
-
-type queuedExecutionUnitsRow struct {
-	ExecutionTargetID    uuid.UUID `gorm:"column:execution_target_id"`
-	QueuedExecutionUnits int64     `gorm:"column:queued_execution_units"`
-}
-
-func loadQueuedExecutionUnits(
-	ctx context.Context,
-	db *gorm.DB,
-	targetIDs []uuid.UUID,
-) (map[uuid.UUID]int64, error) {
-	unitsByTarget := make(map[uuid.UUID]int64, len(targetIDs))
-	if len(targetIDs) == 0 {
-		return unitsByTarget, nil
-	}
-	var rows []queuedExecutionUnitsRow
-	if err := db.WithContext(ctx).
-		Model(&persistence.AgentExecution{}).
-		Select("execution_target_id, COUNT(*) AS queued_execution_units").
-		Where("execution_target_id IN ? AND status IN ?", targetIDs, []string{"queued", "recovering"}).
-		Group("execution_target_id").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		if row.ExecutionTargetID != uuid.Nil && row.QueuedExecutionUnits >= 0 {
-			unitsByTarget[row.ExecutionTargetID] = row.QueuedExecutionUnits
-		}
-	}
-	return unitsByTarget, nil
 }
 
 func healthStatusRank(status string) int {

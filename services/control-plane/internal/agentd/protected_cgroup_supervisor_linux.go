@@ -21,7 +21,10 @@ const (
 	protectedCgroupBundlePrefix       = "synara-e"
 	protectedCgroupDiagnosticPrefix   = "synara-d"
 	protectedCgroupLegacyBundlePrefix = "synara-g"
+	protectedCgroupSupervisorSubgroup = "synara-agentd"
 )
+
+var protectedCgroupRequiredControllers = []string{"cpu", "memory", "pids"}
 
 var (
 	protectedCgroupFstatfs   = unix.Fstatfs
@@ -29,6 +32,7 @@ var (
 		return os.ReadFile("/proc/self/mountinfo")
 	}
 	protectedCgroupCleanupTestHook           = func(_ int, _ string) error { return nil }
+	protectedCgroupDirectoryCreatedTestHook  = func(_ int, _ string) error { return nil }
 	protectedCgroupRecoveryValidatedTestHook = func() error { return nil }
 	protectedCgroupCurrentPID                = os.Getpid
 )
@@ -48,6 +52,10 @@ type ProtectedCgroupRootLease struct {
 	parentPath         string
 	parentDevice       uint64
 	parentInode        uint64
+	supervisorFD       int
+	supervisorPath     string
+	supervisorDevice   uint64
+	supervisorInode    uint64
 	supervisorIdentity ProtectedCgroupIdentity
 	providerIdentity   ProtectedCgroupIdentity
 	supervisorInstance uuid.UUID
@@ -67,6 +75,7 @@ type ProtectedCgroupSupervisor struct {
 
 	paths               ProtectedCgroupPaths
 	fence               ProtectedCgroupFence
+	providerLimits      ProtectedCgroupResourceLimits
 	creationReservation string
 	cleanupPoisoned     bool
 }
@@ -129,7 +138,12 @@ func AcquireProtectedCgroupRootLease(config ProtectedCgroupRootLeaseConfig) (*Pr
 		_ = unix.Flock(parentFD, unix.LOCK_UN)
 		return nil, fmt.Errorf("stat protected cgroup root lease %s: %w", normalizedParent, err)
 	}
-	if err := validateProtectedCgroupParentProcesses(parentFD, normalizedParent); err != nil {
+	supervisorFD, supervisorPath, supervisorStats, err := openAndValidateProtectedCgroupSupervisorSubgroup(
+		parentFD,
+		normalizedParent,
+		config.SupervisorIdentity,
+	)
+	if err != nil {
 		_ = unix.Flock(parentFD, unix.LOCK_UN)
 		return nil, err
 	}
@@ -137,6 +151,8 @@ func AcquireProtectedCgroupRootLease(config ProtectedCgroupRootLeaseConfig) (*Pr
 	return &ProtectedCgroupRootLease{
 		parentFD: parentFD, parentPath: normalizedParent,
 		parentDevice: uint64(stats.Dev), parentInode: stats.Ino,
+		supervisorFD: supervisorFD, supervisorPath: supervisorPath,
+		supervisorDevice: uint64(supervisorStats.Dev), supervisorInode: supervisorStats.Ino,
 		supervisorIdentity: config.SupervisorIdentity,
 		providerIdentity:   config.ProviderIdentity,
 		supervisorInstance: config.SupervisorInstance,
@@ -153,7 +169,12 @@ func (l *ProtectedCgroupRootLease) Close() error {
 		return nil
 	}
 	l.closed = true
-	err := errors.Join(unix.Flock(l.parentFD, unix.LOCK_UN), closeIfOpen(l.parentFD))
+	err := errors.Join(
+		closeIfOpen(l.supervisorFD),
+		unix.Flock(l.parentFD, unix.LOCK_UN),
+		closeIfOpen(l.parentFD),
+	)
+	l.supervisorFD = -1
 	l.parentFD = -1
 	return err
 }
@@ -180,6 +201,9 @@ func NewProtectedCgroupSupervisor(config ProtectedCgroupSupervisorConfig) (*Prot
 		if err := config.RootLease.authorizeConstruction(parentFD, normalizedParent, config); err != nil {
 			return nil, err
 		}
+	}
+	if err := verifyProtectedCgroupControllersEnabled(parentFD, normalizedParent); err != nil {
+		return nil, err
 	}
 
 	creationReservation := protectedCgroupCreationReservationKey(normalizedParent, config)
@@ -209,6 +233,9 @@ func NewProtectedCgroupSupervisor(config ProtectedCgroupSupervisorConfig) (*Prot
 			_ = cleanupProtectedCgroupDirectory(bundleFD, parentFD, normalizedParent, bundleName)
 		}
 	}()
+	if err := enableProtectedCgroupControllers(bundleFD, bundlePath); err != nil {
+		return nil, err
+	}
 
 	agentdFD, agentdPath, err := createProtectedCgroupDirectory(
 		bundleFD,
@@ -241,6 +268,9 @@ func NewProtectedCgroupSupervisor(config ProtectedCgroupSupervisorConfig) (*Prot
 			_ = cleanupProtectedCgroupDirectory(providerFD, bundleFD, bundlePath, "provider")
 		}
 	}()
+	if err := writeAndVerifyProtectedCgroupProviderLimits(providerFD, providerPath, config.ProviderLimits); err != nil {
+		return nil, err
+	}
 
 	cleanupParent = false
 	cleanupBundle = false
@@ -253,6 +283,7 @@ func NewProtectedCgroupSupervisor(config ProtectedCgroupSupervisorConfig) (*Prot
 			ParentPath: normalizedParent, BundlePath: bundlePath, AgentdPath: agentdPath, ProviderPath: providerPath,
 		},
 		fence:               config.Fence,
+		providerLimits:      config.ProviderLimits,
 		creationReservation: creationReservation,
 	}, nil
 }
@@ -405,6 +436,9 @@ func validateProtectedCgroupSupervisorConfig(config ProtectedCgroupSupervisorCon
 	if err := validateProtectedCgroupIdentityBoundary(config.SupervisorIdentity, config.ProviderIdentity); err != nil {
 		return err
 	}
+	if err := validateProtectedCgroupResourceLimits(config.ProviderLimits); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -491,7 +525,7 @@ func (l *ProtectedCgroupRootLease) RecoverOrphans() error {
 	if l.runtimeAuthorized {
 		return errors.New("protected cgroup startup recovery cannot run after runtime authorization")
 	}
-	if err := validateProtectedCgroupParentProcesses(l.parentFD, l.parentPath); err != nil {
+	if err := l.validateSupervisorMembershipLocked(); err != nil {
 		return err
 	}
 	plans, err := inspectProtectedCgroupRecoveryBundles(
@@ -519,7 +553,7 @@ func (l *ProtectedCgroupRootLease) RecoverOrphans() error {
 	if err := revalidateProtectedCgroupRecoverySet(l.parentFD, l.parentPath, plans); err != nil {
 		return err
 	}
-	if err := validateProtectedCgroupParentProcesses(l.parentFD, l.parentPath); err != nil {
+	if err := l.validateSupervisorMembershipLocked(); err != nil {
 		return err
 	}
 	l.recoveryMutating = true
@@ -527,6 +561,9 @@ func (l *ProtectedCgroupRootLease) RecoverOrphans() error {
 		if err := cleanupProtectedCgroupRecoveryBundle(l.parentFD, l.parentPath, plan); err != nil {
 			return fmt.Errorf("recover orphaned protected cgroup %s/%s: %w", l.parentPath, plan.name, err)
 		}
+	}
+	if err := enableProtectedCgroupControllers(l.parentFD, l.parentPath); err != nil {
+		return fmt.Errorf("enable protected cgroup parent controllers: %w", err)
 	}
 	l.recoveryMutating = false
 	l.recoveryComplete = true
@@ -648,35 +685,131 @@ func revalidateProtectedCgroupRecoverySet(
 	return nil
 }
 
-func validateProtectedCgroupParentProcesses(parentFD int, parentPath string) error {
-	fd, err := unix.Openat(parentFD, "cgroup.procs", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+func openAndValidateProtectedCgroupSupervisorSubgroup(
+	parentFD int,
+	parentPath string,
+	owner ProtectedCgroupIdentity,
+) (int, string, unix.Stat_t, error) {
+	subgroupPath := filepath.Join(parentPath, protectedCgroupSupervisorSubgroup)
+	subgroupFD, err := unix.Openat(
+		parentFD,
+		protectedCgroupSupervisorSubgroup,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
 	if err != nil {
-		return fmt.Errorf("open protected cgroup parent %s/cgroup.procs: %w", parentPath, err)
+		return -1, "", unix.Stat_t{}, fmt.Errorf(
+			"open protected cgroup supervisor subgroup %s: %w; systemd DelegateSubgroup=%s is required",
+			subgroupPath,
+			err,
+			protectedCgroupSupervisorSubgroup,
+		)
 	}
-	file := os.NewFile(uintptr(fd), filepath.Join(parentPath, "cgroup.procs"))
+	closeSubgroup := true
+	defer func() {
+		if closeSubgroup {
+			_ = unix.Close(subgroupFD)
+		}
+	}()
+	if err := validateProtectedCgroupDirectoryOwnership(subgroupFD, subgroupPath, owner); err != nil {
+		return -1, "", unix.Stat_t{}, err
+	}
+	if err := validateProtectedCgroupNameStillReferencesFD(
+		parentFD,
+		protectedCgroupSupervisorSubgroup,
+		subgroupFD,
+		subgroupPath,
+	); err != nil {
+		return -1, "", unix.Stat_t{}, err
+	}
+	var stats unix.Stat_t
+	if err := unix.Fstat(subgroupFD, &stats); err != nil {
+		return -1, "", unix.Stat_t{}, fmt.Errorf("stat protected cgroup supervisor subgroup %s: %w", subgroupPath, err)
+	}
+	if err := validateProtectedCgroupSupervisorProcesses(parentFD, parentPath, subgroupFD, subgroupPath); err != nil {
+		return -1, "", unix.Stat_t{}, err
+	}
+	closeSubgroup = false
+	return subgroupFD, subgroupPath, stats, nil
+}
+
+func (l *ProtectedCgroupRootLease) validateSupervisorMembershipLocked() error {
+	if l.supervisorFD < 0 {
+		return errors.New("protected cgroup supervisor subgroup is closed")
+	}
+	if err := validateProtectedCgroupDirectoryOwnership(l.supervisorFD, l.supervisorPath, l.supervisorIdentity); err != nil {
+		return err
+	}
+	if err := validateProtectedCgroupNameStillReferencesFD(
+		l.parentFD,
+		protectedCgroupSupervisorSubgroup,
+		l.supervisorFD,
+		l.supervisorPath,
+	); err != nil {
+		return err
+	}
+	var stats unix.Stat_t
+	if err := unix.Fstat(l.supervisorFD, &stats); err != nil {
+		return fmt.Errorf("stat protected cgroup supervisor subgroup %s: %w", l.supervisorPath, err)
+	}
+	if uint64(stats.Dev) != l.supervisorDevice || stats.Ino != l.supervisorInode {
+		return errors.New("protected cgroup supervisor subgroup inode does not match the daemon root lease")
+	}
+	return validateProtectedCgroupSupervisorProcesses(l.parentFD, l.parentPath, l.supervisorFD, l.supervisorPath)
+}
+
+func validateProtectedCgroupSupervisorProcesses(
+	parentFD int,
+	parentPath string,
+	subgroupFD int,
+	subgroupPath string,
+) error {
+	parentPIDs, err := readProtectedCgroupPIDs(parentFD, parentPath)
+	if err != nil {
+		return err
+	}
+	if len(parentPIDs) != 0 {
+		return fmt.Errorf(
+			"protected cgroup parent %s must be process-free; found %q",
+			parentPath,
+			parentPIDs,
+		)
+	}
+	subgroupPIDs, err := readProtectedCgroupPIDs(subgroupFD, subgroupPath)
+	if err != nil {
+		return err
+	}
+	currentPID := protectedCgroupCurrentPID()
+	if len(subgroupPIDs) != 1 || subgroupPIDs[0] != strconv.Itoa(currentPID) {
+		return fmt.Errorf(
+			"protected cgroup supervisor subgroup %s must contain only current agentd pid %d; found %q",
+			subgroupPath,
+			currentPID,
+			subgroupPIDs,
+		)
+	}
+	return nil
+}
+
+func readProtectedCgroupPIDs(directoryFD int, directoryPath string) ([]string, error) {
+	fd, err := unix.Openat(directoryFD, "cgroup.procs", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open protected cgroup %s/cgroup.procs: %w", directoryPath, err)
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(directoryPath, "cgroup.procs"))
 	if file == nil {
 		_ = unix.Close(fd)
-		return fmt.Errorf("open protected cgroup parent process file %s/cgroup.procs", parentPath)
+		return nil, fmt.Errorf("open protected cgroup process file %s/cgroup.procs", directoryPath)
 	}
 	data, readErr := io.ReadAll(io.LimitReader(file, 1<<20))
 	closeErr := file.Close()
 	if readErr != nil {
-		return fmt.Errorf("read protected cgroup parent %s/cgroup.procs: %w", parentPath, readErr)
+		return nil, fmt.Errorf("read protected cgroup %s/cgroup.procs: %w", directoryPath, readErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close protected cgroup parent %s/cgroup.procs: %w", parentPath, closeErr)
+		return nil, fmt.Errorf("close protected cgroup %s/cgroup.procs: %w", directoryPath, closeErr)
 	}
-	fields := strings.Fields(string(data))
-	currentPID := protectedCgroupCurrentPID()
-	if len(fields) != 1 || fields[0] != strconv.Itoa(currentPID) {
-		return fmt.Errorf(
-			"protected cgroup parent %s must contain only current agentd pid %d; found %q",
-			parentPath,
-			currentPID,
-			fields,
-		)
-	}
-	return nil
+	return strings.Fields(string(data)), nil
 }
 
 func revalidateProtectedCgroupRecoveryBundle(
@@ -788,6 +921,155 @@ func readProtectedCgroupControllers(directoryFD int, directoryPath string) (map[
 		controllers[controller] = struct{}{}
 	}
 	return controllers, nil
+}
+
+func enableProtectedCgroupControllers(directoryFD int, directoryPath string) error {
+	available, err := readProtectedCgroupControllers(directoryFD, directoryPath)
+	if err != nil {
+		return err
+	}
+	for _, controller := range protectedCgroupRequiredControllers {
+		if _, found := available[controller]; !found {
+			return fmt.Errorf(
+				"protected cgroup %s does not delegate required %s controller",
+				directoryPath,
+				controller,
+			)
+		}
+	}
+	commands := make([]string, 0, len(protectedCgroupRequiredControllers))
+	for _, controller := range protectedCgroupRequiredControllers {
+		commands = append(commands, "+"+controller)
+	}
+	if err := writeProtectedCgroupInterface(
+		directoryFD,
+		directoryPath,
+		"cgroup.subtree_control",
+		strings.Join(commands, " "),
+	); err != nil {
+		return err
+	}
+	return verifyProtectedCgroupControllersEnabled(directoryFD, directoryPath)
+}
+
+func verifyProtectedCgroupControllersEnabled(directoryFD int, directoryPath string) error {
+	data, err := readProtectedCgroupInterface(directoryFD, directoryPath, "cgroup.subtree_control", 4096)
+	if err != nil {
+		return err
+	}
+	enabled := make(map[string]struct{})
+	for _, field := range strings.Fields(data) {
+		controller := strings.TrimPrefix(strings.TrimPrefix(field, "+"), "-")
+		if !validProtectedCgroupControllerName(controller) {
+			return fmt.Errorf(
+				"protected cgroup %s/cgroup.subtree_control contains invalid controller %q",
+				directoryPath,
+				field,
+			)
+		}
+		if strings.HasPrefix(field, "-") {
+			delete(enabled, controller)
+			continue
+		}
+		enabled[controller] = struct{}{}
+	}
+	for _, controller := range protectedCgroupRequiredControllers {
+		if _, found := enabled[controller]; !found {
+			return fmt.Errorf(
+				"protected cgroup %s/cgroup.subtree_control did not enable required %s controller",
+				directoryPath,
+				controller,
+			)
+		}
+	}
+	return nil
+}
+
+func writeAndVerifyProtectedCgroupProviderLimits(
+	directoryFD int,
+	directoryPath string,
+	limits ProtectedCgroupResourceLimits,
+) error {
+	if err := validateProtectedCgroupResourceLimits(limits); err != nil {
+		return err
+	}
+	expected := map[string]string{
+		"pids.max":   strconv.FormatUint(limits.PidsMax, 10),
+		"memory.max": strconv.FormatUint(limits.MemoryMaxBytes, 10),
+		"cpu.max": fmt.Sprintf(
+			"%d %d",
+			limits.CPUQuotaMicros,
+			limits.CPUPeriodMicros,
+		),
+	}
+	for _, name := range []string{"pids.max", "memory.max", "cpu.max"} {
+		if err := writeProtectedCgroupInterface(directoryFD, directoryPath, name, expected[name]); err != nil {
+			return err
+		}
+		actual, err := readProtectedCgroupInterface(directoryFD, directoryPath, name, 4096)
+		if err != nil {
+			return err
+		}
+		if strings.Join(strings.Fields(actual), " ") != expected[name] {
+			return fmt.Errorf(
+				"protected cgroup %s/%s readback = %q, want %q",
+				directoryPath,
+				name,
+				strings.TrimSpace(actual),
+				expected[name],
+			)
+		}
+	}
+	return nil
+}
+
+func writeProtectedCgroupInterface(directoryFD int, directoryPath, name, value string) error {
+	fd, err := unix.Openat(directoryFD, name, unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open protected cgroup %s/%s for write: %w", directoryPath, name, err)
+	}
+	defer unix.Close(fd)
+	payload := []byte(value)
+	for len(payload) > 0 {
+		written, writeErr := unix.Write(fd, payload)
+		if writeErr != nil {
+			return fmt.Errorf("write protected cgroup %s/%s: %w", directoryPath, name, writeErr)
+		}
+		if written <= 0 {
+			return fmt.Errorf("write protected cgroup %s/%s made no progress", directoryPath, name)
+		}
+		payload = payload[written:]
+	}
+	return nil
+}
+
+func readProtectedCgroupInterface(
+	directoryFD int,
+	directoryPath string,
+	name string,
+	maximum int64,
+) (string, error) {
+	fd, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", fmt.Errorf("open protected cgroup %s/%s for read: %w", directoryPath, name, err)
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(directoryPath, name))
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", fmt.Errorf("open protected cgroup interface file %s/%s", directoryPath, name)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maximum+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read protected cgroup %s/%s: %w", directoryPath, name, readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close protected cgroup %s/%s: %w", directoryPath, name, closeErr)
+	}
+	if int64(len(data)) > maximum {
+		return "", fmt.Errorf("protected cgroup %s/%s exceeds %d bytes", directoryPath, name, maximum)
+	}
+	return string(data), nil
 }
 
 func validProtectedCgroupControllerName(value string) bool {
@@ -1067,6 +1349,13 @@ func createProtectedCgroupDirectory(parentFD int, parentPath, name string, owner
 	if err := validateProtectedCgroupDirectoryOwnership(directoryFD, directoryPath, owner); err != nil {
 		removeErr := cleanupProtectedCgroupDirectory(directoryFD, parentFD, parentPath, name)
 		return -1, "", errors.Join(err, removeErr)
+	}
+	if err := protectedCgroupDirectoryCreatedTestHook(directoryFD, directoryPath); err != nil {
+		return -1, "", errors.Join(
+			fmt.Errorf("initialize protected cgroup %s: %w", directoryPath, err),
+			closeIfOpen(directoryFD),
+			unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR),
+		)
 	}
 	return directoryFD, directoryPath, nil
 }

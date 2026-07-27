@@ -40,7 +40,7 @@ func TestClaimFairShareOrderAlternatesTenantBacklogsAcrossSequentialClaims(t *te
 				Where("agent_executions.execution_target_id = ?", targetID).
 				Where("agent_executions.target_kind = ?", "kubernetes").
 				Where("agent_executions.status IN ?", []string{"queued", "recovering"})
-			if err := applyClaimFairShareOrder(tx, query, false).Take(&selected).Error; err != nil {
+			if err := applyClaimFairShareOrder(tx, query, false, base.Add(time.Minute)).Take(&selected).Error; err != nil {
 				return err
 			}
 			return tx.Model(&persistence.AgentExecution{}).
@@ -87,7 +87,7 @@ func TestClaimFairShareOrderCountsOnlyActiveServiceStatuses(t *testing.T) {
 	var selected persistence.AgentExecution
 	query := db.Where("agent_executions.execution_target_id = ?", targetID).
 		Where("agent_executions.status IN ?", []string{"queued", "recovering"})
-	if err := applyClaimFairShareOrder(db, query, false).Take(&selected).Error; err != nil {
+	if err := applyClaimFairShareOrder(db, query, false, base.Add(2*time.Minute)).Take(&selected).Error; err != nil {
 		t.Fatal(err)
 	}
 	if selected.ID != bQueued.ID {

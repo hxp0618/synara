@@ -43,6 +43,7 @@ func TestProtectedCgroupSupervisorCreatesFencedTreeAttachesPIDsAndCleansUp(t *te
 
 	supervisor, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: fence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: supervisorInstance, RuntimeInstance: runtimeInstance, RootLease: rootLease,
 	})
 	if err != nil {
@@ -53,6 +54,9 @@ func TestProtectedCgroupSupervisorCreatesFencedTreeAttachesPIDsAndCleansUp(t *te
 	if !strings.Contains(paths.BundlePath, bundleName) {
 		t.Fatalf("bundle path %q does not contain fence %q", paths.BundlePath, bundleName)
 	}
+	assertProtectedCgroupFile(t, filepath.Join(paths.ProviderPath, "pids.max"), "512")
+	assertProtectedCgroupFile(t, filepath.Join(paths.ProviderPath, "memory.max"), "8589934592")
+	assertProtectedCgroupFile(t, filepath.Join(paths.ProviderPath, "cpu.max"), "400000 100000")
 	installProtectedCgroupControlFiles(t, paths.BundlePath)
 	installProtectedCgroupControlFiles(t, paths.AgentdPath)
 	installProtectedCgroupControlFiles(t, paths.ProviderPath)
@@ -90,6 +94,7 @@ func TestProtectedCgroupSupervisorRejectsFenceMismatch(t *testing.T) {
 		ParentPath:         root,
 		SupervisorIdentity: supervisorID,
 		ProviderIdentity:   ProtectedCgroupIdentity{UID: supervisorID.UID + 1, GID: supervisorID.GID + 1},
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		Fence:              fence,
 		SupervisorInstance: uuid.New(),
 		RuntimeInstance:    uuid.New(),
@@ -135,6 +140,7 @@ func TestProtectedCgroupRuntimeRequiresCompletedDaemonRootLease(t *testing.T) {
 	supervisorInstance := uuid.New()
 	config := ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		Fence:              ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 10, WorkerIncarnation: uuid.New()},
 		SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(),
 	}
@@ -152,6 +158,63 @@ func TestProtectedCgroupRuntimeRequiresCompletedDaemonRootLease(t *testing.T) {
 	config.RootLease = lease
 	if _, err := NewProtectedCgroupSupervisor(config); err == nil || !strings.Contains(err.Error(), "has not completed startup recovery") {
 		t.Fatalf("unrecovered daemon lease error = %v", err)
+	}
+}
+
+func TestProtectedCgroupRootLeaseRequiresCPUAndMemoryAndPidsControllers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	overrideProtectedCgroupLinuxTestEnvironment(t, root)
+	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte("cpu memory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisorID := ProtectedCgroupIdentity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	lease, err := AcquireProtectedCgroupRootLease(ProtectedCgroupRootLeaseConfig{
+		ParentPath: root, SupervisorIdentity: supervisorID,
+		ProviderIdentity:   ProtectedCgroupIdentity{UID: supervisorID.UID + 1, GID: supervisorID.GID + 1},
+		SupervisorInstance: uuid.New(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := lease.RecoverOrphans(); err == nil || !strings.Contains(err.Error(), "required pids controller") {
+		t.Fatalf("missing pids controller recovery error = %v", err)
+	}
+}
+
+func TestProtectedCgroupSupervisorFailsClosedBeforeProviderWhenLimitInterfaceIsMissing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	overrideProtectedCgroupLinuxTestEnvironment(t, root)
+	originalHook := protectedCgroupDirectoryCreatedTestHook
+	protectedCgroupDirectoryCreatedTestHook = func(fd int, directoryPath string) error {
+		if err := originalHook(fd, directoryPath); err != nil {
+			return err
+		}
+		if filepath.Base(directoryPath) == "provider" {
+			return os.Remove(filepath.Join(directoryPath, "pids.max"))
+		}
+		return nil
+	}
+	t.Cleanup(func() { protectedCgroupDirectoryCreatedTestHook = originalHook })
+	supervisorID := ProtectedCgroupIdentity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	_, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
+		ParentPath: root, SupervisorIdentity: supervisorID,
+		ProviderIdentity:   ProtectedCgroupIdentity{UID: supervisorID.UID + 1, GID: supervisorID.GID + 1},
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
+		Fence:              ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 10, WorkerIncarnation: uuid.New()},
+		SupervisorInstance: uuid.New(), RuntimeInstance: uuid.New(), Diagnostic: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "pids.max") {
+		t.Fatalf("missing pids.max interface error = %v", err)
+	}
+	if entries := linuxCgroupTestChildren(t, root); len(entries) != 0 {
+		t.Fatalf("failed limit setup leaked protected cgroups: %v", entries)
 	}
 }
 
@@ -179,6 +242,7 @@ func TestProtectedCgroupStandaloneConstructionDoesNotScavengeActiveRuntime(t *te
 	}
 	active, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: fence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(), RootLease: rootLease,
 	})
 	if err != nil {
@@ -191,6 +255,7 @@ func TestProtectedCgroupStandaloneConstructionDoesNotScavengeActiveRuntime(t *te
 
 	diagnostic, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		Fence:              ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 12, WorkerIncarnation: fence.WorkerIncarnation},
 		SupervisorInstance: uuid.New(), RuntimeInstance: uuid.New(),
 		Diagnostic: true,
@@ -250,6 +315,7 @@ func TestProtectedCgroupRootLeaseRejectsRollingOverlapAndReleasesOnClose(t *test
 	diagnosticFence := ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 1, WorkerIncarnation: uuid.New()}
 	standaloneDiagnostic, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: diagnosticFence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: uuid.New(), RuntimeInstance: uuid.New(), Diagnostic: true,
 	})
 	if err != nil {
@@ -264,6 +330,7 @@ func TestProtectedCgroupRootLeaseRejectsRollingOverlapAndReleasesOnClose(t *test
 	}
 	daemonDiagnostic, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: diagnosticFence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: uuid.New(), RuntimeInstance: uuid.New(), RootLease: first, Diagnostic: true,
 	})
 	if err != nil {
@@ -378,6 +445,7 @@ func TestProtectedCgroupRootLeaseRejectsEvenEmptyLegacyV1WithoutMutation(t *test
 	diagnosticFence := ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 99, WorkerIncarnation: uuid.New()}
 	activeDiagnostic, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: diagnosticFence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: uuid.New(), RuntimeInstance: uuid.New(), Diagnostic: true,
 	})
 	if err != nil {
@@ -446,7 +514,7 @@ func TestProtectedCgroupRootLeaseRejectsAdditionalParentProcessWithoutMutation(t
 		ExecutionID: uuid.New(), Generation: 24, WorkerIncarnation: uuid.New(),
 	})
 	if err := os.WriteFile(
-		filepath.Join(root, "cgroup.procs"),
+		filepath.Join(root, protectedCgroupSupervisorSubgroup, "cgroup.procs"),
 		[]byte(fmt.Sprintf("%d\n%d\n", protectedCgroupCurrentPID(), protectedCgroupCurrentPID()+100000)),
 		0o600,
 	); err != nil {
@@ -488,7 +556,7 @@ func TestProtectedCgroupRootLeaseRechecksParentProcessesAfterRecoveryBarrier(t *
 	originalHook := protectedCgroupRecoveryValidatedTestHook
 	protectedCgroupRecoveryValidatedTestHook = func() error {
 		return os.WriteFile(
-			filepath.Join(root, "cgroup.procs"),
+			filepath.Join(root, protectedCgroupSupervisorSubgroup, "cgroup.procs"),
 			[]byte(fmt.Sprintf("%d\n%d\n", protectedCgroupCurrentPID(), protectedCgroupCurrentPID()+100001)),
 			0o600,
 		)
@@ -832,6 +900,7 @@ func TestProtectedCgroupSupervisorSameFenceConcurrentCreationOnlyOneSucceeds(t *
 			<-start
 			supervisor, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 				ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: fence,
+				ProviderLimits:     testProtectedCgroupResourceLimits(),
 				SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(), RootLease: rootLease,
 			})
 			results <- result{supervisor: supervisor, err: err}
@@ -885,6 +954,7 @@ func TestProtectedCgroupCleanupFailurePoisonsOnlyTheFailedExecutionFence(t *test
 	fence := ProtectedCgroupFence{ExecutionID: uuid.New(), Generation: 21, WorkerIncarnation: uuid.New()}
 	config := ProtectedCgroupSupervisorConfig{
 		ParentPath: root, SupervisorIdentity: supervisorID, ProviderIdentity: providerID, Fence: fence,
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		SupervisorInstance: supervisorInstance, RuntimeInstance: uuid.New(), RootLease: lease,
 	}
 	failed, err := NewProtectedCgroupSupervisor(config)
@@ -1021,6 +1091,7 @@ func TestProtectedCgroupSupervisorRejectsProviderWritableParent(t *testing.T) {
 		ParentPath:         root,
 		SupervisorIdentity: supervisorID,
 		ProviderIdentity:   ProtectedCgroupIdentity{UID: supervisorID.UID + 1, GID: supervisorID.GID + 1},
+		ProviderLimits:     testProtectedCgroupResourceLimits(),
 		Fence: ProtectedCgroupFence{
 			ExecutionID: uuid.New(), Generation: 1, WorkerIncarnation: uuid.New(),
 		},
@@ -1068,14 +1139,27 @@ func overrideProtectedCgroupLinuxTestEnvironment(t *testing.T, root string) {
 	t.Helper()
 	originalCurrentPID := protectedCgroupCurrentPID
 	protectedCgroupCurrentPID = os.Getpid
+	installProtectedCgroupControlFiles(t, root)
+	if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(
-		filepath.Join(root, "cgroup.procs"),
-		[]byte(strconv.Itoa(protectedCgroupCurrentPID())+"\n"),
+		filepath.Join(root, "cgroup.subtree_control"),
+		[]byte("cpu memory pids\n"),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte("cpu memory\n"), 0o600); err != nil {
+	supervisorPath := filepath.Join(root, protectedCgroupSupervisorSubgroup)
+	if err := os.Mkdir(supervisorPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	installProtectedCgroupControlFiles(t, supervisorPath)
+	if err := os.WriteFile(
+		filepath.Join(supervisorPath, "cgroup.procs"),
+		[]byte(strconv.Itoa(protectedCgroupCurrentPID())+"\n"),
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
 	originalFstatfs := protectedCgroupFstatfs
@@ -1092,12 +1176,22 @@ func overrideProtectedCgroupLinuxTestEnvironment(t *testing.T, root string) {
 	protectedCgroupCleanupTestHook = func(_ int, directoryPath string) error {
 		return removeFakeProtectedCgroupControlFiles(directoryPath)
 	}
+	originalDirectoryCreatedHook := protectedCgroupDirectoryCreatedTestHook
+	protectedCgroupDirectoryCreatedTestHook = func(_ int, directoryPath string) error {
+		for _, file := range fakeProtectedCgroupControlFiles() {
+			if err := os.WriteFile(filepath.Join(directoryPath, file.name), []byte(file.content), 0o600); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	originalRecoveryHook := protectedCgroupRecoveryValidatedTestHook
 	protectedCgroupRecoveryValidatedTestHook = func() error { return nil }
 	t.Cleanup(func() {
 		protectedCgroupFstatfs = originalFstatfs
 		protectedCgroupMountInfo = originalMountInfo
 		protectedCgroupCleanupTestHook = originalCleanupHook
+		protectedCgroupDirectoryCreatedTestHook = originalDirectoryCreatedHook
 		protectedCgroupRecoveryValidatedTestHook = originalRecoveryHook
 		protectedCgroupCurrentPID = originalCurrentPID
 	})
@@ -1125,24 +1219,36 @@ func createProtectedCgroupRuntimeOrphanFixture(
 
 func installProtectedCgroupControlFiles(t *testing.T, directory string) {
 	t.Helper()
-	for _, file := range []struct {
-		name    string
-		content string
-	}{
-		{name: "cgroup.procs", content: ""},
-		{name: "cgroup.kill", content: "0"},
-		{name: "cgroup.events", content: "populated 0\n"},
-		{name: "cgroup.controllers", content: "cpu memory\n"},
-	} {
+	for _, file := range fakeProtectedCgroupControlFiles() {
 		if err := os.WriteFile(filepath.Join(directory, file.name), []byte(file.content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
+func fakeProtectedCgroupControlFiles() []struct {
+	name    string
+	content string
+} {
+	return []struct {
+		name    string
+		content string
+	}{
+		{name: "cgroup.procs", content: ""},
+		{name: "cgroup.kill", content: "0"},
+		{name: "cgroup.events", content: "populated 0\n"},
+		{name: "cgroup.controllers", content: "cpu memory pids\n"},
+		{name: "cgroup.subtree_control", content: ""},
+		{name: "pids.max", content: ""},
+		{name: "memory.max", content: ""},
+		{name: "cpu.max", content: ""},
+	}
+}
+
 func removeFakeProtectedCgroupControlFiles(directory string) error {
 	var result error
-	for _, name := range []string{"cgroup.procs", "cgroup.kill", "cgroup.events", "cgroup.controllers"} {
+	for _, file := range fakeProtectedCgroupControlFiles() {
+		name := file.name
 		path := filepath.Join(directory, name)
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -1170,5 +1276,11 @@ func assertProtectedCgroupFile(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("%s = %q, want %q", path, data, want)
+	}
+}
+
+func testProtectedCgroupResourceLimits() ProtectedCgroupResourceLimits {
+	return ProtectedCgroupResourceLimits{
+		PidsMax: 512, MemoryMaxBytes: 8 << 30, CPUQuotaMicros: 400_000, CPUPeriodMicros: 100_000,
 	}
 }

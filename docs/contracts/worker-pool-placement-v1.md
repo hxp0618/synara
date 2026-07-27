@@ -32,8 +32,8 @@ Execution Target  (security + provisioner boundary)
 
 ## Worker Pools
 
-Each Pool has a stable UUID, Target, name, mode, capacity class, target-local location, capacity bounds, scheduling
-template, status, and optimistic version.
+Each Pool has a stable UUID, Target, name, mode, capacity class, immutable `tenantIsolation`, target-local location,
+capacity bounds, scheduling template, status, and optimistic version.
 
 Pool modes:
 
@@ -56,6 +56,32 @@ a bounded start time; placement does not wait inside its launch transaction when
 `clusterId`, `region`, and `namespace` are target-local placement attributes in v1. For the first Kubernetes
 implementation, `clusterId` is the canonical local value `kubernetes` and Pool namespace must equal the Target's
 managed namespace. Cross-Target or global multi-cluster selection is deliberately outside this contract.
+
+## Kubernetes priority and preemption v1
+
+Kubernetes Worker priority is a pending-work ordering hint only. Synara does not support evicting an already-running
+Pod to start another Execution. Every execution-pinned and warm Worker Pod therefore carries both a
+`priorityClassName` and `preemptionPolicy=Never`.
+
+When a Pool does not select a class, the Pod uses the pre-created `synara-worker-nonpreempting-v1` PriorityClass. The
+deployment asset defines value `0`, `globalDefault=false`, and `preemptionPolicy=Never`. Every external Target cluster
+must install that exact asset before accepting default Worker Pods; drift in any of those default-class fields is
+rejected. A Pool may select another `priorityClassName` to change
+scheduler order, but that class must already exist in the exact Target cluster and must itself declare
+`preemptionPolicy=Never`. The optional scheduling-template `preemptionPolicy` field is an assertion and accepts only
+the canonical `Never` value; `PreemptLowerPriority` and every other value are rejected when the Pool is written and
+again when a Pod is built.
+
+Before the first use of each class in a reconcile pass, the Reconciler reads the cluster-scoped PriorityClass through
+the Target credential. Missing classes, missing `get priorityclasses.scheduling.k8s.io` authority, API uncertainty, or
+an actual policy other than `Never` fail closed before Pod apply. A class changing to a preempting policy after that
+read cannot bypass the fence: Kubernetes Priority admission rejects the Pod-level `Never` mismatch. Once admitted,
+the Pod keeps the resolved non-preempting policy. The Pod-spec revision is part of the reconciliation hash, so Workers
+created under the older implicit Kubernetes default are not treated as current-spec capacity.
+
+This contract does not define weighted queue priority, starvation bounds, or displacement compensation. A higher
+non-preempting class can move a pending Pod ahead in scheduler order, but it cannot displace running work or bypass
+Tenant equal-share selection and capacity admission.
 
 Pool status is `active`, `draining`, or `disabled`. New placements can select only `active` Pools. Existing leases on
 a draining Pool remain fenced and are allowed to reach their normal drain boundary.
@@ -101,6 +127,32 @@ For Kubernetes, Worker mode and Pool identity come from the TokenReview-authenti
 Worker JSON cannot elevate or change them. A legacy managed Pod that has an Execution label but no mode label is
 treated as `execution-pinned`; an unlabelled unassigned Kubernetes Pod is not treated as warm capacity.
 
+## Reusable Worker Tenant isolation
+
+Every Pool freezes one of two policies when it is created:
+
+- `pinned` is the safe default. On a `general-pool` Worker's first successful Execution or target-scoped Workspace
+  cleanup Claim, the transaction atomically writes `worker_instances.tenant_binding_id`. Every later candidate query
+  is filtered to that Tenant before fair-share ordering. The binding survives Heartbeat and logical Worker
+  re-registration and cannot be cleared or changed.
+- `shared` is an explicit trusted-environment opt-in. The Worker remains unbound and may rotate across Tenants under
+  the equal-share rules below.
+
+The Worker row is locked before Claim, so two Control Plane replicas cannot bind one physical Worker to different
+Tenants. PostgreSQL and personal SQLite both enforce that a non-null binding belongs to a `general-pool` Worker, stays
+inside the Target's ownership scope, and is immutable once written. A Tenant-bound logical Worker cannot re-register
+as `warm-pool` or `execution-pinned`.
+
+`execution-pinned` and `warm-pool` Workers are already one-attempt identities and never receive this durable binding.
+A tenant-owned Target is already scoped to one Tenant, but it still persists the policy so imported/configured Pool
+state is unambiguous. Platform-shared Pool configuration remains operator-owned; tenant management APIs cannot mutate
+it.
+
+Pinned binding is the confidentiality boundary for reusable multi-Tenant Workers. Filesystem and `/tmp`
+scrub-on-release remain required defense in depth, but cleanup success must never be the only reason a Worker is
+considered safe for another Tenant. Conversely, `shared` does not assert that scrub or process containment exists;
+operators must enable it only for workloads that already share an independent trust boundary.
+
 ## Tenant equal-share v1
 
 Shared-Target service order uses one common `fairqueue` algorithm. For each Target, `leased`, `running`, and
@@ -108,8 +160,8 @@ Shared-Target service order uses one common `fairqueue` algorithm. For each Targ
 `suspended` and terminal Executions consume neither an active nor queued service unit.
 
 General and warm-pool Worker Claim first applies every existing lifetime, Pool, release, Provider-manifest, capability,
-and Worker-mode eligibility fence. Among the remaining candidates it selects the Tenant with the fewest active service
-units. General workers retain FIFO by `queuedAt, executionId`. Warm workers retain the existing
+Worker-mode, and existing Tenant-binding fence. Among the remaining candidates it selects the Tenant with the fewest
+active service units. General workers retain FIFO by `queuedAt, executionId`. Warm workers retain the existing
 `low-latency -> balanced -> default` preference only after equal-share count, then FIFO. Execution-pinned Workers have
 one exact assigned candidate and therefore cannot bypass or distort another Tenant's general queue.
 
@@ -119,7 +171,8 @@ the same active-status set; after each selected candidate it increments a transa
 the next Pod, preventing one backlog from consuming an entire reconcile batch.
 
 This is equal weight and one Execution equals one service unit. v1 does not claim weighted fair queuing, CPU/memory/GPU
-dominant-resource fairness, per-Tenant queue caps, priority preemption, or a starvation SLO. Those require an explicit
+dominant-resource fairness, per-Tenant queue caps, queue-priority fairness, or a starvation SLO. Kubernetes scheduling
+priority is non-preempting and applies only after this service-order decision. Richer policies require an explicit
 resource-profile and policy authority rather than inference from arbitrary scheduling-template JSON.
 
 ## Warm Pod Safety

@@ -31,6 +31,11 @@ type addExecutionTargetGroupMemberInput struct {
 	Weight            int       `json:"weight"`
 }
 
+type updateExecutionTargetGroupMemberInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	Status          string `json:"status"`
+}
+
 type observeExecutionTargetHealthInput struct {
 	Status         string `json:"status"`
 	CapacityStatus string `json:"capacityStatus"`
@@ -169,6 +174,38 @@ func (s *Server) addExecutionTargetGroupMember(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusCreated, routing.MemberViewOf(member))
+}
+
+func (s *Server) updateExecutionTargetGroupMember(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok || !s.requireRoutingPermission(w, r, tenantID, authorization.WorkerManage) {
+		return
+	}
+	targetGroupID, ok := s.pathUUID(w, r, "targetGroupID")
+	if !ok {
+		return
+	}
+	memberID, ok := s.pathUUID(w, r, "targetGroupMemberID")
+	if !ok {
+		return
+	}
+	var input updateExecutionTargetGroupMemberInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	principal := mustPrincipal(r)
+	member, replayed, err := s.routing.UpdateMemberStatus(r.Context(), routing.UpdateMemberStatusInput{
+		TenantID: tenantID, TargetGroupID: targetGroupID, MemberID: memberID,
+		ExpectedVersion: input.ExpectedVersion, Status: input.Status, ActorID: principal.UserID,
+		RequestID: requestID(r), IPAddress: clientIP(r),
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusOK, routing.MemberViewOf(member))
 }
 
 func (s *Server) observeExecutionTargetHealth(w http.ResponseWriter, r *http.Request) {

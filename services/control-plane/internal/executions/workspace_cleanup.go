@@ -385,7 +385,7 @@ func (s *Service) ClaimWorkspaceCleanup(
 			}
 
 			var command persistence.WorkspaceCleanupCommand
-			claimErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
+			claimQuery := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
 				Table("workspace_cleanup_commands AS cleanup").
 				Select("cleanup.*").
 				Joins("JOIN workspace_materializations AS materialization ON materialization.tenant_id = cleanup.tenant_id AND materialization.id = cleanup.materialization_id").
@@ -393,13 +393,17 @@ func (s *Service) ClaimWorkspaceCleanup(
 				Where("cleanup.status = ? AND cleanup.delivery_available_at <= ?", "pending", s.now()).
 				Where("cleanup.delivery_attempts < ?", workspaceCleanupMaxAttempts).
 				Where("cleanup.storage_scope = ?", "target").
-				Where("materialization.state = ?", "cleanup-pending").
-				Order("cleanup.delivery_available_at, cleanup.requested_at, cleanup.id").Take(&command).Error
+				Where("materialization.state = ?", "cleanup-pending")
+			claimQuery = filterClaimQueryByWorkerTenantBinding(claimQuery, claimWorker, "cleanup.tenant_id")
+			claimErr := claimQuery.Order("cleanup.delivery_available_at, cleanup.requested_at, cleanup.id").Take(&command).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
 				result.Cleanup = nil
 			} else if claimErr != nil {
 				return problem.Wrap(500, "workspace_cleanup_claim_failed", "Failed to claim a Workspace cleanup command.", claimErr)
 			} else {
+				if err := bindGeneralWorkerTenantForWorkspaceCleanup(ctx, tx, &claimWorker, targetID, command.TenantID); err != nil {
+					return err
+				}
 				plainToken, tokenHash, tokenErr := secret.NewToken()
 				if tokenErr != nil {
 					return problem.Wrap(500, "workspace_cleanup_token_generation_failed", "Failed to create the Workspace cleanup lease token.", tokenErr)

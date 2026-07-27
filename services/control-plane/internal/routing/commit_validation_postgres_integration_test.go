@@ -240,6 +240,108 @@ func TestCapacityAdmissionPostgresSerializesConcurrentReservations(t *testing.T)
 	}
 }
 
+func TestMemberDisablePostgresSerializesWithExecutionCommitAndFailsClosed(t *testing.T) {
+	db := openRoutingCommitPostgresDB(t)
+	service, request, selection := seedRoutingCommitPostgresFixture(t, db)
+	execution := seedRoutingPressureExecutionParents(t, db, request, selection)
+	ApplyExecutionSelection(&execution, selection)
+
+	launchTx := db.Begin()
+	if launchTx.Error != nil {
+		t.Fatal(launchTx.Error)
+	}
+	if _, err := service.LockSelectionForCommit(context.Background(), launchTx, request, selection); err != nil {
+		_ = launchTx.Rollback().Error
+		t.Fatal(err)
+	}
+
+	disableDone := make(chan error, 1)
+	disableStarted := make(chan struct{})
+	go func() {
+		close(disableStarted)
+		_, _, updateErr := NewService(db).UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+			TenantID: request.TenantID, TargetGroupID: request.TargetGroupID, MemberID: selection.Member.ID,
+			ExpectedVersion: selection.Member.Version, Status: MemberStatusDisabled,
+			ActorID: execution.RequestedBy, RequestID: "postgres-member-disable",
+		})
+		disableDone <- updateErr
+	}()
+	<-disableStarted
+
+	select {
+	case updateErr := <-disableDone:
+		_ = launchTx.Rollback().Error
+		t.Fatalf("member disable crossed launch authority lock: %v", updateErr)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := launchTx.Create(&execution).Error; err != nil {
+		_ = launchTx.Rollback().Error
+		t.Fatal(err)
+	}
+	if err := launchTx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case updateErr := <-disableDone:
+		if codeOf(updateErr) != "target_group_member_execution_active" {
+			t.Fatalf("member disable after committed launch err = %v", updateErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("member disable did not resume after launch transaction committed")
+	}
+	var member persistence.ExecutionTargetGroupMember
+	if err := db.Where("tenant_id = ? AND id = ?", request.TenantID, selection.Member.ID).Take(&member).Error; err != nil {
+		t.Fatal(err)
+	}
+	if member.Status != MemberStatusActive || member.Version != selection.Member.Version {
+		t.Fatalf("failed disable changed member = %#v", member)
+	}
+	drained, replayed, err := service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: request.TenantID, TargetGroupID: request.TargetGroupID, MemberID: selection.Member.ID,
+		ExpectedVersion: selection.Member.Version, Status: MemberStatusDraining,
+		ActorID: execution.RequestedBy, RequestID: "postgres-member-drain",
+	})
+	if err != nil || replayed || drained.Status != MemberStatusDraining || drained.Version != selection.Member.Version+1 {
+		t.Fatalf("committed member drain = %#v replayed=%t err=%v", drained, replayed, err)
+	}
+	staleTx := db.Begin()
+	if staleTx.Error != nil {
+		t.Fatal(staleTx.Error)
+	}
+	_, err = service.LockSelectionForCommit(context.Background(), staleTx, request, selection)
+	_ = staleTx.Rollback().Error
+	if codeOf(err) != "target_routing_selection_stale" {
+		t.Fatalf("pre-Drain selection committed after member transition: %v", err)
+	}
+	replayedMember, replayed, err := service.UpdateMemberStatus(context.Background(), UpdateMemberStatusInput{
+		TenantID: request.TenantID, TargetGroupID: request.TargetGroupID, MemberID: selection.Member.ID,
+		ExpectedVersion: selection.Member.Version, Status: MemberStatusDraining,
+		ActorID: execution.RequestedBy, RequestID: "postgres-member-drain-replay",
+	})
+	if err != nil || !replayed || replayedMember.Version != drained.Version {
+		t.Fatalf("PostgreSQL drain replay = %#v replayed=%t err=%v", replayedMember, replayed, err)
+	}
+	var drainAuditCount int64
+	if err := db.Model(&persistence.AuditLog{}).
+		Where("tenant_id = ? AND resource_id = ? AND action = ?", request.TenantID, selection.Member.ID, "execution_target_group_member.drain_started").
+		Count(&drainAuditCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if drainAuditCount != 1 {
+		t.Fatalf("PostgreSQL drain audit count = %d, want 1", drainAuditCount)
+	}
+	if err := db.Model(&persistence.ExecutionTargetGroupMember{}).
+		Where("tenant_id = ? AND id = ?", request.TenantID, selection.Member.ID).
+		Updates(map[string]any{"status": MemberStatusDisabled, "version": drained.Version}).Error; err == nil {
+		t.Fatal("PostgreSQL allowed member status mutation without a next version")
+	}
+	if err := db.Where("tenant_id = ? AND id = ?", request.TenantID, selection.Member.ID).
+		Delete(&persistence.ExecutionTargetGroupMember{}).Error; err == nil {
+		t.Fatal("PostgreSQL allowed Execution Target Group member deletion")
+	}
+}
+
 func openRoutingCommitPostgresDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	databaseURL := os.Getenv("SYNARA_TEST_DATABASE_URL")

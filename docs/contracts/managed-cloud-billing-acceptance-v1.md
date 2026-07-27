@@ -1,6 +1,11 @@
 # Managed-cloud billing acceptance v1
 
-This contract defines the evidence required to promote Synara's Stage 4 cloud-billing support from repository or
+> **Deferred / non-blocking.** Synara currently supports self-hosted Kubernetes with operator-managed tariffs and
+> requested-resource accounting. Native AWS/GCP/Azure billing exports and cloud Workload Identity are not part of the
+> supported Stage 4 product boundary. This document is retained only as a future integration contract; none of its E4/E5
+> gates block the current roadmap or release.
+
+This contract defines the evidence that would be required in a future release to promote cloud-billing support from repository or
 local-environment verification to a real managed-cloud acceptance claim. It complements
 `cloud-cost-accounting-v1.md`; it does not relax that contract's parsing, immutable-object, idempotency, audit, or
 reconciliation rules.

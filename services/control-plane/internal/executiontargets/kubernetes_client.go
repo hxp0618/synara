@@ -32,6 +32,48 @@ func (c *kubernetesHTTPClient) Apply(ctx context.Context, path string, object ma
 	return c.do(ctx, http.MethodPatch, path+"?"+query.Encode(), object, nil, http.StatusOK, http.StatusCreated)
 }
 
+func (c *kubernetesHTTPClient) GetPriorityClass(ctx context.Context, name string) (kubernetesPriorityClass, error) {
+	var response struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Value            int32  `json:"value"`
+		GlobalDefault    bool   `json:"globalDefault"`
+		PreemptionPolicy string `json:"preemptionPolicy"`
+	}
+	path := "/apis/scheduling.k8s.io/v1/priorityclasses/" + url.PathEscape(strings.TrimSpace(name))
+	if err := c.do(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
+		return kubernetesPriorityClass{}, err
+	}
+	return kubernetesPriorityClass{
+		Name: response.Metadata.Name, Value: response.Value,
+		GlobalDefault: response.GlobalDefault, PreemptionPolicy: response.PreemptionPolicy,
+	}, nil
+}
+
+func (c *kubernetesHTTPClient) GetResourceQuota(
+	ctx context.Context,
+	namespace, name string,
+) (kubernetesResourceQuota, error) {
+	var response struct {
+		Status struct {
+			Hard map[string]string `json:"hard"`
+			Used map[string]string `json:"used"`
+		} `json:"status"`
+	}
+	if err := c.do(
+		ctx,
+		http.MethodGet,
+		kubernetesNamespacedPath(namespace, "resourcequotas", name),
+		nil,
+		&response,
+		http.StatusOK,
+	); err != nil {
+		return kubernetesResourceQuota{}, err
+	}
+	return kubernetesResourceQuota{Hard: response.Status.Hard, Used: response.Status.Used}, nil
+}
+
 func (c *kubernetesHTTPClient) ListPods(ctx context.Context, namespace string, targetID uuid.UUID) ([]kubernetesPod, error) {
 	return c.listPods(ctx, namespace, kubernetesTargetLabel+"="+targetID.String())
 }
@@ -65,6 +107,14 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 					Labels            map[string]string `json:"labels"`
 					Annotations       map[string]string `json:"annotations"`
 				} `json:"metadata"`
+				Spec struct {
+					Containers []struct {
+						Name      string `json:"name"`
+						Resources struct {
+							Requests map[string]string `json:"requests"`
+						} `json:"resources"`
+					} `json:"containers"`
+				} `json:"spec"`
 				Status struct {
 					Phase      string `json:"phase"`
 					Reason     string `json:"reason"`
@@ -109,6 +159,13 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			return nil, err
 		}
 		for _, item := range response.Items {
+			resourceRequests := map[string]string{}
+			for _, container := range item.Spec.Containers {
+				if strings.TrimSpace(container.Name) == "agentd" {
+					resourceRequests = container.Resources.Requests
+					break
+				}
+			}
 			conditions := make([]kubernetesPodCondition, 0, len(item.Status.Conditions))
 			for _, condition := range item.Status.Conditions {
 				conditions = append(conditions, kubernetesPodCondition{
@@ -135,7 +192,7 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 				Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase,
 				Reason: item.Status.Reason, CreatedAt: item.Metadata.CreationTimestamp.UTC(),
 				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
-				Conditions: conditions, Containers: containers,
+				Conditions: conditions, Containers: containers, ResourceRequests: resourceRequests,
 			})
 		}
 		continueToken = strings.TrimSpace(response.Metadata.Continue)

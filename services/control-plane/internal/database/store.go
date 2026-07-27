@@ -252,6 +252,10 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		     END
 		 WHERE worker_mode IS NULL
 		    OR trim(worker_mode) = ''`,
+		`UPDATE worker_pools
+		 SET tenant_isolation = 'pinned'
+		 WHERE tenant_isolation IS NULL
+		    OR trim(tenant_isolation) = ''`,
 		`UPDATE agent_executions
 		 SET warm_pool_mode_snapshot = COALESCE((
 		       SELECT CASE
@@ -374,6 +378,39 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		       AND pool.capacity_class = NEW.capacity_class
 		   );
 		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_instances_tenant_binding_insert`,
+		`CREATE TRIGGER trg_worker_instances_tenant_binding_insert
+		 BEFORE INSERT ON worker_instances
+		 WHEN NEW.tenant_binding_id IS NOT NULL
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Only general-pool Workers may carry a Tenant binding')
+		   WHERE NEW.worker_mode <> 'general-pool';
+
+		   SELECT RAISE(ABORT, 'Worker Tenant binding is outside its Execution Target')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM execution_targets AS target
+		     WHERE target.id = NEW.execution_target_id
+		       AND (target.tenant_id IS NULL OR target.tenant_id IS NEW.tenant_binding_id)
+		   );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_instances_tenant_binding_update`,
+		`CREATE TRIGGER trg_worker_instances_tenant_binding_update
+		 BEFORE UPDATE OF tenant_binding_id, worker_mode, execution_target_id ON worker_instances
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker Tenant binding is immutable')
+		   WHERE OLD.tenant_binding_id IS NOT NULL
+		     AND NEW.tenant_binding_id IS NOT OLD.tenant_binding_id;
+
+		   SELECT RAISE(ABORT, 'Only general-pool Workers may carry a Tenant binding')
+		   WHERE NEW.tenant_binding_id IS NOT NULL AND NEW.worker_mode <> 'general-pool';
+
+		   SELECT RAISE(ABORT, 'Worker Tenant binding is outside its Execution Target')
+		   WHERE NEW.tenant_binding_id IS NOT NULL AND NOT EXISTS (
+		     SELECT 1 FROM execution_targets AS target
+		     WHERE target.id = NEW.execution_target_id
+		       AND (target.tenant_id IS NULL OR target.tenant_id IS NEW.tenant_binding_id)
+		   );
+		 END`,
 		`DROP TRIGGER IF EXISTS trg_agent_executions_warm_pool_mode_snapshot_insert`,
 		`CREATE TRIGGER trg_agent_executions_warm_pool_mode_snapshot_insert
 		 BEFORE INSERT ON agent_executions
@@ -398,6 +435,10 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_worker_instances_pool_identity
 		 ON worker_instances (execution_target_id, worker_pool_id, worker_pool_version, capacity_class, id)
 		 WHERE worker_pool_id IS NOT NULL`,
+		`DROP INDEX IF EXISTS idx_worker_instances_tenant_binding`,
+		`CREATE INDEX idx_worker_instances_tenant_binding
+		 ON worker_instances (execution_target_id, tenant_binding_id, status, id)
+		 WHERE tenant_binding_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_worker_pool_target_name
 		 ON worker_pools (execution_target_id, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_worker_pool_target_status
@@ -412,13 +453,13 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 ON agent_executions (execution_target_id, target_kind, status, queued_at, id)
 		 WHERE status IN ('queued', 'recovering', 'leased', 'running', 'waiting-for-approval')`,
 		`INSERT INTO worker_pools (
-		   id, tenant_id, execution_target_id, name, mode, capacity_class,
+		   id, tenant_id, execution_target_id, name, mode, capacity_class, tenant_isolation,
 		   cluster_id, region, namespace, desired_idle_units, min_idle_units, max_active_units,
 		   scheduling_template, status, version, created_at, updated_at
 		 )
 		 SELECT target.id, target.tenant_id, target.id, 'default',
 		   CASE WHEN target.kind = 'kubernetes' THEN 'per-execution' ELSE 'resident' END,
-		   'standard', '', '', '', 0, 0, 1, '{}', 'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		   'standard', 'pinned', '', '', '', 0, 0, 1, '{}', 'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 		 FROM execution_targets AS target
 		 WHERE NOT EXISTS (
 		   SELECT 1 FROM worker_pools AS pool
@@ -442,6 +483,7 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		   SELECT RAISE(ABORT, 'invalid Worker pool shape')
 		   WHERE NEW.mode NOT IN ('resident', 'per-execution', 'warm')
 		      OR NEW.capacity_class NOT IN ('standard', 'interactive')
+		      OR NEW.tenant_isolation NOT IN ('pinned', 'shared')
 		      OR NEW.status NOT IN ('active', 'draining', 'disabled')
 		      OR length(trim(NEW.name)) NOT BETWEEN 1 AND 160
 		      OR NEW.desired_idle_units < 0
@@ -467,11 +509,14 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		   WHERE NEW.execution_target_id IS NOT OLD.execution_target_id
 		      OR NEW.tenant_id IS NOT OLD.tenant_id;
 
-		   SELECT RAISE(ABORT, 'Worker pool mode and capacity class are immutable')
-		   WHERE NEW.mode IS NOT OLD.mode OR NEW.capacity_class IS NOT OLD.capacity_class;
+		   SELECT RAISE(ABORT, 'Worker pool mode, capacity class, and Tenant isolation are immutable')
+		   WHERE NEW.mode IS NOT OLD.mode
+		      OR NEW.capacity_class IS NOT OLD.capacity_class
+		      OR NEW.tenant_isolation IS NOT OLD.tenant_isolation;
 
 		   SELECT RAISE(ABORT, 'invalid Worker pool update')
-		   WHERE NEW.status NOT IN ('active', 'draining', 'disabled')
+		   WHERE NEW.tenant_isolation NOT IN ('pinned', 'shared')
+		      OR NEW.status NOT IN ('active', 'draining', 'disabled')
 		      OR length(trim(NEW.name)) NOT BETWEEN 1 AND 160
 		      OR NEW.desired_idle_units < 0
 		      OR NEW.min_idle_units < 0
@@ -3561,6 +3606,49 @@ func migrateExecutionSchedulingPolicySQLiteSafety(ctx context.Context, db *gorm.
 		      OR NEW.placement_cluster_id IS NOT OLD.placement_cluster_id;
 		 END`).Error; err != nil {
 			return fmt.Errorf("create sqlite Execution Scheduling Policy snapshot trigger: %w", err)
+		}
+	}
+	if db.Migrator().HasColumn(&persistence.AgentExecution{}, "queue_class") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "queue_priority") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "quota_units") &&
+		db.Migrator().HasColumn(&persistence.AgentExecution{}, "automation_id") {
+		queueStatements := []string{
+			`UPDATE agent_executions SET queue_class = 'interactive'
+			 WHERE queue_class IS NULL OR trim(queue_class) = ''`,
+			`UPDATE agent_executions SET quota_units = 1
+			 WHERE quota_units IS NULL OR quota_units <= 0`,
+			`DROP TRIGGER IF EXISTS trg_agent_executions_queue_scope_insert`,
+			`CREATE TRIGGER trg_agent_executions_queue_scope_insert
+			 BEFORE INSERT ON agent_executions
+			 BEGIN
+			   SELECT RAISE(ABORT, 'Execution queue snapshot is invalid')
+			   WHERE NEW.queue_class NOT IN ('interactive', 'automation', 'batch')
+			      OR NEW.queue_priority < -100 OR NEW.queue_priority > 100
+			      OR NEW.quota_units < 1 OR NEW.quota_units > 1000000
+			      OR ((NEW.queue_class = 'automation') IS NOT (NEW.automation_id IS NOT NULL));
+			   SELECT RAISE(ABORT, 'Execution Automation is outside its Session Project')
+			   WHERE NEW.automation_id IS NOT NULL AND NOT EXISTS (
+			     SELECT 1 FROM automations a
+			     JOIN agent_sessions s ON s.tenant_id = a.tenant_id AND s.project_id = a.project_id
+			     WHERE a.tenant_id = NEW.tenant_id AND a.id = NEW.automation_id
+			       AND a.archived_at IS NULL AND s.id = NEW.session_id AND s.archived_at IS NULL
+			   );
+			 END`,
+			`DROP TRIGGER IF EXISTS trg_agent_executions_queue_scope_update`,
+			`CREATE TRIGGER trg_agent_executions_queue_scope_update
+			 BEFORE UPDATE OF automation_id, queue_class, queue_priority, quota_units ON agent_executions
+			 BEGIN
+			   SELECT RAISE(ABORT, 'Execution queue and quota snapshot is immutable')
+			   WHERE NEW.automation_id IS NOT OLD.automation_id
+			      OR NEW.queue_class IS NOT OLD.queue_class
+			      OR NEW.queue_priority IS NOT OLD.queue_priority
+			      OR NEW.quota_units IS NOT OLD.quota_units;
+			 END`,
+		}
+		for _, statement := range queueStatements {
+			if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
+				return fmt.Errorf("apply sqlite Execution queue safety migration: %w", err)
+			}
 		}
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,10 +47,11 @@ type Binding struct {
 }
 
 type Service struct {
-	db         *gorm.DB
-	authorizer *authorization.Authorizer
-	platform   platform.Config
-	cipher     *secret.CursorCipher
+	db                          *gorm.DB
+	authorizer                  *authorization.Authorizer
+	platform                    platform.Config
+	cipher                      *secret.CursorCipher
+	kubernetesReconcilerLocalMu sync.Mutex
 }
 
 func NewService(db *gorm.DB, platformConfig platform.Config, cipher *secret.CursorCipher) *Service {

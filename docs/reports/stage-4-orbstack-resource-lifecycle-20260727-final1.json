@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "failed",
+  "startedAt": "2026-07-26T16:34:44Z",
+  "finishedAt": "2026-07-26T16:36:26Z",
+  "durationSeconds": 102,
+  "context": "orbstack",
+  "namespace": "synara-stage4-lifecycle-1",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-lifecycle-1",
+  "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-final1.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+    "sessionAuthorityMode": "stage2-postgres",
+    "nodePartitionManagedHookOverride": {
+      "startHookEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+      "verifyHookEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
+      "stopHookEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
+      "timeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
+      "startTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+      "verifyTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
+      "stopTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
+    }
+  },
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 102
+  },
+  "unexpectedExitStatus": null,
+  "plannedCases": [
+    "resource-lifecycle"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "permissions": [],
+  "topology": null,
+  "scenarios": [
+    {
+      "name": "resource-lifecycle",
+      "status": "failed",
+      "startedAt": "2026-07-26T16:36:26Z",
+      "finishedAt": "2026-07-26T16:36:26Z",
+      "details": {
+        "status": "failed",
+        "evidenceLevel": "E3",
+        "durationSeconds": 0,
+        "identities": null,
+        "lifecycle": null,
+        "pendingInteraction": null,
+        "workspace": null,
+        "recoveryBundle": null,
+        "podLifecycle": null,
+        "cleanup": null,
+        "reasonCode": "postgres_json_invalid",
+        "message": "The acceptance state query returned malformed JSON",
+        "details": {
+          "resultBytes": 181,
+          "resultDigest": "f812ec0e2cf6929c800f64313dcf99009b30b8602180759572b884041eda03e3"
+        }
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled"
+  }
+}

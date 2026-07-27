@@ -129,5 +129,5 @@ No Tenant, Target, Execution, Generation, Pod, publisher, or acknowledgement dig
 
 The authority treats each Execution as one Pod-slot unit. Heterogeneous CPU/memory/GPU reservation vectors, preemption,
 batch priority classes, and production multi-Tenant load/soak remain separate Stage 4 work. OrbStack PostgreSQL and
-Kubernetes evidence is local E3 evidence; it does not prove managed-cloud publisher correctness or production capacity
-SLOs.
+Kubernetes evidence is local E3 evidence; target-hardware self-hosted deployment must still establish its production
+capacity SLOs. Managed-cloud publisher correctness is outside the supported scope.

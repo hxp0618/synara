@@ -163,6 +163,13 @@ function WorkerCard(props: {
           label="Lease / fencing"
           value={`${worker.leaseSupported ? "lease" : "no lease"} · ${worker.fencingSupported ? "fencing" : "no fencing"}`}
         />
+        {worker.reconciliationDrainRequestedAt ? (
+          <WorkerFact
+            label="Reconciliation Drain"
+            value={formatReconciliationDrain(worker)}
+            dateTime={worker.reconciliationDrainRequestedAt}
+          />
+        ) : null}
       </dl>
 
       {worker.compatibilityReason ? (
@@ -300,6 +307,16 @@ function formatRelease(worker: ControlPlaneWorker): string {
 function formatTimestamp(value: string): string {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestampFormatter.format(new Date(timestamp)) : value;
+}
+
+function formatReconciliationDrain(worker: ControlPlaneWorker): string {
+  const requestedAt = worker.reconciliationDrainRequestedAt;
+  const requested = requestedAt ? formatTimestamp(requestedAt) : "pending";
+  const reason = worker.reconciliationDrainReason ?? "managed replacement";
+  const incarnation = worker.reconciliationDrainIncarnation;
+  return incarnation
+    ? `${reason} · incarnation ${incarnation} · ${requested}`
+    : `${reason} · ${requested}`;
 }
 
 function formatRevocationCounts(result: ControlPlaneWorkerRevocationResult): string {

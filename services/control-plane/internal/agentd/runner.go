@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ type Runner struct {
 	experimentalProviders    map[string]struct{}
 	cgroupV2Root             string
 	cgroupV2ProviderIdentity *ProtectedCgroupIdentity
+	cgroupV2ProviderLimits   *ProtectedCgroupResourceLimits
 	instanceUID              uuid.UUID
 	supervisorInstance       uuid.UUID
 	protectedRootLease       *ProtectedCgroupRootLease
@@ -47,11 +49,17 @@ func NewRunner(cfg Config) *Runner {
 		identityCopy := *cfg.CgroupV2ProviderIdentity
 		providerIdentity = &identityCopy
 	}
+	var providerLimits *ProtectedCgroupResourceLimits
+	if cfg.CgroupV2ProviderLimits != nil {
+		limitsCopy := *cfg.CgroupV2ProviderLimits
+		providerLimits = &limitsCopy
+	}
 	return &Runner{
 		command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes,
 		protocol: cfg.RunnerProtocol, experimentalProviders: experimentalProviders,
 		cgroupV2Root:             cfg.CgroupV2Root,
 		cgroupV2ProviderIdentity: providerIdentity,
+		cgroupV2ProviderLimits:   providerLimits,
 		instanceUID:              instanceUID,
 		supervisorInstance:       uuid.New(),
 	}
@@ -83,6 +91,10 @@ func (r *Runner) processTreeOptions(executionID uuid.UUID, generation int64) pro
 	}
 	identityCopy := *r.cgroupV2ProviderIdentity
 	options.ProtectedProviderIdentity = &identityCopy
+	if r.cgroupV2ProviderLimits != nil {
+		limitsCopy := *r.cgroupV2ProviderLimits
+		options.ProtectedProviderLimits = &limitsCopy
+	}
 	options.ContainmentFence = ProtectedCgroupFence{
 		ExecutionID:       executionID,
 		Generation:        generation,
@@ -162,6 +174,14 @@ func (r *Runner) runLegacy(
 	}()
 	command.Dir = input.WorkspaceDirectory
 	command.Env = runnerEnvironment(os.Environ())
+	for _, name := range providerHostPackageEnvironmentAllowlist {
+		if value, found := input.ProviderEnvironment[name]; found {
+			if !filepath.IsAbs(value) || strings.ContainsAny(value, "\r\n\x00") {
+				return RunnerResult{}, errors.New("Provider execution environment contains an unsupported value")
+			}
+			command.Env = replaceEnvironmentValue(command.Env, name, value)
+		}
+	}
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))
 	var credentialWrite <-chan error
 	if credential != nil {

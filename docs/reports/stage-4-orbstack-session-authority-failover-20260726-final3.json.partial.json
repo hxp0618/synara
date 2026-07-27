@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "passed",
+  "startedAt": "2026-07-26T15:03:58Z",
+  "updatedAt": "2026-07-26T15:06:12Z",
+  "finishedAt": "2026-07-26T15:06:12Z",
+  "context": "orbstack",
+  "namespace": "synara-stage4-session-authority-3",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-session-authority-3",
+  "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final3.json",
+  "journalFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final3.json.journal.jsonl",
+  "partialFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final3.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 122
+  },
+  "plannedCases": [
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": [
+    {
+      "name": "control-plane-failover",
+      "status": "passed",
+      "startedAt": "2026-07-26T15:06:01Z",
+      "finishedAt": "2026-07-26T15:06:12Z",
+      "details": {
+        "deletedPod": "synara-control-plane-fdd755f75-lt4jz",
+        "readyProbeFailures": 0,
+        "replacement": {
+          "beforePods": [
+            {
+              "name": "synara-control-plane-fdd755f75-lt4jz",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-fdd755f75-wq262",
+              "node": "orbstack"
+            }
+          ],
+          "afterPods": [
+            {
+              "name": "synara-control-plane-fdd755f75-4gz7k",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-fdd755f75-wq262",
+              "node": "orbstack"
+            }
+          ],
+          "replacementPods": [
+            {
+              "name": "synara-control-plane-fdd755f75-4gz7k",
+              "node": "orbstack"
+            }
+          ]
+        },
+        "sessionAuthority": {
+          "mode": "stage2-postgres",
+          "verified": true,
+          "sentinelIdDigest": "894dcb44a598dbed3e6a4a5e056ea59c298043f50d3cba5a5074684b8a041600",
+          "beforeDigest": "15497b7480cbf1f2d8536c3457c56b3b8e2357111da9fb8d3ab9040f794cbb13",
+          "afterDigest": "15497b7480cbf1f2d8536c3457c56b3b8e2357111da9fb8d3ab9040f794cbb13",
+          "rowCount": 1
+        },
+        "preHook": null,
+        "postHook": null
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "passed",
+    "startedAt": "2026-07-26T15:03:58Z",
+    "finishedAt": "2026-07-26T15:06:12Z",
+    "durationSeconds": 134,
+    "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final3.json",
+    "unexpectedExitStatus": null
+  }
+}

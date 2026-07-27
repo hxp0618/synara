@@ -114,6 +114,36 @@ describe("provider credential isolation", () => {
     expect(rendered).toBe("error=[REDACTED] output=[REDACTED]");
   });
 
+  it("maps only controlled absolute Package Registry config paths", () => {
+    const result = providerEnvironment(
+      {
+        PATH: "/bin",
+        NPM_CONFIG_USERCONFIG: "/ambient/npmrc",
+        PIP_CONFIG_FILE: "/ambient/pip.conf",
+        SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG: "/run/synara/package/npmrc",
+        SYNARA_PROVIDER_PIP_CONFIG_FILE: "/run/synara/package/pip.conf",
+      },
+      "codex",
+      null,
+    );
+
+    expect(result.environment).toEqual({
+      PATH: "/bin",
+      NPM_CONFIG_USERCONFIG: "/run/synara/package/npmrc",
+      PIP_CONFIG_FILE: "/run/synara/package/pip.conf",
+    });
+    expect(Object.keys(result.environment)).not.toContain(
+      "SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG",
+    );
+    expect(() =>
+      providerEnvironment(
+        { SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG: "relative/npmrc" },
+        "codex",
+        null,
+      ),
+    ).toThrow("SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG is invalid");
+  });
+
   it.each([
     "SYNARA_PROVIDER_HTTP_PROXY",
     "SYNARA_PROVIDER_HTTPS_PROXY",

@@ -7,45 +7,50 @@ import (
 )
 
 type WorkerInstance struct {
-	ID                      uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
-	Incarnation             int64          `gorm:"column:incarnation;default:1"`
-	InstanceUID             string         `gorm:"column:instance_uid"`
-	SSHBootstrapGeneration  *int64         `gorm:"column:ssh_bootstrap_generation"`
-	ExecutionTargetID       uuid.UUID      `gorm:"column:execution_target_id;type:uuid"`
-	TargetKind              string         `gorm:"column:target_kind"`
-	WorkerMode              string         `gorm:"column:worker_mode;not null;default:general-pool"`
-	AssignedExecutionID     *uuid.UUID     `gorm:"column:assigned_execution_id;type:uuid"`
-	WorkerPoolID            *uuid.UUID     `gorm:"column:worker_pool_id;type:uuid"`
-	WorkerPoolVersion       *int64         `gorm:"column:worker_pool_version"`
-	CapacityClass           *string        `gorm:"column:capacity_class"`
-	RegistrationTrustMode   string         `gorm:"column:registration_trust_mode;not null;default:shared-token"`
-	ClusterID               string         `gorm:"column:cluster_id"`
-	Namespace               string         `gorm:"column:namespace"`
-	PodName                 string         `gorm:"column:pod_name"`
-	Version                 string         `gorm:"column:version"`
-	ProtocolVersion         int            `gorm:"column:protocol_version"`
-	Capabilities            map[string]any `gorm:"column:capabilities;serializer:json"`
-	CurrentManifestID       *uuid.UUID     `gorm:"column:current_manifest_id;type:uuid"`
-	CompatibilityStatus     string         `gorm:"column:compatibility_status;default:unknown"`
-	CompatibilityReason     *string        `gorm:"column:compatibility_reason"`
-	CompatibilityCheckedAt  *time.Time     `gorm:"column:compatibility_checked_at"`
-	WorkerReleaseRevisionID *uuid.UUID     `gorm:"column:worker_release_revision_id;type:uuid"`
-	WorkerReleaseChannel    *string        `gorm:"column:worker_release_channel"`
-	WorkerReleaseStatus     string         `gorm:"column:worker_release_status;default:unmanaged"`
-	WorkerReleaseReason     *string        `gorm:"column:worker_release_reason"`
-	WorkerReleaseCheckedAt  *time.Time     `gorm:"column:worker_release_checked_at"`
-	LeaseSupported          bool           `gorm:"column:lease_supported"`
-	FencingSupported        bool           `gorm:"column:fencing_supported"`
-	AuthTokenHash           []byte         `gorm:"column:auth_token_hash"`
-	Status                  string         `gorm:"column:status"`
-	AdministrativeStatus    string         `gorm:"column:administrative_status;default:active"`
-	RegisteredAt            time.Time      `gorm:"column:registered_at"`
-	LastHeartbeatAt         time.Time      `gorm:"column:last_heartbeat_at"`
-	DrainingAt              *time.Time     `gorm:"column:draining_at"`
-	TerminatedAt            *time.Time     `gorm:"column:terminated_at"`
-	RevokedAt               *time.Time     `gorm:"column:revoked_at"`
-	RevokedBy               *uuid.UUID     `gorm:"column:revoked_by;type:uuid"`
-	RevocationReason        *string        `gorm:"column:revocation_reason"`
+	ID                             uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	Incarnation                    int64          `gorm:"column:incarnation;default:1"`
+	InstanceUID                    string         `gorm:"column:instance_uid"`
+	SSHBootstrapGeneration         *int64         `gorm:"column:ssh_bootstrap_generation"`
+	ExecutionTargetID              uuid.UUID      `gorm:"column:execution_target_id;type:uuid"`
+	TargetKind                     string         `gorm:"column:target_kind"`
+	WorkerMode                     string         `gorm:"column:worker_mode;not null;default:general-pool"`
+	AssignedExecutionID            *uuid.UUID     `gorm:"column:assigned_execution_id;type:uuid"`
+	WorkerPoolID                   *uuid.UUID     `gorm:"column:worker_pool_id;type:uuid"`
+	WorkerPoolVersion              *int64         `gorm:"column:worker_pool_version"`
+	CapacityClass                  *string        `gorm:"column:capacity_class"`
+	TenantBindingID                *uuid.UUID     `gorm:"column:tenant_binding_id;type:uuid"`
+	RegistrationTrustMode          string         `gorm:"column:registration_trust_mode;not null;default:shared-token"`
+	ClusterID                      string         `gorm:"column:cluster_id"`
+	Namespace                      string         `gorm:"column:namespace"`
+	PodName                        string         `gorm:"column:pod_name"`
+	Version                        string         `gorm:"column:version"`
+	ProtocolVersion                int            `gorm:"column:protocol_version"`
+	Capabilities                   map[string]any `gorm:"column:capabilities;serializer:json"`
+	CurrentManifestID              *uuid.UUID     `gorm:"column:current_manifest_id;type:uuid"`
+	CompatibilityStatus            string         `gorm:"column:compatibility_status;default:unknown"`
+	CompatibilityReason            *string        `gorm:"column:compatibility_reason"`
+	CompatibilityCheckedAt         *time.Time     `gorm:"column:compatibility_checked_at"`
+	WorkerReleaseRevisionID        *uuid.UUID     `gorm:"column:worker_release_revision_id;type:uuid"`
+	WorkerReleaseChannel           *string        `gorm:"column:worker_release_channel"`
+	WorkerReleaseStatus            string         `gorm:"column:worker_release_status;default:unmanaged"`
+	WorkerReleaseReason            *string        `gorm:"column:worker_release_reason"`
+	WorkerReleaseCheckedAt         *time.Time     `gorm:"column:worker_release_checked_at"`
+	LeaseSupported                 bool           `gorm:"column:lease_supported"`
+	FencingSupported               bool           `gorm:"column:fencing_supported"`
+	AuthTokenHash                  []byte         `gorm:"column:auth_token_hash"`
+	Status                         string         `gorm:"column:status"`
+	AdministrativeStatus           string         `gorm:"column:administrative_status;default:active"`
+	RegisteredAt                   time.Time      `gorm:"column:registered_at"`
+	LastHeartbeatAt                time.Time      `gorm:"column:last_heartbeat_at"`
+	DrainingAt                     *time.Time     `gorm:"column:draining_at"`
+	ReconciliationDrainIncarnation *int64         `gorm:"column:reconciliation_drain_incarnation"`
+	ReconciliationDrainInstanceUID *string        `gorm:"column:reconciliation_drain_instance_uid"`
+	ReconciliationDrainRequestedAt *time.Time     `gorm:"column:reconciliation_drain_requested_at"`
+	ReconciliationDrainReason      *string        `gorm:"column:reconciliation_drain_reason"`
+	TerminatedAt                   *time.Time     `gorm:"column:terminated_at"`
+	RevokedAt                      *time.Time     `gorm:"column:revoked_at"`
+	RevokedBy                      *uuid.UUID     `gorm:"column:revoked_by;type:uuid"`
+	RevocationReason               *string        `gorm:"column:revocation_reason"`
 }
 
 func (WorkerInstance) TableName() string { return "worker_instances" }
@@ -82,6 +87,10 @@ type AgentExecution struct {
 	TenantID                            uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
 	SessionID                           uuid.UUID  `gorm:"column:session_id;type:uuid"`
 	TurnID                              uuid.UUID  `gorm:"column:turn_id;type:uuid"`
+	AutomationID                        *uuid.UUID `gorm:"column:automation_id;type:uuid"`
+	QueueClass                          string     `gorm:"column:queue_class;not null;default:interactive"`
+	QueuePriority                       int        `gorm:"column:queue_priority;not null;default:0"`
+	QuotaUnits                          int        `gorm:"column:quota_units;not null;default:1"`
 	Attempt                             int        `gorm:"column:attempt"`
 	Status                              string     `gorm:"column:status"`
 	ExecutionTargetID                   uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`

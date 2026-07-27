@@ -142,6 +142,85 @@ func TestReservationAwareSelectedOnlyUsesMemberLocationAndAuthority(t *testing.T
 	}
 }
 
+func TestCreateExecutionPersistsCompleteTraceWithRejectedMissingHealth(t *testing.T) {
+	db := schedulingDecisionTestDB(t)
+	execution := fixedExecutionFixture()
+	execution.TargetKind = "kubernetes"
+	groupID := uuid.New()
+	groupVersion := int64(4)
+	memberVersion := int64(2)
+	selectedMemberID := uuid.New()
+	region, clusterID := "cn-shanghai", "cluster-a"
+	execution.TargetGroupID = &groupID
+	execution.TargetGroupVersion = &groupVersion
+	execution.TargetGroupMemberVersion = &memberVersion
+	execution.SelectedRegion = &region
+	execution.SelectedClusterID = &clusterID
+	healthVersion := int64(3)
+	healthStatus, capacityStatus := "healthy", "available"
+	observedAt := execution.QueuedAt.Add(-time.Second)
+	expiresAt := execution.QueuedAt.Add(time.Minute)
+	allocated := 0
+	queued, effectiveRank := int64(0), int64(0)
+	priority, weight := 100, 100
+	routeRank, regionRank, capacityRank := 0, 0, 0
+	selected := CandidateFromExecution(execution)
+	selected.TargetGroupMemberID = &selectedMemberID
+	selected.HealthVersion = &healthVersion
+	selected.HealthStatus = &healthStatus
+	selected.CapacityStatus = &capacityStatus
+	selected.HealthObservedAt = &observedAt
+	selected.HealthExpiresAt = &expiresAt
+	selected.AllocatedCapacityUnits = &allocated
+	selected.QueuedExecutionUnits = &queued
+	selected.EffectiveLoadRank = &effectiveRank
+	selected.Priority = &priority
+	selected.Weight = &weight
+	selected.PriorityRank = &routeRank
+	selected.RegionRank = &regionRank
+	selected.CapacityRank = &capacityRank
+	rejectedTargetID := uuid.New()
+	rejectedMemberID := uuid.New()
+	rejectionCode := "health-missing"
+	rejected := CandidateSnapshot{
+		ExecutionTargetID:        rejectedTargetID,
+		TargetKind:               "kubernetes",
+		TargetGroupID:            &groupID,
+		TargetGroupVersion:       &groupVersion,
+		TargetGroupMemberID:      &rejectedMemberID,
+		TargetGroupMemberVersion: &memberVersion,
+		Region:                   "cn-beijing",
+		ClusterID:                "cluster-b",
+		Priority:                 &priority,
+		Weight:                   &weight,
+		Eligibility:              EligibilityRejected,
+		RejectionCode:            &rejectionCode,
+	}
+	input := NewCompleteInput(
+		uuid.New(),
+		AlgorithmQueuePressureV1,
+		execution.QueuedAt,
+		[]CandidateSnapshot{rejected, selected},
+	)
+	decision, err := CreateExecution(context.Background(), db, &execution, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.EvidenceCompleteness != EvidenceComplete || decision.CandidateCount != 2 || decision.SelectedOrdinal != 1 {
+		t.Fatalf("complete Decision = %#v", decision)
+	}
+	var candidates []persistence.ExecutionSchedulingCandidate
+	if err := db.Where("tenant_id = ? AND decision_id = ?", execution.TenantID, decision.ID).
+		Order("ordinal ASC").Find(&candidates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 || candidates[0].ExecutionTargetID != rejectedTargetID ||
+		candidates[0].Eligibility != EligibilityRejected || candidates[0].HealthVersion != nil ||
+		!candidates[1].Selected || candidates[1].PriorityRank == nil {
+		t.Fatalf("complete Candidates = %#v", candidates)
+	}
+}
+
 func schedulingDecisionTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{TranslateError: true})

@@ -51,7 +51,7 @@ func TestOrderKubernetesExecutionsForServiceUsesTenantEqualShare(t *testing.T) {
 	}
 	items := append(append([]kubernetesExecution{}, active...), a1, b2, b1)
 
-	ordered, err := orderKubernetesExecutionsForService(items)
+	ordered, err := orderKubernetesExecutionsForService(items, base.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestOrderKubernetesExecutionsForServiceUsesTenantEqualShare(t *testing.T) {
 
 	invalid := append([]kubernetesExecution{}, items...)
 	invalid = append(invalid, kubernetesExecution{ID: uuid.New(), TenantID: tenantA, Status: "completed"})
-	if _, err := orderKubernetesExecutionsForService(invalid); err == nil {
+	if _, err := orderKubernetesExecutionsForService(invalid, base.Add(time.Minute)); err == nil {
 		t.Fatal("Kubernetes fair queue accepted an unexpected execution status")
 	}
 }
@@ -127,7 +127,9 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	spec := pod["spec"].(map[string]any)
 	if spec["restartPolicy"] != "Never" || spec["automountServiceAccountToken"] != false ||
 		spec["terminationGracePeriodSeconds"] != 30 || spec["enableServiceLinks"] != false ||
-		spec["hostNetwork"] != false || spec["hostPID"] != false || spec["hostIPC"] != false {
+		spec["hostNetwork"] != false || spec["hostPID"] != false || spec["hostIPC"] != false ||
+		spec["priorityClassName"] != kubernetesWorkerDefaultPriorityClassName ||
+		spec["preemptionPolicy"] != placement.KubernetesPreemptionPolicyNever {
 		t.Fatalf("Kubernetes Pod runtime policy is unsafe: %#v", spec)
 	}
 	container := spec["containers"].([]any)[0].(map[string]any)
@@ -509,6 +511,144 @@ func TestKubernetesReconcilerMountsPersistentGitCacheVolume(t *testing.T) {
 	}
 }
 
+func TestKubernetesReconcilerProjectsTenantNetworkPolicyAndProviderProxy(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["egressTcpPorts"] = []int{443, 8443}
+	configuration["privateNetworkCidrs"] = []string{"10.20.0.0/16"}
+	configuration["providerHttpProxy"] = "http://10.20.0.10:3128"
+	configuration["providerHttpsProxy"] = "https://proxy.corp.example:4443"
+	configuration["providerAllProxy"] = "socks5://10.20.0.11:1080"
+	configuration["providerNoProxy"] = []string{"control-plane.test", ".corp.example"}
+	fixture.updateConfiguration(t, configuration)
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	networkPolicy := client.lastKind("NetworkPolicy")
+	spec := networkPolicy["spec"].(map[string]any)
+	egress := spec["egress"].([]any)
+	if len(egress) != 2 {
+		t.Fatalf("Kubernetes NetworkPolicy egress rules = %#v, want DNS plus explicit TCP egress", egress)
+	}
+	dnsRule := egress[0].(map[string]any)
+	dnsTo := dnsRule["to"].([]any)[0].(map[string]any)
+	namespaceLabels := dnsTo["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]any)
+	podLabels := dnsTo["podSelector"].(map[string]any)["matchLabels"].(map[string]any)
+	if namespaceLabels["kubernetes.io/metadata.name"] != "kube-system" || podLabels["k8s-app"] != "kube-dns" {
+		t.Fatalf("Kubernetes DNS egress selector is not kube-system/kube-dns: %#v", dnsTo)
+	}
+	dnsPorts := dnsRule["ports"].([]any)
+	if len(dnsPorts) != 2 || dnsPorts[0].(map[string]any)["protocol"] != "UDP" ||
+		dnsPorts[0].(map[string]any)["port"] != 53 || dnsPorts[1].(map[string]any)["protocol"] != "TCP" ||
+		dnsPorts[1].(map[string]any)["port"] != 53 {
+		t.Fatalf("Kubernetes DNS egress ports = %#v", dnsPorts)
+	}
+
+	providerRule := egress[1].(map[string]any)
+	ipBlock := providerRule["to"].([]any)[0].(map[string]any)["ipBlock"].(map[string]any)
+	if ipBlock["cidr"] != "0.0.0.0/0" {
+		t.Fatalf("Kubernetes Provider egress CIDR = %#v", ipBlock)
+	}
+	except, ok := ipBlock["except"].([]any)
+	if !ok || !containsAnyString(except, "169.254.0.0/16") || !containsAnyString(except, "100.100.100.200/32") {
+		t.Fatalf("Kubernetes Provider egress did not exclude metadata/link-local endpoints: %#v", ipBlock)
+	}
+	actualPorts := map[int]bool{}
+	for _, raw := range providerRule["ports"].([]any) {
+		port := raw.(map[string]any)
+		if port["protocol"] != "TCP" {
+			t.Fatalf("Kubernetes Provider egress emitted a non-TCP port: %#v", port)
+		}
+		actualPorts[port["port"].(int)] = true
+	}
+	for _, expected := range []int{443, 1080, 3128, 3780, 4443, 8443} {
+		if !actualPorts[expected] {
+			t.Fatalf("Kubernetes Provider egress omitted TCP port %d: %#v", expected, actualPorts)
+		}
+	}
+	if actualPorts[22] {
+		t.Fatalf("explicit Kubernetes egress ports unexpectedly retained the default SSH port: %#v", actualPorts)
+	}
+
+	pod := client.lastKind("Pod")
+	container := pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	for name, expected := range map[string]string{
+		"SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON": `["10.20.0.0/16"]`,
+		"SYNARA_PROVIDER_HTTP_PROXY":               "http://10.20.0.10:3128",
+		"SYNARA_PROVIDER_HTTPS_PROXY":              "https://proxy.corp.example:4443",
+		"SYNARA_PROVIDER_ALL_PROXY":                "socks5://10.20.0.11:1080",
+		"SYNARA_PROVIDER_NO_PROXY":                 "control-plane.test,.corp.example",
+	} {
+		if value, found := kubernetesEnvironmentValue(container, name); !found || value != expected {
+			t.Fatalf("Kubernetes Pod %s = %q, want %q", name, value, expected)
+		}
+	}
+	for _, forbidden := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"} {
+		if _, found := kubernetesEnvironmentValue(container, forbidden); found {
+			t.Fatalf("Kubernetes Pod received ambient proxy variable %s", forbidden)
+		}
+	}
+}
+
+func TestKubernetesNetworkConfigurationFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+		code   string
+	}{
+		{
+			name: "metadata endpoint CIDR",
+			mutate: func(configuration map[string]any) {
+				configuration["egressCidrs"] = []string{"169.254.169.254/32"}
+			},
+			code: "invalid_kubernetes_egress_policy",
+		},
+		{
+			name: "loopback private Git policy",
+			mutate: func(configuration map[string]any) {
+				configuration["privateNetworkCidrs"] = []string{"127.0.0.0/8"}
+			},
+			code: "invalid_kubernetes_private_network_policy",
+		},
+		{
+			name: "private Git network outside egress policy",
+			mutate: func(configuration map[string]any) {
+				configuration["egressCidrs"] = []string{"192.0.2.0/24"}
+				configuration["privateNetworkCidrs"] = []string{"10.20.0.0/16"}
+			},
+			code: "invalid_kubernetes_private_network_policy",
+		},
+		{
+			name: "proxy URL with embedded credentials",
+			mutate: func(configuration map[string]any) {
+				configuration["providerHttpsProxy"] = "https://user:password@proxy.corp.example:8443"
+			},
+			code: "invalid_kubernetes_provider_proxy",
+		},
+		{
+			name: "shared live Workspace PVC",
+			mutate: func(configuration map[string]any) {
+				configuration["workspacePersistentVolumeClaim"] = "shared-live-workspace"
+			},
+			code: "invalid_kubernetes_configuration",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newKubernetesReconcileFixture(t, "")
+			configuration := kubernetesTestConfiguration("")
+			test.mutate(configuration)
+			fixture.updateConfiguration(t, configuration)
+			fixture.reconciler.factory = &fakeKubernetesFactory{client: newFakeKubernetesClient()}
+			err := fixture.reconciler.ReconcileOnce(context.Background())
+			assertProblemCode(t, err, 400, test.code)
+		})
+	}
+}
+
 func TestKubernetesReconcilerRequiresNodeSpread(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	configuration := kubernetesTestConfiguration("")
@@ -597,7 +737,12 @@ func TestKubernetesReconcilerPinsExecutionReleaseImageAndUsesTargetPullCredentia
 		t.Fatal(err)
 	}
 	pod := client.lastKind("Pod")
-	container := pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	spec := pod["spec"].(map[string]any)
+	if spec["priorityClassName"] != kubernetesWorkerDefaultPriorityClassName ||
+		spec["preemptionPolicy"] != placement.KubernetesPreemptionPolicyNever {
+		t.Fatalf("warm-pool priority policy = %#v", spec)
+	}
+	container := spec["containers"].([]any)[0].(map[string]any)
 	if container["image"] != "ghcr.io/synara/worker@"+firstDigest {
 		t.Fatalf("release Pod image = %q", container["image"])
 	}
@@ -1749,6 +1894,7 @@ func TestKubernetesReconcilerAppliesSelectedPoolSchedulingTemplateToColdFallback
 	pool.Namespace = "synara-test"
 	pool.SchedulingTemplate = map[string]any{
 		"priorityClassName": "interactive-high",
+		"preemptionPolicy":  "Never",
 		"nodeSelector":      map[string]any{"pool": "warm"},
 		"tolerations":       []any{map[string]any{"key": "warm", "operator": "Exists"}},
 	}
@@ -1769,6 +1915,9 @@ func TestKubernetesReconcilerAppliesSelectedPoolSchedulingTemplateToColdFallback
 		t.Fatal(err)
 	}
 	client := newFakeKubernetesClient()
+	client.priorityClasses["interactive-high"] = kubernetesPriorityClass{
+		Name: "interactive-high", PreemptionPolicy: placement.KubernetesPreemptionPolicyNever,
+	}
 	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
 
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
@@ -1778,6 +1927,12 @@ func TestKubernetesReconcilerAppliesSelectedPoolSchedulingTemplateToColdFallback
 	spec := pod["spec"].(map[string]any)
 	if spec["priorityClassName"] != "interactive-high" {
 		t.Fatalf("priorityClassName = %#v", spec["priorityClassName"])
+	}
+	if spec["preemptionPolicy"] != placement.KubernetesPreemptionPolicyNever {
+		t.Fatalf("preemptionPolicy = %#v", spec["preemptionPolicy"])
+	}
+	if client.priorityClassReadCount["interactive-high"] != 1 {
+		t.Fatalf("PriorityClass reads = %#v", client.priorityClassReadCount)
 	}
 	nodeSelector, ok := spec["nodeSelector"].(map[string]string)
 	if !ok || nodeSelector["pool"] != "warm" {
@@ -1790,6 +1945,24 @@ func TestKubernetesReconcilerAppliesSelectedPoolSchedulingTemplateToColdFallback
 	toleration, ok := tolerations[0].(map[string]any)
 	if !ok || toleration["key"] != "warm" || toleration["operator"] != "Exists" {
 		t.Fatalf("toleration = %#v", tolerations[0])
+	}
+}
+
+func TestKubernetesReconcilerRejectsPreemptingPriorityClassBeforePodApply(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	client.priorityClasses[kubernetesWorkerDefaultPriorityClassName] = kubernetesPriorityClass{
+		Name: kubernetesWorkerDefaultPriorityClassName, PreemptionPolicy: "PreemptLowerPriority",
+	}
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertExecutionTargetProblemCode(t, err, "worker_pool_preemption_unsupported")
+	if client.kindCount("Pod") != 0 || len(client.pods) != 0 {
+		t.Fatalf("preempting PriorityClass reached Pod apply: applied=%d active=%#v", client.kindCount("Pod"), client.pods)
+	}
+	if client.priorityClassReadCount[kubernetesWorkerDefaultPriorityClassName] != 1 {
+		t.Fatalf("PriorityClass reads = %#v", client.priorityClassReadCount)
 	}
 }
 
@@ -2188,6 +2361,15 @@ func kubernetesTestConfiguration(gitCachePersistentVolumeClaim string) map[strin
 	return configuration
 }
 
+func containsAnyString(values []any, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (f kubernetesReconcileFixture) updateConfiguration(t *testing.T, configuration map[string]any) {
 	t.Helper()
 	encrypted, err := encryptConfiguration(f.reconciler.targets.cipher, configuration)
@@ -2429,17 +2611,30 @@ func (f *fakeKubernetesFactory) Open(kubernetesTargetConfiguration) (kubernetesC
 }
 
 type fakeKubernetesClient struct {
-	applied        []map[string]any
-	pods           map[string]kubernetesPod
-	deletedPods    []string
-	podApplyErr    error
-	podApplyErrFor map[string]error
-	listPodUIDsErr error
-	deletePodErr   error
+	applied                []map[string]any
+	pods                   map[string]kubernetesPod
+	priorityClasses        map[string]kubernetesPriorityClass
+	priorityClassReadErr   error
+	priorityClassReadCount map[string]int
+	resourceQuota          kubernetesResourceQuota
+	resourceQuotaReadErr   error
+	deletedPods            []string
+	podApplyErr            error
+	podApplyErrFor         map[string]error
+	listPodUIDsErr         error
+	deletePodErr           error
 }
 
 func newFakeKubernetesClient() *fakeKubernetesClient {
-	return &fakeKubernetesClient{pods: map[string]kubernetesPod{}}
+	return &fakeKubernetesClient{
+		pods: map[string]kubernetesPod{},
+		priorityClasses: map[string]kubernetesPriorityClass{
+			kubernetesWorkerDefaultPriorityClassName: {
+				Name: kubernetesWorkerDefaultPriorityClassName, PreemptionPolicy: placement.KubernetesPreemptionPolicyNever,
+			},
+		},
+		priorityClassReadCount: map[string]int{},
+	}
 }
 
 func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[string]any) error {
@@ -2465,12 +2660,45 @@ func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[str
 				annotations[key], _ = value.(string)
 			}
 		}
+		resourceRequests := map[string]string{}
+		if spec, ok := object["spec"].(map[string]any); ok {
+			if containers, ok := spec["containers"].([]any); ok && len(containers) > 0 {
+				if container, ok := containers[0].(map[string]any); ok {
+					if resources, ok := container["resources"].(map[string]any); ok {
+						if requests, ok := resources["requests"].(map[string]any); ok {
+							for key, value := range requests {
+								resourceRequests[key], _ = value.(string)
+							}
+						}
+					}
+				}
+			}
+		}
 		c.pods[name] = kubernetesPod{
 			Name: name, UID: uuid.NewString(), Phase: "Pending", CreatedAt: time.Now().UTC(),
-			Labels: labels, Annotations: annotations,
+			Labels: labels, Annotations: annotations, ResourceRequests: resourceRequests,
 		}
 	}
 	return nil
+}
+
+func (c *fakeKubernetesClient) GetResourceQuota(_ context.Context, _, _ string) (kubernetesResourceQuota, error) {
+	if c.resourceQuotaReadErr != nil {
+		return kubernetesResourceQuota{}, c.resourceQuotaReadErr
+	}
+	return c.resourceQuota, nil
+}
+
+func (c *fakeKubernetesClient) GetPriorityClass(_ context.Context, name string) (kubernetesPriorityClass, error) {
+	c.priorityClassReadCount[name]++
+	if c.priorityClassReadErr != nil {
+		return kubernetesPriorityClass{}, c.priorityClassReadErr
+	}
+	priorityClass, found := c.priorityClasses[name]
+	if !found {
+		return kubernetesPriorityClass{}, &kubernetesAPIStatusError{StatusCode: http.StatusNotFound, Detail: "PriorityClass not found"}
+	}
+	return priorityClass, nil
 }
 
 func (c *fakeKubernetesClient) ListPods(_ context.Context, _ string, targetID uuid.UUID) ([]kubernetesPod, error) {

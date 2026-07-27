@@ -24,6 +24,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/cgroupv2limits"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -38,6 +39,8 @@ type SSHProvisioningConfig struct {
 	WorkerHeartbeatTimeout time.Duration
 	Timeout                time.Duration
 }
+
+const protectedCgroupSupervisorSubgroupName = "synara-agentd"
 
 type SSHProvisionResult struct {
 	TargetID     uuid.UUID `json:"targetId"`
@@ -84,6 +87,10 @@ type sshTargetConfiguration struct {
 	CgroupV2Root               string   `json:"cgroupV2Root"`
 	CgroupV2ProviderUID        *int     `json:"cgroupV2ProviderUid"`
 	CgroupV2ProviderGID        *int     `json:"cgroupV2ProviderGid"`
+	CgroupV2ProviderPidsMax    *int64   `json:"cgroupV2ProviderPidsMax"`
+	CgroupV2ProviderMemoryMax  *int64   `json:"cgroupV2ProviderMemoryMaxBytes"`
+	CgroupV2ProviderCPUQuota   *int64   `json:"cgroupV2ProviderCpuQuotaMicros"`
+	CgroupV2ProviderCPUPeriod  *int64   `json:"cgroupV2ProviderCpuPeriodMicros"`
 	CgroupV2AttestationKeyID   string   `json:"cgroupV2AttestationKeyId"`
 	CgroupV2AttestationKeyPath string   `json:"cgroupV2AttestationPrivateKeyPath"`
 }
@@ -315,8 +322,12 @@ func (p *SSHProvisioner) apply(
 	if configuration.protectedCgroupEnabled() {
 		commands = append(commands,
 			"test \"$(systemctl show "+shellQuote(paths.serviceName)+" --property=ControlGroup --value)\" = "+shellQuote("/system.slice/"+paths.serviceName),
+			"test \"$(systemctl show "+shellQuote(paths.serviceName)+" --property=DelegateSubgroup --value)\" = "+shellQuote(protectedCgroupSupervisorSubgroupName),
 			"test -d "+shellQuote(configuration.CgroupV2Root),
+			"test -d "+shellQuote(configuration.CgroupV2Root+"/"+protectedCgroupSupervisorSubgroupName),
 			"test \"$(stat -fc %T "+shellQuote(configuration.CgroupV2Root)+")\" = cgroup2fs",
+			"test -z \"$(cat "+shellQuote(configuration.CgroupV2Root+"/cgroup.procs")+")\"",
+			"test \"$(cat "+shellQuote(configuration.CgroupV2Root+"/"+protectedCgroupSupervisorSubgroupName+"/cgroup.procs")+")\" = \"$(systemctl show "+shellQuote(paths.serviceName)+" --property=MainPID --value)\"",
 		)
 	}
 	command := paths.prefix + "sh -c " + shellQuote(strings.Join(commands, " && "))
@@ -572,12 +583,14 @@ func (p *SSHProvisioner) normalize(
 			configuration.CgroupV2Root = expectedCgroupV2Root
 		}
 		if configuration.CgroupV2ProviderUID == nil || configuration.CgroupV2ProviderGID == nil ||
+			configuration.CgroupV2ProviderPidsMax == nil || configuration.CgroupV2ProviderMemoryMax == nil ||
+			configuration.CgroupV2ProviderCPUQuota == nil || configuration.CgroupV2ProviderCPUPeriod == nil ||
 			configuration.CgroupV2AttestationKeyID == "" || configuration.CgroupV2AttestationKeyPath == "" ||
 			configuration.AgentdVersion == "" || configuration.AgentdBuildGitSHA == "" || configuration.AgentdImageDigest == "" {
 			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
 				400,
 				"invalid_ssh_configuration",
-				"SSH protected cgroup supervision requires cgroup root, provider uid/gid, attestation key, and explicit agentd build identity.",
+				"SSH protected cgroup supervision requires cgroup root, provider uid/gid, finite pids/memory/cpu limits, attestation key, and explicit agentd build identity.",
 			)
 		}
 		if configuration.ServiceUser != "root" {
@@ -611,6 +624,20 @@ func (p *SSHProvisioner) normalize(
 				400,
 				"invalid_ssh_configuration",
 				"SSH protected cgroup provider uid/gid are invalid.",
+			)
+		}
+		if *configuration.CgroupV2ProviderPidsMax <= 0 || *configuration.CgroupV2ProviderMemoryMax <= 0 ||
+			*configuration.CgroupV2ProviderCPUQuota <= 0 || *configuration.CgroupV2ProviderCPUPeriod <= 0 ||
+			cgroupv2limits.Validate(cgroupv2limits.Limits{
+				PidsMax:         uint64(*configuration.CgroupV2ProviderPidsMax),
+				MemoryMaxBytes:  uint64(*configuration.CgroupV2ProviderMemoryMax),
+				CPUQuotaMicros:  uint64(*configuration.CgroupV2ProviderCPUQuota),
+				CPUPeriodMicros: uint64(*configuration.CgroupV2ProviderCPUPeriod),
+			}) != nil {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup Provider resource limits are invalid.",
 			)
 		}
 		if !validSSHProvisionBuildGitSHA(configuration.AgentdBuildGitSHA) || !validSSHProvisionImageDigest(configuration.AgentdImageDigest) {
@@ -696,6 +723,10 @@ func (p *SSHProvisioner) environmentFile(
 			[2]string{"SYNARA_AGENTD_CGROUP_V2_ROOT", configuration.CgroupV2Root},
 			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", strconv.Itoa(*configuration.CgroupV2ProviderUID)},
 			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", strconv.Itoa(*configuration.CgroupV2ProviderGID)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX", strconv.FormatInt(*configuration.CgroupV2ProviderPidsMax, 10)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES", strconv.FormatInt(*configuration.CgroupV2ProviderMemoryMax, 10)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS", strconv.FormatInt(*configuration.CgroupV2ProviderCPUQuota, 10)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS", strconv.FormatInt(*configuration.CgroupV2ProviderCPUPeriod, 10)},
 			[2]string{"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID", configuration.CgroupV2AttestationKeyID},
 			[2]string{"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE", configuration.CgroupV2AttestationKeyPath},
 		)
@@ -730,7 +761,7 @@ func systemdUnitWithDelegate(paths sshProvisionPaths, serviceUser string, delega
 		"NoNewPrivileges=true",
 	}
 	if delegate {
-		lines = append(lines, "Delegate=yes")
+		lines = append(lines, "Delegate=yes", "DelegateSubgroup="+protectedCgroupSupervisorSubgroupName)
 	}
 	lines = append(lines,
 		"",
@@ -1187,6 +1218,10 @@ func (c sshTargetConfiguration) protectedCgroupEnabled() bool {
 	return c.CgroupV2Root != "" ||
 		c.CgroupV2ProviderUID != nil ||
 		c.CgroupV2ProviderGID != nil ||
+		c.CgroupV2ProviderPidsMax != nil ||
+		c.CgroupV2ProviderMemoryMax != nil ||
+		c.CgroupV2ProviderCPUQuota != nil ||
+		c.CgroupV2ProviderCPUPeriod != nil ||
 		c.CgroupV2AttestationKeyID != "" ||
 		c.CgroupV2AttestationKeyPath != ""
 }

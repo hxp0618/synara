@@ -1,5 +1,10 @@
 # Cloud Cost Accounting v1
 
+> **Current supported boundary:** self-hosted Kubernetes uses operator-managed versioned tariffs and durable resource
+> facts to produce estimates and allocations. Provider-shaped actual-invoice imports, native AWS/GCP/Azure exports, and
+> cloud Workload Identity are retained as internal/future contract surfaces and are not part of the current product or
+> Stage 4 release gate.
+
 This contract defines the first Control Plane billing-accounting boundary for retained worker usage.
 
 It is deliberately split into separate durable domains:
@@ -256,7 +261,7 @@ The low-cardinality metrics are
 Local SQLite and OrbStack PostgreSQL 17.10 evidence is recorded in
 [`stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md`](../reports/stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md).
 It proves database/runtime correctness, not AWS/GCP/Azure workload identity, provider account ownership, export
-settlement, or managed-cloud delivery; those remain provider-specific E4 gates.
+settlement, or managed-cloud delivery. Those capabilities are deferred rather than current release gates.
 
 ## Actual invoice imports
 
@@ -310,10 +315,10 @@ The current v1 report also returns unmatched estimated charge IDs for the import
 
 ## Provider Adapter Appendix
 
-The `services/control-plane/internal/billing` package now includes blob-backed actual-invoice adapters for strict offline imports.
-Managed-cloud acceptance evidence is governed separately by
-[`managed-cloud-billing-acceptance-v1.md`](managed-cloud-billing-acceptance-v1.md); local Kubernetes, MinIO, and
-provider-compatible emulators cannot be promoted to a managed-cloud identity or native-export pass.
+The `services/control-plane/internal/billing` package includes blob-backed actual-invoice adapters for strict offline imports.
+They are internal compatibility/test surfaces in the current self-hosted product. A future managed-cloud integration would
+be governed separately by [`managed-cloud-billing-acceptance-v1.md`](managed-cloud-billing-acceptance-v1.md); local
+Kubernetes, MinIO, and provider-compatible emulators never imply cloud-provider support.
 
 Delimited provider/object mappings are configured by `(tenant_id, provider, external_import_id)` and resolve to one export object plus one parser format:
 

@@ -1,6 +1,6 @@
 # Execution Scheduling Decision v1
 
-Status: Stage 4 selected-only implementation contract.
+Status: Stage 4 complete routed-candidate implementation contract.
 
 ## Purpose
 
@@ -8,10 +8,16 @@ Every newly created Execution must retain the immutable scheduling evidence that
 Worker Pool. Mutable Target health, queue depth, routing membership, DR readiness, placement policy, and scheduling
 policy heads are not historical evidence by themselves.
 
-Version 1 deliberately records only the final selected candidate. The current routing coordinator discards candidates
-rejected during routing, placement preview, hard-policy admission, and Provider capability admission. Calling the final
-winner a complete candidate trace would therefore be false. New rows use `evidenceCompleteness = selected-only`; only
-migration backfill uses `legacy-selected-only`. `complete` is reserved for a future bounded full-trace producer.
+Every successful Target Group launch records all active Group Members observed by the first routing pass, including
+eligible losers and candidates rejected by request exclusion, scope, Target kind/status, Scheduling Policy, Health,
+capacity, Region, location outage, DR readiness, placement preview, post-preview Scheduling Policy, or Provider
+capability admission. Repeated excluded-Target passes merge into the same stable Member-ID-ordered trace; a coordinator
+rejection is not overwritten by the later synthetic `request-excluded` filter. These rows use
+`evidenceCompleteness = complete`.
+
+An explicit fixed-Target launch still has exactly one honest `selected-only` candidate because no Target Group candidate
+set was evaluated. Migration backfill remains `legacy-selected-only`; it never fabricates evidence that was not retained.
+The bounded producer rejects a Target Group with more than 4096 active Members before launch.
 
 ## Atomic graph
 
@@ -26,11 +32,13 @@ The Execution points to the Decision and the Decision points to the same tenant-
 review/compact, and disaster-recovery successor creation use one shared transaction boundary that:
 
 1. applies the final post-lock routing, policy, and placement snapshot;
-2. freezes the selected Worker release;
-3. creates the Execution with its Decision identity;
-4. creates the Decision and selected Candidate;
-5. verifies the stored candidate hash, count, ordinal, selection, and aggregate hash;
-6. appends the Event and Outbox dispatch in the caller's same transaction.
+2. freezes routing filters, ranking inputs, coordinator rejection codes, and any Worker Pool preview retained for every
+   candidate;
+3. freezes the selected Worker release;
+4. creates the Execution with its Decision identity;
+5. creates the Decision and every ordered Candidate;
+6. verifies every stored candidate hash, exact count, contiguous ordinal, single selection, and aggregate hash;
+7. appends the Event and Outbox dispatch in the caller's same transaction.
 
 Migration `000084_execution_capacity_reservation_authority.sql` extends the same transaction with one immutable
 `execution_capacity_admissions` snapshot. It is a separate one-to-one graph because fixed Targets and routed Targets share
@@ -41,7 +49,7 @@ original graph and never creates a second Decision.
 
 ## Evidence allowlist
 
-The selected Candidate contains only bounded scheduling authority:
+Each Candidate contains only bounded scheduling authority available at the stage it reached:
 
 - Target ID and kind;
 - Target Group, Member, and policy versions for routed decisions;
@@ -51,7 +59,8 @@ The selected Candidate contains only bounded scheduling authority:
   and weight;
 - DR readiness version, source/destination domains, replication watermark, readiness bits, and observation/expiry;
 - Worker Pool ID/version, Capacity Class, and placement-policy version;
-- eligibility, selected ordinal, and a bounded stable rejection code when complete evidence is implemented.
+- eligibility, selection, stable Member-ID ordinal, route rank, preferred-Region rank, health-status rank, and a bounded
+  stable rejection code when rejected.
 
 It never copies encrypted Target configuration, Target capability maps, Pool scheduling templates, policy documents,
 Provider error details, publisher identity, or free-form health/readiness reasons. Events and Outbox messages carry the
@@ -61,6 +70,31 @@ capacity-admission digest—not either evidence body.
 The capacity-admission snapshot separately freezes Health version/source/timestamps, capacity ceiling and allocation,
 exact acknowledgement count/digest, active/unacknowledged reservation units, strict used units, and its canonical
 SHA-256. See [`Execution Capacity Reservation Authority v1`](execution-capacity-reservation-authority-v1.md).
+
+## Candidate ordering, ranking, and rejection codes
+
+Candidate `ordinal` is deterministic active Member-ID order, not winner order. For candidates that reached routing rank,
+`priorityRank` stores the zero-based total route order for that pass, `regionRank` stores the normalized preferred-Region
+position, and `capacityRank` stores the Health status rank. Health/capacity, queue pressure, Member priority/weight, and
+Target ID remain frozen alongside those derived ranks. After a coordinator rejection, the next routing pass may have a
+new rank 0; the rejected candidate retains its earlier route rank plus the stage-specific rejection code.
+
+Routing rejection codes are allowlisted operational tokens:
+
+- `request-excluded`, `target-inactive`, `tenant-scope-mismatch`, `organization-scope-mismatch`, and
+  `target-kind-mismatch`;
+- `scheduling-policy-denied` and `region-policy-denied`;
+- `health-missing`, `health-status-ineligible`, `health-observed-in-future`, `health-expired`, `health-stale`,
+  `capacity-saturated`, and `capacity-exhausted`;
+- `location-outage-active`; and
+- `dr-readiness-context-missing`, `dr-readiness-missing`, `dr-readiness-expired`, `dr-readiness-unready`,
+  `dr-readiness-source-mismatch`, `dr-readiness-destination-mismatch`, `dr-readiness-observed-in-future`, and
+  `dr-readiness-watermark-stale`.
+
+Coordinator retries retain the existing bounded API problem code, currently covering unsupported Provider capability,
+missing/incompatible Provider, Worker Manifest admission, unavailable placement Pool/policy/location, and post-preview
+Scheduling Policy denial. Free-form Provider details are never copied. A corrupt Member reference to a missing Target or
+an unrecognized error aborts the transaction instead of inventing a trace row.
 
 ## Location authority
 
@@ -98,11 +132,11 @@ DR readiness observations that were not retained on the Execution.
 
 ## Explicit limitations
 
-Selected-only evidence explains and replays the committed winner, but not why every losing candidate was rejected. A
-truthful complete trace requires structured evidence across routing filters, repeated excluded-Target iterations,
-placement preview, hard scheduling-policy admission, Provider capability admission, and commit revalidation. Rejected
-transactions remain mutation-free; persisting failed-attempt evidence would require a separately authorized audit
-transaction and is not part of v1.
+`complete` describes a successfully committed Target Group decision, not every failed launch attempt. If no candidate
+survives, final placement/capability validation fails, or commit revalidation detects stale authority, the caller's
+transaction remains mutation-free and no Decision is written. Persisting those failed attempts would require a separate
+authorized audit transaction and is not part of v1.
 
-Until that producer exists, the Stage 4 completion item “调度决策可解释、可审计、可重放” remains open rather than treating
-selected-only evidence as full completion.
+Only the selected Target and its final Pool are commit-locked. Losing rows intentionally retain the observations that the
+algorithm actually evaluated; they do not claim that mutable loser Health or Pool authority was linearized at commit.
+Fixed-Target and historical rows remain explicitly selected-only as described above.

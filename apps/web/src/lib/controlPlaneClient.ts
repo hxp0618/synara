@@ -387,6 +387,7 @@ export type ControlPlaneExecutionTarget = {
 export type ControlPlaneWorkerPoolMode = "resident" | "per-execution" | "warm";
 export type ControlPlaneWorkerPoolStatus = "active" | "draining" | "disabled";
 export type ControlPlaneWorkerPoolCapacityClass = "standard" | "interactive";
+export type ControlPlaneWorkerPoolTenantIsolation = "pinned" | "shared";
 
 export type ControlPlaneWorkerPool = {
   id: string;
@@ -395,10 +396,12 @@ export type ControlPlaneWorkerPool = {
   name: string;
   mode: ControlPlaneWorkerPoolMode;
   capacityClass: ControlPlaneWorkerPoolCapacityClass;
+  tenantIsolation: ControlPlaneWorkerPoolTenantIsolation;
   clusterId: string;
   region: string;
   namespace: string;
   desiredIdleUnits: number;
+  minIdleUnits: number;
   maxActiveUnits: number;
   schedulingTemplate: Record<string, unknown>;
   status: ControlPlaneWorkerPoolStatus;
@@ -427,10 +430,12 @@ export type ControlPlaneWorkerPoolInput = {
   name: string;
   mode: ControlPlaneWorkerPoolMode;
   capacityClass: ControlPlaneWorkerPoolCapacityClass;
+  tenantIsolation: ControlPlaneWorkerPoolTenantIsolation;
   clusterId: string;
   region: string;
   namespace: string;
   desiredIdleUnits: number;
+  minIdleUnits: number;
   maxActiveUnits: number;
   schedulingTemplate: Record<string, unknown>;
   status: ControlPlaneWorkerPoolStatus;
@@ -443,6 +448,7 @@ export type ControlPlaneWorker = {
   executionTargetId: string;
   targetKind: ControlPlaneExecutionTargetKind | string;
   workerMode: "execution-pinned" | "warm-pool" | "general-pool";
+  tenantBindingId?: string | null;
   clusterId: string;
   namespace: string;
   podName: string;
@@ -464,6 +470,10 @@ export type ControlPlaneWorker = {
   registeredAt: string;
   lastHeartbeatAt: string;
   drainingAt?: string | null;
+  reconciliationDrainIncarnation?: number | null;
+  reconciliationDrainInstanceUid?: string | null;
+  reconciliationDrainRequestedAt?: string | null;
+  reconciliationDrainReason?: string | null;
   terminatedAt?: string | null;
   revokedAt?: string | null;
   revokedBy?: string | null;

@@ -30,6 +30,9 @@ const (
 	PoolStatusDraining = "draining"
 	PoolStatusDisabled = "disabled"
 
+	TenantIsolationPinned = "pinned"
+	TenantIsolationShared = "shared"
+
 	WarmPoolModeDefault    = "default"
 	WarmPoolModeDisabled   = "disabled"
 	WarmPoolModeBalanced   = "balanced"
@@ -43,6 +46,7 @@ type Pool struct {
 	Name               string         `json:"name"`
 	Mode               string         `json:"mode"`
 	CapacityClass      string         `json:"capacityClass"`
+	TenantIsolation    string         `json:"tenantIsolation"`
 	ClusterID          string         `json:"clusterId"`
 	Region             string         `json:"region"`
 	Namespace          string         `json:"namespace"`
@@ -83,6 +87,7 @@ type CreatePoolInput struct {
 	Name               string         `json:"name"`
 	Mode               string         `json:"mode"`
 	CapacityClass      string         `json:"capacityClass"`
+	TenantIsolation    string         `json:"tenantIsolation"`
 	ClusterID          string         `json:"clusterId"`
 	Region             string         `json:"region"`
 	Namespace          string         `json:"namespace"`
@@ -263,6 +268,9 @@ func (s *Service) CreatePool(
 		if err := validatePoolTargetMode(target, normalized.Mode); err != nil {
 			return err
 		}
+		if err := validatePoolTargetSchedulingTemplate(target, normalized.SchedulingTemplate); err != nil {
+			return err
+		}
 		now := s.now()
 		model := persistence.WorkerPool{
 			ID:                 uuid.New(),
@@ -271,6 +279,7 @@ func (s *Service) CreatePool(
 			Name:               normalized.Name,
 			Mode:               normalized.Mode,
 			CapacityClass:      normalized.CapacityClass,
+			TenantIsolation:    normalized.TenantIsolation,
 			ClusterID:          normalized.ClusterID,
 			Region:             normalized.Region,
 			Namespace:          normalized.Namespace,
@@ -323,6 +332,9 @@ func (s *Service) UpdatePool(
 		if err := validatePoolTargetMode(target, normalized.Mode); err != nil {
 			return err
 		}
+		if err := validatePoolTargetSchedulingTemplate(target, normalized.SchedulingTemplate); err != nil {
+			return err
+		}
 		var current persistence.WorkerPool
 		err = persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("id = ? AND execution_target_id = ? AND tenant_id = ?", poolID, targetID, tenantID).
@@ -336,8 +348,9 @@ func (s *Service) UpdatePool(
 		if current.Version != input.ExpectedVersion {
 			return problem.New(409, "worker_pool_version_conflict", "Worker pool changed; reload it before saving.")
 		}
-		if current.Mode != normalized.Mode || current.CapacityClass != normalized.CapacityClass {
-			return problem.New(409, "worker_pool_identity_immutable", "Worker pool mode and capacityClass cannot change after creation.")
+		if current.Mode != normalized.Mode || current.CapacityClass != normalized.CapacityClass ||
+			current.TenantIsolation != normalized.TenantIsolation {
+			return problem.New(409, "worker_pool_identity_immutable", "Worker pool mode, capacityClass, and tenantIsolation cannot change after creation.")
 		}
 		var blocked int64
 		if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
@@ -363,6 +376,7 @@ func (s *Service) UpdatePool(
 		current.Name = normalized.Name
 		current.Mode = normalized.Mode
 		current.CapacityClass = normalized.CapacityClass
+		current.TenantIsolation = normalized.TenantIsolation
 		current.ClusterID = normalized.ClusterID
 		current.Region = normalized.Region
 		current.Namespace = normalized.Namespace
@@ -376,7 +390,7 @@ func (s *Service) UpdatePool(
 		result := tx.WithContext(ctx).Model(&persistence.WorkerPool{}).
 			Where("id = ? AND version = ?", current.ID, expectedVersion).
 			Select(
-				"name", "mode", "capacity_class", "cluster_id", "region", "namespace",
+				"name", "mode", "capacity_class", "tenant_isolation", "cluster_id", "region", "namespace",
 				"desired_idle_units", "min_idle_units", "max_active_units", "scheduling_template", "status", "version", "updated_at",
 			).
 			Updates(&current)
@@ -545,6 +559,7 @@ func previewDefaultPool(
 		Name:               "default",
 		Mode:               defaultPoolMode(target.Kind),
 		CapacityClass:      CapacityClassStandard,
+		TenantIsolation:    TenantIsolationPinned,
 		ClusterID:          "",
 		Region:             "",
 		Namespace:          "",
@@ -661,6 +676,7 @@ func (s *Service) ensureDefaultPool(
 		Name:               "default",
 		Mode:               defaultPoolMode(target.Kind),
 		CapacityClass:      CapacityClassStandard,
+		TenantIsolation:    TenantIsolationPinned,
 		ClusterID:          "",
 		Region:             "",
 		Namespace:          "",
@@ -746,6 +762,7 @@ func toPool(model persistence.WorkerPool) Pool {
 		Name:               model.Name,
 		Mode:               model.Mode,
 		CapacityClass:      model.CapacityClass,
+		TenantIsolation:    model.TenantIsolation,
 		ClusterID:          model.ClusterID,
 		Region:             model.Region,
 		Namespace:          model.Namespace,
@@ -830,6 +847,15 @@ func normalizePoolInput(input CreatePoolInput) (CreatePoolInput, error) {
 	default:
 		return CreatePoolInput{}, problem.New(400, "invalid_worker_pool_status", "Worker pool status must be active, draining, or disabled.")
 	}
+	tenantIsolation := strings.ToLower(strings.TrimSpace(input.TenantIsolation))
+	if tenantIsolation == "" {
+		tenantIsolation = TenantIsolationPinned
+	}
+	switch tenantIsolation {
+	case TenantIsolationPinned, TenantIsolationShared:
+	default:
+		return CreatePoolInput{}, problem.New(400, "invalid_worker_pool_tenant_isolation", "Worker pool tenantIsolation must be pinned or shared.")
+	}
 	minIdleUnits := 0
 	if input.MinIdleUnits != nil {
 		minIdleUnits = *input.MinIdleUnits
@@ -845,6 +871,7 @@ func normalizePoolInput(input CreatePoolInput) (CreatePoolInput, error) {
 		Name:               name,
 		Mode:               mode,
 		CapacityClass:      capacityClass,
+		TenantIsolation:    tenantIsolation,
 		ClusterID:          strings.TrimSpace(input.ClusterID),
 		Region:             strings.TrimSpace(input.Region),
 		Namespace:          strings.TrimSpace(input.Namespace),
@@ -865,6 +892,14 @@ func validatePoolTargetMode(target persistence.ExecutionTarget, mode string) err
 		)
 	}
 	return nil
+}
+
+func validatePoolTargetSchedulingTemplate(target persistence.ExecutionTarget, template map[string]any) error {
+	if !strings.EqualFold(strings.TrimSpace(target.Kind), "kubernetes") {
+		return nil
+	}
+	_, err := NormalizeKubernetesSchedulingTemplate(template)
+	return err
 }
 
 func deterministicUUID(seed string) uuid.UUID {

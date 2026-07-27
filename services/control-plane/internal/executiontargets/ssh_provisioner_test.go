@@ -639,9 +639,14 @@ func TestSSHWorkerReadyRejectsPersistedSignedV1ProtectedCgroupManifest(t *testin
 	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err == nil || !strings.Contains(err.Error(), "trustState") {
 		t.Fatalf("persisted signed v1 protected-cgroup Manifest error = %v", err)
 	}
-	version = ProtectedCgroupSupervisorVersionV2
+	version = "agentd-protected-cgroup-supervisor-v2"
+	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err == nil || !strings.Contains(err.Error(), "trustState") {
+		t.Fatalf("persisted signed v2 protected-cgroup Manifest error = %v", err)
+	}
+	version = ProtectedCgroupSupervisorVersionV3
+	probe = ProtectedCgroupProbeVersionV3
 	if err := validateSSHWorkerManifestReadiness(target, configuration, manifest); err != nil {
-		t.Fatalf("signed v2 protected-cgroup Manifest error = %v", err)
+		t.Fatalf("signed v3 protected-cgroup Manifest error = %v", err)
 	}
 }
 
@@ -729,6 +734,10 @@ func TestSSHProvisionerProtectedCgroupInstallAddsDelegateAndSignedContainmentEnv
 		"agentdImageDigest":                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		"cgroupV2ProviderUid":               10001,
 		"cgroupV2ProviderGid":               10002,
+		"cgroupV2ProviderPidsMax":           512,
+		"cgroupV2ProviderMemoryMaxBytes":    8589934592,
+		"cgroupV2ProviderCpuQuotaMicros":    400000,
+		"cgroupV2ProviderCpuPeriodMicros":   100000,
 		"cgroupV2AttestationKeyId":          "ssh-protected-key",
 		"cgroupV2AttestationPrivateKeyPath": "/etc/synara/keys/process-containment.ed25519",
 	})
@@ -758,6 +767,10 @@ func TestSSHProvisionerProtectedCgroupInstallAddsDelegateAndSignedContainmentEnv
 		`SYNARA_AGENTD_CGROUP_V2_ROOT="` + expectedCgroupV2Root + `"`,
 		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID="10001"`,
 		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID="10002"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX="512"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES="8589934592"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS="400000"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS="100000"`,
 		`SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID="ssh-protected-key"`,
 		`SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE="/etc/synara/keys/process-containment.ed25519"`,
 	} {
@@ -769,7 +782,8 @@ func TestSSHProvisionerProtectedCgroupInstallAddsDelegateAndSignedContainmentEnv
 	if parsed, err := uuid.Parse(instanceUID); err != nil || parsed == uuid.Nil {
 		t.Fatalf("protected SSH env instance UID = %q", instanceUID)
 	}
-	if !bytes.Contains(unit, []byte("User=root\n")) || !bytes.Contains(unit, []byte("Delegate=yes\n")) {
+	if !bytes.Contains(unit, []byte("User=root\n")) || !bytes.Contains(unit, []byte("Delegate=yes\n")) ||
+		!bytes.Contains(unit, []byte("DelegateSubgroup=synara-agentd\n")) {
 		t.Fatalf("protected SSH unit omitted root+Delegate: %s", unit)
 	}
 	if !commandsContainAll(

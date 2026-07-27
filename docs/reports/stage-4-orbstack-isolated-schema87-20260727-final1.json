@@ -1,0 +1,1001 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "passed",
+  "startedAt": "2026-07-27T03:07:06Z",
+  "finishedAt": "2026-07-27T03:11:19Z",
+  "durationSeconds": 253,
+  "context": "orbstack",
+  "namespace": "synara-stage4-schema87-final1",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-schema87-final1",
+  "evidenceFile": "docs/reports/stage-4-orbstack-isolated-schema87-20260727-final1.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+    "sessionAuthorityMode": "stage2-postgres",
+    "nodePartitionManagedHookOverride": {
+      "startHookEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+      "verifyHookEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
+      "stopHookEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
+      "timeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
+      "startTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+      "verifyTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
+      "stopTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
+    }
+  },
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 94
+  },
+  "unexpectedExitStatus": null,
+  "plannedCases": [
+    "rbac",
+    "leader-takeover",
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0
+  },
+  "permissions": [
+    {
+      "verb": "create",
+      "resource": "tokenreviews",
+      "apiGroup": "authentication.k8s.io",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "list",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "delete",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "delete",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "update",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "watch",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-stage4-schema87-final1",
+      "expectedAllowed": false,
+      "allowed": false
+    }
+  ],
+  "topology": null,
+  "scenarios": [
+    {
+      "name": "rbac",
+      "status": "passed",
+      "startedAt": "2026-07-27T03:08:40Z",
+      "finishedAt": "2026-07-27T03:08:42Z",
+      "details": {
+        "clusterRoleName": "synara-control-plane-reconciler-synara-stage4-schema87-final1",
+        "rules": [
+          {
+            "apiGroups": [
+              "authentication.k8s.io"
+            ],
+            "resources": [
+              "tokenreviews"
+            ],
+            "verbs": [
+              "create"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "namespaces"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "pods"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "patch",
+              "delete"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "secrets",
+              "serviceaccounts",
+              "resourcequotas"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              "networking.k8s.io"
+            ],
+            "resources": [
+              "networkpolicies"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "verb": "create",
+            "resource": "tokenreviews",
+            "apiGroup": "authentication.k8s.io",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "list",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "delete",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "delete",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "update",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "watch",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-stage4-schema87-final1",
+            "expectedAllowed": false,
+            "allowed": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "leader-takeover",
+      "status": "passed",
+      "startedAt": "2026-07-27T03:08:42Z",
+      "finishedAt": "2026-07-27T03:08:50Z",
+      "details": {
+        "leaseName": "synara:kubernetes-execution-reconciler",
+        "guardProtocol": "v2",
+        "guardPostgresPod": "synara-stage2-postgres-5896547f89-lj2k4",
+        "guardPostgresPodUID": "76b886ef-0b72-45f4-8019-d085245d5d00",
+        "deletedPodUID": "69ab6c0d-8c08-4d27-946e-1f8a79d7ff4c",
+        "deletion": {
+          "outcome": "submitted",
+          "attempts": 1,
+          "ambiguous": false,
+          "priorResponseClass": null,
+          "priorObservedState": null,
+          "responseRedacted": true,
+          "responseMaxBytes": 2000
+        },
+        "before": {
+          "holderId": "synara-control-plane-7d896c99c6-s9kmr:1:cfb41b80-b087-4262-b4ea-1d8377a932c0",
+          "pod": "synara-control-plane-7d896c99c6-s9kmr",
+          "podUID": "69ab6c0d-8c08-4d27-946e-1f8a79d7ff4c",
+          "fencingToken": 3
+        },
+        "after": {
+          "holderId": "synara-control-plane-7d896c99c6-fb8b9:1:e528b2b4-71c9-4f94-ab91-c03459696227",
+          "pod": "synara-control-plane-7d896c99c6-fb8b9",
+          "fencingToken": 4
+        },
+        "readyProbeFailures": 0
+      }
+    },
+    {
+      "name": "control-plane-failover",
+      "status": "passed",
+      "startedAt": "2026-07-27T03:08:50Z",
+      "finishedAt": "2026-07-27T03:09:07Z",
+      "details": {
+        "deletedPod": "synara-control-plane-7d896c99c6-74kbk",
+        "readyProbeFailures": 0,
+        "replacement": {
+          "beforePods": [
+            {
+              "name": "synara-control-plane-7d896c99c6-74kbk",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-7d896c99c6-fb8b9",
+              "node": "orbstack"
+            }
+          ],
+          "afterPods": [
+            {
+              "name": "synara-control-plane-7d896c99c6-fb8b9",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-7d896c99c6-xzl28",
+              "node": "orbstack"
+            }
+          ],
+          "replacementPods": [
+            {
+              "name": "synara-control-plane-7d896c99c6-xzl28",
+              "node": "orbstack"
+            }
+          ]
+        },
+        "sessionAuthority": {
+          "mode": "stage2-postgres",
+          "verified": true,
+          "sentinelIdDigest": "54d896c69d301e10e96c58158e404340711224278dd1bed9af1eb0fc9ea0386b",
+          "beforeDigest": "0d0aae1e0c573944b592ff21edf6044b3420f90ae6ac86b8f60c137d3190f17a",
+          "afterDigest": "0d0aae1e0c573944b592ff21edf6044b3420f90ae6ac86b8f60c137d3190f17a",
+          "rowCount": 1
+        },
+        "preHook": null,
+        "postHook": null
+      }
+    }
+  ],
+  "soak": {
+    "executed": true,
+    "status": "passed",
+    "startedAt": "2026-07-27T03:09:07Z",
+    "finishedAt": "2026-07-27T03:11:19Z",
+    "configuredDurationSeconds": 120,
+    "durationSeconds": 132,
+    "plannedCases": [
+      "leader-takeover",
+      "control-plane-failover"
+    ],
+    "idleReadyProbeFailures": 0,
+    "requiredSkippedCycles": 0,
+    "cycles": [
+      {
+        "case": "leader-takeover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:09:07Z",
+        "finishedAt": "2026-07-27T03:09:16Z",
+        "details": {
+          "leaseName": "synara:kubernetes-execution-reconciler",
+          "guardProtocol": "v2",
+          "guardPostgresPod": "synara-stage2-postgres-5896547f89-lj2k4",
+          "guardPostgresPodUID": "76b886ef-0b72-45f4-8019-d085245d5d00",
+          "deletedPodUID": "b4539342-7112-4e57-8059-9a04c1c7ba73",
+          "deletion": {
+            "outcome": "submitted",
+            "attempts": 1,
+            "ambiguous": false,
+            "priorResponseClass": null,
+            "priorObservedState": null,
+            "responseRedacted": true,
+            "responseMaxBytes": 2000
+          },
+          "before": {
+            "holderId": "synara-control-plane-7d896c99c6-fb8b9:1:e528b2b4-71c9-4f94-ab91-c03459696227",
+            "pod": "synara-control-plane-7d896c99c6-fb8b9",
+            "podUID": "b4539342-7112-4e57-8059-9a04c1c7ba73",
+            "fencingToken": 4
+          },
+          "after": {
+            "holderId": "synara-control-plane-7d896c99c6-xzl28:1:c42abf5f-950c-4ca9-83a7-f34b103c0276",
+            "pod": "synara-control-plane-7d896c99c6-xzl28",
+            "fencingToken": 5
+          },
+          "readyProbeFailures": 0
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:09:21Z",
+        "finishedAt": "2026-07-27T03:09:38Z",
+        "details": {
+          "deletedPod": "synara-control-plane-7d896c99c6-xzl28",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-2pt4v",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-xzl28",
+                "node": "orbstack"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-2pt4v",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-d6slp",
+                "node": "orbstack"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-d6slp",
+                "node": "orbstack"
+              }
+            ]
+          },
+          "sessionAuthority": {
+            "mode": "stage2-postgres",
+            "verified": true,
+            "sentinelIdDigest": "c4069efa1d00ee8023baa5fa86edb7902c612565320cec4fc0aa3608f9b24751",
+            "beforeDigest": "720b46dcbca65421dfac82420fd2caeceebec1104e2ba02642bc7cf2869e36f3",
+            "afterDigest": "720b46dcbca65421dfac82420fd2caeceebec1104e2ba02642bc7cf2869e36f3",
+            "rowCount": 1
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "leader-takeover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:09:44Z",
+        "finishedAt": "2026-07-27T03:09:48Z",
+        "details": {
+          "leaseName": "synara:kubernetes-execution-reconciler",
+          "guardProtocol": "v2",
+          "guardPostgresPod": "synara-stage2-postgres-5896547f89-lj2k4",
+          "guardPostgresPodUID": "76b886ef-0b72-45f4-8019-d085245d5d00",
+          "deletedPodUID": "00a7301d-faf0-4227-9c63-345103ab2185",
+          "deletion": {
+            "outcome": "submitted",
+            "attempts": 1,
+            "ambiguous": false,
+            "priorResponseClass": null,
+            "priorObservedState": null,
+            "responseRedacted": true,
+            "responseMaxBytes": 2000
+          },
+          "before": {
+            "holderId": "synara-control-plane-7d896c99c6-d6slp:1:bd58546f-f778-49f1-847c-c29e6c071f78",
+            "pod": "synara-control-plane-7d896c99c6-d6slp",
+            "podUID": "00a7301d-faf0-4227-9c63-345103ab2185",
+            "fencingToken": 6
+          },
+          "after": {
+            "holderId": "synara-control-plane-7d896c99c6-2pt4v:1:a711a9e0-0681-40f9-8fd9-d2285734b8fd",
+            "pod": "synara-control-plane-7d896c99c6-2pt4v",
+            "fencingToken": 7
+          },
+          "readyProbeFailures": 0
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:09:54Z",
+        "finishedAt": "2026-07-27T03:10:11Z",
+        "details": {
+          "deletedPod": "synara-control-plane-7d896c99c6-2pt4v",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-2pt4v",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-bj2mg",
+                "node": "orbstack"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-bj2mg",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-lgslz",
+                "node": "orbstack"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-lgslz",
+                "node": "orbstack"
+              }
+            ]
+          },
+          "sessionAuthority": {
+            "mode": "stage2-postgres",
+            "verified": true,
+            "sentinelIdDigest": "5c2fe429267387d44bcd8cef9e53e607d9137ab6788a845f16881fa768226375",
+            "beforeDigest": "f347771a2f2763b30c231ecd8248dd91c58561bbc2005756e0bb2e75903d8236",
+            "afterDigest": "f347771a2f2763b30c231ecd8248dd91c58561bbc2005756e0bb2e75903d8236",
+            "rowCount": 1
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "leader-takeover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:10:16Z",
+        "finishedAt": "2026-07-27T03:10:22Z",
+        "details": {
+          "leaseName": "synara:kubernetes-execution-reconciler",
+          "guardProtocol": "v2",
+          "guardPostgresPod": "synara-stage2-postgres-5896547f89-lj2k4",
+          "guardPostgresPodUID": "76b886ef-0b72-45f4-8019-d085245d5d00",
+          "deletedPodUID": "0703bb9e-e2ee-4729-8293-7afdfa4ec7cd",
+          "deletion": {
+            "outcome": "submitted",
+            "attempts": 1,
+            "ambiguous": false,
+            "priorResponseClass": null,
+            "priorObservedState": null,
+            "responseRedacted": true,
+            "responseMaxBytes": 2000
+          },
+          "before": {
+            "holderId": "synara-control-plane-7d896c99c6-lgslz:1:cceedddf-8ee7-40fe-85c4-2a9311ff4991",
+            "pod": "synara-control-plane-7d896c99c6-lgslz",
+            "podUID": "0703bb9e-e2ee-4729-8293-7afdfa4ec7cd",
+            "fencingToken": 8
+          },
+          "after": {
+            "holderId": "synara-control-plane-7d896c99c6-7c6g5:1:61bf05eb-0e3a-4620-a8b9-ec5a1dd72d2a",
+            "pod": "synara-control-plane-7d896c99c6-7c6g5",
+            "fencingToken": 9
+          },
+          "readyProbeFailures": 0
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:10:27Z",
+        "finishedAt": "2026-07-27T03:10:45Z",
+        "details": {
+          "deletedPod": "synara-control-plane-7d896c99c6-bj2mg",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-7c6g5",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-bj2mg",
+                "node": "orbstack"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-7c6g5",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-wbqjh",
+                "node": "orbstack"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-wbqjh",
+                "node": "orbstack"
+              }
+            ]
+          },
+          "sessionAuthority": {
+            "mode": "stage2-postgres",
+            "verified": true,
+            "sentinelIdDigest": "ebade0625154032927bd6dc8a1976ec73d2f50c760142fb4a9b82c0442aa00de",
+            "beforeDigest": "35b12fa9833b7be2e2790f77c7e5d2473fa025d6efe95ccf922e2bd3a5ff8954",
+            "afterDigest": "35b12fa9833b7be2e2790f77c7e5d2473fa025d6efe95ccf922e2bd3a5ff8954",
+            "rowCount": 1
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "leader-takeover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:10:50Z",
+        "finishedAt": "2026-07-27T03:10:56Z",
+        "details": {
+          "leaseName": "synara:kubernetes-execution-reconciler",
+          "guardProtocol": "v2",
+          "guardPostgresPod": "synara-stage2-postgres-5896547f89-lj2k4",
+          "guardPostgresPodUID": "76b886ef-0b72-45f4-8019-d085245d5d00",
+          "deletedPodUID": "aa2d8dc5-52e4-4c7a-a94a-f1542f287236",
+          "deletion": {
+            "outcome": "submitted",
+            "attempts": 1,
+            "ambiguous": false,
+            "priorResponseClass": null,
+            "priorObservedState": null,
+            "responseRedacted": true,
+            "responseMaxBytes": 2000
+          },
+          "before": {
+            "holderId": "synara-control-plane-7d896c99c6-7c6g5:1:61bf05eb-0e3a-4620-a8b9-ec5a1dd72d2a",
+            "pod": "synara-control-plane-7d896c99c6-7c6g5",
+            "podUID": "aa2d8dc5-52e4-4c7a-a94a-f1542f287236",
+            "fencingToken": 9
+          },
+          "after": {
+            "holderId": "synara-control-plane-7d896c99c6-wbqjh:1:232b9457-9c02-4627-8e55-59e39c66b5e5",
+            "pod": "synara-control-plane-7d896c99c6-wbqjh",
+            "fencingToken": 10
+          },
+          "readyProbeFailures": 0
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-27T03:11:01Z",
+        "finishedAt": "2026-07-27T03:11:18Z",
+        "details": {
+          "deletedPod": "synara-control-plane-7d896c99c6-wbqjh",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-l6vbn",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-wbqjh",
+                "node": "orbstack"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-45tpw",
+                "node": "orbstack"
+              },
+              {
+                "name": "synara-control-plane-7d896c99c6-l6vbn",
+                "node": "orbstack"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-7d896c99c6-45tpw",
+                "node": "orbstack"
+              }
+            ]
+          },
+          "sessionAuthority": {
+            "mode": "stage2-postgres",
+            "verified": true,
+            "sentinelIdDigest": "6f0b1d654484ac4d1b4615c89273edcbcd9b5e9dd30575db802b333af79464a6",
+            "beforeDigest": "aeab410222a8c5f793ee67f79b2243fc3e51b6988ffceebb4ad4e6fff32a33fb",
+            "afterDigest": "aeab410222a8c5f793ee67f79b2243fc3e51b6988ffceebb4ad4e6fff32a33fb",
+            "rowCount": 1
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      }
+    ]
+  }
+}

@@ -12,7 +12,8 @@ import (
 const (
 	ProcessContainmentTrustDisabled    = "disabled"
 	ProcessContainmentTrustSignedV1    = "signed-v1"
-	ProtectedCgroupSupervisorVersionV2 = "agentd-protected-cgroup-supervisor-v2"
+	ProtectedCgroupSupervisorVersionV3 = "agentd-protected-cgroup-supervisor-v3"
+	ProtectedCgroupProbeVersionV3      = 2
 )
 
 type ProcessContainmentPolicy struct {

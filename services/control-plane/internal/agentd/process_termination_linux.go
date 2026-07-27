@@ -76,6 +76,7 @@ func newProcessTree(command *exec.Cmd, options ...processTreeOptions) (*processT
 		protectedCgroup, err := newProtectedLinuxCgroup(
 			opts.CgroupV2Root,
 			*opts.ProtectedProviderIdentity,
+			opts.ProtectedProviderLimits,
 			opts.ContainmentFence,
 			opts.SupervisorInstance,
 			opts.RuntimeInstance,
@@ -156,6 +157,7 @@ func (p *processTree) cleanup(phase string, force bool) error {
 func newProtectedLinuxCgroup(
 	rootPath string,
 	providerIdentity ProtectedCgroupIdentity,
+	providerLimits *ProtectedCgroupResourceLimits,
 	fence ProtectedCgroupFence,
 	supervisorInstance uuid.UUID,
 	runtimeInstance uuid.UUID,
@@ -166,10 +168,14 @@ func newProtectedLinuxCgroup(
 	if err := validateProtectedCgroupIdentityBoundary(supervisorIdentity, providerIdentity); err != nil {
 		return nil, err
 	}
+	if providerLimits == nil {
+		return nil, errors.New("protected cgroup Provider resource limits are required")
+	}
 	supervisor, err := NewProtectedCgroupSupervisor(ProtectedCgroupSupervisorConfig{
 		ParentPath:         rootPath,
 		SupervisorIdentity: supervisorIdentity,
 		ProviderIdentity:   providerIdentity,
+		ProviderLimits:     *providerLimits,
 		Fence:              fence,
 		SupervisorInstance: supervisorInstance,
 		RuntimeInstance:    runtimeInstance,

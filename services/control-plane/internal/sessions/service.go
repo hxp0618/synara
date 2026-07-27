@@ -12,6 +12,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentialscope"
+	"github.com/synara-ai/synara/services/control-plane/internal/executionqueue"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
@@ -101,10 +102,26 @@ func (s *Service) RequireExecutionQuotaAvailable(
 	tx *gorm.DB,
 	tenantID uuid.UUID,
 ) error {
+	return s.RequireExecutionQuotaAvailableFor(ctx, tx, tenantID, ExecutionQuotaAdmission{QuotaUnits: 1})
+}
+
+type ExecutionQuotaAdmission struct {
+	ProjectID    uuid.UUID
+	SessionID    uuid.UUID
+	AutomationID *uuid.UUID
+	QuotaUnits   int
+}
+
+func (s *Service) RequireExecutionQuotaAvailableFor(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+	admission ExecutionQuotaAdmission,
+) error {
 	if err := s.lockExecutionQuotaAuthority(ctx, tx, tenantID); err != nil {
 		return err
 	}
-	return s.requireExecutionQuotaAvailableAfterAuthorityLock(ctx, tx, tenantID)
+	return s.requireExecutionQuotaAdmissionAfterAuthorityLock(ctx, tx, tenantID, admission)
 }
 
 func (s *Service) lockExecutionQuotaAuthority(
@@ -134,25 +151,152 @@ func (s *Service) requireExecutionQuotaAvailableAfterAuthorityLock(
 	tx *gorm.DB,
 	tenantID uuid.UUID,
 ) error {
+	return s.requireExecutionQuotaAdmissionAfterAuthorityLock(
+		ctx, tx, tenantID, ExecutionQuotaAdmission{QuotaUnits: 1},
+	)
+}
+
+func (s *Service) requireExecutionQuotaAdmissionAfterAuthorityLock(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+	admission ExecutionQuotaAdmission,
+) error {
+	if admission.QuotaUnits == 0 {
+		admission.QuotaUnits = 1
+	}
+	if admission.QuotaUnits < 1 || admission.QuotaUnits > 1_000_000 {
+		return problem.New(400, "invalid_execution_quota_units", "Execution quotaUnits must be between 1 and 1000000.")
+	}
 	var quota persistence.TenantQuota
 	quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
-	if errors.Is(quotaErr, gorm.ErrRecordNotFound) {
-		return nil
-	}
-	if quotaErr != nil {
+	if quotaErr != nil && !errors.Is(quotaErr, gorm.ErrRecordNotFound) {
 		return problem.Wrap(500, "execution_quota_check_failed", "Failed to load the tenant execution quota.", quotaErr)
 	}
-	if quota.MaxConcurrentExecutions == nil {
+	if quotaErr == nil {
+		if err := s.enforceExecutionQuotaLimits(
+			ctx, tx, tenantID, "tenant", tenantID, admission,
+			quota.MaxConcurrentExecutions, quota.MaxQueuedExecutions, quota.MaxConcurrentExecutionUnits,
+		); err != nil {
+			return err
+		}
+	}
+
+	scopes := make([]struct {
+		kind string
+		id   uuid.UUID
+	}, 0, 3)
+	if admission.ProjectID != uuid.Nil {
+		scopes = append(scopes, struct {
+			kind string
+			id   uuid.UUID
+		}{kind: "project", id: admission.ProjectID})
+	}
+	if admission.SessionID != uuid.Nil {
+		scopes = append(scopes, struct {
+			kind string
+			id   uuid.UUID
+		}{kind: "session", id: admission.SessionID})
+	}
+	if admission.AutomationID != nil && *admission.AutomationID != uuid.Nil {
+		scopes = append(scopes, struct {
+			kind string
+			id   uuid.UUID
+		}{kind: "automation", id: *admission.AutomationID})
+	}
+	for _, scope := range scopes {
+		var policy persistence.ExecutionQuotaPolicy
+		err := tx.WithContext(ctx).
+			Where("tenant_id = ? AND scope_kind = ? AND scope_id = ?", tenantID, scope.kind, scope.id).
+			Take(&policy).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			continue
+		}
+		if err != nil {
+			return problem.Wrap(500, "execution_quota_check_failed", "Failed to load the scoped execution quota.", err)
+		}
+		if err := s.enforceExecutionQuotaLimits(
+			ctx, tx, tenantID, scope.kind, scope.id, admission,
+			policy.MaxConcurrentExecutions, policy.MaxQueuedExecutions, policy.MaxConcurrentExecutionUnits,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) enforceExecutionQuotaLimits(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+	scopeKind string,
+	scopeID uuid.UUID,
+	admission ExecutionQuotaAdmission,
+	maxConcurrent *int,
+	maxQueued *int,
+	maxUnits *int64,
+) error {
+	if maxConcurrent == nil && maxQueued == nil && maxUnits == nil {
 		return nil
 	}
-	var activeExecutions int64
-	if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-		Where("tenant_id = ? AND status IN ?", tenantID, resourceQuotaExecutionStatuses).
-		Count(&activeExecutions).Error; err != nil {
-		return problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
+	query := tx.WithContext(ctx).Table("agent_executions AS execution").
+		Joins("JOIN agent_sessions AS session ON session.tenant_id = execution.tenant_id AND session.id = execution.session_id").
+		Where("execution.tenant_id = ?", tenantID)
+	switch scopeKind {
+	case "tenant":
+	case "project":
+		query = query.Where("session.project_id = ?", scopeID)
+	case "session":
+		query = query.Where("execution.session_id = ?", scopeID)
+	case "automation":
+		query = query.Where("execution.automation_id = ?", scopeID)
+	default:
+		return problem.New(500, "execution_quota_scope_invalid", "Execution quota scope is invalid.")
 	}
-	if activeExecutions >= int64(*quota.MaxConcurrentExecutions) {
-		return problem.New(409, "execution_quota_exceeded", "The tenant concurrent execution quota has been reached.")
+	if maxConcurrent != nil {
+		var active int64
+		if err := query.Session(&gorm.Session{}).
+			Where("execution.status IN ?", resourceQuotaExecutionStatuses).
+			Count(&active).Error; err != nil {
+			return problem.Wrap(500, "execution_quota_check_failed", "Failed to check concurrent execution quota.", err)
+		}
+		if active >= int64(*maxConcurrent) {
+			apiError := problem.New(409, "execution_quota_exceeded", "The concurrent execution quota has been reached.")
+			apiError.Details = map[string]any{"scopeKind": scopeKind, "scopeId": scopeID, "limit": *maxConcurrent}
+			return apiError
+		}
+	}
+	if maxQueued != nil {
+		var queued int64
+		if err := query.Session(&gorm.Session{}).
+			Where("execution.status IN ?", []string{"queued", "recovering"}).
+			Count(&queued).Error; err != nil {
+			return problem.Wrap(500, "execution_queue_quota_check_failed", "Failed to check queued execution quota.", err)
+		}
+		if queued >= int64(*maxQueued) {
+			apiError := problem.New(429, "execution_queue_quota_exceeded", "The queued execution quota has been reached.")
+			apiError.Details = map[string]any{"scopeKind": scopeKind, "scopeId": scopeID, "limit": *maxQueued}
+			return apiError
+		}
+	}
+	if maxUnits != nil {
+		var used struct {
+			Units int64 `gorm:"column:units"`
+		}
+		if err := query.Session(&gorm.Session{}).
+			Select("COALESCE(SUM(execution.quota_units), 0) AS units").
+			Where("execution.status IN ?", resourceQuotaExecutionStatuses).
+			Scan(&used).Error; err != nil {
+			return problem.Wrap(500, "execution_unit_quota_check_failed", "Failed to check execution resource-unit quota.", err)
+		}
+		if used.Units+int64(admission.QuotaUnits) > *maxUnits {
+			apiError := problem.New(409, "execution_unit_quota_exceeded", "The concurrent execution resource-unit quota has been reached.")
+			apiError.Details = map[string]any{
+				"scopeKind": scopeKind, "scopeId": scopeID, "limit": *maxUnits,
+				"used": used.Units, "requested": admission.QuotaUnits,
+			}
+			return apiError
+		}
 	}
 	return nil
 }
@@ -704,6 +848,17 @@ func (s *Service) CreateTurnWithIdempotency(
 	if err != nil {
 		return Turn{}, false, err
 	}
+	queueSnapshot, err := executionqueue.Normalize(executionqueue.Snapshot{
+		Class: input.QueueClass, Priority: input.QueuePriority,
+		QuotaUnits: input.QuotaUnits, AutomationID: input.AutomationID,
+	})
+	if err != nil {
+		return Turn{}, false, problem.New(
+			400,
+			"invalid_execution_queue_snapshot",
+			"queueClass, queuePriority, quotaUnits, and automationId do not form a valid immutable queue snapshot.",
+		)
+	}
 	var execution persistence.AgentExecution
 	var createdEvent persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
@@ -713,6 +868,8 @@ func (s *Service) CreateTurnWithIdempotency(
 			"sessionId": sessionID, "inputText": inputText,
 			"runtimeMode": runtimeMode, "interactionMode": interactionMode,
 			"sourceProposedPlan": sourceProposedPlan,
+			"automationId":       queueSnapshot.AutomationID, "queueClass": queueSnapshot.Class,
+			"queuePriority": queueSnapshot.Priority, "quotaUnits": queueSnapshot.QuotaUnits,
 		},
 	}, func(tx *gorm.DB) (Turn, error) {
 		queuedAt := s.now()
@@ -746,7 +903,26 @@ func (s *Service) CreateTurnWithIdempotency(
 		if activeSessionExecutions > 0 {
 			return Turn{}, problem.New(409, "session_execution_active", "The Session already has an active Turn execution.")
 		}
-		if err := s.RequireExecutionQuotaAvailable(ctx, tx, tenantID); err != nil {
+		if queueSnapshot.AutomationID != nil {
+			var automation persistence.Automation
+			if err := tx.WithContext(ctx).
+				Where(
+					"tenant_id = ? AND id = ? AND project_id = ? AND status = ? AND archived_at IS NULL",
+					tenantID, *queueSnapshot.AutomationID, locked.ProjectID, "active",
+				).
+				Take(&automation).Error; err != nil {
+				return Turn{}, problem.Wrap(
+					409,
+					"execution_automation_unavailable",
+					"The Automation queue authority is unavailable for this Session Project.",
+					err,
+				)
+			}
+		}
+		if err := s.RequireExecutionQuotaAvailableFor(ctx, tx, tenantID, ExecutionQuotaAdmission{
+			ProjectID: locked.ProjectID, SessionID: sessionID,
+			AutomationID: queueSnapshot.AutomationID, QuotaUnits: queueSnapshot.QuotaUnits,
+		}); err != nil {
 			return Turn{}, err
 		}
 		var target persistence.ExecutionTarget
@@ -816,6 +992,8 @@ func (s *Service) CreateTurnWithIdempotency(
 		provider := locked.Provider
 		execution = persistence.AgentExecution{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
+			AutomationID: queueSnapshot.AutomationID, QueueClass: queueSnapshot.Class,
+			QueuePriority: queueSnapshot.Priority, QuotaUnits: queueSnapshot.QuotaUnits,
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,
 			WorkspaceMaterializationID: &resources.MaterializationID,
@@ -837,6 +1015,8 @@ func (s *Service) CreateTurnWithIdempotency(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
+				"automationId": execution.AutomationID, "queueClass": execution.QueueClass,
+				"queuePriority": execution.QueuePriority, "quotaUnits": execution.QuotaUnits,
 				"provider":                              provider,
 				"providerRuntimeBindingId":              resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
@@ -853,6 +1033,10 @@ func (s *Service) CreateTurnWithIdempotency(
 			"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 			"status": "queued", "executionTargetId": execution.ExecutionTargetID,
 			"targetKind":                 execution.TargetKind,
+			"automationId":               execution.AutomationID,
+			"queueClass":                 execution.QueueClass,
+			"queuePriority":              execution.QueuePriority,
+			"quotaUnits":                 execution.QuotaUnits,
 			"workspaceMaterializationId": resources.MaterializationID,
 			"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
 		})

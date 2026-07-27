@@ -62,8 +62,14 @@ semantics are maintained in the
 Artifact metadata, Local/MinIO/S3 payload lifecycle, verified upload/download, reentrant Personal
 Local-to-object-storage migration, Kubernetes reconciliation, and enterprise OIDC/SAML/SCIM foundations
 are available. Control-plane productionization (Stage 2) and the Web main-flow authority cutover with
-remote Worker productization (Stage 3) are accepted and closed; the distributed execution platform and
-multi-cluster productionization (Stage 4) remain in progress — see `TODO.md`.
+remote Worker productization (Stage 3) are accepted and closed. The self-hosted distributed execution platform and
+multi-cluster productionization (Stage 4) are also closed; its queue/capacity/network/storage, dual-cluster chaos,
+and single-node regression evidence is linked from [`TODO.md`](TODO.md).
+
+The current Kubernetes product boundary is self-hosted/operator-managed. Synara does
+not currently claim EKS/GKE/AKS-specific Workload Identity, native AWS/GCP/Azure
+billing exports, or managed-cloud availability integration; cost accounting uses
+operator-defined tariffs and durable resource facts.
 
 Stage 3 Worker releases use a clean-worktree Registry gate that performs cached and no-cache
 `linux/amd64` + `linux/arm64` pushes, validates Registry-returned OCI digests, BuildKit SPDX/SLSA

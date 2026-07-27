@@ -50,13 +50,13 @@ class ProtectedCgroupLiveGateTest(unittest.TestCase):
     def test_parse_test_evidence_requires_exact_passing_scenario_set(self) -> None:
         scenarios = {
             "runtimeDiagnosticOverlapAndFence": {"status": "pass"},
-            "parentExtraPidZeroMutation": {"status": "pass"},
+            "supervisorSubgroupExtraPidZeroMutation": {"status": "pass"},
             "legacyV1ZeroMutation": {"status": "pass"},
             "unknownChildRepairRecovery": {"status": "pass"},
             "sigkillHolderOrphanRecovery": {"status": "pass"},
         }
         payload = {
-            "schemaVersion": "synara.protected-cgroup-v2-live-test.v1",
+            "schemaVersion": "synara.protected-cgroup-v3-live-test.v1",
             "scenarios": scenarios,
         }
         output = "=== RUN live\n    file.go:1: " + protected_cgroup_live_gate.TEST_EVIDENCE_PREFIX + json.dumps(payload) + "\n--- PASS\n"
@@ -211,6 +211,185 @@ class ProtectedCgroupLiveGateTest(unittest.TestCase):
                 hashlib.sha256(panic_output.encode()).hexdigest(),
             )
             self.assertFalse(report["vm"]["deleted"])
+
+    def test_known_orbstack_id_panic_uses_version_gated_exact_id_rpc(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            options = self.make_options(root)
+            debian = self.debian_machine()
+            owned = self.owned_machine()
+            report = {
+                "vm": {"name": options.vm_name, "ownedByThisRun": True, "deleted": None},
+                "preservedVm": {
+                    "before": protected_cgroup_live_gate.stable_machine_identity(debian),
+                    "after": None,
+                    "unchanged": False,
+                },
+            }
+            commands: list[list[str]] = []
+            panic_output = "\n".join(
+                [
+                    "panic: runtime error: invalid memory address or nil pointer dereference",
+                    "github.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141 +0x84c",
+                ]
+            )
+
+            def fake_command(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                if command == ["orbctl", "delete", "--force", "01OWNEDVMID"]:
+                    return subprocess.CompletedProcess(command, 2, panic_output)
+                if command == ["orbctl", "version"]:
+                    version = "\n".join(
+                        [
+                            protected_cgroup_live_gate.KNOWN_ORBSTACK_ID_DELETE_BUG_VERSION,
+                            protected_cgroup_live_gate.KNOWN_ORBSTACK_ID_DELETE_BUG_COMMIT,
+                        ]
+                    )
+                    return subprocess.CompletedProcess(command, 0, version)
+                return subprocess.CompletedProcess(command, 0, "")
+
+            rpc_evidence = {
+                "status": "acknowledged",
+                "method": "ContainerDelete",
+                "parameters": "captured-opaque-id-only",
+            }
+            with (
+                mock.patch.object(
+                    protected_cgroup_live_gate,
+                    "load_inventory",
+                    side_effect=[[debian, owned], [debian]],
+                ),
+                mock.patch.object(protected_cgroup_live_gate, "run_command", side_effect=fake_command),
+                mock.patch.object(
+                    protected_cgroup_live_gate,
+                    "delete_orbstack_container_exact_id",
+                    return_value=rpc_evidence,
+                ) as exact_delete,
+            ):
+                errors = protected_cgroup_live_gate.cleanup_proven_owned_vm(
+                    options,
+                    report,
+                    "01OWNEDVMID",
+                    protected_cgroup_live_gate.stable_machine_identity(debian),
+                )
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                commands,
+                [
+                    ["orbctl", "delete", "--force", "01OWNEDVMID"],
+                    ["orbctl", "version"],
+                ],
+            )
+            exact_delete.assert_called_once_with("01OWNEDVMID")
+            self.assertEqual(report["vm"]["deleteMode"], "opaque-id-cli-panic-sconrpc-exact-id")
+            self.assertEqual(report["vm"]["exactIdRpc"], rpc_evidence)
+            self.assertTrue(report["vm"]["deleted"])
+            self.assertNotIn("manualCleanupRequired", report["vm"])
+
+    def test_ambiguous_exact_id_rpc_is_reconciled_only_by_final_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            options = self.make_options(root)
+            debian = self.debian_machine()
+            owned = self.owned_machine()
+            report = {
+                "vm": {"name": options.vm_name, "ownedByThisRun": True, "deleted": None},
+                "preservedVm": {
+                    "before": protected_cgroup_live_gate.stable_machine_identity(debian),
+                    "after": None,
+                    "unchanged": False,
+                },
+            }
+            panic_output = "\n".join(
+                [
+                    "panic: runtime error: invalid memory address or nil pointer dereference",
+                    "github.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141 +0x84c",
+                ]
+            )
+
+            def fake_command(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[:3] == ["orbctl", "delete", "--force"]:
+                    return subprocess.CompletedProcess(command, 2, panic_output)
+                if command == ["orbctl", "version"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        protected_cgroup_live_gate.KNOWN_ORBSTACK_ID_DELETE_BUG_VERSION
+                        + "\n"
+                        + protected_cgroup_live_gate.KNOWN_ORBSTACK_ID_DELETE_BUG_COMMIT
+                        + "\n",
+                    )
+                return subprocess.CompletedProcess(command, 0, "")
+
+            with (
+                mock.patch.object(
+                    protected_cgroup_live_gate,
+                    "load_inventory",
+                    side_effect=[[debian, owned], [debian]],
+                ),
+                mock.patch.object(protected_cgroup_live_gate, "run_command", side_effect=fake_command),
+                mock.patch.object(
+                    protected_cgroup_live_gate,
+                    "delete_orbstack_container_exact_id",
+                    side_effect=protected_cgroup_live_gate.GateFailure("response lost"),
+                ),
+            ):
+                errors = protected_cgroup_live_gate.cleanup_proven_owned_vm(
+                    options,
+                    report,
+                    "01OWNEDVMID",
+                    protected_cgroup_live_gate.stable_machine_identity(debian),
+                )
+            self.assertEqual(errors, [])
+            self.assertTrue(report["vm"]["deleted"])
+            self.assertEqual(report["vm"]["exactIdRpc"]["status"], "ambiguous-reconciled-absent")
+            self.assertTrue(report["vm"]["exactIdRpc"]["reconciledByFinalInventory"])
+            self.assertNotIn("manualCleanupRequired", report["vm"])
+
+    def test_exact_id_rpc_sends_only_the_captured_id(self) -> None:
+        request_id = "0123456789abcdef0123456789abcdef"
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, "result": None},
+            separators=(",", ":"),
+        ).encode()
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        socket_identity = mock.Mock(st_dev=7, st_ino=11, st_uid=501, st_mode=0o140700)
+        socket_path = pathlib.Path("/owner/run/sconrpc.sock")
+        with (
+            mock.patch.object(
+                protected_cgroup_live_gate,
+                "validate_owner_controlled_unix_socket",
+                return_value=socket_identity,
+            ),
+            mock.patch.object(
+                protected_cgroup_live_gate,
+                "UnixSocketHTTPConnection",
+                return_value=connection,
+            ),
+            mock.patch.object(protected_cgroup_live_gate.secrets, "token_hex", return_value=request_id),
+        ):
+            evidence = protected_cgroup_live_gate.delete_orbstack_container_exact_id(
+                "01OWNEDVMID",
+                socket_path=socket_path,
+            )
+        request = connection.request.call_args
+        self.assertEqual(request.args[:2], ("POST", "/"))
+        payload = json.loads(request.kwargs["body"])
+        self.assertEqual(
+            payload,
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "ContainerDelete",
+                "params": ["01OWNEDVMID"],
+            },
+        )
+        self.assertNotIn("name", request.kwargs["body"].decode())
+        self.assertEqual(evidence["status"], "acknowledged")
+        connection.close.assert_called_once_with()
 
     def test_id_delete_failure_with_replacement_never_uses_name_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

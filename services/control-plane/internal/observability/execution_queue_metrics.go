@@ -12,6 +12,7 @@ import (
 type executionQueueGroup struct {
 	TargetKind    string  `gorm:"column:target_kind"`
 	CapacityClass *string `gorm:"column:capacity_class"`
+	QueueClass    string  `gorm:"column:queue_class"`
 	Depth         int64   `gorm:"column:depth"`
 	OldestQueued  string  `gorm:"column:oldest_queued_at"`
 }
@@ -35,6 +36,7 @@ func parseMetricTimestamp(value string) (time.Time, error) {
 type executionQueueMetricKey struct {
 	TargetKind    string
 	CapacityClass string
+	QueueClass    string
 }
 
 type executionQueueMetric struct {
@@ -49,10 +51,10 @@ func (r *Registry) writeExecutionQueueMetrics(
 ) error {
 	var rows []executionQueueGroup
 	if err := r.db.WithContext(ctx).Table("agent_executions").
-		Select(`target_kind, capacity_class, COUNT(*) AS depth,
+		Select(`target_kind, capacity_class, queue_class, COUNT(*) AS depth,
 			MIN(queued_at) AS oldest_queued_at`).
 		Where("status IN ?", []string{"queued", "recovering"}).
-		Group("target_kind, capacity_class").
+		Group("target_kind, capacity_class, queue_class").
 		Scan(&rows).Error; err != nil {
 		return fmt.Errorf("collect durable Execution queue metrics: %w", err)
 	}
@@ -66,6 +68,7 @@ func (r *Registry) writeExecutionQueueMetrics(
 		key := executionQueueMetricKey{
 			TargetKind:    boundedTargetKind(strings.ToLower(strings.TrimSpace(row.TargetKind))),
 			CapacityClass: boundedExecutionQueueCapacityClass(row.CapacityClass),
+			QueueClass:    boundedExecutionQueueClass(row.QueueClass),
 		}
 		metric := metrics[key]
 		metric.Depth += row.Depth
@@ -83,26 +86,30 @@ func (r *Registry) writeExecutionQueueMetrics(
 		if keys[left].TargetKind != keys[right].TargetKind {
 			return keys[left].TargetKind < keys[right].TargetKind
 		}
-		return keys[left].CapacityClass < keys[right].CapacityClass
+		if keys[left].CapacityClass != keys[right].CapacityClass {
+			return keys[left].CapacityClass < keys[right].CapacityClass
+		}
+		return keys[left].QueueClass < keys[right].QueueClass
 	})
 
 	writeHelp(
 		output,
 		"synara_execution_queue_depth",
-		"Authoritative queued or recovering Execution count by bounded target kind and capacity class.",
+		"Authoritative queued or recovering Execution count by bounded target kind, capacity class, and queue class.",
 		"gauge",
 	)
 	for _, key := range keys {
 		metricLabels := labels(map[string]string{
 			"target_kind":    key.TargetKind,
 			"capacity_class": key.CapacityClass,
+			"queue_class":    key.QueueClass,
 		})
 		fmt.Fprintf(output, "synara_execution_queue_depth%s %d\n", metricLabels, metrics[key].Depth)
 	}
 	writeHelp(
 		output,
 		"synara_execution_queue_oldest_age_seconds",
-		"Age of the oldest queued or recovering Execution by bounded target kind and capacity class.",
+		"Age of the oldest queued or recovering Execution by bounded target kind, capacity class, and queue class.",
 		"gauge",
 	)
 	for _, key := range keys {
@@ -110,6 +117,7 @@ func (r *Registry) writeExecutionQueueMetrics(
 		metricLabels := labels(map[string]string{
 			"target_kind":    key.TargetKind,
 			"capacity_class": key.CapacityClass,
+			"queue_class":    key.QueueClass,
 		})
 		oldestAgeSeconds := 0.0
 		if !metric.OldestQueued.IsZero() && metric.OldestQueued.Before(now) {
@@ -123,6 +131,15 @@ func (r *Registry) writeExecutionQueueMetrics(
 		)
 	}
 	return nil
+}
+
+func boundedExecutionQueueClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "interactive", "automation", "batch":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
 }
 
 func boundedExecutionQueueCapacityClass(value *string) string {

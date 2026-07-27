@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the protected-cgroup v2 supervisor against real systemd and cgroup2."""
+"""Run the protected-cgroup v3 supervisor against real systemd and cgroup2."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ import dataclasses
 import datetime as dt
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import pathlib
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import sys
@@ -23,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-SCHEMA_VERSION = "synara.protected-cgroup-v2-live-gate.v1"
+SCHEMA_VERSION = "synara.protected-cgroup-v3-live-gate.v1"
 TEST_EVIDENCE_PREFIX = "SYNARA_CGROUP_V2_LIVE_EVIDENCE="
 VM_PREFIX = "synara-cgroup-v2-live-"
 DISPOSABLE_VM_USER = "bin"
@@ -31,6 +33,16 @@ UNIT_TOKEN_PATTERN = re.compile(r"^[a-z0-9]{8,32}$")
 MAX_CAPTURE_BYTES = 48 * 1024
 CREATION_MARKER_PATH = "/etc/synara-cgroup-v2-live-owner"
 LATE_CREATE_RECONCILIATION_SECONDS = 20.0
+MAX_ORBSTACK_RPC_RESPONSE_BYTES = 64 * 1024
+KNOWN_ORBSTACK_ID_DELETE_BUG_VERSION = "Version: 2.2.1 (2020100)"
+KNOWN_ORBSTACK_ID_DELETE_BUG_COMMIT = (
+    "Commit: 0e182b501fcd9e05b99ffb363fce03610390c400 (v2.2.1)"
+)
+KNOWN_ORBSTACK_ID_DELETE_PANIC_MARKERS = (
+    "panic: runtime error: invalid memory address or nil pointer dereference",
+    "github.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141",
+)
+ORBSTACK_EXACT_ID_DELETE_METHOD = "ContainerDelete"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +63,22 @@ class LateCreationReconciliation:
     last_candidate: dict[str, Any] | None
     attempts: int
     last_error: str | None
+
+
+class UnixSocketHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: pathlib.Path, timeout: float) -> None:
+        super().__init__("sconrpc", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.timeout)
+        try:
+            connection.connect(os.fspath(self.socket_path))
+        except Exception:
+            connection.close()
+            raise
+        self.sock = connection
 
 
 def parse_args(argv: Sequence[str]) -> Options:
@@ -116,6 +144,135 @@ def bounded(value: str, limit: int = MAX_CAPTURE_BYTES) -> str:
     if len(encoded) <= limit:
         return value
     return encoded[:limit].decode("utf-8", errors="replace") + "\n[output truncated]\n"
+
+
+def known_orbstack_id_delete_bug(
+    options: Options,
+    delete_result: subprocess.CompletedProcess[str],
+) -> dict[str, Any] | None:
+    if delete_result.returncode != 2 or any(
+        marker not in delete_result.stdout for marker in KNOWN_ORBSTACK_ID_DELETE_PANIC_MARKERS
+    ):
+        return None
+    version_result = run_command(
+        [options.orbctl, "version"],
+        timeout=30,
+        check=False,
+    )
+    version_lines = [line.strip() for line in version_result.stdout.splitlines() if line.strip()]
+    if version_result.returncode != 0 or version_lines != [
+        KNOWN_ORBSTACK_ID_DELETE_BUG_VERSION,
+        KNOWN_ORBSTACK_ID_DELETE_BUG_COMMIT,
+    ]:
+        return None
+    return {
+        "version": "2.2.1",
+        "build": 2020100,
+        "commit": "0e182b501fcd9e05b99ffb363fce03610390c400",
+        "panicSite": "github.com/orbstack/macvirt/scon/cmd/scli/cmd/delete.go:141",
+    }
+
+
+def default_orbstack_sconrpc_socket() -> pathlib.Path:
+    return pathlib.Path.home() / ".orbstack" / "run" / "sconrpc.sock"
+
+
+def validate_owner_controlled_unix_socket(path: pathlib.Path) -> os.stat_result:
+    if not path.is_absolute():
+        raise GateFailure("OrbStack sconrpc socket path must be absolute")
+    try:
+        parent_stats = path.parent.lstat()
+        socket_stats = path.lstat()
+    except OSError as error:
+        raise GateFailure("inspect OrbStack sconrpc socket identity") from error
+    if (
+        not stat.S_ISDIR(parent_stats.st_mode)
+        or parent_stats.st_uid != os.getuid()
+        or stat.S_IMODE(parent_stats.st_mode) & 0o022 != 0
+    ):
+        raise GateFailure("OrbStack sconrpc parent must be owner-controlled and not group/other writable")
+    if (
+        not stat.S_ISSOCK(socket_stats.st_mode)
+        or socket_stats.st_uid != os.getuid()
+        or stat.S_IMODE(socket_stats.st_mode) & 0o022 != 0
+    ):
+        raise GateFailure("OrbStack sconrpc endpoint must be an owner-controlled Unix socket")
+    return socket_stats
+
+
+def delete_orbstack_container_exact_id(
+    machine_id: str,
+    *,
+    socket_path: pathlib.Path | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Z0-9]{10,64}", machine_id):
+        raise GateFailure("captured OrbStack machine ID is invalid")
+    socket_path = socket_path or default_orbstack_sconrpc_socket()
+    before = validate_owner_controlled_unix_socket(socket_path)
+    request_id = secrets.token_hex(16)
+    request_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": ORBSTACK_EXACT_ID_DELETE_METHOD,
+            "params": [machine_id],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    connection = UnixSocketHTTPConnection(socket_path, timeout)
+    try:
+        connection.request(
+            "POST",
+            "/",
+            body=request_body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        response = connection.getresponse()
+        response_body = response.read(MAX_ORBSTACK_RPC_RESPONSE_BYTES + 1)
+        response_status = response.status
+    except Exception as error:
+        raise GateFailure("OrbStack exact-ID sconrpc request did not return a complete response") from error
+    finally:
+        connection.close()
+    if len(response_body) > MAX_ORBSTACK_RPC_RESPONSE_BYTES:
+        raise GateFailure("OrbStack exact-ID sconrpc response exceeded the byte limit")
+    try:
+        after = validate_owner_controlled_unix_socket(socket_path)
+    except Exception as error:
+        raise GateFailure("OrbStack sconrpc socket identity was unavailable after the request") from error
+    before_identity = (before.st_dev, before.st_ino, before.st_uid, stat.S_IFMT(before.st_mode))
+    after_identity = (after.st_dev, after.st_ino, after.st_uid, stat.S_IFMT(after.st_mode))
+    if before_identity != after_identity:
+        raise GateFailure("OrbStack sconrpc socket identity changed across exact-ID delete")
+    if response_status != 200:
+        raise GateFailure(f"OrbStack exact-ID sconrpc returned HTTP {response_status}")
+    try:
+        payload = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GateFailure("OrbStack exact-ID sconrpc returned invalid JSON") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("jsonrpc") != "2.0"
+        or payload.get("id") != request_id
+    ):
+        raise GateFailure("OrbStack exact-ID sconrpc response envelope did not match the request")
+    if "error" in payload:
+        error_digest = hashlib.sha256(
+            json.dumps(payload["error"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        raise GateFailure(f"OrbStack exact-ID sconrpc returned an error ({error_digest})")
+    if set(payload) != {"jsonrpc", "id", "result"} or payload["result"] is not None:
+        raise GateFailure("OrbStack exact-ID sconrpc returned an unexpected success payload")
+    return {
+        "status": "acknowledged",
+        "method": ORBSTACK_EXACT_ID_DELETE_METHOD,
+        "parameters": "captured-opaque-id-only",
+        "transport": "owner-controlled-unix-http-jsonrpc",
+        "socketPathSha256": hashlib.sha256(os.fspath(socket_path).encode("utf-8")).hexdigest(),
+        "socketDevice": before.st_dev,
+        "socketInode": before.st_ino,
+    }
 
 
 def load_inventory(orbctl: str) -> list[dict[str, Any]]:
@@ -361,6 +518,7 @@ def repository_root() -> pathlib.Path:
 def source_manifest(repo: pathlib.Path) -> tuple[str, list[dict[str, Any]]]:
     control_plane = repo / "services/control-plane"
     sources = sorted((control_plane / "internal/agentd").glob("*.go"))
+    sources.extend(sorted((control_plane / "internal/cgroupv2limits").glob("*.go")))
     sources.extend([control_plane / "go.mod", control_plane / "go.sum", pathlib.Path(__file__).resolve()])
     aggregate = hashlib.sha256()
     entries: list[dict[str, Any]] = []
@@ -390,12 +548,12 @@ def parse_test_evidence(output: str) -> dict[str, Any]:
     if len(matches) != 1:
         raise GateFailure(f"expected one live test evidence record, found {len(matches)}")
     payload = json.loads(matches[0])
-    if not isinstance(payload, dict) or payload.get("schemaVersion") != "synara.protected-cgroup-v2-live-test.v1":
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != "synara.protected-cgroup-v3-live-test.v1":
         raise GateFailure("live test evidence schema is invalid")
     scenarios = payload.get("scenarios")
     expected = {
         "runtimeDiagnosticOverlapAndFence",
-        "parentExtraPidZeroMutation",
+        "supervisorSubgroupExtraPidZeroMutation",
         "legacyV1ZeroMutation",
         "unknownChildRepairRecovery",
         "sigkillHolderOrphanRecovery",
@@ -487,6 +645,7 @@ def execute_live_test(options: Options, remote_binary: str, token: str) -> tuple
         "--pipe",
         "--property=Type=exec",
         "--property=Delegate=yes",
+        "--property=DelegateSubgroup=synara-agentd",
         "--property=KillMode=process",
         "--property=Restart=no",
         f"--property=TimeoutStartSec={options.timeout}s",
@@ -496,7 +655,7 @@ def execute_live_test(options: Options, remote_binary: str, token: str) -> tuple
         f"--setenv=SYNARA_CGROUP_V2_LIVE_HELPER_UNIT={helper_unit}",
         "--setenv=SYNARA_CGROUP_V2_LIVE=1",
         remote_binary,
-        "-test.run=^TestProtectedCgroupV2LiveIntegration$",
+        "-test.run=^TestProtectedCgroupV3LiveIntegration$",
         "-test.v",
         f"-test.timeout={options.timeout - 15}s",
     ]
@@ -517,15 +676,32 @@ def execute_live_test(options: Options, remote_binary: str, token: str) -> tuple
         raise GateFailure(f"live systemd test failed ({result.returncode}): {bounded(result.stdout)}")
     evidence = parse_test_evidence(result.stdout)
     service_facts = evidence.get("systemd")
-    if service_facts != {
+    expected_service_facts = {
         "unit": main_unit,
         "delegate": "yes",
+        "delegateSubgroup": "synara-agentd",
         "killMode": "process",
         "controlGroup": f"/system.slice/{main_unit}",
         "activeState": "active",
         "subState": "running",
-    }:
+    }
+    if not isinstance(service_facts, dict) or any(
+        service_facts.get(name) != value for name, value in expected_service_facts.items()
+    ):
         raise GateFailure(f"main service properties were not exact: {service_facts}")
+    if service_facts.get("parentProcessCount") != 0 or service_facts.get("supervisorPids") != [evidence.get("mainPid")]:
+        raise GateFailure(f"main service cgroup topology was not exact: {service_facts}")
+    enabled_controllers = service_facts.get("enabledControllers")
+    if not isinstance(enabled_controllers, list) or not {"cpu", "memory", "pids"}.issubset(enabled_controllers):
+        raise GateFailure(f"main service cgroup controllers were incomplete: {service_facts}")
+    runtime_proof = evidence.get("scenarios", {}).get("runtimeDiagnosticOverlapAndFence", {})
+    if runtime_proof.get("providerLimits") != {
+        "pidsMax": 128,
+        "memoryMaxBytes": 512 * 1024 * 1024,
+        "cpuQuotaMicros": 200000,
+        "cpuPeriodMicros": 100000,
+    }:
+        raise GateFailure(f"live Provider resource-limit readback was incomplete: {runtime_proof}")
     return evidence, bounded(result.stdout), service_facts
 
 
@@ -569,6 +745,22 @@ def cleanup_proven_owned_vm(
     cleanup_errors: list[str] = []
     cleanup_observations: list[str] = []
     should_delete = owned_vm_id is not None
+    delete_attempted = False
+    id_delete_failed = False
+    exact_id_rpc_attempted = False
+    exact_id_rpc_error: str | None = None
+
+    def require_manual_cleanup(reason: str, *, captured_id_absent: bool | None = None) -> None:
+        manual: dict[str, Any] = {
+            "required": True,
+            "capturedId": owned_vm_id,
+            "capturedName": options.vm_name,
+            "reason": reason,
+        }
+        if captured_id_absent is not None:
+            manual["capturedIdAbsent"] = captured_id_absent
+        report["vm"]["manualCleanupRequired"] = manual
+
     if owned_vm_id is not None:
         try:
             inventory = load_inventory(options.orbctl)
@@ -587,6 +779,7 @@ def cleanup_proven_owned_vm(
                 should_delete = False
                 cleanup_errors.append("pre-delete inventory did not bind the captured VM ID to the owned name")
     if should_delete and owned_vm_id is not None:
+        delete_attempted = True
         report["vm"]["deleteAttempted"] = True
         report["vm"]["deleteMode"] = "opaque-id"
         try:
@@ -596,37 +789,90 @@ def cleanup_proven_owned_vm(
                 check=False,
             )
         except Exception as error:
+            id_delete_failed = True
             cleanup_errors.append(f"delete captured VM ID failed: {bounded(str(error), 1024)}")
         else:
             if result.returncode != 0:
+                id_delete_failed = True
                 report["vm"]["idDeleteFailure"] = {
                     "returnCode": result.returncode,
                     "outputSha256": hashlib.sha256(result.stdout.encode("utf-8", errors="replace")).hexdigest(),
                     "observation": bounded(result.stdout, 1024),
                 }
-                report["vm"]["deleteMode"] = "opaque-id-failed-no-name-fallback"
-                report["vm"]["manualCleanupRequired"] = {
-                    "required": True,
-                    "capturedId": owned_vm_id,
-                    "capturedName": options.vm_name,
-                    "reason": (
-                        "OrbStack 2.2.1 opaque-ID delete failed; automatic name deletion is forbidden because "
-                        "identity cannot be held atomically across a name-delete TOCTOU window"
-                    ),
-                }
-                cleanup_errors.append(
-                    "opaque-ID delete failed; manual operator cleanup requires fresh identity and marker verification"
-                )
+                known_bug: dict[str, Any] | None = None
+                try:
+                    known_bug = known_orbstack_id_delete_bug(options, result)
+                except Exception as error:
+                    report["vm"]["idDeleteCompatibilityDetection"] = {
+                        "status": "failed",
+                        "errorSha256": hashlib.sha256(str(error).encode("utf-8", errors="replace")).hexdigest(),
+                        "observation": bounded(str(error), 1024),
+                    }
+                if known_bug is None:
+                    report["vm"]["deleteMode"] = "opaque-id-failed-no-name-fallback"
+                    require_manual_cleanup(
+                        "documented opaque-ID delete failed outside the single version-gated compatibility path; "
+                        "automatic name deletion is forbidden because identity cannot be held atomically across "
+                        "a name-delete TOCTOU window"
+                    )
+                else:
+                    exact_id_rpc_attempted = True
+                    report["vm"]["deleteMode"] = "opaque-id-cli-panic-sconrpc-exact-id"
+                    report["vm"]["idDeleteCompatibility"] = known_bug
+                    try:
+                        report["vm"]["exactIdRpc"] = delete_orbstack_container_exact_id(owned_vm_id)
+                    except Exception as error:
+                        exact_id_rpc_error = bounded(str(error), 1024)
+                        report["vm"]["exactIdRpc"] = {
+                            "status": "ambiguous-or-failed",
+                            "method": ORBSTACK_EXACT_ID_DELETE_METHOD,
+                            "parameters": "captured-opaque-id-only",
+                            "errorSha256": hashlib.sha256(
+                                str(error).encode("utf-8", errors="replace")
+                            ).hexdigest(),
+                            "observation": exact_id_rpc_error,
+                        }
+                        cleanup_observations.append(
+                            "single exact-ID compatibility RPC had no acknowledged success; final inventory is authoritative"
+                        )
 
     try:
         final_inventory = load_inventory(options.orbctl)
     except Exception as error:
         cleanup_errors.append(f"final inventory unavailable: {bounded(str(error), 1024)}")
+        if owned_vm_id is not None and delete_attempted:
+            require_manual_cleanup(
+                "final inventory was unavailable, so deletion of the captured exact ID could not be reconciled"
+            )
     else:
         if owned_vm_id is not None:
-            report["vm"]["deleted"] = inventory_machine_by_id(final_inventory, owned_vm_id) is None
+            captured_machine = inventory_machine_by_id(final_inventory, owned_vm_id)
+            same_name_machine = inventory_machine(final_inventory, options.vm_name)
+            report["vm"]["deleted"] = captured_machine is None
             if not report["vm"]["deleted"]:
-                cleanup_errors.append("captured exact VM ID remained after cleanup")
+                require_manual_cleanup(
+                    "captured exact VM ID remained after every allowed cleanup path; automatic name deletion is forbidden",
+                    captured_id_absent=False,
+                )
+                cleanup_errors.append(
+                    "captured exact VM ID remained after cleanup; manual operator cleanup requires fresh identity and marker verification"
+                )
+            elif same_name_machine is not None and same_name_machine.get("id") != owned_vm_id:
+                replacement = stable_machine_identity(same_name_machine)
+                report["vm"]["sameNameReplacement"] = replacement
+                require_manual_cleanup(
+                    "captured exact VM ID is absent, but a different same-name machine appeared; the runner will not delete it",
+                    captured_id_absent=True,
+                )
+                cleanup_errors.append(
+                    "different same-name VM appeared during cleanup; manual operator cleanup/review is required and the replacement was not deleted"
+                )
+            elif exact_id_rpc_attempted and exact_id_rpc_error is not None:
+                report["vm"]["exactIdRpc"]["status"] = "ambiguous-reconciled-absent"
+                report["vm"]["exactIdRpc"]["reconciledByFinalInventory"] = True
+            elif id_delete_failed and not exact_id_rpc_attempted:
+                report["vm"]["deleteMode"] = "opaque-id-nonzero-reconciled-absent"
+                report["vm"].pop("manualCleanupRequired", None)
         else:
             candidate = stable_machine_identity(inventory_machine(final_inventory, options.vm_name))
             if candidate is not None:
@@ -779,8 +1025,10 @@ def run_gate(options: Options) -> dict[str, Any]:
         report["evidenceBoundary"]["containmentScenariosProved"] = True
         report["evidenceBoundary"]["proved"] = [
             "daemon root flock exclusion and crash release",
-            "standalone live preflight credential drop, UseCgroupFD, and setsid cleanup",
-            "parent PID, legacy v1, and unknown child zero-mutation rejection",
+            "DelegateSubgroup supervisor leaf with a process-free delegated parent",
+            "cpu, memory, and pids controller enablement plus exact finite Provider limit readback",
+            "standalone live preflight credential drop, UseCgroupFD, finite limits, and setsid cleanup",
+            "extra supervisor PID, legacy v1, and unknown child zero-mutation rejection",
             "same-fence exclusion and real cgroup.kill/cgroup.events orphan recovery",
         ]
         report["status"] = "pass"

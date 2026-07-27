@@ -49,10 +49,12 @@ export function buildWarmPoolInput(input: {
     name: input.name.trim(),
     mode: "warm",
     capacityClass: "interactive",
+    tenantIsolation: "pinned",
     clusterId: "",
     region: "",
     namespace: "",
     desiredIdleUnits: Number(input.desiredIdleUnits),
+    minIdleUnits: 0,
     maxActiveUnits: Number(input.maxActiveUnits),
     schedulingTemplate: {},
     status: "active",
@@ -72,10 +74,12 @@ export function buildWorkerPoolUpdateInput(
     name: pool.name,
     mode: pool.mode,
     capacityClass: pool.capacityClass,
+    tenantIsolation: pool.tenantIsolation,
     clusterId: pool.clusterId,
     region: pool.region,
     namespace: pool.namespace,
     desiredIdleUnits: Number(input.desiredIdleUnits),
+    minIdleUnits: pool.minIdleUnits,
     maxActiveUnits: Number(input.maxActiveUnits),
     schedulingTemplate: pool.schedulingTemplate,
     status: input.status,
@@ -90,10 +94,11 @@ export function WorkerPoolPlacementControls(props: {
 }) {
   const queryClient = useQueryClient();
   const queryKey = workerPoolPlacementQueryKey(props.tenantId, props.target.id);
+  const canMutatePlacement = props.canManage && props.target.tenantId !== null;
   const placement = useQuery({
     queryKey,
     queryFn: () => controlPlaneClient.getExecutionPlacement(props.tenantId, props.target.id),
-    enabled: props.enabled && props.target.tenantId !== null,
+    enabled: props.enabled,
   });
   const updatePolicy = useMutation({
     mutationFn: (input: {
@@ -127,7 +132,7 @@ export function WorkerPoolPlacementControls(props: {
       ) : state ? (
         <>
           <WorkerPoolInventory
-            canManage={props.canManage}
+            canManage={canMutatePlacement}
             onUpdated={(next) => {
               queryClient.setQueryData<ControlPlaneExecutionPlacementState>(queryKey, (current) =>
                 current
@@ -142,7 +147,7 @@ export function WorkerPoolPlacementControls(props: {
             targetId={props.target.id}
             tenantId={props.tenantId}
           />
-          {props.canManage ? (
+          {canMutatePlacement ? (
             <>
               <PlacementPolicyEditor
                 disabled={updatePolicy.isPending}
@@ -231,11 +236,12 @@ function WorkerPoolInventoryRow(props: {
           <span className="font-medium text-foreground">{props.pool.name}</span>
           <span className="ml-1.5 text-muted-foreground">
             {props.pool.capacityClass} · idle {props.pool.desiredIdleUnits} · max{" "}
-            {props.pool.maxActiveUnits} · v{props.pool.version}
+            {props.pool.maxActiveUnits} · {props.pool.tenantIsolation} · v{props.pool.version}
           </span>
         </span>
         <span className="flex flex-wrap gap-1">
           <ControlPlaneStatusPill active={false} value={props.pool.mode} />
+          <ControlPlaneStatusPill active={false} value={props.pool.tenantIsolation} />
           <ControlPlaneStatusPill value={props.pool.status} />
         </span>
       </div>

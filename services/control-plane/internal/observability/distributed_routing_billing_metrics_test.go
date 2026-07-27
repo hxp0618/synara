@@ -101,6 +101,62 @@ func TestWorkerPoolWarmCapacityMetricsAreFreshBoundedAndStable(t *testing.T) {
 	}
 }
 
+func TestExecutionTargetCapacityMetricsAggregateFreshVectorsWithoutTargetLabels(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&persistence.ExecutionTargetCapacity{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	firstTarget, secondTarget := uuid.New(), uuid.New()
+	firstTenant, secondTenant := uuid.New(), uuid.New()
+	cpuTotal, cpuAllocated, cpuAvailable := int64(4_000), int64(1_500), int64(2_500)
+	gpuTotal, gpuAllocated, gpuAvailable := int64(4), int64(1), int64(3)
+	gpuRequest := int64(1)
+	gpuName := "nvidia.com/gpu"
+	rows := []persistence.ExecutionTargetCapacity{
+		{
+			ExecutionTargetID: firstTarget, TenantID: firstTenant, TargetKind: "kubernetes", Source: "test",
+			TotalPods: 10, AllocatedPods: 3, AvailablePods: 7, SchedulableUnits: 3,
+			TotalCPUMillicores: &cpuTotal, AllocatedCPUMillicores: &cpuAllocated, AvailableCPUMillicores: &cpuAvailable,
+			GPUResourceName: &gpuName, PodRequestGPUUnits: &gpuRequest,
+			TotalGPUUnits: &gpuTotal, AllocatedGPUUnits: &gpuAllocated, AvailableGPUUnits: &gpuAvailable,
+			ObservedAt: now, ExpiresAt: now.Add(time.Minute), Version: 1, UpdatedAt: now,
+		},
+		{
+			ExecutionTargetID: secondTarget, TenantID: secondTenant, TargetKind: "kubernetes", Source: "test",
+			TotalPods: 8, AllocatedPods: 8, AvailablePods: 0, SchedulableUnits: 0,
+			ObservedAt: now.Add(-time.Minute), ExpiresAt: now, Version: 1, UpdatedAt: now,
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := New(db).writeExecutionTargetCapacityMetrics(context.Background(), &output, now); err != nil {
+		t.Fatal(err)
+	}
+	metrics := output.String()
+	for _, expected := range []string{
+		`synara_execution_target_capacity_authorities{freshness="fresh",resource="cpu_millicores",target_kind="kubernetes"} 1`,
+		`synara_execution_target_capacity_authorities{freshness="expired",resource="pods",target_kind="kubernetes"} 1`,
+		`synara_execution_target_capacity{resource="cpu_millicores",state="available",target_kind="kubernetes"} 2500`,
+		`synara_execution_target_capacity{resource="gpu_units",state="available",target_kind="kubernetes"} 3`,
+		`synara_execution_target_schedulable_units{target_kind="kubernetes"} 3`,
+	} {
+		if !strings.Contains(metrics, expected) {
+			t.Fatalf("capacity metrics omitted %q:\n%s", expected, metrics)
+		}
+	}
+	for _, forbidden := range []string{firstTarget.String(), secondTarget.String(), firstTenant.String(), secondTenant.String()} {
+		if strings.Contains(metrics, forbidden) {
+			t.Fatalf("capacity metrics leaked high-cardinality id %q:\n%s", forbidden, metrics)
+		}
+	}
+}
+
 func warmCapacityMetricFixture(
 	poolID, tenantID, targetID uuid.UUID,
 	capacityClass string,
@@ -113,7 +169,8 @@ func warmCapacityMetricFixture(
 	return persistence.WorkerPoolWarmCapacity{
 		WorkerPoolID: poolID, WorkerPoolVersion: 1, TenantID: tenantID, ExecutionTargetID: targetID,
 		CapacityClass: capacityClass, WarmSupported: warmSupported,
-		DesiredIdleUnits: desiredIdle, MinIdleUnits: minIdle, MaxActiveUnits: 10,
+		DesiredIdleUnits: desiredIdle, EffectiveDesiredIdleUnits: desiredIdle,
+		MinIdleUnits: minIdle, MaxActiveUnits: 10,
 		DesiredTotalUnits: desiredTotal, ClaimedUnits: claimed, ReadyIdleUnits: readyIdle,
 		Source: "test", ObservedAt: observedAt, ExpiresAt: expiresAt, Version: 1, UpdatedAt: observedAt,
 	}

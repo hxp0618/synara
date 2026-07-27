@@ -612,3 +612,107 @@ func runTestGitOutput(t *testing.T, directory string, arguments ...string) strin
 	}
 	return string(output)
 }
+
+// stageWorktreeMetadata writes the absolute pointer pair `git worktree add`
+// produces before git 2.48, where `--relative-paths` became available.
+func stageWorktreeMetadata(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	staging := t.TempDir()
+	repository := filepath.Join(staging, "repo.git")
+	checkout := filepath.Join(staging, "checkout")
+	worktreeGitDir := filepath.Join(repository, "worktrees", "checkout")
+	for _, directory := range []string{worktreeGitDir, checkout} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitFile := filepath.Join(checkout, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+worktreeGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "gitdir"), []byte(gitFile+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return staging, repository, checkout, worktreeGitDir
+}
+
+func TestRelativizeWorktreeMetadataSurvivesTheGenerationRename(t *testing.T) {
+	staging, repository, checkout, worktreeGitDir := stageWorktreeMetadata(t)
+	if err := relativizeWorktreeMetadata(repository, checkout); err != nil {
+		t.Fatal(err)
+	}
+	// These are the exact bytes `git worktree add --relative-paths` writes on
+	// git 2.48+, so both paths through this code produce one on-disk shape.
+	for path, want := range map[string]string{
+		filepath.Join(checkout, ".git"):         "gitdir: ../repo.git/worktrees/checkout",
+		filepath.Join(worktreeGitDir, "gitdir"): "../../../checkout/.git",
+	} {
+		content, err := os.ReadFile(path)
+		if err != nil || strings.TrimSpace(string(content)) != want {
+			t.Fatalf("%s = %q err=%v, want %q", path, content, err, want)
+		}
+	}
+
+	// The whole point of relative pointers: the generation is built in a staging
+	// directory and renamed into place, and must still resolve afterwards.
+	active := filepath.Join(t.TempDir(), "active")
+	if err := os.Rename(staging, active); err != nil {
+		t.Fatal(err)
+	}
+	movedCheckout := filepath.Join(active, "checkout")
+	movedGitDir := filepath.Join(active, "repo.git", "worktrees", "checkout")
+	gitFileValue, err := readSmallRegularFile(filepath.Join(movedCheckout, ".git"), gitMetadataPointerMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveRelativeMetadataPath(movedCheckout, strings.TrimPrefix(gitFileValue, "gitdir: "))
+	if err != nil || !sameExistingPath(resolved, movedGitDir) {
+		t.Fatalf("moved Git file resolved to %q err=%v, want %q", resolved, err, movedGitDir)
+	}
+	pointer, err := readSmallRegularFile(filepath.Join(movedGitDir, "gitdir"), gitMetadataPointerMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err = resolveRelativeMetadataPath(movedGitDir, pointer)
+	if err != nil || !sameExistingPath(resolved, filepath.Join(movedCheckout, ".git")) {
+		t.Fatalf("moved checkout pointer resolved to %q err=%v", resolved, err)
+	}
+}
+
+func TestRelativizeWorktreeMetadataLeavesRelativePointersUntouched(t *testing.T) {
+	_, repository, checkout, worktreeGitDir := stageWorktreeMetadata(t)
+	gitFile := filepath.Join(checkout, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: ../repo.git/worktrees/checkout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointerPath := filepath.Join(worktreeGitDir, "gitdir")
+	before, err := os.Stat(pointerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relativizeWorktreeMetadata(repository, checkout); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(pointerPath)
+	if err != nil || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+		t.Fatalf("a relative gitfile must not be rewritten: err=%v", err)
+	}
+}
+
+func TestRelativizeWorktreeMetadataRejectsAForeignWorktreeDirectory(t *testing.T) {
+	_, repository, checkout, _ := stageWorktreeMetadata(t)
+	foreign := filepath.Join(t.TempDir(), "worktrees", "checkout")
+	if err := os.MkdirAll(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(checkout, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+foreign+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := relativizeWorktreeMetadata(repository, checkout); err == nil {
+		t.Fatal("a gitfile pointing outside the private repository was accepted")
+	}
+}

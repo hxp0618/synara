@@ -1,5 +1,8 @@
 # Agentd Protected cgroup Supervisor v2
 
+> Superseded by [Agentd Protected cgroup Supervisor v3](agentd-protected-cgroup-supervisor-v3.md). Version 2 proves
+> fenced process ownership and reliable termination but does not prove finite CPU, memory, or PID confinement.
+
 This document describes the Linux-only protected cgroup supervisor and attestation contract implemented under
 `services/control-plane/internal/agentd/protected_cgroup_supervisor*.go`.
 
@@ -162,6 +165,21 @@ The production daemon applies the same environment boundary below the gate: both
 and its `setsid()` sentinel child are started with an explicit non-nil empty environment. Their handshake reports and
 requires zero environment entries, so registration tokens, Runner configuration, capabilities, attestation key path,
 and other daemon variables cannot reach either lower-privilege process.
+
+## Local live acceptance
+
+The disposable OrbStack lane binds its claim to the current source set, Linux arm64 test binary, a run-random
+root-owned cloud-init marker, stable opaque VM ID, and a pre-existing preservation oracle. Cleanup never targets a
+name. It first calls OrbStack's documented opaque-ID delete; the private compatibility transport is permitted only
+for the exact OrbStack 2.2.1 build 2020100 nil-pointer signature currently covered by the gate. That path validates an
+owner-controlled Unix socket and stable socket identity, then sends one `ContainerDelete` JSON-RPC request with the
+captured opaque ID as its only parameter. It does not retry an ambiguous write. Final exact-ID inventory absence is
+required, while a remaining ID or different same-name object fails closed.
+
+[The 2026-07-26 final3 report](../reports/stage-4-protected-cgroup-v2-live-acceptance-20260726-final3.md) records all five
+real systemd/cgroup-v2 scenarios passing together with acknowledged exact-ID cleanup and an unchanged preservation
+oracle. This compatibility code belongs only to the disposable acceptance harness; it is not supervisor authority,
+production lifecycle behavior, or evidence that an arbitrary OrbStack version implements the same private method.
 
 ## Remaining non-goals
 

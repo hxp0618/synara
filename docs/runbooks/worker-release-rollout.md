@@ -102,8 +102,8 @@ mechanics gate，不能作为生产批准。生产发布选择以下一种模式
 
 - `keyless`：配置短期 OIDC token 的环境变量名，以及获批的 certificate identity/regexp 和 OIDC
   issuer/regexp。Regexp 必须首尾锚定并兼容 RE2；token 值不得进入命令行、报告或聊天。
-- `kms-key`：配置获批的 AWS/GCP/Azure/Vault KMS URI，以及最小 credential 环境变量名集合；值只注入
-  gate 进程，不写入 Docker 参数或报告。
+- `kms-key`：当前支持自建 Vault KMS URI，以及最小 credential 环境变量名集合；值只注入 gate 进程，
+  不写入 Docker 参数或报告。代码中的 AWS/GCP/Azure KMS reference 仅为 deferred 兼容面，不构成支持声明。
 
 当前生产方向已选择 `kms-key`；如落地自建 Vault KMS，使用受支持的 `hashivault://...` reference。具体
 KMS key reference、最小 credential 环境变量名、签名 identity、tlog 和 admission policy 必须在生产发布前
@@ -282,7 +282,30 @@ Transition 后再决定下一步；不要仅替换 Version 重放旧意图。
 当前 deterministic managed Docker gate 已使用两个不同 Registry Digest 验证第 3、4、6、8 项的 mechanics，
 但 deterministic Provider fixture 不能满足第 5 项，也不能替代真实 Provider 与生产 rollout。
 
-### 8.1 自动回滚判定边界
+### 8.1 Managed Docker Drain 观察与处置
+
+Managed Docker 的替换和缩容由服务端持久化 Drain 驱动。每个 Target 同时最多一个非终态 Drain，每轮最多推进
+一个旧逻辑 Worker；只有当前 desired containers 都已注册、fresh heartbeat、compatible 且 release-active，下一
+个旧 Worker 才会进入 Drain。通过 `GET /v1/tenants/${SYNARA_TENANT_ID}/workers` 观察：
+
+- `status=draining` 且 `reconciliationDrainRequestedAt` 非空，表示 Reconciler 已冻结服务端删除 authority；
+  Worker heartbeat 不能撤销它。
+- `reconciliationDrainIncarnation` 与 `reconciliationDrainInstanceUid` 是待替换的精确旧物理身份；同名新容器
+  必须以不同 instance UID 注册，旧 fence 才会完成。
+- `reconciliationDrainReason` 当前只能是 `managed-docker-stale-spec` 或
+  `managed-docker-scale-down`。
+- Drain 长时间停留时，先检查旧 Worker 的 Execution Lease 和状态为 `leased/running` 的 Workspace cleanup，
+  再检查新容器注册、heartbeat、Protocol、Manifest/Release compatibility；不要强制删容器或改数据库字段。
+- `worker_reconciliation_draining` 是 agentd 在退出旧 Worker Claim 循环时的预期终态错误；
+  `docker_worker_lifecycle_unavailable` 表示 Reconciler 未接入持久化 lifecycle authority，必须停止变更并修复部署。
+- Control Plane 在 Docker DELETE 后崩溃时，下一次成功 List 会根据缺失容器恢复已持久化 Drain。若容器仍存在，
+  保留原 fence 并安全重试；不要创建第二个 Drain。
+
+本地 mechanics 可运行 `TestManagedDockerRollingDrainOrbStackIntegration`，但必须显式提供从当前源码构建的
+acceptance agentd image。脏工作树镜像只可证明本地机制，不能替代 clean SHA、Registry digest、签名和生产
+发布审批。
+
+### 8.2 自动回滚判定边界
 
 - 可计入阈值的失败码只有 `provider_not_installed`、`provider_version_incompatible` 和
   `protocol_violation`；新候选 Manifest 的 Worker 在观察期内被判定为 `incompatible` 时可立即触发。

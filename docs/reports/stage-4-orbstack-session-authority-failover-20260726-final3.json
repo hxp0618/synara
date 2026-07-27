@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "passed",
+  "startedAt": "2026-07-26T15:03:58Z",
+  "finishedAt": "2026-07-26T15:06:12Z",
+  "durationSeconds": 134,
+  "context": "orbstack",
+  "namespace": "synara-stage4-session-authority-3",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-session-authority-3",
+  "evidenceFile": "docs/reports/stage-4-orbstack-session-authority-failover-20260726-final3.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE",
+    "sessionAuthorityMode": "stage2-postgres",
+    "nodePartitionManagedHookOverride": {
+      "startHookEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK",
+      "verifyHookEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK",
+      "stopHookEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK",
+      "timeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_HOOK_TIMEOUT_SECONDS",
+      "startTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_START_HOOK_TIMEOUT_SECONDS",
+      "verifyTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_VERIFY_HOOK_TIMEOUT_SECONDS",
+      "stopTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS"
+    }
+  },
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 122
+  },
+  "unexpectedExitStatus": null,
+  "plannedCases": [
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "permissions": [],
+  "topology": null,
+  "scenarios": [
+    {
+      "name": "control-plane-failover",
+      "status": "passed",
+      "startedAt": "2026-07-26T15:06:01Z",
+      "finishedAt": "2026-07-26T15:06:12Z",
+      "details": {
+        "deletedPod": "synara-control-plane-fdd755f75-lt4jz",
+        "readyProbeFailures": 0,
+        "replacement": {
+          "beforePods": [
+            {
+              "name": "synara-control-plane-fdd755f75-lt4jz",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-fdd755f75-wq262",
+              "node": "orbstack"
+            }
+          ],
+          "afterPods": [
+            {
+              "name": "synara-control-plane-fdd755f75-4gz7k",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-fdd755f75-wq262",
+              "node": "orbstack"
+            }
+          ],
+          "replacementPods": [
+            {
+              "name": "synara-control-plane-fdd755f75-4gz7k",
+              "node": "orbstack"
+            }
+          ]
+        },
+        "sessionAuthority": {
+          "mode": "stage2-postgres",
+          "verified": true,
+          "sentinelIdDigest": "894dcb44a598dbed3e6a4a5e056ea59c298043f50d3cba5a5074684b8a041600",
+          "beforeDigest": "15497b7480cbf1f2d8536c3457c56b3b8e2357111da9fb8d3ab9040f794cbb13",
+          "afterDigest": "15497b7480cbf1f2d8536c3457c56b3b8e2357111da9fb8d3ab9040f794cbb13",
+          "rowCount": 1
+        },
+        "preHook": null,
+        "postHook": null
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled"
+  }
+}

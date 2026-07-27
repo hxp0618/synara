@@ -20,8 +20,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 
-SCHEMA_VERSION = "synara.ssh-protected-cgroup-gate.v1"
-SUPPORTED_PROTECTED_CGROUP_SUPERVISOR = "agentd-protected-cgroup-supervisor-v2"
+SCHEMA_VERSION = "synara.ssh-protected-cgroup-gate.v2"
+SUPPORTED_PROTECTED_CGROUP_SUPERVISOR = "agentd-protected-cgroup-supervisor-v3"
+SUPPORTED_PROTECTED_CGROUP_PROBE_VERSION = 2
+PROTECTED_CGROUP_SUPERVISOR_SUBGROUP = "synara-agentd"
 SIGNATURE_DOMAIN = b"synara.process-containment-attestation.v1\n"
 IDENTITY_PATTERN = re.compile(r"^uid:(\d+) gid:(\d+)$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -40,6 +42,10 @@ REQUIRED_REMOTE_ENV_KEYS = (
     "SYNARA_AGENTD_CGROUP_V2_ROOT",
     "SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID",
     "SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID",
+    "SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX",
+    "SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES",
+    "SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS",
+    "SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS",
     "SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID",
     "SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE",
     "SYNARA_AGENTD_BUILD_GIT_SHA",
@@ -164,7 +170,9 @@ def run_gate(
     preflight = run_live_preflight(options, remote_runner, live["env"])
     validate_registration_context_matches_live_env(registration_context, live["env"])
     validate_projected_manifest_trust(worker_manifest)
-    validate_live_preflight(live["serviceUser"], live["delegate"], live["env"], preflight)
+    validate_live_preflight(
+        live["serviceUser"], live["delegate"], live["delegateSubgroup"], live["env"], preflight
+    )
     validate_manifest_trusted(
         capability_object(worker_manifest),
         registration_context,
@@ -181,6 +189,7 @@ def run_gate(
             "name": options.service_name,
             "user": live["serviceUser"],
             "delegate": live["delegate"],
+            "delegateSubgroup": live["delegateSubgroup"],
             "activeState": live["activeState"],
             "subState": live["subState"],
             "mainPid": live["mainPid"],
@@ -239,6 +248,10 @@ def _collect_live_host_snapshot_once(
         options,
         "systemctl show " + shlex.quote(options.service_name) + " --property=Delegate --value",
     ).strip().lower()
+    delegate_subgroup = remote_runner(
+        options,
+        "systemctl show " + shlex.quote(options.service_name) + " --property=DelegateSubgroup --value",
+    ).strip()
     active_state = remote_runner(
         options,
         "systemctl show " + shlex.quote(options.service_name) + " --property=ActiveState --value",
@@ -253,6 +266,8 @@ def _collect_live_host_snapshot_once(
     ).strip()
     if active_state != "active" or sub_state != "running":
         raise ValueError("systemd service is not active/running")
+    if delegate_subgroup != PROTECTED_CGROUP_SUPERVISOR_SUBGROUP:
+        raise ValueError("systemd service DelegateSubgroup is not the protected supervisor subgroup")
     if not main_pid_text.isdigit() or int(main_pid_text) <= 0:
         raise ValueError("systemd service does not have a running MainPID")
     main_pid = int(main_pid_text)
@@ -281,8 +296,9 @@ def _collect_live_host_snapshot_once(
         options,
         "awk -F: '$1 == \"0\" {print $3}' " + shlex.quote(f"/proc/{main_pid}/cgroup"),
     ).strip()
-    if process_control_group != control_group:
-        raise ValueError("systemd service MainPID is outside the reported ControlGroup")
+    expected_process_control_group = control_group + "/" + PROTECTED_CGROUP_SUPERVISOR_SUBGROUP
+    if process_control_group != expected_process_control_group:
+        raise ValueError("systemd service MainPID is outside the protected supervisor subgroup")
     process_env_payload = remote_runner(
         options,
         "tr '\\000' '\\n' < " + shlex.quote(f"/proc/{main_pid}/environ") +
@@ -307,8 +323,22 @@ def _collect_live_host_snapshot_once(
         options,
         "cat -- " + shlex.quote(cgroup_root + "/cgroup.procs"),
     ).split()
-    if parent_processes != [str(main_pid)]:
-        raise ValueError("protected cgroup service parent must contain only the systemd MainPID")
+    if parent_processes:
+        raise ValueError("protected cgroup service parent must be process-free")
+    supervisor_cgroup = cgroup_root + "/" + PROTECTED_CGROUP_SUPERVISOR_SUBGROUP
+    remote_runner(options, "test -d " + shlex.quote(supervisor_cgroup))
+    supervisor_processes = remote_runner(
+        options,
+        "cat -- " + shlex.quote(supervisor_cgroup + "/cgroup.procs"),
+    ).split()
+    if supervisor_processes != [str(main_pid)]:
+        raise ValueError("protected cgroup supervisor subgroup must contain only the systemd MainPID")
+    enabled_controllers = set(remote_runner(
+        options,
+        "cat -- " + shlex.quote(cgroup_root + "/cgroup.subtree_control"),
+    ).split())
+    if not {"cpu", "memory", "pids"}.issubset(enabled_controllers):
+        raise ValueError("protected cgroup service parent omitted required cpu/memory/pids controllers")
     remote_runner(options, "test \"$(stat -c %u " + shlex.quote(key_path) + ")\" = 0")
     remote_runner(options, "test \"$(stat -c %F " + shlex.quote(key_path) + ")\" = " + shlex.quote("regular file"))
     remote_runner(
@@ -324,6 +354,7 @@ def _collect_live_host_snapshot_once(
     snapshot = {
         "serviceUser": service_user,
         "delegate": delegate,
+        "delegateSubgroup": delegate_subgroup,
         "activeState": active_state,
         "subState": sub_state,
         "mainPid": main_pid,
@@ -335,6 +366,8 @@ def _collect_live_host_snapshot_once(
         "env": env_values,
         "processEnv": process_env_values,
         "parentProcesses": parent_processes,
+        "supervisorProcesses": supervisor_processes,
+        "enabledControllers": sorted(enabled_controllers),
         "cgroupFilesystem": cgroup_filesystem,
         "cgroupRootIdentity": cgroup_root_identity,
     }
@@ -350,6 +383,10 @@ def _collect_live_host_snapshot_once(
         options,
         "systemctl show " + shlex.quote(options.service_name) + " --property=Delegate --value",
     ).strip().lower()
+    tail_delegate_subgroup = remote_runner(
+        options,
+        "systemctl show " + shlex.quote(options.service_name) + " --property=DelegateSubgroup --value",
+    ).strip()
     tail_sub_state = remote_runner(
         options,
         "systemctl show " + shlex.quote(options.service_name) + " --property=SubState --value",
@@ -374,6 +411,14 @@ def _collect_live_host_snapshot_once(
         options,
         "cat -- " + shlex.quote(cgroup_root + "/cgroup.procs"),
     ).split()
+    tail_supervisor_processes = remote_runner(
+        options,
+        "cat -- " + shlex.quote(supervisor_cgroup + "/cgroup.procs"),
+    ).split()
+    tail_enabled_controllers = sorted(set(remote_runner(
+        options,
+        "cat -- " + shlex.quote(cgroup_root + "/cgroup.subtree_control"),
+    ).split()))
     tail_root_identity = remote_runner(
         options,
         "stat -Lc '%d:%i' " + shlex.quote(cgroup_root),
@@ -385,12 +430,15 @@ def _collect_live_host_snapshot_once(
     tail = {
         "serviceUser": tail_service_user,
         "delegate": tail_delegate,
+        "delegateSubgroup": tail_delegate_subgroup,
         "activeState": tail_active_state,
         "subState": tail_sub_state,
         "mainPid": tail_main_pid,
         "processStartTime": tail_start_time,
         "controlGroup": tail_control_group,
         "parentProcesses": tail_parent_processes,
+        "supervisorProcesses": tail_supervisor_processes,
+        "enabledControllers": tail_enabled_controllers,
         "cgroupRootIdentity": tail_root_identity,
         "cgroupFilesystem": tail_cgroup_filesystem,
     }
@@ -474,6 +522,7 @@ def validate_same_live_host_incarnation(
         "subState",
         "serviceUser",
         "delegate",
+        "delegateSubgroup",
         "mainPid",
         "processStartTime",
         "controlGroup",
@@ -483,6 +532,8 @@ def validate_same_live_host_incarnation(
         "env",
         "processEnv",
         "parentProcesses",
+        "supervisorProcesses",
+        "enabledControllers",
         "cgroupFilesystem",
         "cgroupRootIdentity",
     )
@@ -620,6 +671,7 @@ def validate_projected_manifest_trust(worker_manifest: Mapping[str, Any]) -> Non
 def validate_live_preflight(
     service_user: str,
     delegate: str,
+    delegate_subgroup: str,
     env_values: Mapping[str, str],
     preflight: Mapping[str, Any],
 ) -> None:
@@ -627,10 +679,16 @@ def validate_live_preflight(
         raise ValueError("systemd service user is not root")
     if delegate not in {"yes", "true", "1"}:
         raise ValueError("systemd service is missing Delegate=yes")
+    if delegate_subgroup != PROTECTED_CGROUP_SUPERVISOR_SUBGROUP:
+        raise ValueError("systemd service is missing the exact protected DelegateSubgroup")
     if not expect_bool(preflight.get("enabled"), "preflight.enabled"):
         raise ValueError("protected cgroup preflight is not enabled")
     if preflight.get("mode") != "cgroup-v2":
         raise ValueError("protected cgroup preflight mode is invalid")
+    if preflight.get("supervisorVersion") != SUPPORTED_PROTECTED_CGROUP_SUPERVISOR:
+        raise ValueError("protected cgroup preflight supervisorVersion is unsupported")
+    if expect_int(preflight.get("probeVersion"), "preflight.probeVersion") != SUPPORTED_PROTECTED_CGROUP_PROBE_VERSION:
+        raise ValueError("protected cgroup preflight probeVersion is unsupported")
     if not expect_bool(preflight.get("useCgroupFD"), "preflight.useCgroupFD"):
         raise ValueError("protected cgroup preflight did not prove UseCgroupFD")
     if not expect_bool(preflight.get("setsidDescendantKilled"), "preflight.setsidDescendantKilled"):
@@ -653,6 +711,31 @@ def validate_live_preflight(
         "preflight.providerGid",
     ) != provider_gid:
         raise ValueError("protected cgroup preflight observed provider uid/gid do not match env configuration")
+    if not expect_bool(preflight.get("resourceLimitsApplied"), "preflight.resourceLimitsApplied"):
+        raise ValueError("protected cgroup preflight did not prove finite Provider resource limits")
+    provider_limits = preflight.get("providerLimits")
+    if not isinstance(provider_limits, Mapping):
+        raise ValueError("protected cgroup preflight omitted Provider resource limits")
+    expected_limits = {
+        "pidsMax": int(expect_string(env_values.get("SYNARA_AGENTD_CGROUP_V2_PROVIDER_PIDS_MAX"), "env pids max")),
+        "memoryMaxBytes": int(expect_string(
+            env_values.get("SYNARA_AGENTD_CGROUP_V2_PROVIDER_MEMORY_MAX_BYTES"), "env memory max"
+        )),
+        "cpuQuotaMicros": int(expect_string(
+            env_values.get("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_QUOTA_MICROS"), "env cpu quota"
+        )),
+        "cpuPeriodMicros": int(expect_string(
+            env_values.get("SYNARA_AGENTD_CGROUP_V2_PROVIDER_CPU_PERIOD_MICROS"), "env cpu period"
+        )),
+    }
+    if any(value <= 0 for value in expected_limits.values()):
+        raise ValueError("protected cgroup environment contains non-positive Provider resource limits")
+    actual_limits = {
+        name: expect_int(provider_limits.get(name), "preflight.providerLimits." + name)
+        for name in expected_limits
+    }
+    if actual_limits != expected_limits:
+        raise ValueError("protected cgroup preflight Provider limits do not match env configuration")
     if expect_string(preflight.get("attestationKeyId"), "preflight.attestationKeyId") != expect_string(
         env_values.get("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID"), "env attestation key id"
     ):
@@ -714,6 +797,8 @@ def validate_manifest_trusted(
         != SUPPORTED_PROTECTED_CGROUP_SUPERVISOR
     ):
         raise ValueError("worker manifest protected cgroup supervisorVersion is unsupported")
+    if expect_int(containment.get("probeVersion"), "workerRuntime.processContainment.probeVersion") != SUPPORTED_PROTECTED_CGROUP_PROBE_VERSION:
+        raise ValueError("worker manifest protected cgroup probeVersion is unsupported")
     attestation = containment.get("attestation")
     if not isinstance(attestation, Mapping):
         raise ValueError("worker manifest omitted process containment attestation")

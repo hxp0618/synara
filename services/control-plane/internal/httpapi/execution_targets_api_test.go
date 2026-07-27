@@ -1,13 +1,18 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
 
 func TestUpdateExecutionTargetProviderPolicyRoute(t *testing.T) {
@@ -61,5 +66,56 @@ func TestUpdateExecutionTargetProcessContainmentPolicyRoute(t *testing.T) {
 	}
 	if policy.TrustMode != executiontargets.ProcessContainmentTrustSignedV1 || policy.KeyID != "test-key" {
 		t.Fatalf("updated process containment policy = %#v", policy)
+	}
+}
+
+func TestDisableManagedKubernetesExecutionTargetRoute(t *testing.T) {
+	fixture := newWorkerManifestHTTPFixture(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	targetID := uuid.New()
+	if err := fixture.db.Create(&persistence.ExecutionTarget{
+		ID: targetID, TenantID: &fixture.tenantID, Kind: "kubernetes",
+		Name: "http-managed-kubernetes", Status: "active", Capabilities: map[string]any{},
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	available := 8
+	if _, err := routing.NewService(fixture.db).ObserveHealth(context.Background(), routing.HealthObservation{
+		ExecutionTargetID: targetID, Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
+		AvailableCapacityUnits: &available,
+		ReservationAuthority:   &routing.ReservationAuthorityObservation{Mode: routing.ReservationAuthorityExactActiveV1},
+		Source:                 "managed-kubernetes-routing-publisher:http-test",
+		ObservedAt:             now, TTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/execution-targets/" + targetID.String() + "/kubernetes/disable"
+	request := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.AddCookie(&http.Cookie{Name: fixture.cookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		fixture.handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	denied := request(fixture.memberToken)
+	assertProblemResponse(t, denied, http.StatusForbidden, "tenant_forbidden")
+
+	first := request(fixture.ownerToken)
+	if first.Code != http.StatusOK || first.Header().Get("Idempotency-Replayed") != "" {
+		t.Fatalf("first disable status=%d replay=%q body=%s", first.Code, first.Header().Get("Idempotency-Replayed"), first.Body.String())
+	}
+	var disabled executiontargets.Target
+	if err := json.Unmarshal(first.Body.Bytes(), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.ID != targetID || disabled.Status != "disabled" {
+		t.Fatalf("disabled Target = %#v", disabled)
+	}
+
+	replay := request(fixture.ownerToken)
+	if replay.Code != http.StatusOK || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("replay status=%d replay=%q body=%s", replay.Code, replay.Header().Get("Idempotency-Replayed"), replay.Body.String())
 	}
 }

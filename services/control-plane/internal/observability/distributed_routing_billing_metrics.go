@@ -33,13 +33,13 @@ type warmCapacityAuthorityGroup struct {
 }
 
 type warmCapacityUnitGroup struct {
-	CapacityClass     string `gorm:"column:capacity_class"`
-	DesiredIdleUnits  int64  `gorm:"column:desired_idle_units"`
-	MinIdleUnits      int64  `gorm:"column:min_idle_units"`
-	DesiredTotalUnits int64  `gorm:"column:desired_total_units"`
-	ClaimedUnits      int64  `gorm:"column:claimed_units"`
-	ReadyIdleUnits    int64  `gorm:"column:ready_idle_units"`
-	DeficitUnits      int64  `gorm:"column:deficit_units"`
+	CapacityClass             string `gorm:"column:capacity_class"`
+	EffectiveDesiredIdleUnits int64  `gorm:"column:effective_desired_idle_units"`
+	MinIdleUnits              int64  `gorm:"column:min_idle_units"`
+	DesiredTotalUnits         int64  `gorm:"column:desired_total_units"`
+	ClaimedUnits              int64  `gorm:"column:claimed_units"`
+	ReadyIdleUnits            int64  `gorm:"column:ready_idle_units"`
+	DeficitUnits              int64  `gorm:"column:deficit_units"`
 }
 
 type warmCapacityAuthorityMetricKey struct {
@@ -112,7 +112,13 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 	if err := r.writeCapacityReservationMetrics(ctx, output, now); err != nil {
 		return err
 	}
+	if err := r.writeExecutionTargetCapacityMetrics(ctx, output, now); err != nil {
+		return err
+	}
 	if err := r.writeWorkerPoolWarmCapacityMetrics(ctx, output, now); err != nil {
+		return err
+	}
+	if err := r.writeWorkerPoolAutoscalingMetrics(ctx, output); err != nil {
 		return err
 	}
 	if err := r.writeBillingSharedAllocationScheduleMetrics(ctx, output, now); err != nil {
@@ -196,6 +202,216 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		)
 	}
 	return nil
+}
+
+func (r *Registry) writeExecutionTargetCapacityMetrics(ctx context.Context, output *bytes.Buffer, now time.Time) error {
+	if !r.db.Migrator().HasTable(&persistence.ExecutionTargetCapacity{}) {
+		return nil
+	}
+	var rows []persistence.ExecutionTargetCapacity
+	if err := r.db.WithContext(ctx).Order("target_kind, execution_target_id").Find(&rows).Error; err != nil {
+		return fmt.Errorf("collect Execution Target capacity metrics: %w", err)
+	}
+	type resourceTotals struct {
+		total, allocated, available int64
+		authorities                 int64
+	}
+	type authorityKey struct {
+		targetKind, resource, freshness string
+	}
+	type resourceKey struct {
+		targetKind, resource string
+	}
+	authorities := map[authorityKey]int64{}
+	resources := map[resourceKey]resourceTotals{}
+	schedulable := map[string]int64{}
+	for _, row := range rows {
+		targetKind := boundedTargetKind(row.TargetKind)
+		freshness := "expired"
+		if row.ExpiresAt.After(now) {
+			freshness = "fresh"
+			schedulable[targetKind] += row.SchedulableUnits
+		}
+		vectors := []struct {
+			resource                    string
+			total, allocated, available *int64
+		}{
+			{resource: "pods", total: &row.TotalPods, allocated: &row.AllocatedPods, available: &row.AvailablePods},
+			{resource: "cpu_millicores", total: row.TotalCPUMillicores, allocated: row.AllocatedCPUMillicores, available: row.AvailableCPUMillicores},
+			{resource: "memory_bytes", total: row.TotalMemoryBytes, allocated: row.AllocatedMemoryBytes, available: row.AvailableMemoryBytes},
+			{resource: "ephemeral_storage_bytes", total: row.TotalEphemeralStorageBytes, allocated: row.AllocatedEphemeralStorageBytes, available: row.AvailableEphemeralStorageBytes},
+			{resource: "gpu_units", total: row.TotalGPUUnits, allocated: row.AllocatedGPUUnits, available: row.AvailableGPUUnits},
+		}
+		for _, vector := range vectors {
+			if vector.total == nil || vector.allocated == nil || vector.available == nil {
+				continue
+			}
+			authorities[authorityKey{targetKind: targetKind, resource: vector.resource, freshness: freshness}]++
+			if freshness != "fresh" {
+				continue
+			}
+			key := resourceKey{targetKind: targetKind, resource: vector.resource}
+			totals := resources[key]
+			totals.total += *vector.total
+			totals.allocated += *vector.allocated
+			totals.available += *vector.available
+			totals.authorities++
+			resources[key] = totals
+		}
+	}
+	authorityKeys := make([]authorityKey, 0, len(authorities))
+	for key := range authorities {
+		authorityKeys = append(authorityKeys, key)
+	}
+	sort.Slice(authorityKeys, func(i, j int) bool {
+		left, right := authorityKeys[i], authorityKeys[j]
+		if left.targetKind != right.targetKind {
+			return left.targetKind < right.targetKind
+		}
+		if left.resource != right.resource {
+			return left.resource < right.resource
+		}
+		return left.freshness < right.freshness
+	})
+	writeHelp(output, "synara_execution_target_capacity_authorities", "Execution Target capacity vector authorities by bounded target kind, resource, and freshness.", "gauge")
+	for _, key := range authorityKeys {
+		fmt.Fprintf(output, "synara_execution_target_capacity_authorities%s %d\n", labels(map[string]string{
+			"target_kind": key.targetKind, "resource": key.resource, "freshness": key.freshness,
+		}), authorities[key])
+	}
+	resourceKeys := make([]resourceKey, 0, len(resources))
+	for key := range resources {
+		resourceKeys = append(resourceKeys, key)
+	}
+	sort.Slice(resourceKeys, func(i, j int) bool {
+		if resourceKeys[i].targetKind != resourceKeys[j].targetKind {
+			return resourceKeys[i].targetKind < resourceKeys[j].targetKind
+		}
+		return resourceKeys[i].resource < resourceKeys[j].resource
+	})
+	writeHelp(output, "synara_execution_target_capacity", "Fresh Execution Target capacity vectors by bounded target kind, resource, and counter state.", "gauge")
+	for _, key := range resourceKeys {
+		totals := resources[key]
+		for _, counter := range []struct {
+			state string
+			value int64
+		}{{"total", totals.total}, {"allocated", totals.allocated}, {"available", totals.available}} {
+			fmt.Fprintf(output, "synara_execution_target_capacity%s %d\n", labels(map[string]string{
+				"target_kind": key.targetKind, "resource": key.resource, "state": counter.state,
+			}), counter.value)
+		}
+	}
+	kinds := make([]string, 0, len(schedulable))
+	for kind := range schedulable {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	writeHelp(output, "synara_execution_target_schedulable_units", "Fresh resource-constrained schedulable Pod-equivalent units by bounded target kind.", "gauge")
+	for _, kind := range kinds {
+		fmt.Fprintf(output, "synara_execution_target_schedulable_units%s %d\n", labels(map[string]string{"target_kind": kind}), schedulable[kind])
+	}
+	return nil
+}
+
+func (r *Registry) writeWorkerPoolAutoscalingMetrics(ctx context.Context, output *bytes.Buffer) error {
+	if !r.db.Migrator().HasTable("worker_pool_autoscaling_state") ||
+		!r.db.Migrator().HasTable("worker_pool_autoscaling_policies") ||
+		!r.db.Migrator().HasTable("worker_pools") {
+		return nil
+	}
+	type row struct {
+		CapacityClass    string `gorm:"column:capacity_class"`
+		GateStatus       string `gorm:"column:cold_start_gate_status"`
+		DesiredIdleUnits int64  `gorm:"column:desired_idle_units"`
+		QueueDepth       int64  `gorm:"column:queue_depth"`
+		ReadyIdleUnits   int64  `gorm:"column:ready_idle_units"`
+		Authorities      int64  `gorm:"column:authorities"`
+	}
+	var rows []row
+	if err := r.db.WithContext(ctx).Table("worker_pool_autoscaling_state AS state").
+		Select(`pool.capacity_class, state.cold_start_gate_status,
+			SUM(state.desired_idle_units) AS desired_idle_units,
+			SUM(state.queue_depth) AS queue_depth,
+			SUM(state.ready_idle_units) AS ready_idle_units,
+			COUNT(*) AS authorities`).
+		Joins(`JOIN worker_pool_autoscaling_policies AS policy
+		  ON policy.worker_pool_id = state.worker_pool_id
+		 AND policy.worker_pool_version = state.worker_pool_version
+		 AND policy.version = state.policy_version`).
+		Joins(`JOIN worker_pools AS pool
+		  ON pool.id = state.worker_pool_id AND pool.version = state.worker_pool_version`).
+		Where("policy.enabled = ?", true).
+		Group("pool.capacity_class, state.cold_start_gate_status").
+		Order("pool.capacity_class, state.cold_start_gate_status").
+		Scan(&rows).Error; err != nil {
+		return fmt.Errorf("collect Worker Pool autoscaling metrics: %w", err)
+	}
+	type totals struct {
+		desired int64
+		queued  int64
+		ready   int64
+	}
+	byClass := make(map[string]totals)
+	writeHelp(
+		output,
+		"synara_worker_pool_cold_start_gate",
+		"Enabled Worker Pool autoscaling authorities by bounded capacity class and interactive cold-start gate state.",
+		"gauge",
+	)
+	for _, item := range rows {
+		capacityClass := boundedWarmCapacityClass(item.CapacityClass)
+		gate := boundedColdStartGate(item.GateStatus)
+		fmt.Fprintf(
+			output,
+			"synara_worker_pool_cold_start_gate%s %d\n",
+			labels(map[string]string{"capacity_class": capacityClass, "status": gate}),
+			item.Authorities,
+		)
+		current := byClass[capacityClass]
+		current.desired += item.DesiredIdleUnits
+		current.queued += item.QueueDepth
+		current.ready += item.ReadyIdleUnits
+		byClass[capacityClass] = current
+	}
+	writeHelp(
+		output,
+		"synara_worker_pool_autoscaling_units",
+		"Durable Worker Pool autoscaling desired idle, queued, and ready idle units by bounded capacity class.",
+		"gauge",
+	)
+	classes := make([]string, 0, len(byClass))
+	for capacityClass := range byClass {
+		classes = append(classes, capacityClass)
+	}
+	sort.Strings(classes)
+	for _, capacityClass := range classes {
+		current := byClass[capacityClass]
+		for _, value := range []struct {
+			kind  string
+			units int64
+		}{
+			{kind: "desired_idle", units: current.desired},
+			{kind: "queued", units: current.queued},
+			{kind: "ready_idle", units: current.ready},
+		} {
+			fmt.Fprintf(
+				output,
+				"synara_worker_pool_autoscaling_units%s %d\n",
+				labels(map[string]string{"capacity_class": capacityClass, "kind": value.kind}),
+				value.units,
+			)
+		}
+	}
+	return nil
+}
+
+func boundedColdStartGate(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "unknown", "healthy", "violated":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
 }
 
 func (r *Registry) writeCapacityReservationMetrics(
@@ -573,7 +789,7 @@ func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
 	var unitRows []warmCapacityUnitGroup
 	if err := r.db.WithContext(ctx).Table("worker_pool_warm_capacity").
 		Select(`capacity_class,
-			SUM(desired_idle_units) AS desired_idle_units,
+			SUM(effective_desired_idle_units) AS effective_desired_idle_units,
 			SUM(min_idle_units) AS min_idle_units,
 			SUM(desired_total_units) AS desired_total_units,
 			SUM(claimed_units) AS claimed_units,
@@ -599,7 +815,7 @@ func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
 	for _, row := range unitRows {
 		capacityClass := boundedWarmCapacityClass(row.CapacityClass)
 		totals := units[capacityClass]
-		totals.desiredIdle += row.DesiredIdleUnits
+		totals.desiredIdle += row.EffectiveDesiredIdleUnits
 		totals.minIdle += row.MinIdleUnits
 		totals.desiredTotal += row.DesiredTotalUnits
 		totals.claimed += row.ClaimedUnits
@@ -682,6 +898,8 @@ func boundedReconcilerLeaseName(value string) string {
 		return "retention"
 	case "synara:metric-rollup":
 		return "metric-rollup"
+	case "synara:worker-pool-autoscaling":
+		return "worker-pool-autoscaling"
 	case "synara:billing-import-scheduler":
 		return "billing-import"
 	case "synara:billing-shared-allocation-scheduler":

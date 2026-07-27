@@ -273,20 +273,24 @@ sshd or the host. Cleanup uses product `ssh/revoke`, verifies the target unit/bi
 ownership-marked runtime, preserves the host and operator identity source, and keeps host/source paths out of reports.
 
 Protected cgroup SSH mode adds stricter host prerequisites before it can count as trusted containment evidence:
-the installed unit must run as `root`, must include `Delegate=yes`, the delegated cgroup-v2 subtree and attestation
-key path must already exist as operator-managed absolute paths, the Provider UID/GID must differ from the supervisor
-UID, and `synara-agentd protected-cgroup-preflight` must succeed on the live host. A release claim must also verify
+the installed unit must run as `root`, must include `Delegate=yes` and `DelegateSubgroup=synara-agentd`, and therefore
+requires systemd 254 or newer. The delegated cgroup-v2 root must be process-free, its supervisor leaf must contain only
+MainPID, and the attestation key path must already exist as an operator-managed absolute path. Provider UID/GID must
+differ from the supervisor UID; all four finite PID/memory/CPU limit settings are mandatory; and
+`synara-agentd protected-cgroup-preflight` must prove exact limit readback on the live host. A release claim must also verify
 that the preflight public key matches the target `processContainmentPolicy`; a local probe without that policy match
 is not signed strict-containment evidence.
 
 ### Disposable live systemd/cgroup-v2 supervisor lane
 
-`protected_cgroup_live_gate.py` is the narrow real-kernel acceptance lane for supervisor-v2 recovery and exclusion
-semantics. It cross-compiles the current `internal/agentd` test binary for Linux arm64, hashes the complete package
+`protected_cgroup_live_gate.py` is the narrow real-kernel acceptance lane for supervisor-v3 resource confinement,
+recovery, and exclusion semantics. It cross-compiles the current `internal/agentd` test binary for Linux arm64, hashes the complete package
 source set and binary, copies only that binary into one uniquely named Ubuntu 24.04 OrbStack VM, and runs the exact
-env-gated test as the sole MainPID of a `Delegate=yes`, `KillMode=process` service. The test covers a live Provider plus
-`setsid` descendant, the actual standalone live preflight, lease and same-fence overlap, parent-PID and legacy-v1 zero-mutation
-rejection, unknown-child repair, and SIGKILL lease-holder recovery through real `cgroup.kill`/`cgroup.events`.
+env-gated test as the sole MainPID of a `Delegate=yes`, `DelegateSubgroup=synara-agentd`, `KillMode=process` service.
+The test proves a process-free parent, `cpu/memory/pids` controller enablement, exact finite Provider-limit readback, a
+live Provider plus `setsid` descendant, the actual standalone live preflight, lease and same-fence overlap,
+supervisor-subgroup PID and legacy-v1 zero-mutation rejection, unknown-child repair, and SIGKILL lease-holder recovery
+through real `cgroup.kill`/`cgroup.events`.
 
 The gate holds a non-blocking per-name local `flock`, refuses an existing VM name, and records the pre-existing
 `debian` VM identity as a preservation oracle. It does not claim ownership until successful creation is followed by
@@ -299,11 +303,22 @@ deleted by its captured exact ID. Deadline exhaustion records the last candidate
 error, and an explicit unresolved late-create risk in both the raised failure and cleanup evidence. Cleanup deletes
 only a proven captured VM ID.
 
-Cleanup uses only OrbStack's documented opaque-ID delete. OrbStack 2.2.1 can return a nil-pointer panic for that form;
-the runner records its bounded output/digest and fails with `manualCleanupRequired` rather than falling back to a name
-delete. Even a fresh marker check cannot close the ID-check-to-name-delete replacement window, so automatic name
-deletion is forbidden. An operator must perform separate fresh identity/marker verification and cleanup; that manual
-operation is outside this runner and the gate cannot pass until final inventory confirms the captured ID is absent.
+Cleanup first uses OrbStack's documented opaque-ID delete. OrbStack 2.2.1 build 2020100 can return a nil-pointer panic
+at the known `delete.go:141` site for that form. Only when the return code, panic markers, exact version/build/commit,
+and owner-controlled local `sconrpc.sock` all match does the runner use the narrow compatibility path: it validates
+the socket device/inode/owner/type before and after one HTTP JSON-RPC `ContainerDelete` request whose sole positional
+parameter is the already captured opaque ID. It never sends the VM name and never retries an ambiguous write; final
+inventory is authoritative for reconciliation. A changed build/panic site, insecure or replaced socket, malformed
+response, remaining captured ID, or same-name replacement fails closed with `manualCleanupRequired`. Even a fresh
+marker check cannot close an ID-check-to-name-delete replacement window, so automatic name deletion remains
+forbidden.
+
+The retained [final3 live report](../../docs/reports/stage-4-protected-cgroup-v2-live-acceptance-20260726-final3.md)
+proves this path end to end: all five real systemd/cgroup-v2 scenarios passed, the known CLI panic was matched, the
+single exact-ID RPC was acknowledged, final inventory proved the VM absent, and the pre-existing `debian` oracle was
+unchanged. Its preceding final2 attempt also demonstrates the create-side fail-closed boundary: when image-index
+fetch left an unstartable `creating` record and the run-random root marker could not be observed, the runner did not
+claim ownership or delete the candidate.
 
 The local lock directory and file are opened fd-relative with `O_NOFOLLOW` and must be private, regular, and owned by
 the current user. Bounded secret-free JSON is attempted after every cleanup path. A separate fallback evidence file is
@@ -724,7 +739,9 @@ Use `ssh_protected_cgroup_gate.py` for that narrow host proof. It refuses to tou
 `--allow-remote-host`, accepts only explicit SSH/service/path inputs, reads only an allowlist of non-secret
 protected-cgroup env keys from the remote `agentd.env`, and requires an active/running systemd MainPID whose executable,
 EnvironmentFile, allowlisted process environment, and cgroup membership bind to those exact inputs. The configured
-cgroup root must be that unit's delegated `ControlGroup`, and the live registration identity must match the supplied
+cgroup root must be that unit's process-free delegated `ControlGroup`, `DelegateSubgroup` must be exactly
+`synara-agentd`, that leaf must contain only MainPID, the parent must expose `cpu/memory/pids`, and the live registration
+identity plus four finite limit values must match the supplied
 control-plane projection context. Every core sample rechecks its critical process/cgroup fence at the tail, every
 snapshot is double-sampled, and both layers bind cgroup-root device/inode; the gate records
 `/proc/<MainPID>/stat` starttime using the final parenthesis of the possibly space-containing comm field, then repeats

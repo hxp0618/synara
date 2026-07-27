@@ -13,19 +13,21 @@ import (
 const managedKubernetesWarmCapacityPublisherPrefix = "managed-kubernetes-warm-capacity-publisher:"
 
 type ManagedKubernetesWarmCapacityObservation struct {
-	TenantID                uuid.UUID
-	ExecutionTargetID       uuid.UUID
-	WorkerPoolID            uuid.UUID
-	WorkerPoolVersion       int64
-	WarmSupported           bool
-	WorkerReleaseRevisionID *uuid.UUID
-	WorkerReleaseChannel    *string
-	MinIdleUnits            int
-	DesiredTotalUnits       int
-	ClaimedUnits            int
-	ReadyIdleUnits          int
-	Reason                  *string
-	ObservedAt              time.Time
+	TenantID                   uuid.UUID
+	ExecutionTargetID          uuid.UUID
+	WorkerPoolID               uuid.UUID
+	WorkerPoolVersion          int64
+	WarmSupported              bool
+	WorkerReleaseRevisionID    *uuid.UUID
+	WorkerReleaseChannel       *string
+	ConfiguredDesiredIdleUnits int
+	EffectiveDesiredIdleUnits  *int
+	MinIdleUnits               int
+	DesiredTotalUnits          int
+	ClaimedUnits               int
+	ReadyIdleUnits             int
+	Reason                     *string
+	ObservedAt                 time.Time
 }
 
 type ManagedKubernetesWarmCapacityObserver func(context.Context, ManagedKubernetesWarmCapacityObservation) error
@@ -67,21 +69,22 @@ func (p *ManagedKubernetesWarmCapacityPublisher) PublishReconcile(
 		observedAt = p.now()
 	}
 	_, err := p.warmCapacity.Observe(ctx, warmcapacity.Observation{
-		TenantID:                observation.TenantID,
-		ExecutionTargetID:       observation.ExecutionTargetID,
-		WorkerPoolID:            observation.WorkerPoolID,
-		WorkerPoolVersion:       observation.WorkerPoolVersion,
-		WarmSupported:           observation.WarmSupported,
-		WorkerReleaseRevisionID: observation.WorkerReleaseRevisionID,
-		WorkerReleaseChannel:    observation.WorkerReleaseChannel,
-		MinIdleUnits:            observation.MinIdleUnits,
-		DesiredTotalUnits:       observation.DesiredTotalUnits,
-		ClaimedUnits:            observation.ClaimedUnits,
-		ReadyIdleUnits:          observation.ReadyIdleUnits,
-		Source:                  p.publisherIdentity,
-		Reason:                  observation.Reason,
-		ObservedAt:              observedAt,
-		TTL:                     p.observationTTL,
+		TenantID:                  observation.TenantID,
+		ExecutionTargetID:         observation.ExecutionTargetID,
+		WorkerPoolID:              observation.WorkerPoolID,
+		WorkerPoolVersion:         observation.WorkerPoolVersion,
+		WarmSupported:             observation.WarmSupported,
+		WorkerReleaseRevisionID:   observation.WorkerReleaseRevisionID,
+		WorkerReleaseChannel:      observation.WorkerReleaseChannel,
+		EffectiveDesiredIdleUnits: observation.EffectiveDesiredIdleUnits,
+		MinIdleUnits:              observation.MinIdleUnits,
+		DesiredTotalUnits:         observation.DesiredTotalUnits,
+		ClaimedUnits:              observation.ClaimedUnits,
+		ReadyIdleUnits:            observation.ReadyIdleUnits,
+		Source:                    p.publisherIdentity,
+		Reason:                    observation.Reason,
+		ObservedAt:                observedAt,
+		TTL:                       p.observationTTL,
 	})
 	return err
 }

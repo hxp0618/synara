@@ -13,6 +13,7 @@ type WorkerPool struct {
 	Name               string         `gorm:"column:name;not null;uniqueIndex:uq_worker_pool_target_name,priority:2"`
 	Mode               string         `gorm:"column:mode;not null"`
 	CapacityClass      string         `gorm:"column:capacity_class;not null;index:idx_worker_pool_target_status,priority:3"`
+	TenantIsolation    string         `gorm:"column:tenant_isolation;not null;default:pinned"`
 	ClusterID          string         `gorm:"column:cluster_id;not null;default:''"`
 	Region             string         `gorm:"column:region;not null;default:''"`
 	Namespace          string         `gorm:"column:namespace;not null;default:''"`

@@ -114,8 +114,8 @@ func TestNormalizeWorkerManifestFreezesProcessContainmentEvidence(t *testing.T) 
 	}
 	manifest := normalized.Manifest
 	if manifest.ProcessContainmentMode != "cgroup-v2" ||
-		manifest.ProcessContainmentSupervisorVersion == nil || *manifest.ProcessContainmentSupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV2 ||
-		manifest.ProcessContainmentProbeVersion == nil || *manifest.ProcessContainmentProbeVersion != 1 ||
+		manifest.ProcessContainmentSupervisorVersion == nil || *manifest.ProcessContainmentSupervisorVersion != executiontargets.ProtectedCgroupSupervisorVersionV3 ||
+		manifest.ProcessContainmentProbeVersion == nil || *manifest.ProcessContainmentProbeVersion != executiontargets.ProtectedCgroupProbeVersionV3 ||
 		manifest.ProcessContainmentProbeSHA256 == nil || len(*manifest.ProcessContainmentProbeSHA256) != 64 ||
 		manifest.ProcessContainmentSupervisorIdentity == nil || *manifest.ProcessContainmentSupervisorIdentity != "uid:10001" ||
 		manifest.ProcessContainmentProviderIdentity == nil || *manifest.ProcessContainmentProviderIdentity != "uid:10002" ||
@@ -167,19 +167,36 @@ func TestNormalizeWorkerManifestRequiresSignedAttestationWhenConfigured(t *testi
 	}
 }
 
-func TestNormalizeWorkerManifestRejectsSignedLegacyProtectedCgroupSupervisor(t *testing.T) {
-	capabilities := workerManifestTestCapabilities()
-	registration := workerManifestTestRegistrationContext(platform.TargetKubernetes)
-	addWorkerManifestTestContainmentEvidence(capabilities)
-	capabilities["workerRuntime"].(map[string]any)["processContainment"].(map[string]any)["supervisorVersion"] =
-		"agentd-protected-cgroup-supervisor-v1"
-	signWorkerManifestTestContainment(t, capabilities, registration)
-	_, err := normalizeWorkerManifest(
-		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(), registration,
-	)
-	var apiError *problem.Error
-	if !errors.As(err, &apiError) || apiError.Code != "worker_containment_supervisor_unsupported" {
-		t.Fatalf("signed legacy supervisor error = %#v", err)
+func TestNormalizeWorkerManifestRejectsSignedUnsupportedProtectedCgroupEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "v1 supervisor", mutate: func(value map[string]any) {
+			value["supervisorVersion"] = "agentd-protected-cgroup-supervisor-v1"
+		}},
+		{name: "v2 supervisor without resource limits", mutate: func(value map[string]any) {
+			value["supervisorVersion"] = "agentd-protected-cgroup-supervisor-v2"
+			value["probeVersion"] = 1
+		}},
+		{name: "v3 supervisor with old probe", mutate: func(value map[string]any) {
+			value["probeVersion"] = 1
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := workerManifestTestCapabilities()
+			registration := workerManifestTestRegistrationContext(platform.TargetKubernetes)
+			addWorkerManifestTestContainmentEvidence(capabilities)
+			test.mutate(capabilities["workerRuntime"].(map[string]any)["processContainment"].(map[string]any))
+			signWorkerManifestTestContainment(t, capabilities, registration)
+			_, err := normalizeWorkerManifest(
+				"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(), registration,
+			)
+			var apiError *problem.Error
+			if !errors.As(err, &apiError) || apiError.Code != "worker_containment_supervisor_unsupported" {
+				t.Fatalf("signed unsupported cgroup evidence error = %#v", err)
+			}
+		})
 	}
 }
 
@@ -545,8 +562,8 @@ func workerManifestTestRegistrationContext(targetKind platform.ExecutionTargetKi
 
 func addWorkerManifestTestContainmentEvidence(capabilities map[string]any) {
 	capabilities["workerRuntime"].(map[string]any)["processContainment"] = map[string]any{
-		"mode": "cgroup-v2", "supervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV2,
-		"probeVersion":       1,
+		"mode": "cgroup-v2", "supervisorVersion": executiontargets.ProtectedCgroupSupervisorVersionV3,
+		"probeVersion":       executiontargets.ProtectedCgroupProbeVersionV3,
 		"probeSha256":        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 		"supervisorIdentity": "uid:10001", "providerIdentity": "uid:10002",
 	}
@@ -568,9 +585,18 @@ func signWorkerManifestTestContainment(
 	registration workerManifestRegistrationContext,
 ) {
 	t.Helper()
+	if err := signWorkerManifestTestContainmentValue(capabilities, registration); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func signWorkerManifestTestContainmentValue(
+	capabilities map[string]any,
+	registration workerManifestRegistrationContext,
+) error {
 	var runtimeCapability workerRuntimeCapability
 	if err := decodeCapability(capabilities["workerRuntime"], &runtimeCapability); err != nil {
-		t.Fatal(err)
+		return err
 	}
 	containment := runtimeCapability.ProcessContainment
 	statement := containmentattestation.Statement{
@@ -589,9 +615,10 @@ func signWorkerManifestTestContainment(
 		workerManifestTestAttestationPrivateKey, workerManifestTestAttestationKeyID, statement,
 	)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	capabilities["workerRuntime"].(map[string]any)["processContainment"].(map[string]any)["attestation"] = envelope
+	return nil
 }
 
 func testProviderCapabilityMap(capabilities map[string]any, provider string) map[string]any {

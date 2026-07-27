@@ -201,6 +201,7 @@ func (s *Service) Claim(
 				Joins("JOIN agent_sessions AS claim_session ON claim_session.tenant_id = agent_executions.tenant_id AND claim_session.id = agent_executions.session_id").
 				Where("claim_session.absolute_expires_at IS NULL OR claim_session.absolute_expires_at > ?", claimNow).
 				Where("agent_executions.status IN ? AND agent_executions.execution_target_id = ? AND agent_executions.target_kind = ?", []string{"queued", "recovering"}, normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind)
+			claimQuery = filterClaimQueryByWorkerTenantBinding(claimQuery, claimWorker, "agent_executions.tenant_id")
 			if normalizedTarget.ExecutionID != nil {
 				claimQuery = claimQuery.Where("agent_executions.id = ?", *normalizedTarget.ExecutionID)
 			}
@@ -244,7 +245,7 @@ func (s *Service) Claim(
 			}
 			claimQuery = workerreleases.FilterClaimQuery(claimQuery, claimWorker)
 			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
-			claimQuery = applyClaimFairShareOrder(tx, claimQuery, workerMode == WorkerModeWarmPool)
+			claimQuery = applyClaimFairShareOrder(tx, claimQuery, workerMode == WorkerModeWarmPool, claimNow)
 			claimErr := claimQuery.Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
 				if normalizedTarget.ExecutionID != nil {
@@ -255,6 +256,9 @@ func (s *Service) Claim(
 							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
 						Take(&assigned).Error
 					if assignedErr == nil {
+						if err := validateWorkerTenantBinding(claimWorker, assigned.TenantID); err != nil {
+							return err
+						}
 						if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, assigned, claimNow); err != nil {
 							return err
 						}
@@ -288,6 +292,9 @@ func (s *Service) Claim(
 				return problem.Wrap(500, "execution_claim_lookup_failed", "Failed to find a claimable execution.", claimErr)
 			} else {
 				if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, s.now()); err != nil {
+					return err
+				}
+				if err := bindGeneralWorkerTenantForExecution(ctx, tx, &claimWorker, execution); err != nil {
 					return err
 				}
 				previousStatus := execution.Status
@@ -1717,6 +1724,13 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	}
 	if worker.AdministrativeStatus == "revoked" {
 		return persistence.WorkerInstance{}, workerTokenRevoked()
+	}
+	if worker.ReconciliationDrainRequestedAt != nil {
+		return persistence.WorkerInstance{}, problem.New(
+			409,
+			"worker_reconciliation_draining",
+			"The managed Worker is draining for reconciliation and cannot claim new work.",
+		)
 	}
 	if worker.AdministrativeStatus != "active" {
 		return persistence.WorkerInstance{}, problem.New(409, "worker_not_claimable", "Only administratively active workers can claim executions.")

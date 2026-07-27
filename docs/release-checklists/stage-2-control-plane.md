@@ -16,8 +16,8 @@
 - [ ] 当前构建嵌入的全部 Migration 完整、Checksum 未变化；以
       `/ready.checks.schema.expectedVersion` 为 Required Schema Version，不在检查单中写死版本号。
 - [ ] Provider Cursor Key、Credential KMS、Worker Registration Token 来自 Secret Manager。
-- [ ] MinIO/S3 Bucket、Region、CORS、Lifecycle 和 Workload Identity 已验证。
-- [ ] 真实 AWS S3 部署已使用明确授权的测试 Bucket 运行 Live Store；若不适用，记录原因和审批人。
+- [ ] 自建 MinIO/S3-compatible Bucket、Region、CORS、Lifecycle 和受控 Secret/Vault 身份已验证。
+- [ ] 对象存储已在目标自建环境运行 Live Store 验证；不得把 MinIO 结果描述为 AWS S3 支持证据。
 
 ## 2. 自动化验证
 

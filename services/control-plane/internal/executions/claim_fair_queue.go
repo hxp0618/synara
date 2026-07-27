@@ -1,9 +1,12 @@
 package executions
 
 import (
+	"time"
+
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/executionqueue"
 	"github.com/synara-ai/synara/services/control-plane/internal/fairqueue"
 )
 
@@ -21,23 +24,34 @@ import (
 // 500 it is ~25ms. Removing the index, or widening the status set here without
 // widening the index predicate to match, silently reintroduces the 8s claim.
 
-func applyClaimFairShareOrder(tx, claimQuery *gorm.DB, warmPool bool) *gorm.DB {
+func applyClaimFairShareOrder(tx, claimQuery *gorm.DB, warmPool bool, now time.Time) *gorm.DB {
 	activeServiceUnits := tx.Table("agent_executions AS fair_active").
 		Select("COUNT(*)").
 		Where("fair_active.execution_target_id = agent_executions.execution_target_id").
 		Where("fair_active.target_kind = agent_executions.target_kind").
 		Where("fair_active.tenant_id = agent_executions.tenant_id").
 		Where("fair_active.status IN ?", fairqueue.ActiveServiceStatuses())
-	orderSQL := "(?) ASC, agent_executions.queued_at, agent_executions.id"
+	starvationBoundary := now.UTC().Add(-executionqueue.DefaultStarvationThreshold)
+	orderSQL := `CASE WHEN agent_executions.queued_at <= ? THEN 0 ELSE 1 END,
+		(?) ASC,
+		CASE agent_executions.queue_class WHEN 'interactive' THEN 0 WHEN 'automation' THEN 1 ELSE 2 END,
+		agent_executions.queue_priority DESC,
+		agent_executions.queued_at,
+		agent_executions.id`
+	vars := []any{starvationBoundary, activeServiceUnits}
 	if warmPool {
-		orderSQL = `(?) ASC, CASE claim_session.warm_pool_mode
+		orderSQL = `CASE WHEN agent_executions.queued_at <= ? THEN 0 ELSE 1 END,
+			(?) ASC,
+			CASE agent_executions.queue_class WHEN 'interactive' THEN 0 WHEN 'automation' THEN 1 ELSE 2 END,
+			agent_executions.queue_priority DESC,
+			CASE claim_session.warm_pool_mode
 			WHEN 'low-latency' THEN 0
 			WHEN 'balanced' THEN 1
 			ELSE 2 END, agent_executions.queued_at, agent_executions.id`
 	}
 	return claimQuery.Order(clause.OrderBy{Expression: clause.Expr{
 		SQL:                orderSQL,
-		Vars:               []any{activeServiceUnits},
+		Vars:               vars,
 		WithoutParentheses: true,
 	}})
 }

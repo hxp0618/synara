@@ -414,13 +414,21 @@ database_url="postgres://synara:$postgres_password@synara-stage2-postgres.$names
   --from-literal=public-control-plane-url=https://synara-control-plane.test \
   --from-literal=trusted-proxy-cidrs= \
   --from-literal=artifact-bucket=synara-artifacts \
-  --from-literal=aws-region=us-east-1 \
-  --from-literal=credential-kms-key-id=stage2-local-v1 \
+  --from-literal=artifact-region=us-east-1 \
+  --from-literal=artifact-endpoint="http://synara-stage2-minio.$namespace.svc.cluster.local:9000" \
+  --from-literal=artifact-public-endpoint="http://synara-stage2-minio.$namespace.svc.cluster.local:9000" \
+  --from-literal=artifact-use-path-style=true \
+  --from-literal=billing-tariff-operator-tenant-id= \
+  --from-literal=billing-blob-source=disabled \
+  --from-literal=platform-routing-publishers-json='[]' \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 "${kube[@]}" -n "$namespace" create secret generic synara-control-plane-secrets \
   --from-literal=database-url="$database_url" \
   --from-literal=worker-registration-token="$worker_registration_token" \
   --from-literal=provider-cursor-key="$provider_cursor_key" \
+  --from-literal=credential-master-key="$credential_master_key" \
+  --from-literal=artifact-access-key-id="$minio_user" \
+  --from-literal=artifact-secret-access-key="$minio_password" \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 
 overlay_dir="$work_dir/kustomize"
@@ -481,7 +489,6 @@ cleanup_rbac=1
   --from=secret/synara-control-plane-acceptance-env >/dev/null
 "${kube[@]}" -n "$namespace" set env deployment/synara-control-plane \
   SYNARA_CREDENTIAL_KMS_PROVIDER=local \
-  SYNARA_CREDENTIAL_KMS_KEY_ID=stage2-local-v1 \
   SYNARA_ARTIFACT_ENDPOINT=http://synara-stage2-minio.$namespace.svc.cluster.local:9000 \
   SYNARA_ARTIFACT_PUBLIC_ENDPOINT=http://synara-stage2-minio.$namespace.svc.cluster.local:9000 \
   SYNARA_ARTIFACT_USE_PATH_STYLE=true \
@@ -704,6 +711,13 @@ printf 'Kubernetes sensitive-log audit passed\n'
   --as="system:serviceaccount:$namespace:synara-control-plane" >/dev/null
 "${kube[@]}" auth can-i create tokenreviews.authentication.k8s.io \
   --as="system:serviceaccount:$namespace:synara-control-plane" >/dev/null
+"${kube[@]}" auth can-i get priorityclasses.scheduling.k8s.io \
+  --as="system:serviceaccount:$namespace:synara-control-plane" >/dev/null
+if "${kube[@]}" auth can-i create priorityclasses.scheduling.k8s.io \
+  --as="system:serviceaccount:$namespace:synara-control-plane" >/dev/null; then
+  printf 'Control Plane ServiceAccount unexpectedly can create PriorityClasses\n' >&2
+  exit 1
+fi
 if "${kube[@]}" auth can-i delete namespaces \
   --as="system:serviceaccount:$namespace:synara-control-plane" >/dev/null; then
   printf 'Control Plane ServiceAccount unexpectedly can delete Namespaces\n' >&2

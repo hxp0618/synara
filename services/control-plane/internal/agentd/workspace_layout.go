@@ -25,6 +25,9 @@ const (
 	workspaceLayoutV3         = 3
 	workspaceManifestMaxSize  = 32 << 10
 	workspaceProviderStateDir = ".provider-state"
+	// gitMetadataPointerMaxSize bounds the gitfile, `gitdir` and `commondir`
+	// pointers. They hold a single path, so anything larger is not a pointer.
+	gitMetadataPointerMaxSize = 4096
 )
 
 type workspaceLayout struct {
@@ -409,7 +412,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 		return err
 	}
 	gitFile := filepath.Join(layout.Checkout, ".git")
-	gitFileValue, err := readSmallRegularFile(gitFile, 4096)
+	gitFileValue, err := readSmallRegularFile(gitFile, gitMetadataPointerMaxSize)
 	if err != nil {
 		return errors.New("Workspace Git file is unavailable")
 	}
@@ -424,7 +427,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 	if err := validateExistingContainedDirectory(layout.GitDir, worktreeGitDir); err != nil {
 		return err
 	}
-	commonValue, err := readSmallRegularFile(filepath.Join(worktreeGitDir, "commondir"), 4096)
+	commonValue, err := readSmallRegularFile(filepath.Join(worktreeGitDir, "commondir"), gitMetadataPointerMaxSize)
 	if err != nil {
 		return errors.New("Workspace common Git directory is unavailable")
 	}
@@ -432,7 +435,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 	if err != nil || filepath.Clean(commonDir) != filepath.Clean(layout.GitDir) || !sameExistingPath(commonDir, layout.GitDir) {
 		return errors.New("Workspace common Git directory is not private")
 	}
-	checkoutPointer, err := readSmallRegularFile(filepath.Join(worktreeGitDir, "gitdir"), 4096)
+	checkoutPointer, err := readSmallRegularFile(filepath.Join(worktreeGitDir, "gitdir"), gitMetadataPointerMaxSize)
 	if err != nil {
 		return errors.New("Workspace checkout Git pointer is unavailable")
 	}

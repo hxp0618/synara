@@ -1,0 +1,12 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: synara-worker-nonpreempting-v1
+  labels:
+    app.kubernetes.io/name: synara-worker
+    app.kubernetes.io/part-of: synara
+    app.kubernetes.io/managed-by: kustomize
+value: 0
+globalDefault: false
+preemptionPolicy: Never
+description: Default non-preempting scheduling class for Synara Worker Pods.

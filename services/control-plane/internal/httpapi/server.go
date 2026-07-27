@@ -37,6 +37,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
+	"github.com/synara-ai/synara/services/control-plane/internal/poolautoscaling"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
@@ -86,6 +87,7 @@ type Server struct {
 	credentialBindings *credentialbindings.Service
 	workerReleases     *workerreleases.Service
 	placement          *placement.Service
+	poolAutoscaling    *poolautoscaling.Service
 	routing            *routing.Service
 	platformRouting    *routing.PlatformAuthorityService
 	schedulingPolicies *schedulingpolicy.Service
@@ -170,7 +172,8 @@ func New(
 		artifacts: artifactService, memories: memories.NewService(db), lifecyclePolicies: lifecyclePolicies,
 		quotas:      quotaService,
 		credentials: credentialService, credentialBindings: credentialbindings.NewService(db, credentialService),
-		workerReleases: workerreleases.NewService(db), placement: placement.NewService(db), routing: routing.NewService(db),
+		workerReleases: workerreleases.NewService(db), placement: placement.NewService(db),
+		poolAutoscaling: poolautoscaling.NewService(db), routing: routing.NewService(db),
 		platformRouting:    platformRouting,
 		schedulingPolicies: schedulingpolicy.NewService(db),
 		retention:          retentionService, metrics: metrics, outbox: outboxService,
@@ -269,10 +272,13 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.listWorkerPools)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.createWorkerPool)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}", server.requireAuth(http.HandlerFunc(server.updateWorkerPool)))
+	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.getWorkerPoolAutoscaling)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.putWorkerPoolAutoscaling)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/placement-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionPlacementPolicy)))
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.listExecutionTargetGroups)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.createExecutionTargetGroup)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members", server.requireAuth(http.HandlerFunc(server.addExecutionTargetGroupMember)))
+	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members/{targetGroupMemberID}", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetGroupMember)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation", server.requireAuth(http.HandlerFunc(server.observeExecutionTargetHealth)))
 	mux.Handle("GET /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.listLocationOutages)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.observeLocationOutage)))
@@ -280,11 +286,14 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireAuth(http.HandlerFunc(server.getExecutionTarget)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProviderPolicy)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProcessContainmentPolicy)))
+	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable", server.requireAuth(http.HandlerFunc(server.disableManagedKubernetesExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install", server.requireAuth(http.HandlerFunc(server.installSSHExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade", server.requireAuth(http.HandlerFunc(server.upgradeSSHExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/revoke", server.requireAuth(http.HandlerFunc(server.revokeSSHExecutionTarget)))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.getTenantQuota)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.putTenantQuota)))
+	mux.Handle("GET /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.getScopedExecutionQuota)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.putScopedExecutionQuota)))
 	mux.Handle("GET /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.listBillingTariffs)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.createBillingTariff)))
 	mux.Handle("GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.getBillingSharedTargetLedgerCoverage)))

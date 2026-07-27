@@ -20,7 +20,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
+	"github.com/synara-ai/synara/services/control-plane/internal/executionqueue"
 	"github.com/synara-ai/synara/services/control-plane/internal/fairqueue"
+	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
@@ -98,55 +100,71 @@ type KubernetesReconcilerConfig struct {
 	PodPendingFailureThreshold         time.Duration
 	PublishRoutingHealth               ManagedKubernetesRoutingHealthObserver
 	PublishWarmCapacity                ManagedKubernetesWarmCapacityObserver
+	PublishTargetCapacity              ManagedKubernetesTargetCapacityObserver
 	Observer                           BackgroundObserver
 	ResolveImagePull                   ImagePullCredentialResolver
 }
 
 type kubernetesTargetConfiguration struct {
-	APIServer                     string            `json:"apiServer"`
-	BearerToken                   string            `json:"bearerToken"`
-	BearerTokenFile               string            `json:"bearerTokenFile"`
-	CACertificate                 string            `json:"caCertificate"`
-	CAFile                        string            `json:"caFile"`
-	Namespace                     string            `json:"namespace"`
-	ManageNamespace               *bool             `json:"manageNamespace"`
-	ServiceAccountName            string            `json:"serviceAccountName"`
-	Image                         string            `json:"image"`
-	ImagePullPolicy               string            `json:"imagePullPolicy"`
-	ImagePullSecrets              []string          `json:"imagePullSecrets"`
-	ControlPlaneURL               string            `json:"controlPlaneUrl"`
-	AllowInsecureControlPlane     bool              `json:"allowInsecureControlPlane"`
-	RunnerCommand                 []string          `json:"runnerCommand"`
-	MaxActivePods                 int               `json:"maxActivePods"`
-	EgressCIDRs                   []string          `json:"egressCidrs"`
-	CPURequest                    string            `json:"cpuRequest"`
-	CPULimit                      string            `json:"cpuLimit"`
-	MemoryRequest                 string            `json:"memoryRequest"`
-	MemoryLimit                   string            `json:"memoryLimit"`
-	EphemeralStorageRequest       string            `json:"ephemeralStorageRequest"`
-	EphemeralStorageLimit         string            `json:"ephemeralStorageLimit"`
-	WorkspaceSizeLimit            string            `json:"workspaceSizeLimit"`
-	GitCachePersistentVolumeClaim string            `json:"gitCachePersistentVolumeClaim"`
-	QuotaCPURequests              string            `json:"quotaCpuRequests"`
-	QuotaCPULimits                string            `json:"quotaCpuLimits"`
-	QuotaMemoryRequests           string            `json:"quotaMemoryRequests"`
-	QuotaMemoryLimits             string            `json:"quotaMemoryLimits"`
-	QuotaEphemeralStorage         string            `json:"quotaEphemeralStorage"`
-	NodeSelector                  map[string]string `json:"nodeSelector"`
-	Tolerations                   []map[string]any  `json:"tolerations"`
-	RequireNodeSpread             bool              `json:"requireNodeSpread"`
+	APIServer                       string            `json:"apiServer"`
+	BearerToken                     string            `json:"bearerToken"`
+	BearerTokenFile                 string            `json:"bearerTokenFile"`
+	CACertificate                   string            `json:"caCertificate"`
+	CAFile                          string            `json:"caFile"`
+	Namespace                       string            `json:"namespace"`
+	ManageNamespace                 *bool             `json:"manageNamespace"`
+	ServiceAccountName              string            `json:"serviceAccountName"`
+	Image                           string            `json:"image"`
+	ImagePullPolicy                 string            `json:"imagePullPolicy"`
+	ImagePullSecrets                []string          `json:"imagePullSecrets"`
+	ControlPlaneURL                 string            `json:"controlPlaneUrl"`
+	AllowInsecureControlPlane       bool              `json:"allowInsecureControlPlane"`
+	RunnerCommand                   []string          `json:"runnerCommand"`
+	MaxActivePods                   int               `json:"maxActivePods"`
+	EgressCIDRs                     []string          `json:"egressCidrs"`
+	EgressTCPPorts                  []int             `json:"egressTcpPorts"`
+	PrivateNetworkCIDRs             []string          `json:"privateNetworkCidrs"`
+	ProviderHTTPProxy               string            `json:"providerHttpProxy"`
+	ProviderHTTPSProxy              string            `json:"providerHttpsProxy"`
+	ProviderAllProxy                string            `json:"providerAllProxy"`
+	ProviderNoProxy                 []string          `json:"providerNoProxy"`
+	CPURequest                      string            `json:"cpuRequest"`
+	CPULimit                        string            `json:"cpuLimit"`
+	MemoryRequest                   string            `json:"memoryRequest"`
+	MemoryLimit                     string            `json:"memoryLimit"`
+	EphemeralStorageRequest         string            `json:"ephemeralStorageRequest"`
+	EphemeralStorageLimit           string            `json:"ephemeralStorageLimit"`
+	WorkspaceSizeLimit              string            `json:"workspaceSizeLimit"`
+	GitCachePersistentVolumeClaim   string            `json:"gitCachePersistentVolumeClaim"`
+	QuotaCPURequests                string            `json:"quotaCpuRequests"`
+	QuotaCPULimits                  string            `json:"quotaCpuLimits"`
+	QuotaMemoryRequests             string            `json:"quotaMemoryRequests"`
+	QuotaMemoryLimits               string            `json:"quotaMemoryLimits"`
+	QuotaEphemeralStorage           string            `json:"quotaEphemeralStorage"`
+	GPUResourceName                 string            `json:"gpuResourceName"`
+	GPURequest                      string            `json:"gpuRequest"`
+	QuotaGPURequests                string            `json:"quotaGpuRequests"`
+	NodeSelector                    map[string]string `json:"nodeSelector"`
+	Tolerations                     []map[string]any  `json:"tolerations"`
+	RequireNodeSpread               bool              `json:"requireNodeSpread"`
 }
 
 type kubernetesPod struct {
-	Name        string
-	UID         string
-	Phase       string
-	Reason      string
-	CreatedAt   time.Time
-	Labels      map[string]string
-	Annotations map[string]string
-	Conditions  []kubernetesPodCondition
-	Containers  []kubernetesContainerStatus
+	Name             string
+	UID              string
+	Phase            string
+	Reason           string
+	CreatedAt        time.Time
+	Labels           map[string]string
+	Annotations      map[string]string
+	Conditions       []kubernetesPodCondition
+	Containers       []kubernetesContainerStatus
+	ResourceRequests map[string]string
+}
+
+type kubernetesResourceQuota struct {
+	Hard map[string]string
+	Used map[string]string
 }
 
 type kubernetesPodCondition struct {
@@ -177,6 +195,8 @@ type KubernetesPodTerminalObservation struct {
 
 type kubernetesClient interface {
 	Apply(context.Context, string, map[string]any) error
+	GetPriorityClass(context.Context, string) (kubernetesPriorityClass, error)
+	GetResourceQuota(context.Context, string, string) (kubernetesResourceQuota, error)
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
 	ListPodUIDs(context.Context, string) ([]string, error)
 	DeletePod(context.Context, string, string, string) error
@@ -241,7 +261,7 @@ func (r *KubernetesReconciler) Run(ctx context.Context) {
 }
 
 func (r *KubernetesReconciler) ReconcileOnce(ctx context.Context) error {
-	release, acquired, err := persistence.TryAdvisoryLock(ctx, r.targets.db, "synara:kubernetes-execution-reconciler")
+	release, acquired, err := r.targets.tryKubernetesReconcilerLock(ctx)
 	if err != nil {
 		return problem.Wrap(500, "kubernetes_reconciler_lock_failed", "Kubernetes reconciler coordination failed.", err)
 	}
@@ -274,6 +294,8 @@ type kubernetesExecution struct {
 	OrganizationID           uuid.UUID  `gorm:"column:organization_id"`
 	ProjectID                uuid.UUID  `gorm:"column:project_id"`
 	SessionID                uuid.UUID  `gorm:"column:session_id"`
+	QueueClass               string     `gorm:"column:queue_class"`
+	QueuePriority            int        `gorm:"column:queue_priority"`
 	AbsoluteExpiresAt        *time.Time `gorm:"column:absolute_expires_at"`
 	Status                   string     `gorm:"column:status"`
 	Generation               int64      `gorm:"column:generation"`
@@ -324,6 +346,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	}
 	acknowledgedReservations := make(map[routing.ReservationIdentity]struct{})
 	var warmCapacityObservations []ManagedKubernetesWarmCapacityObservation
+	var targetCapacityObservation *ManagedKubernetesTargetCapacityObservation
 	defer func() {
 		if ctx.Err() != nil || target.TenantID == nil {
 			return
@@ -342,6 +365,12 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				if publishErr := r.config.PublishWarmCapacity(ctx, observation); publishErr != nil {
 					err = errors.Join(err, publishErr)
 				}
+			}
+		}
+		if reconcileSucceeded && r.config.PublishTargetCapacity != nil && targetCapacityObservation != nil {
+			targetCapacityObservation.ObservedAt = observedAt
+			if publishErr := r.config.PublishTargetCapacity(ctx, *targetCapacityObservation); publishErr != nil {
+				err = errors.Join(err, publishErr)
 			}
 		}
 	}()
@@ -641,6 +670,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		return err
 	}
 	readyWarmCapacity := make(map[kubernetesWarmCapacityKey]int)
+	priorityClassValidation := make(map[string]error)
 	warmDemandEvictionCandidates := make([]kubernetesWarmDemandEvictionCandidate, 0)
 	for _, observed := range unleasedWarmPods {
 		plan, found := validationWarmPlansByName[observed.Pod.Name]
@@ -849,6 +879,10 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
 				continue
 			}
+			if err := validateKubernetesWorkerPodPriorityClass(ctx, client, pod, priorityClassValidation); err != nil {
+				executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
+				continue
+			}
 			path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
 			if err := client.Apply(ctx, path, pod); err != nil {
 				executionFailures = append(executionFailures, fmt.Errorf(
@@ -908,6 +942,10 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		if !kubernetesExecutionWithinAbsoluteLifetime(execution, r.now()) {
 			continue
 		}
+		if err := validateKubernetesWorkerPodPriorityClass(ctx, client, pod, priorityClassValidation); err != nil {
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
+		}
 		path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
 		applyStartedAt := r.now()
 		applyErr := client.Apply(ctx, path, pod)
@@ -954,6 +992,19 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		// health observation published by the deferred hook stays accurate;
 		// only the per-Execution placements failed.
 		return errors.Join(executionFailures...)
+	}
+	if r.config.PublishTargetCapacity != nil {
+		quota, quotaErr := client.GetResourceQuota(
+			ctx, configuration.Namespace, kubernetesResourceQuotaName(target.ID),
+		)
+		if quotaErr != nil {
+			return problem.Wrap(502, "kubernetes_resource_quota_load_failed", "Kubernetes ResourceQuota capacity could not be loaded.", quotaErr)
+		}
+		observation, capacityErr := kubernetesTargetCapacityFromQuota(*target.TenantID, target.ID, configuration, quota)
+		if capacityErr != nil {
+			return capacityErr
+		}
+		targetCapacityObservation = &observation
 	}
 	availableCapacity := configuration.MaxActivePods
 	healthObservation.Status = routing.HealthHealthy
@@ -1110,6 +1161,8 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 		OrganizationID               uuid.UUID  `gorm:"column:organization_id"`
 		ProjectID                    uuid.UUID  `gorm:"column:project_id"`
 		SessionID                    uuid.UUID  `gorm:"column:session_id"`
+		QueueClass                   string     `gorm:"column:queue_class"`
+		QueuePriority                int        `gorm:"column:queue_priority"`
 		AbsoluteExpiresAt            *time.Time `gorm:"column:absolute_expires_at"`
 		Status                       string     `gorm:"column:status"`
 		Generation                   int64      `gorm:"column:generation"`
@@ -1130,7 +1183,8 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 	}
 	var rows []executionRow
 	err := r.targets.db.WithContext(ctx).Table("agent_executions AS e").
-		Select(`e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, s.absolute_expires_at, e.status, e.generation, e.queued_at,
+		Select(`e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, e.queue_class, e.queue_priority,
+			s.absolute_expires_at, e.status, e.generation, e.queued_at,
 			e.warm_pool_mode_snapshot,
 			e.worker_pool_id, e.worker_pool_version, e.capacity_class,
 			e.worker_release_revision_id, e.worker_release_channel,
@@ -1155,7 +1209,8 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 	for _, row := range rows {
 		item := kubernetesExecution{
 			ID: row.ID, TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
-			SessionID: row.SessionID, AbsoluteExpiresAt: row.AbsoluteExpiresAt, Status: row.Status,
+			SessionID: row.SessionID, QueueClass: row.QueueClass, QueuePriority: row.QueuePriority,
+			AbsoluteExpiresAt: row.AbsoluteExpiresAt, Status: row.Status,
 			Generation: row.Generation, QueuedAt: row.QueuedAt, WorkerReleaseRevisionID: row.WorkerReleaseRevisionID,
 			WorkerReleaseChannel: row.WorkerReleaseChannel, WorkerReleaseImageDigest: row.WorkerReleaseImageDigest,
 			WarmPoolModeSnapshot: row.WarmPoolModeSnapshot,
@@ -1187,7 +1242,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 		}
 		items = append(items, item)
 	}
-	items, err = orderKubernetesExecutionsForService(items)
+	items, err = orderKubernetesExecutionsForService(items, r.now())
 	if err != nil {
 		return nil, problem.Wrap(
 			500,
@@ -1199,7 +1254,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 	return items, nil
 }
 
-func orderKubernetesExecutionsForService(items []kubernetesExecution) ([]kubernetesExecution, error) {
+func orderKubernetesExecutionsForService(items []kubernetesExecution, now time.Time) ([]kubernetesExecution, error) {
 	activeServiceUnits := make(map[uuid.UUID]int64)
 	queuedCandidates := make([]fairqueue.Candidate, 0, len(items))
 	queuedByID := make(map[uuid.UUID]kubernetesExecution, len(items))
@@ -1207,8 +1262,8 @@ func orderKubernetesExecutionsForService(items []kubernetesExecution) ([]kuberne
 	for _, item := range items {
 		if fairqueue.IsQueuedStatus(item.Status) {
 			queuedCandidates = append(queuedCandidates, fairqueue.Candidate{
-				TenantID: item.TenantID,
-				ID:       item.ID,
+				TenantID: item.TenantID, ID: item.ID,
+				QueueClass: item.QueueClass, QueuePriority: item.QueuePriority,
 				QueuedAt: item.QueuedAt,
 			})
 			queuedByID[item.ID] = item
@@ -1219,7 +1274,9 @@ func orderKubernetesExecutionsForService(items []kubernetesExecution) ([]kuberne
 			return nil, fairqueue.ErrInvalidCandidate
 		}
 	}
-	orderedCandidates, err := fairqueue.Order(queuedCandidates, activeServiceUnits)
+	orderedCandidates, err := fairqueue.OrderWithPolicy(queuedCandidates, activeServiceUnits, fairqueue.Policy{
+		Now: now, StarvationThreshold: executionqueue.DefaultStarvationThreshold,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1237,22 +1294,36 @@ func orderKubernetesExecutionsForService(items []kubernetesExecution) ([]kuberne
 
 func (r *KubernetesReconciler) loadKubernetesWarmPools(ctx context.Context, targetID uuid.UUID) ([]kubernetesWarmPool, error) {
 	type warmPoolRow struct {
-		ID                 uuid.UUID `gorm:"column:id"`
-		Version            int64     `gorm:"column:version"`
-		CapacityClass      string    `gorm:"column:capacity_class"`
-		ClusterID          string    `gorm:"column:cluster_id"`
-		Namespace          string    `gorm:"column:namespace"`
-		DesiredIdleUnits   int       `gorm:"column:desired_idle_units"`
-		MinIdleUnits       int       `gorm:"column:min_idle_units"`
-		MaxActiveUnits     int       `gorm:"column:max_active_units"`
-		SchedulingTemplate string    `gorm:"column:scheduling_template"`
-		Status             string    `gorm:"column:status"`
+		ID                         uuid.UUID `gorm:"column:id"`
+		Version                    int64     `gorm:"column:version"`
+		CapacityClass              string    `gorm:"column:capacity_class"`
+		ClusterID                  string    `gorm:"column:cluster_id"`
+		Namespace                  string    `gorm:"column:namespace"`
+		ConfiguredDesiredIdleUnits int       `gorm:"column:configured_desired_idle_units"`
+		DesiredIdleUnits           int       `gorm:"column:effective_desired_idle_units"`
+		MinIdleUnits               int       `gorm:"column:min_idle_units"`
+		MaxActiveUnits             int       `gorm:"column:max_active_units"`
+		SchedulingTemplate         string    `gorm:"column:scheduling_template"`
+		Status                     string    `gorm:"column:status"`
 	}
 	var rows []warmPoolRow
-	err := r.targets.db.WithContext(ctx).Table("worker_pools").
-		Select("id, version, capacity_class, cluster_id, namespace, desired_idle_units, min_idle_units, max_active_units, scheduling_template, status").
-		Where("execution_target_id = ? AND mode = ?", targetID, placement.PoolModeWarm).
-		Order("capacity_class, id").
+	err := r.targets.db.WithContext(ctx).Table("worker_pools AS pool").
+		Select(`pool.id, pool.version, pool.capacity_class, pool.cluster_id, pool.namespace,
+			pool.desired_idle_units AS configured_desired_idle_units,
+			CASE
+			  WHEN autoscaling.enabled = ?
+			   AND autoscaling_state.policy_version = autoscaling.version
+			  THEN autoscaling_state.desired_idle_units
+			  ELSE pool.desired_idle_units
+			END AS effective_desired_idle_units,
+			pool.min_idle_units, pool.max_active_units, pool.scheduling_template, pool.status`, true).
+		Joins(`LEFT JOIN worker_pool_autoscaling_policies AS autoscaling
+		  ON autoscaling.worker_pool_id = pool.id AND autoscaling.worker_pool_version = pool.version`).
+		Joins(`LEFT JOIN worker_pool_autoscaling_state AS autoscaling_state
+		  ON autoscaling_state.worker_pool_id = autoscaling.worker_pool_id
+		 AND autoscaling_state.worker_pool_version = autoscaling.worker_pool_version`).
+		Where("pool.execution_target_id = ? AND pool.mode = ?", targetID, placement.PoolModeWarm).
+		Order("pool.capacity_class, pool.id").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, problem.Wrap(500, "kubernetes_worker_pools_load_failed", "Kubernetes warm Worker pools could not be loaded.", err)
@@ -1268,7 +1339,8 @@ func (r *KubernetesReconciler) loadKubernetesWarmPools(ctx context.Context, targ
 		items = append(items, kubernetesWarmPool{
 			ID: row.ID, Version: row.Version, CapacityClass: row.CapacityClass,
 			ClusterID: row.ClusterID, Namespace: row.Namespace,
-			DesiredIdleUnits: row.DesiredIdleUnits, MinIdleUnits: row.MinIdleUnits, MaxActiveUnits: row.MaxActiveUnits,
+			ConfiguredDesiredIdleUnits: row.ConfiguredDesiredIdleUnits,
+			DesiredIdleUnits:           row.DesiredIdleUnits, MinIdleUnits: row.MinIdleUnits, MaxActiveUnits: row.MaxActiveUnits,
 			SchedulingTemplate: template, Status: row.Status,
 		})
 	}
@@ -1611,8 +1683,10 @@ func (r *KubernetesReconciler) loadConfiguration(target persistence.ExecutionTar
 }
 
 var (
-	kubernetesNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
-	quantityPattern       = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?(?:m|Ki|Mi|Gi|Ti|Pi|Ei)?$`)
+	kubernetesNamePattern                 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	quantityPattern                       = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?(?:m|Ki|Mi|Gi|Ti|Pi|Ei)?$`)
+	kubernetesExtendedResourceNamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?/[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
+	kubernetesPositiveIntegerPattern      = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
 
 func (r *KubernetesReconciler) normalizeKubernetes(
@@ -1661,6 +1735,9 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 		configuration.MaxActivePods = 50
 	}
 	configuration.GitCachePersistentVolumeClaim = strings.TrimSpace(configuration.GitCachePersistentVolumeClaim)
+	configuration.GPUResourceName = strings.TrimSpace(configuration.GPUResourceName)
+	configuration.GPURequest = strings.TrimSpace(configuration.GPURequest)
+	configuration.QuotaGPURequests = strings.TrimSpace(configuration.QuotaGPURequests)
 	if !kubernetesNamePattern.MatchString(configuration.Namespace) || len(configuration.Namespace) > 63 ||
 		!kubernetesNamePattern.MatchString(configuration.ServiceAccountName) || len(configuration.ServiceAccountName) > 63 ||
 		(configuration.GitCachePersistentVolumeClaim != "" &&
@@ -1686,9 +1763,84 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 		return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes maxActivePods and egressCidrs are required and must be valid.")
 	}
 	for _, cidr := range configuration.EgressCIDRs {
-		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+		_, candidate, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
 			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes egressCidrs contains an invalid CIDR.")
 		}
+		for _, forbiddenCIDR := range kubernetesForbiddenEgressCIDRs {
+			_, forbidden, _ := net.ParseCIDR(forbiddenCIDR)
+			if cidrContainsCIDR(forbidden, candidate) {
+				return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_egress_policy", "Kubernetes egressCidrs cannot directly allow link-local or metadata endpoints.")
+			}
+		}
+	}
+	if _, err := gitpolicy.ParsePrivateNetworkCIDRs(configuration.PrivateNetworkCIDRs); err != nil {
+		return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_private_network_policy", "Kubernetes privateNetworkCidrs contains a non-private or unsafe CIDR.")
+	}
+	for _, privateCIDR := range configuration.PrivateNetworkCIDRs {
+		_, privateNetwork, _ := net.ParseCIDR(privateCIDR)
+		covered := false
+		for _, egressCIDR := range configuration.EgressCIDRs {
+			_, egressNetwork, _ := net.ParseCIDR(strings.TrimSpace(egressCIDR))
+			if cidrContainsCIDR(egressNetwork, privateNetwork) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_private_network_policy", "Every Kubernetes privateNetworkCidrs entry must be covered by egressCidrs.")
+		}
+	}
+	explicitEgressPorts := len(configuration.EgressTCPPorts) > 0
+	ports := make(map[int]struct{}, len(configuration.EgressTCPPorts)+4)
+	for _, port := range configuration.EgressTCPPorts {
+		if port < 1 || port > 65535 {
+			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_egress_ports", "Kubernetes egressTcpPorts contains an invalid port.")
+		}
+		ports[port] = struct{}{}
+	}
+	controlPlanePort := 443
+	if controlPlaneURL.Scheme == "http" {
+		controlPlanePort = 80
+	}
+	if parsedPort := controlPlaneURL.Port(); parsedPort != "" {
+		controlPlanePort, _ = strconv.Atoi(parsedPort)
+	}
+	ports[controlPlanePort] = struct{}{}
+	for field, allowedSchemes := range map[*string]map[string]struct{}{
+		&configuration.ProviderHTTPProxy:  {"http": {}, "https": {}},
+		&configuration.ProviderHTTPSProxy: {"http": {}, "https": {}},
+		&configuration.ProviderAllProxy:   {"http": {}, "https": {}, "socks5": {}},
+	} {
+		normalized, proxyPort, proxyErr := normalizeKubernetesProviderProxy(*field, allowedSchemes)
+		if proxyErr != nil {
+			return kubernetesTargetConfiguration{}, proxyErr
+		}
+		*field = normalized
+		if proxyPort > 0 {
+			ports[proxyPort] = struct{}{}
+		}
+	}
+	if !explicitEgressPorts {
+		// HTTPS package/registry/provider APIs and SSH Git are the portable
+		// default. Operators can replace this set explicitly.
+		ports[443] = struct{}{}
+		ports[22] = struct{}{}
+	}
+	configuration.EgressTCPPorts = configuration.EgressTCPPorts[:0]
+	for port := range ports {
+		configuration.EgressTCPPorts = append(configuration.EgressTCPPorts, port)
+	}
+	sort.Ints(configuration.EgressTCPPorts)
+	if len(configuration.ProviderNoProxy) > 64 {
+		return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes providerNoProxy exceeds 64 entries.")
+	}
+	for index := range configuration.ProviderNoProxy {
+		value := strings.TrimSpace(configuration.ProviderNoProxy[index])
+		if value == "" || value == "*" || len(value) > 253 || strings.ContainsAny(value, "\r\n\t\x00") {
+			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes providerNoProxy contains an invalid entry.")
+		}
+		configuration.ProviderNoProxy[index] = value
 	}
 	for _, value := range configuration.RunnerCommand {
 		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
@@ -1700,12 +1852,59 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 		configuration.EphemeralStorageRequest, configuration.EphemeralStorageLimit, configuration.WorkspaceSizeLimit,
 		configuration.QuotaCPURequests, configuration.QuotaCPULimits, configuration.QuotaMemoryRequests,
 		configuration.QuotaMemoryLimits, configuration.QuotaEphemeralStorage,
+		configuration.GPURequest, configuration.QuotaGPURequests,
 	} {
 		if value != "" && !quantityPattern.MatchString(value) {
 			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes resource quantities are invalid.")
 		}
 	}
+	hasGPUConfiguration := configuration.GPUResourceName != "" || configuration.GPURequest != "" || configuration.QuotaGPURequests != ""
+	if hasGPUConfiguration {
+		if !kubernetesExtendedResourceNamePattern.MatchString(configuration.GPUResourceName) ||
+			!kubernetesPositiveIntegerPattern.MatchString(configuration.GPURequest) ||
+			!kubernetesPositiveIntegerPattern.MatchString(configuration.QuotaGPURequests) {
+			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_gpu_configuration", "Kubernetes GPU capacity requires gpuResourceName, gpuRequest, and quotaGpuRequests.")
+		}
+		request, requestErr := parseKubernetesRequestedQuantity(configuration.GPURequest, 1)
+		quota, quotaErr := parseKubernetesRequestedQuantity(configuration.QuotaGPURequests, 1)
+		if requestErr != nil || quotaErr != nil || request == nil || quota == nil || *request > *quota {
+			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_gpu_configuration", "Kubernetes GPU request must be a positive integer no greater than quotaGpuRequests.")
+		}
+	}
 	return configuration, nil
+}
+
+func normalizeKubernetesProviderProxy(raw string, allowedSchemes map[string]struct{}) (string, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", 0, nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Opaque != "" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy must be a credential-free HTTP(S) or SOCKS5 authority.")
+	}
+	if _, ok := allowedSchemes[strings.ToLower(parsed.Scheme)]; !ok {
+		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy scheme is unsupported.")
+	}
+	if _, err := gitpolicy.NormalizeHostname(parsed.Hostname()); err != nil {
+		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy host is invalid.")
+	}
+	port := 0
+	if parsed.Port() != "" {
+		port, err = strconv.Atoi(parsed.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy port is invalid.")
+		}
+	} else if parsed.Scheme == "http" {
+		port = 80
+	} else if parsed.Scheme == "https" {
+		port = 443
+	} else {
+		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "SOCKS5 Provider proxy requires an explicit port.")
+	}
+	parsed.Path = ""
+	return parsed.String(), port, nil
 }
 
 func (r *KubernetesReconciler) resolveImagePullCredential(
