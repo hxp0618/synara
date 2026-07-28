@@ -108,8 +108,15 @@ target acceptance:
 - `synara.io/provider-transport=vsock-v2`;
 - `synara.io/isolation-profile=microvm-isolated-v1`.
 
-These are attestation outputs, not operator configuration shortcuts. Manually
-adding them does not constitute acceptance evidence. The attesting component
+Static labels are insufficient. The same Node must also carry a non-nil UUID in
+`synara.io/host-supervisor-instance` and an RFC3339Nano timestamp in
+`synara.io/host-supervisor-observed-at`. The heartbeat is accepted for 45
+seconds with at most five seconds of future clock skew. A stopped or partitioned
+supervisor therefore expires without depending on best-effort label cleanup.
+
+These labels and short-lived annotations are attestation outputs, not operator
+configuration shortcuts. Manually adding static labels does not constitute
+acceptance evidence. The attesting component
 must prove the host supervisor, guest identity fence, vsock peer binding,
 credential non-entry into the guest, and the negative isolation suite. Current
 vk-cocoon v0.3.5 provides the VM/exec/logs substrate but does not implement this

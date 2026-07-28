@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -48,14 +49,19 @@ type kubernetesSandboxAcceptanceObservation struct {
 }
 
 const (
-	kubernetesCocoonKVMReadyLabel          = "sandbox.cocoonstack.io/kvm-ready"
-	kubernetesCocoonHostSupervisorLabel    = "synara.io/host-supervisor"
-	kubernetesCocoonProviderTransportLabel = "synara.io/provider-transport"
-	kubernetesCocoonIsolationProfileLabel  = "synara.io/isolation-profile"
+	kubernetesCocoonKVMReadyLabel                  = "sandbox.cocoonstack.io/kvm-ready"
+	kubernetesCocoonHostSupervisorLabel            = "synara.io/host-supervisor"
+	kubernetesCocoonProviderTransportLabel         = "synara.io/provider-transport"
+	kubernetesCocoonIsolationProfileLabel          = "synara.io/isolation-profile"
+	kubernetesCocoonSupervisorInstanceAnnotation   = "synara.io/host-supervisor-instance"
+	kubernetesCocoonSupervisorObservedAtAnnotation = "synara.io/host-supervisor-observed-at"
 
 	kubernetesCocoonHostSupervisorV1    = "v1"
 	kubernetesCocoonProviderTransportV2 = "vsock-v2"
 	kubernetesCocoonIsolationProfileV1  = "microvm-isolated-v1"
+
+	kubernetesCocoonSupervisorHeartbeatMaxAge     = 45 * time.Second
+	kubernetesCocoonSupervisorHeartbeatFutureSkew = 5 * time.Second
 )
 
 type kubernetesSandboxClient interface {
@@ -354,7 +360,8 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	var nodes struct {
 		Items []struct {
 			Metadata struct {
-				Labels map[string]string `json:"labels"`
+				Labels      map[string]string `json:"labels"`
+				Annotations map[string]string `json:"annotations"`
 			} `json:"metadata"`
 			Status struct {
 				Conditions []struct {
@@ -368,6 +375,7 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	if err := c.do(ctx, http.MethodGet, "/api/v1/nodes?"+query.Encode(), nil, &nodes, http.StatusOK); err != nil {
 		return kubernetesSandboxAcceptanceObservation{}, err
 	}
+	observedAt := time.Now().UTC()
 	for _, node := range nodes.Items {
 		ready := false
 		for _, condition := range node.Status.Conditions {
@@ -384,7 +392,8 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 			observation.KVMRuntimeReady = true
 			if node.Metadata.Labels[kubernetesCocoonHostSupervisorLabel] == kubernetesCocoonHostSupervisorV1 &&
 				node.Metadata.Labels[kubernetesCocoonProviderTransportLabel] == kubernetesCocoonProviderTransportV2 &&
-				node.Metadata.Labels[kubernetesCocoonIsolationProfileLabel] == kubernetesCocoonIsolationProfileV1 {
+				node.Metadata.Labels[kubernetesCocoonIsolationProfileLabel] == kubernetesCocoonIsolationProfileV1 &&
+				kubernetesCocoonSupervisorHeartbeatReady(node.Metadata.Annotations, observedAt) {
 				observation.HostSupervisorReady = true
 				observation.FencedVSockReady = true
 				observation.GuestIsolationReady = true
@@ -392,6 +401,19 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		}
 	}
 	return observation, nil
+}
+
+func kubernetesCocoonSupervisorHeartbeatReady(annotations map[string]string, observedAt time.Time) bool {
+	instanceID, err := uuid.Parse(strings.TrimSpace(annotations[kubernetesCocoonSupervisorInstanceAnnotation]))
+	if err != nil || instanceID == uuid.Nil {
+		return false
+	}
+	heartbeatAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(annotations[kubernetesCocoonSupervisorObservedAtAnnotation]))
+	if err != nil {
+		return false
+	}
+	age := observedAt.Sub(heartbeatAt)
+	return age >= -kubernetesCocoonSupervisorHeartbeatFutureSkew && age <= kubernetesCocoonSupervisorHeartbeatMaxAge
 }
 
 func kubernetesSandboxAcceptanceRuntimeImage(
