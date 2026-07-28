@@ -33,6 +33,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	TemplateIdentity               string
 	TemplateRuntime                string
 	TemplateAgentdImage            string
+	TemplateSandboxRuntimeImage    string
 	AssignedExecutionFieldRefReady bool
 	WarmPoolTemplateReady          bool
 	WarmPoolReady                  bool
@@ -251,7 +252,10 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	observation.WarmPoolReady = pool.Status.ReadyReplicas >= pool.Spec.Replicas
 	observation.WarmPoolDesiredReplicas = pool.Spec.Replicas
 	observation.WarmPoolUpdateStrategy = strings.TrimSpace(pool.Spec.UpdateStrategy.Type)
-	for _, container := range template.Spec.PodTemplate.Spec.Containers {
+	for index, container := range template.Spec.PodTemplate.Spec.Containers {
+		if index == 0 {
+			observation.TemplateSandboxRuntimeImage = strings.TrimSpace(container.Image)
+		}
 		if strings.TrimSpace(container.Name) == "agentd" {
 			observation.TemplateAgentdImage = strings.TrimSpace(container.Image)
 			break
@@ -298,13 +302,20 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		}
 		ownedPoolMembers++
 		image := ""
-		for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		for index, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+			if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+				if index == 0 {
+					image = strings.TrimSpace(container.Image)
+				}
+				break
+			}
 			if strings.TrimSpace(container.Name) == "agentd" {
 				image = strings.TrimSpace(container.Image)
 				break
 			}
 		}
-		if image == "" || image != observation.TemplateAgentdImage {
+		templateImage := kubernetesSandboxAcceptanceRuntimeImage(configuration.AllocationBackend, observation)
+		if image == "" || image != templateImage {
 			poolMembersFresh = false
 		}
 	}
@@ -381,6 +392,23 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		}
 	}
 	return observation, nil
+}
+
+func kubernetesSandboxAcceptanceRuntimeImage(
+	backend string,
+	observation kubernetesSandboxAcceptanceObservation,
+) string {
+	if backend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		return strings.TrimSpace(observation.TemplateSandboxRuntimeImage)
+	}
+	return strings.TrimSpace(observation.TemplateAgentdImage)
+}
+
+func kubernetesSandboxPodRuntimeImage(backend string, pod kubernetesPod) string {
+	if backend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		return strings.TrimSpace(pod.SandboxRuntimeImage)
+	}
+	return strings.TrimSpace(pod.AgentdImage)
 }
 
 func (c *kubernetesHTTPClient) sandboxCRDReady(ctx context.Context, name string) (bool, error) {

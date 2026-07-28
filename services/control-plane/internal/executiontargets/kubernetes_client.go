@@ -262,7 +262,11 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			}
 			resourceRequests := map[string]string{}
 			agentdImage := ""
-			for _, container := range item.Spec.Containers {
+			sandboxRuntimeImage := ""
+			for index, container := range item.Spec.Containers {
+				if index == 0 {
+					sandboxRuntimeImage = strings.TrimSpace(container.Image)
+				}
 				if strings.TrimSpace(container.Name) == "agentd" {
 					resourceRequests = container.Resources.Requests
 					agentdImage = strings.TrimSpace(container.Image)
@@ -292,7 +296,8 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 				containers = append(containers, container)
 			}
 			items = append(items, kubernetesPod{
-				Name: item.Metadata.Name, UID: item.Metadata.UID, AgentdImage: agentdImage, Phase: item.Status.Phase,
+				Name: item.Metadata.Name, UID: item.Metadata.UID, AgentdImage: agentdImage,
+				SandboxRuntimeImage: sandboxRuntimeImage, Phase: item.Status.Phase,
 				Reason: item.Status.Reason, CreatedAt: item.Metadata.CreationTimestamp.UTC(),
 				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
 				ControllerOwnerKind: controllerOwnerKind, ControllerOwnerUID: controllerOwnerUID,

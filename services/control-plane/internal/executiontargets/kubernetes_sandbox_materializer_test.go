@@ -27,11 +27,82 @@ func newFakeSandboxClient(runtime string) *fakeSandboxClient {
 			SandboxAPIReady: true, SandboxClaimAPIReady: true, SandboxTemplateAPIReady: true,
 			SandboxWarmPoolAPIReady: true, OperatorReady: true,
 			TemplateIdentity: "template-uid:1", TemplateRuntime: runtime, TemplateAgentdImage: "synara-agentd:test", AssignedExecutionFieldRefReady: true,
-			WarmPoolTemplateReady: true, WarmPoolReady: true, WarmPoolDesiredReplicas: 0,
+			TemplateSandboxRuntimeImage: "synara-agentd:test",
+			WarmPoolTemplateReady:       true, WarmPoolReady: true, WarmPoolDesiredReplicas: 0,
 			WarmPoolUpdateStrategy: "Recreate", WarmPoolTemplateImageFresh: true,
 			VirtualNodeReady: runtime == "vk-cocoon", KVMRuntimeReady: runtime == "vk-cocoon",
 		},
 		claims: map[string]kubernetesSandboxClaimObservation{}, sandboxes: map[string]kubernetesSandboxObservation{},
+	}
+}
+
+func TestKubernetesCocoonSandboxMaterializerUsesGuestImageWithoutPodAgentdContract(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t)
+	configuration := kubernetesTestConfiguration("")
+	configuration["allocationBackend"] = "sandbox-operator-cocoon"
+	configuration["sandboxTemplateName"] = "synara-worker"
+	configuration["sandboxWarmPoolName"] = "synara-interactive"
+	fixture.updateConfiguration(t, configuration)
+	seedKubernetesAllocationGenerationFacts(t, fixture)
+	cancelAdditionalSandboxExecutions(t, fixture)
+
+	client := newFakeSandboxClient("vk-cocoon")
+	client.acceptance.TemplateAgentdImage = ""
+	client.acceptance.AssignedExecutionFieldRefReady = false
+	client.acceptance.HostSupervisorReady = true
+	client.acceptance.FencedVSockReady = true
+	client.acceptance.GuestIsolationReady = true
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("materialize Cocoon SandboxClaim: %v", err)
+	}
+
+	var allocation persistence.ExecutionKubernetesAllocation
+	if err := fixture.db.Where("execution_id = ?", fixture.executionIDs[0]).Take(&allocation).Error; err != nil {
+		t.Fatal(err)
+	}
+	claim := client.claims[allocation.ClaimName]
+	claim.Ready = true
+	claim.SandboxName = "cocoon-sandbox"
+	client.claims[allocation.ClaimName] = claim
+	client.sandboxes[claim.SandboxName] = kubernetesSandboxObservation{UID: uuid.NewString(), PodName: "cocoon-pod"}
+	client.pods["cocoon-pod"] = kubernetesPod{
+		Name: "cocoon-pod", UID: uuid.NewString(), SandboxRuntimeImage: "synara-agentd:test",
+		AgentdImage: "ignored-kubernetes-agentd-placeholder:old", Phase: "Running",
+		Labels: map[string]string{kubernetesTargetLabel: fixture.targetID.String()},
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("bind Cocoon allocation by guest image: %v", err)
+	}
+	if err := fixture.db.Where("execution_id = ?", fixture.executionIDs[0]).Take(&allocation).Error; err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Status != "bound" || allocation.PodUID == nil {
+		t.Fatalf("Cocoon allocation = %#v, want bound guest", allocation)
+	}
+}
+
+func TestKubernetesSandboxAllocationDigestKeepsStandardCompatibilityAndVersionsCocoon(t *testing.T) {
+	configuration := kubernetesTargetConfiguration{
+		AllocationBackend: "sandbox-operator-standard", Namespace: "synara-workers",
+		SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
+		SandboxClaimReadyTimeoutSeconds: 30,
+	}
+	standard, err := kubernetesSandboxAllocationConfigurationDigest(configuration, "template-uid:42", "synara-agentd:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyStandardDigest = "d26b9aab9bdd1bcdb179e97750592e540978ca87546cd79bf591bece1e993519"
+	if standard != legacyStandardDigest {
+		t.Fatalf("standard digest = %s, want legacy-compatible %s", standard, legacyStandardDigest)
+	}
+	configuration.AllocationBackend = "sandbox-operator-cocoon"
+	cocoon, err := kubernetesSandboxAllocationConfigurationDigest(configuration, "template-uid:42", "synara-agentd:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cocoon == standard {
+		t.Fatal("Cocoon supervisor/image contract must have a distinct versioned allocation digest")
 	}
 }
 

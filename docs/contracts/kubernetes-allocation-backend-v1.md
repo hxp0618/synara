@@ -45,8 +45,11 @@ Synara applies the pool with `updateStrategy.type: Recreate` and observes every
 pool-owned idle Sandbox before materializing a Claim. New Claims remain fenced
 with `kubernetes_sandbox_warm_pool_rollout_pending` until the owned count and
 pool status match desired capacity and every idle Sandbox carries the current
-template agentd image. This prevents `OnReplenish` from lending an old idle
-Worker after a promoted image update.
+backend-specific runtime image. Standard observes the container named `agentd`;
+Cocoon observes the first container image, which sandbox-operator projects to
+vk-cocoon's `cocoonset.cocoonstack.io/image` guest-image annotation. This
+prevents `OnReplenish` from lending an old idle Worker or microVM after a
+promoted image update.
 
 The adapter acceptance interface and materializer are fail-closed. Every
 allocation is persisted before a `SandboxClaim` is applied. Once the Claim is
@@ -56,16 +59,21 @@ uses its exact UID as a Kubernetes delete precondition; a name reused with a
 different UID is fenced instead of deleted.
 
 The allocation configuration digest includes the observed SandboxTemplate UID,
-resourceVersion, and the exact agentd image selected for the Execution.
-Updating a template in place therefore cannot silently change an
-already-authorized Generation; a new Generation must accept the new template
-identity and image.
+resourceVersion, and the exact backend-specific runtime image selected for the
+Execution. The standard digest remains byte-compatible with the original
+`agentd` contract. Cocoon uses a separate `cocoon-v1` digest domain that also
+freezes `host-supervisor=v1`, `provider-transport=vsock-v2`, and
+`isolation-profile=microvm-isolated-v1`. Updating a template or isolation
+contract therefore cannot silently change an already-authorized Generation; a
+new Generation must accept the new identity and image.
 
 Worker Release selection remains Synara authority. Before applying a Claim, the
-adapter requires `SandboxTemplate.spec.podTemplate`'s `agentd` image to equal
-the Execution's resolved release image. After assignment it checks the backing
-Pod image again before binding the allocation. A mismatched Pod is fenced and
-its exact Claim is deleted instead of registering the wrong release. A single
+adapter requires the template's backend-specific runtime image to equal the
+Execution's resolved release image. Standard uses the `agentd` container;
+Cocoon uses the first container image, matching sandbox-operator's vk-cocoon
+translation contract. After assignment it checks the same image source on the
+backing Pod before binding the allocation. A mismatched Pod is fenced and its
+exact Claim is deleted instead of registering the wrong release. A single
 configured SandboxWarmPool cannot safely serve promoted and canary revisions at
 the same time, so canary-selected Executions fail closed until per-release
 template/pool routing is implemented. Promoted rollout updates the external
@@ -73,7 +81,7 @@ template; the enforced `Recreate` pool strategy drains/replenishes idle members,
 and the rollout fence keeps new Executions queued until the current image and
 capacity are fully observed.
 
-The configured `SandboxTemplate` must expose the
+For `sandbox-operator-standard`, the configured `SandboxTemplate` must expose the
 `synara.io/assigned-execution-id` Pod label through an updating downward-API
 volume and set `SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE` to the mounted item.
 The materializer supplies that label through `additionalPodMetadata`; agentd
@@ -81,7 +89,10 @@ waits on the file before registration, so a pre-warmed Sandbox is pinned to its
 assigned execution when the Claim is fulfilled. A downward-API environment
 field is not accepted because it is evaluated only when the Pod starts. The template annotation
 `sandbox.cocoonstack.io/runtime` must be `standard` or `vk-cocoon` to match the
-selected backend.
+selected backend. Cocoon deliberately does not require this in-guest
+downward-API/agentd contract: the attested host supervisor owns assignment and
+Worker identity outside the guest, while the guest template must expose a
+non-empty first container image for vk-cocoon materialization.
 
 ## Cocoon host-supervisor gate
 

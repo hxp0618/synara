@@ -166,6 +166,7 @@ type kubernetesPod struct {
 	Name                string
 	UID                 string
 	AgentdImage         string
+	SandboxRuntimeImage string
 	Phase               string
 	Reason              string
 	CreatedAt           time.Time

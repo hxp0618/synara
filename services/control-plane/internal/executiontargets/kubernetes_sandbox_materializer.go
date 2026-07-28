@@ -100,12 +100,18 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 			503, "kubernetes_sandbox_acceptance_unavailable", "Sandbox operator target acceptance could not be observed.", err,
 		)
 	}
+	templateReady := observedAcceptance.TemplateIdentity != ""
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		templateReady = templateReady && observedAcceptance.TemplateSandboxRuntimeImage != ""
+	} else {
+		templateReady = templateReady && observedAcceptance.AssignedExecutionFieldRefReady
+	}
 	acceptanceObservation := KubernetesAllocationAcceptanceObservation{
 		SandboxAPIReady:           observedAcceptance.SandboxAPIReady,
 		SandboxClaimAPIReady:      observedAcceptance.SandboxClaimAPIReady,
 		SandboxWarmPoolAPIReady:   observedAcceptance.SandboxWarmPoolAPIReady && observedAcceptance.SandboxTemplateAPIReady,
 		OperatorReady:             observedAcceptance.OperatorReady,
-		TemplateReady:             observedAcceptance.AssignedExecutionFieldRefReady && observedAcceptance.TemplateIdentity != "",
+		TemplateReady:             templateReady,
 		WarmPoolReady:             observedAcceptance.WarmPoolReady && observedAcceptance.WarmPoolTemplateReady,
 		StandardRuntimeReady:      observedAcceptance.TemplateRuntime == "standard",
 		CocoonVirtualNodeReady:    observedAcceptance.VirtualNodeReady,
@@ -194,11 +200,11 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 		if err != nil {
 			return result, err
 		}
-		if strings.TrimSpace(observedAcceptance.TemplateAgentdImage) != strings.TrimSpace(expectedImage) {
+		if kubernetesSandboxAcceptanceRuntimeImage(configuration.AllocationBackend, observedAcceptance) != strings.TrimSpace(expectedImage) {
 			return result, problem.New(
 				503,
 				"kubernetes_sandbox_worker_release_template_mismatch",
-				"The SandboxTemplate agentd image does not match the Execution Worker release selection.",
+				"The SandboxTemplate runtime image does not match the Execution Worker release selection.",
 			)
 		}
 		digest, err := kubernetesSandboxAllocationConfigurationDigest(
@@ -260,7 +266,7 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 			result.Allocated++
 		}
 		bound, err := r.observeKubernetesSandboxAllocation(
-			ctx, sandboxClient, client, allocation, expectedImage,
+			ctx, sandboxClient, client, allocation, configuration.AllocationBackend, expectedImage,
 			time.Duration(configuration.SandboxClaimReadyTimeoutSeconds)*time.Second, now,
 		)
 		if err != nil {
@@ -379,6 +385,7 @@ func (r *KubernetesReconciler) observeKubernetesSandboxAllocation(
 	sandboxClient kubernetesSandboxClient,
 	client kubernetesClient,
 	allocation persistence.ExecutionKubernetesAllocation,
+	backend string,
 	expectedImage string,
 	readyTimeout time.Duration,
 	observedAt time.Time,
@@ -455,7 +462,8 @@ func (r *KubernetesReconciler) observeKubernetesSandboxAllocation(
 		if pod.Name != sandbox.PodName || strings.TrimSpace(pod.UID) == "" {
 			continue
 		}
-		if strings.TrimSpace(pod.AgentdImage) != strings.TrimSpace(expectedImage) {
+		observedImage := kubernetesSandboxPodRuntimeImage(backend, pod)
+		if observedImage != strings.TrimSpace(expectedImage) {
 			if err := r.failKubernetesSandboxAllocation(ctx, allocation, claim, true, "worker-release-image-mismatch", observedAt); err != nil {
 				return false, err
 			}
@@ -699,7 +707,35 @@ func kubernetesSandboxClaimName(targetID uuid.UUID, execution kubernetesExecutio
 	return "synara-claim-" + targetPrefix + "-" + executionPrefix + "-g" + strconv.FormatInt(generation, 16)
 }
 
-func kubernetesSandboxAllocationConfigurationDigest(configuration kubernetesTargetConfiguration, templateIdentity, agentdImage string) (string, error) {
+func kubernetesSandboxAllocationConfigurationDigest(configuration kubernetesTargetConfiguration, templateIdentity, runtimeImage string) (string, error) {
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		payload, err := json.Marshal(struct {
+			Version           string
+			Backend           string
+			Namespace         string
+			TemplateName      string
+			TemplateID        string
+			WarmPoolName      string
+			GuestImage        string
+			HostSupervisor    string
+			ProviderTransport string
+			IsolationProfile  string
+			Timeout           int
+		}{
+			Version: "cocoon-v1", Backend: configuration.AllocationBackend, Namespace: configuration.Namespace,
+			TemplateName: configuration.SandboxTemplateName, TemplateID: templateIdentity,
+			WarmPoolName: configuration.SandboxWarmPoolName, GuestImage: strings.TrimSpace(runtimeImage),
+			HostSupervisor:    kubernetesCocoonHostSupervisorV1,
+			ProviderTransport: kubernetesCocoonProviderTransportV2,
+			IsolationProfile:  kubernetesCocoonIsolationProfileV1,
+			Timeout:           configuration.SandboxClaimReadyTimeoutSeconds,
+		})
+		if err != nil {
+			return "", fmt.Errorf("encode Kubernetes Cocoon Sandbox allocation configuration: %w", err)
+		}
+		digest := sha256.Sum256(payload)
+		return hex.EncodeToString(digest[:]), nil
+	}
 	payload, err := json.Marshal(struct {
 		Backend      string
 		Namespace    string
@@ -712,7 +748,7 @@ func kubernetesSandboxAllocationConfigurationDigest(configuration kubernetesTarg
 		Backend: configuration.AllocationBackend, Namespace: configuration.Namespace,
 		TemplateName: configuration.SandboxTemplateName, TemplateID: templateIdentity,
 		WarmPoolName: configuration.SandboxWarmPoolName,
-		AgentdImage:  strings.TrimSpace(agentdImage),
+		AgentdImage:  strings.TrimSpace(runtimeImage),
 		Timeout:      configuration.SandboxClaimReadyTimeoutSeconds,
 	})
 	if err != nil {
