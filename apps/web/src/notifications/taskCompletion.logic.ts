@@ -631,6 +631,8 @@ function approvalSummary(requestKind: WorkLogRequestKind): string {
       return "Network access approval requested.";
     case "tool":
       return "Tool approval requested.";
+    case "permissions":
+      return "Permission approval requested.";
   }
 }
 
