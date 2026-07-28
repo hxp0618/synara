@@ -101,15 +101,18 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 		)
 	}
 	acceptanceObservation := KubernetesAllocationAcceptanceObservation{
-		SandboxAPIReady:         observedAcceptance.SandboxAPIReady,
-		SandboxClaimAPIReady:    observedAcceptance.SandboxClaimAPIReady,
-		SandboxWarmPoolAPIReady: observedAcceptance.SandboxWarmPoolAPIReady && observedAcceptance.SandboxTemplateAPIReady,
-		OperatorReady:           observedAcceptance.OperatorReady,
-		TemplateReady:           observedAcceptance.AssignedExecutionFieldRefReady && observedAcceptance.TemplateIdentity != "",
-		WarmPoolReady:           observedAcceptance.WarmPoolReady && observedAcceptance.WarmPoolTemplateReady,
-		StandardRuntimeReady:    observedAcceptance.TemplateRuntime == "standard",
-		CocoonVirtualNodeReady:  observedAcceptance.VirtualNodeReady,
-		CocoonKVMRuntimeReady:   observedAcceptance.KVMRuntimeReady,
+		SandboxAPIReady:           observedAcceptance.SandboxAPIReady,
+		SandboxClaimAPIReady:      observedAcceptance.SandboxClaimAPIReady,
+		SandboxWarmPoolAPIReady:   observedAcceptance.SandboxWarmPoolAPIReady && observedAcceptance.SandboxTemplateAPIReady,
+		OperatorReady:             observedAcceptance.OperatorReady,
+		TemplateReady:             observedAcceptance.AssignedExecutionFieldRefReady && observedAcceptance.TemplateIdentity != "",
+		WarmPoolReady:             observedAcceptance.WarmPoolReady && observedAcceptance.WarmPoolTemplateReady,
+		StandardRuntimeReady:      observedAcceptance.TemplateRuntime == "standard",
+		CocoonVirtualNodeReady:    observedAcceptance.VirtualNodeReady,
+		CocoonKVMRuntimeReady:     observedAcceptance.KVMRuntimeReady,
+		CocoonHostSupervisorReady: observedAcceptance.HostSupervisorReady,
+		CocoonFencedVSockReady:    observedAcceptance.FencedVSockReady,
+		CocoonGuestIsolationReady: observedAcceptance.GuestIsolationReady,
 	}
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) &&
 		observedAcceptance.TemplateRuntime != "vk-cocoon" {

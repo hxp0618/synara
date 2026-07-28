@@ -41,7 +41,21 @@ type kubernetesSandboxAcceptanceObservation struct {
 	WarmPoolTemplateImageFresh     bool
 	VirtualNodeReady               bool
 	KVMRuntimeReady                bool
+	HostSupervisorReady            bool
+	FencedVSockReady               bool
+	GuestIsolationReady            bool
 }
+
+const (
+	kubernetesCocoonKVMReadyLabel          = "sandbox.cocoonstack.io/kvm-ready"
+	kubernetesCocoonHostSupervisorLabel    = "synara.io/host-supervisor"
+	kubernetesCocoonProviderTransportLabel = "synara.io/provider-transport"
+	kubernetesCocoonIsolationProfileLabel  = "synara.io/isolation-profile"
+
+	kubernetesCocoonHostSupervisorV1    = "v1"
+	kubernetesCocoonProviderTransportV2 = "vsock-v2"
+	kubernetesCocoonIsolationProfileV1  = "microvm-isolated-v1"
+)
 
 type kubernetesSandboxClient interface {
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
@@ -355,8 +369,15 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 			continue
 		}
 		observation.VirtualNodeReady = true
-		if node.Metadata.Labels["sandbox.cocoonstack.io/kvm-ready"] == "true" {
+		if node.Metadata.Labels[kubernetesCocoonKVMReadyLabel] == "true" {
 			observation.KVMRuntimeReady = true
+			if node.Metadata.Labels[kubernetesCocoonHostSupervisorLabel] == kubernetesCocoonHostSupervisorV1 &&
+				node.Metadata.Labels[kubernetesCocoonProviderTransportLabel] == kubernetesCocoonProviderTransportV2 &&
+				node.Metadata.Labels[kubernetesCocoonIsolationProfileLabel] == kubernetesCocoonIsolationProfileV1 {
+				observation.HostSupervisorReady = true
+				observation.FencedVSockReady = true
+				observation.GuestIsolationReady = true
+			}
 		}
 	}
 	return observation, nil

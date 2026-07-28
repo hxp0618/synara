@@ -98,7 +98,7 @@ func TestKubernetesAllocationTargetAcceptance(t *testing.T) {
 		},
 		{
 			name: "cocoon", backend: "sandbox-operator-cocoon",
-			observation: withCocoonRuntime(base), accepted: true,
+			observation: withCocoonIsolation(withCocoonRuntime(base)), accepted: true,
 		},
 		{
 			name: "cocoon kvm missing", backend: "sandbox-operator-cocoon",
@@ -107,6 +107,11 @@ func TestKubernetesAllocationTargetAcceptance(t *testing.T) {
 				OperatorReady: true, TemplateReady: true, WarmPoolReady: true, CocoonVirtualNodeReady: true,
 			},
 			reasonCode: "sandbox-operator-cocoon-runtime-unavailable",
+		},
+		{
+			name: "cocoon host supervisor missing", backend: "sandbox-operator-cocoon",
+			observation: withCocoonRuntime(base),
+			reasonCode:  "sandbox-operator-cocoon-supervisor-unavailable",
 		},
 	}
 	for _, test := range tests {
@@ -132,5 +137,12 @@ func withStandardRuntime(observation KubernetesAllocationAcceptanceObservation) 
 func withCocoonRuntime(observation KubernetesAllocationAcceptanceObservation) KubernetesAllocationAcceptanceObservation {
 	observation.CocoonVirtualNodeReady = true
 	observation.CocoonKVMRuntimeReady = true
+	return observation
+}
+
+func withCocoonIsolation(observation KubernetesAllocationAcceptanceObservation) KubernetesAllocationAcceptanceObservation {
+	observation.CocoonHostSupervisorReady = true
+	observation.CocoonFencedVSockReady = true
+	observation.CocoonGuestIsolationReady = true
 	return observation
 }

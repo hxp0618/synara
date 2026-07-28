@@ -1229,7 +1229,7 @@ func sandboxReadyKVMNodeNames(
 	t.Helper()
 	payload := sandboxKubectlOutput(
 		t, ctx, kubernetesContext, nil, "get", "nodes",
-		"-l", "node.kubernetes.io/instance-type=virtual-node,sandbox.cocoonstack.io/kvm-ready=true",
+		"-l", "node.kubernetes.io/instance-type=virtual-node,sandbox.cocoonstack.io/kvm-ready=true,synara.io/host-supervisor=v1,synara.io/provider-transport=vsock-v2,synara.io/isolation-profile=microvm-isolated-v1",
 		"-o", "json",
 	)
 	var nodes struct {

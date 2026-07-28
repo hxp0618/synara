@@ -28,8 +28,9 @@ therefore cannot borrow a canary Target merely by referencing its ID.
 `sandbox-operator-standard` additionally requires the Sandbox, SandboxClaim,
 and SandboxWarmPool APIs, a Ready operator, the configured template and pool,
 and a positively observed standard runtime. `sandbox-operator-cocoon` replaces
-the final requirement with both a vk-cocoon virtual node and a positively
-observed KVM runtime.
+the final requirement with a vk-cocoon virtual node, a positively observed KVM
+runtime, and the attested host-supervisor boundary described below. KVM alone
+is substrate evidence and never authorizes Synara materialization.
 
 Sandbox API acceptance reads all four CRDs from the exact target, requires
 `v1beta1` to be an established storage version, verifies that the pool points
@@ -80,8 +81,29 @@ waits on the file before registration, so a pre-warmed Sandbox is pinned to its
 assigned execution when the Claim is fulfilled. A downward-API environment
 field is not accepted because it is evaluated only when the Pod starts. The template annotation
 `sandbox.cocoonstack.io/runtime` must be `standard` or `vk-cocoon` to match the
-selected backend. Cocoon acceptance additionally requires an observed virtual node labelled
-`sandbox.cocoonstack.io/kvm-ready=true`.
+selected backend.
+
+## Cocoon host-supervisor gate
+
+The frozen `microvm-isolated-v1` boundary keeps Synara agentd, the Control Plane
+Worker credential, and the Provider Credential broker outside the guest. Only
+the Provider Host, Provider CLI, and tool processes run inside the microVM, over
+an Execution/Generation-fenced vsock transport. A Ready virtual node must carry
+all of these labels on the same node before `sandbox-operator-cocoon` can pass
+target acceptance:
+
+- `sandbox.cocoonstack.io/kvm-ready=true`;
+- `synara.io/host-supervisor=v1`;
+- `synara.io/provider-transport=vsock-v2`;
+- `synara.io/isolation-profile=microvm-isolated-v1`.
+
+These are attestation outputs, not operator configuration shortcuts. Manually
+adding them does not constitute acceptance evidence. The attesting component
+must prove the host supervisor, guest identity fence, vsock peer binding,
+credential non-entry into the guest, and the negative isolation suite. Current
+vk-cocoon v0.3.5 provides the VM/exec/logs substrate but does not implement this
+Synara host-supervisor contract, so it remains fail closed even on a KVM-ready
+node.
 
 After assignment, agentd retries only the explicit
 `kubernetes_sandbox_allocation_not_bound` registration result for
