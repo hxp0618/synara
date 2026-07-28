@@ -364,9 +364,10 @@ func (s *Service) ResolveWorkerRegistrationTargetInTransaction(
 	targetKind string,
 	instanceUID string,
 	sshBootstrapGeneration *int64,
+	verifiedKubernetesPodBound bool,
 ) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
 	return resolveWorkerBootstrapTargetLocked(
-		ctx, tx, targetID, targetKind, instanceUID, sshBootstrapGeneration, true,
+		ctx, tx, targetID, targetKind, instanceUID, sshBootstrapGeneration, verifiedKubernetesPodBound,
 	)
 }
 
@@ -377,7 +378,7 @@ func resolveWorkerBootstrapTargetLocked(
 	targetKind string,
 	instanceUID string,
 	sshBootstrapGeneration *int64,
-	registration bool,
+	allowOfflineKubernetes bool,
 ) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
 	kind, err := platform.ParseExecutionTargetKind(targetKind)
 	if err != nil {
@@ -394,7 +395,7 @@ func resolveWorkerBootstrapTargetLocked(
 		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
 	}
 	if kind != platform.TargetSSH {
-		if model.Status != "active" {
+		if model.Status != "active" && !(allowOfflineKubernetes && kind == platform.TargetKubernetes && model.Status == "offline") {
 			return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
 		}
 		return model, kind, nil

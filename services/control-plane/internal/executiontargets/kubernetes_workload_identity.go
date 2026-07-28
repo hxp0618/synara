@@ -213,6 +213,9 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 	if err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
 	}
+	if err := s.verifyKubernetesSandboxAllocationIdentity(ctx, targetID, configuration, pod, identity); err != nil {
+		return VerifiedKubernetesWorkloadIdentity{}, err
+	}
 	resources, err := kubernetesRequestedResourceSnapshot(pod.AgentdResourceRequests)
 	if err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, problem.New(
@@ -239,6 +242,50 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 		ServiceAccountName:             configuration.ServiceAccountName,
 		ServiceAccountUsername:         expectedUsername,
 	}, nil
+}
+
+func (s *Service) verifyKubernetesSandboxAllocationIdentity(
+	ctx context.Context,
+	targetID uuid.UUID,
+	configuration kubernetesTargetConfiguration,
+	pod kubernetesVerifiedPod,
+	identity kubernetesVerifiedWorkerIdentity,
+) error {
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendNativePod) {
+		return nil
+	}
+	if identity.WorkerMode != kubernetesWorkerModeExecutionPinned || identity.AssignedExecutionID == nil {
+		return problem.New(401, "kubernetes_sandbox_allocation_identity_missing", "Sandbox-backed workers must be pinned to an Execution allocation.")
+	}
+	generation, err := strconv.ParseInt(strings.TrimSpace(pod.Labels[kubernetesGenerationLabel]), 10, 64)
+	if err != nil || generation <= 0 {
+		return problem.New(401, "kubernetes_sandbox_allocation_generation_invalid", "Sandbox-backed worker Generation identity is missing or invalid.")
+	}
+	var latestGeneration int64
+	if err := s.db.WithContext(ctx).Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = (SELECT tenant_id FROM agent_executions WHERE id = ?) AND execution_id = ?", *identity.AssignedExecutionID, *identity.AssignedExecutionID).
+		Select("COALESCE(MAX(generation), 0)").Scan(&latestGeneration).Error; err != nil {
+		return problem.Wrap(500, "kubernetes_sandbox_allocation_generation_load_failed", "Sandbox allocation Generation authority could not be loaded.", err)
+	}
+	if latestGeneration != generation {
+		return problem.New(409, "kubernetes_sandbox_allocation_generation_stale", "Sandbox-backed worker belongs to a stale Execution Generation.")
+	}
+	var allocation persistence.ExecutionKubernetesAllocation
+	if err := s.db.WithContext(ctx).Where(
+		"execution_target_id = ? AND execution_id = ? AND generation = ? AND status = ?",
+		targetID, *identity.AssignedExecutionID, generation, "bound",
+	).Take(&allocation).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(409, "kubernetes_sandbox_allocation_not_bound", "Sandbox-backed worker allocation identity is not bound.")
+		}
+		return problem.Wrap(500, "kubernetes_sandbox_allocation_load_failed", "Sandbox allocation identity could not be loaded.", err)
+	}
+	if allocation.Namespace != configuration.Namespace ||
+		!kubernetesOptionalIdentityMatches(allocation.PodName, pod.Name) ||
+		!kubernetesOptionalIdentityMatches(allocation.PodUID, pod.UID) {
+		return problem.New(401, "kubernetes_sandbox_allocation_pod_mismatch", "Sandbox-backed worker Pod does not match its bound allocation identity.")
+	}
+	return nil
 }
 
 type kubernetesVerifiedWorkerIdentity struct {
@@ -372,9 +419,7 @@ func (s *Service) loadKubernetesWorkloadIdentityTarget(
 	targetID uuid.UUID,
 ) (persistence.ExecutionTarget, error) {
 	var model persistence.ExecutionTarget
-	err := s.db.WithContext(ctx).
-		Where("id = ? AND kind = ? AND status <> ?", targetID, "kubernetes", "disabled").
-		Take(&model).Error
+	err := s.db.WithContext(ctx).Where("id = ?", targetID).Take(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.ExecutionTarget{}, problem.New(404, "execution_target_not_found", "Execution target not found.")
 	}
@@ -385,6 +430,9 @@ func (s *Service) loadKubernetesWorkloadIdentityTarget(
 			"Failed to load the execution target.",
 			err,
 		)
+	}
+	if model.Kind != "kubernetes" || model.Status == "disabled" {
+		return persistence.ExecutionTarget{}, problem.New(404, "execution_target_not_found", "Execution target not found.")
 	}
 	return model, nil
 }
@@ -486,6 +534,9 @@ func normalizeKubernetesWorkloadIdentityConfiguration(
 			"Kubernetes apiServer must be an HTTPS origin.",
 		)
 	}
+	if err := normalizeKubernetesAllocationConfiguration(&configuration); err != nil {
+		return kubernetesTargetConfiguration{}, err
+	}
 	return configuration, nil
 }
 
@@ -531,6 +582,7 @@ type kubernetesTokenReviewStatus struct {
 }
 
 type kubernetesVerifiedPod struct {
+	Name                   string
 	UID                    string
 	DeletionTimestamp      *time.Time
 	Labels                 map[string]string
@@ -610,6 +662,7 @@ func (c *kubernetesHTTPClient) GetPod(
 		}
 	}
 	return kubernetesVerifiedPod{
+		Name:                   strings.TrimSpace(podName),
 		UID:                    strings.TrimSpace(response.Metadata.UID),
 		DeletionTimestamp:      response.Metadata.DeletionTimestamp,
 		Labels:                 response.Metadata.Labels,

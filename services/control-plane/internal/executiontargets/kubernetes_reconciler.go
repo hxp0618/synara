@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,6 +107,11 @@ type KubernetesReconcilerConfig struct {
 }
 
 type kubernetesTargetConfiguration struct {
+	AllocationBackend               string            `json:"allocationBackend"`
+	SandboxTemplateName             string            `json:"sandboxTemplateName"`
+	SandboxWarmPoolName             string            `json:"sandboxWarmPoolName"`
+	SandboxClaimReadyTimeoutSeconds int               `json:"sandboxClaimReadyTimeoutSeconds"`
+	SandboxAllowedTenantIDs         []uuid.UUID       `json:"sandboxAllowedTenantIds"`
 	APIServer                       string            `json:"apiServer"`
 	BearerToken                     string            `json:"bearerToken"`
 	BearerTokenFile                 string            `json:"bearerTokenFile"`
@@ -150,16 +156,19 @@ type kubernetesTargetConfiguration struct {
 }
 
 type kubernetesPod struct {
-	Name             string
-	UID              string
-	Phase            string
-	Reason           string
-	CreatedAt        time.Time
-	Labels           map[string]string
-	Annotations      map[string]string
-	Conditions       []kubernetesPodCondition
-	Containers       []kubernetesContainerStatus
-	ResourceRequests map[string]string
+	Name                string
+	UID                 string
+	AgentdImage         string
+	Phase               string
+	Reason              string
+	CreatedAt           time.Time
+	Labels              map[string]string
+	Annotations         map[string]string
+	ControllerOwnerKind string
+	ControllerOwnerUID  string
+	Conditions          []kubernetesPodCondition
+	Containers          []kubernetesContainerStatus
+	ResourceRequests    map[string]string
 }
 
 type kubernetesResourceQuota struct {
@@ -438,6 +447,63 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			"Managed Kubernetes execution state is unavailable.",
 		)
 		return err
+	}
+	if configuration.AllocationBackend != string(kubernetesAllocationBackendNativePod) {
+		if err := validateKubernetesSandboxExecutionTenants(configuration, executions); err != nil {
+			healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+				"Managed Kubernetes Sandbox tenant allowlist rejected an Execution.",
+			)
+			return err
+		}
+	}
+	if err := r.fenceKubernetesAllocationBackendTransition(ctx, client, target, configuration); err != nil {
+		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+			"Managed Kubernetes allocation backend transition is fenced.",
+		)
+		_ = r.setKubernetesStatus(ctx, target, "offline", foundationChanged, false, 0, 0)
+		return err
+	}
+	if configuration.AllocationBackend != string(kubernetesAllocationBackendNativePod) {
+		materialized, materializeErr := r.reconcileSandboxAllocations(ctx, client, target, configuration, executions)
+		if materializeErr != nil {
+			healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+				"Managed Kubernetes Sandbox allocation materialization failed.",
+			)
+			_ = r.setKubernetesStatus(ctx, target, "offline", foundationChanged, false, materialized.Allocated, materialized.Deleted)
+			return materializeErr
+		}
+		for _, allocation := range materialized.Acknowledgements {
+			acknowledgedReservations[routing.ReservationIdentity{
+				ExecutionID: allocation.ExecutionID, Generation: allocation.Generation,
+			}] = struct{}{}
+		}
+		if err := r.setKubernetesStatus(
+			ctx, target, "active", foundationChanged, materialized.Allocated+materialized.Deleted > 0,
+			materialized.Allocated, materialized.Deleted,
+		); err != nil {
+			return err
+		}
+		availableCapacity := configuration.MaxActivePods - materialized.Active
+		if availableCapacity < 0 {
+			availableCapacity = 0
+		}
+		healthObservation.Status = routing.HealthHealthy
+		healthObservation.CapacityStatus = routing.CapacityAvailable
+		healthObservation.AvailableCapacityUnits = &availableCapacity
+		healthObservation.AllocatedCapacityUnits = materialized.Active
+		healthObservation.ReservationAuthority.Acknowledgements = make(
+			[]routing.ReservationIdentity, 0, len(acknowledgedReservations),
+		)
+		for identity := range acknowledgedReservations {
+			healthObservation.ReservationAuthority.Acknowledgements = append(
+				healthObservation.ReservationAuthority.Acknowledgements, identity,
+			)
+		}
+		if availableCapacity == 0 {
+			healthObservation.CapacityStatus = routing.CapacitySaturated
+		}
+		healthObservation.Reason = nil
+		return nil
 	}
 	warmPools, err := r.loadKubernetesWarmPools(ctx, target.ID)
 	if err != nil {
@@ -1044,6 +1110,22 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		readyWarmCapacity,
 		warmRelease,
 	)
+	return nil
+}
+
+func validateKubernetesSandboxExecutionTenants(
+	configuration kubernetesTargetConfiguration,
+	executions []kubernetesExecution,
+) error {
+	for _, execution := range executions {
+		if !slices.Contains(configuration.SandboxAllowedTenantIDs, execution.TenantID) {
+			return problem.New(
+				403,
+				"kubernetes_sandbox_execution_tenant_not_allowed",
+				"An Execution Tenant is not explicitly allowed to use the Sandbox allocation backend.",
+			)
+		}
+	}
 	return nil
 }
 
@@ -1693,6 +1775,24 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 	target persistence.ExecutionTarget,
 	configuration kubernetesTargetConfiguration,
 ) (kubernetesTargetConfiguration, error) {
+	if err := normalizeKubernetesAllocationConfiguration(&configuration); err != nil {
+		return kubernetesTargetConfiguration{}, err
+	}
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendNativePod) {
+		if len(configuration.SandboxAllowedTenantIDs) != 0 {
+			return kubernetesTargetConfiguration{}, problem.New(
+				400,
+				"invalid_kubernetes_allocation_backend_configuration",
+				"Native Kubernetes Pod allocation cannot include a Sandbox tenant allowlist.",
+			)
+		}
+	} else if target.TenantID == nil || !slices.Contains(configuration.SandboxAllowedTenantIDs, *target.TenantID) {
+		return kubernetesTargetConfiguration{}, problem.New(
+			403,
+			"kubernetes_sandbox_tenant_not_allowed",
+			"The Kubernetes target Tenant is not explicitly allowed to use the Sandbox allocation backend.",
+		)
+	}
 	configuration.APIServer = strings.TrimRight(strings.TrimSpace(configuration.APIServer), "/")
 	if configuration.APIServer == "" {
 		configuration.APIServer = "https://kubernetes.default.svc"

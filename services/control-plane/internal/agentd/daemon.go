@@ -160,7 +160,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		providerHostCapabilities,
 		d.config,
 	)
-	registered, err := d.client.Register(ctx, d.config)
+	registered, err := registerWorkerAfterSandboxAllocationBound(
+		ctx,
+		d.config.PollInterval,
+		d.config.SandboxAllocationBindTimeout,
+		func(registerContext context.Context) (executions.RegisteredWorker, error) {
+			return d.client.Register(registerContext, d.config)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
@@ -316,6 +323,39 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.draining.Load() {
 			<-drainMarked
 			return nil
+		}
+	}
+}
+
+func registerWorkerAfterSandboxAllocationBound(
+	ctx context.Context,
+	retryInterval time.Duration,
+	retryTimeout time.Duration,
+	register func(context.Context) (executions.RegisteredWorker, error),
+) (executions.RegisteredWorker, error) {
+	if retryInterval <= 0 {
+		retryInterval = 100 * time.Millisecond
+	}
+	if retryTimeout <= 0 {
+		retryTimeout = 30 * time.Second
+	}
+	retryContext, cancel := context.WithTimeout(ctx, retryTimeout)
+	defer cancel()
+	for {
+		registered, err := register(retryContext)
+		if err == nil {
+			return registered, nil
+		}
+		var apiError *controlPlaneProblem
+		if !errors.As(err, &apiError) || apiError.Code != "kubernetes_sandbox_allocation_not_bound" {
+			return executions.RegisteredWorker{}, err
+		}
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-retryContext.Done():
+			timer.Stop()
+			return executions.RegisteredWorker{}, errors.Join(err, retryContext.Err())
+		case <-timer.C:
 		}
 	}
 }

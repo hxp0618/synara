@@ -106,10 +106,16 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 					CreationTimestamp time.Time         `json:"creationTimestamp"`
 					Labels            map[string]string `json:"labels"`
 					Annotations       map[string]string `json:"annotations"`
+					OwnerReferences   []struct {
+						Kind       string `json:"kind"`
+						UID        string `json:"uid"`
+						Controller bool   `json:"controller"`
+					} `json:"ownerReferences"`
 				} `json:"metadata"`
 				Spec struct {
 					Containers []struct {
 						Name      string `json:"name"`
+						Image     string `json:"image"`
 						Resources struct {
 							Requests map[string]string `json:"requests"`
 						} `json:"resources"`
@@ -159,10 +165,20 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			return nil, err
 		}
 		for _, item := range response.Items {
+			controllerOwnerKind, controllerOwnerUID := "", ""
+			for _, owner := range item.Metadata.OwnerReferences {
+				if owner.Controller {
+					controllerOwnerKind = strings.TrimSpace(owner.Kind)
+					controllerOwnerUID = strings.TrimSpace(owner.UID)
+					break
+				}
+			}
 			resourceRequests := map[string]string{}
+			agentdImage := ""
 			for _, container := range item.Spec.Containers {
 				if strings.TrimSpace(container.Name) == "agentd" {
 					resourceRequests = container.Resources.Requests
+					agentdImage = strings.TrimSpace(container.Image)
 					break
 				}
 			}
@@ -189,9 +205,10 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 				containers = append(containers, container)
 			}
 			items = append(items, kubernetesPod{
-				Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase,
+				Name: item.Metadata.Name, UID: item.Metadata.UID, AgentdImage: agentdImage, Phase: item.Status.Phase,
 				Reason: item.Status.Reason, CreatedAt: item.Metadata.CreationTimestamp.UTC(),
 				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
+				ControllerOwnerKind: controllerOwnerKind, ControllerOwnerUID: controllerOwnerUID,
 				Conditions: conditions, Containers: containers, ResourceRequests: resourceRequests,
 			})
 		}

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
@@ -96,6 +98,53 @@ func TestVerifyKubernetesWorkloadIdentity(t *testing.T) {
 	}
 	if serverState.podAuthHeader != "Bearer kubernetes-api-token" {
 		t.Fatalf("Pod lookup used cluster auth header %q", serverState.podAuthHeader)
+	}
+}
+
+func TestLoadKubernetesWorkloadIdentityTargetAcceptsOfflineButRejectsDisabled(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t)
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).
+		Where("id = ?", fixture.targetID).Update("status", "offline").Error; err != nil {
+		t.Fatal(err)
+	}
+	model, err := fixture.reconciler.targets.loadKubernetesWorkloadIdentityTarget(context.Background(), fixture.targetID)
+	if err != nil || model.ID != fixture.targetID || model.Status != "offline" {
+		t.Fatalf("load offline Kubernetes Target = %#v, %v", model, err)
+	}
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).
+		Where("id = ?", fixture.targetID).Update("status", "disabled").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.reconciler.targets.loadKubernetesWorkloadIdentityTarget(context.Background(), fixture.targetID)
+	assertProblemCode(t, err, 404, "execution_target_not_found")
+}
+
+func TestResolveWorkerRegistrationAllowsOnlyVerifiedPodBoundKubernetesTargetOffline(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t)
+	if err := fixture.db.Model(&persistence.ExecutionTarget{}).
+		Where("id = ?", fixture.targetID).Update("status", "offline").Error; err != nil {
+		t.Fatal(err)
+	}
+	err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		_, _, resolveErr := fixture.reconciler.targets.ResolveWorkerRegistrationTargetInTransaction(
+			context.Background(), tx, fixture.targetID, "kubernetes", uuid.NewString(), nil, false,
+		)
+		return resolveErr
+	})
+	assertProblemCode(t, err, 404, "execution_target_not_found")
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		model, kind, resolveErr := fixture.reconciler.targets.ResolveWorkerRegistrationTargetInTransaction(
+			context.Background(), tx, fixture.targetID, "kubernetes", uuid.NewString(), nil, true,
+		)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if model.ID != fixture.targetID || kind != "kubernetes" {
+			t.Fatalf("resolved offline Pod-bound target = %#v/%q", model, kind)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

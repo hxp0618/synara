@@ -1,0 +1,92 @@
+package executiontargets
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestObserveSandboxAcceptanceRequiresStoredCRDsAndUpdatingAssignmentFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(request.URL.Path, "/customresourcedefinitions/"):
+			_, _ = writer.Write([]byte(`{"status":{"storedVersions":["v1beta1"],"conditions":[{"type":"Established","status":"True"}]}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxtemplates/synara-worker"):
+			_, _ = writer.Write([]byte(`{
+  "metadata":{"uid":"template-uid","resourceVersion":"42"},
+  "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"standard"}},"spec":{
+    "containers":[{"name":"agentd","image":"synara-agentd:test","env":[{"name":"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE","value":"/var/run/synara/assignment/execution-id"}],"volumeMounts":[{"name":"assignment","mountPath":"/var/run/synara/assignment"}]}],
+    "volumes":[{"name":"assignment","downwardAPI":{"items":[{"path":"execution-id","fieldRef":{"fieldPath":"metadata.labels['synara.io/assigned-execution-id']"}}]}}]
+  }}}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxwarmpools/synara-interactive"):
+			_, _ = writer.Write([]byte(`{"metadata":{"uid":"pool-uid"},"spec":{"replicas":2,"sandboxTemplateRef":{"name":"synara-worker"},"updateStrategy":{"type":"Recreate"}},"status":{"replicas":2,"readyReplicas":2}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxes"):
+			_, _ = writer.Write([]byte(`{"items":[
+  {"metadata":{"ownerReferences":[{"uid":"pool-uid"}]},"spec":{"podTemplate":{"spec":{"containers":[{"name":"agentd","image":"synara-agentd:test"}]}}}},
+  {"metadata":{"ownerReferences":[{"uid":"pool-uid"}]},"spec":{"podTemplate":{"spec":{"containers":[{"name":"agentd","image":"synara-agentd:test"}]}}}}
+]}`))
+		default:
+			http.Error(writer, fmt.Sprintf("unexpected path %s", request.URL.Path), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	observation, err := client.ObserveSandboxAcceptance(context.Background(), kubernetesTargetConfiguration{
+		AllocationBackend: "sandbox-operator-standard", Namespace: "synara-workers",
+		SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observation.SandboxAPIReady || !observation.SandboxClaimAPIReady ||
+		!observation.SandboxTemplateAPIReady || !observation.SandboxWarmPoolAPIReady ||
+		!observation.OperatorReady || !observation.WarmPoolTemplateReady || !observation.WarmPoolReady ||
+		!observation.AssignedExecutionFieldRefReady || observation.WarmPoolDesiredReplicas != 2 ||
+		observation.TemplateIdentity != "template-uid:42" || observation.TemplateRuntime != "standard" ||
+		observation.TemplateAgentdImage != "synara-agentd:test" || observation.WarmPoolUpdateStrategy != "Recreate" ||
+		!observation.WarmPoolTemplateImageFresh {
+		t.Fatalf("Sandbox acceptance observation = %#v", observation)
+	}
+}
+
+func TestObserveSandboxAcceptanceRejectsAssignmentFileMountedOnlyBySidecar(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(request.URL.Path, "/customresourcedefinitions/"):
+			_, _ = writer.Write([]byte(`{"status":{"storedVersions":["v1beta1"],"conditions":[{"type":"Established","status":"True"}]}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxtemplates/synara-worker"):
+			_, _ = writer.Write([]byte(`{
+  "metadata":{"uid":"template-uid","resourceVersion":"42"},
+  "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"standard"}},"spec":{
+    "containers":[
+      {"name":"agentd","image":"synara-agentd:test"},
+      {"name":"assignment-sidecar","env":[{"name":"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE","value":"/var/run/synara/assignment/execution-id"}],"volumeMounts":[{"name":"assignment","mountPath":"/var/run/synara/assignment"}]}
+    ],
+    "volumes":[{"name":"assignment","downwardAPI":{"items":[{"path":"execution-id","fieldRef":{"fieldPath":"metadata.labels['synara.io/assigned-execution-id']"}}]}}]
+  }}}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxwarmpools/synara-interactive"):
+			_, _ = writer.Write([]byte(`{"metadata":{"uid":"pool-uid"},"spec":{"replicas":0,"sandboxTemplateRef":{"name":"synara-worker"},"updateStrategy":{"type":"Recreate"}},"status":{"replicas":0,"readyReplicas":0}}`))
+		case strings.HasSuffix(request.URL.Path, "/sandboxes"):
+			_, _ = writer.Write([]byte(`{"items":[]}`))
+		default:
+			http.Error(writer, fmt.Sprintf("unexpected path %s", request.URL.Path), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	observation, err := client.ObserveSandboxAcceptance(context.Background(), kubernetesTargetConfiguration{
+		AllocationBackend: "sandbox-operator-standard", Namespace: "synara-workers",
+		SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.AssignedExecutionFieldRefReady {
+		t.Fatal("assignment file mounted only by a sidecar must not satisfy the agentd template contract")
+	}
+}

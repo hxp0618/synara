@@ -57,6 +57,7 @@ type Config struct {
 	LeaseRenewInterval           time.Duration
 	DrainTimeout                 time.Duration
 	RequestTimeout               time.Duration
+	SandboxAllocationBindTimeout time.Duration
 	ArtifactTimeout              time.Duration
 	RunnerMessageBytes           int
 }
@@ -223,13 +224,11 @@ func LoadConfig() (Config, error) {
 		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot,
 		PrivateNetworkCIDRs: privateNetworkCIDRs,
 	}
-	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
-		assignedExecutionID, parseErr := uuid.Parse(raw)
-		if parseErr != nil {
-			return Config{}, errors.New("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID must be a UUID")
-		}
-		cfg.AssignedExecutionID = &assignedExecutionID
+	assignedExecutionID, err := loadAssignedExecutionID()
+	if err != nil {
+		return Config{}, err
 	}
+	cfg.AssignedExecutionID = assignedExecutionID
 	cfg.WorkerMode, err = resolveConfiguredWorkerMode(
 		os.Getenv("SYNARA_AGENTD_WORKER_MODE"),
 		cfg.AssignedExecutionID,
@@ -255,6 +254,12 @@ func LoadConfig() (Config, error) {
 	if cfg.RequestTimeout, err = durationEnv("SYNARA_AGENTD_REQUEST_TIMEOUT", 30*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.SandboxAllocationBindTimeout, err = durationEnv("SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT", 30*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.SandboxAllocationBindTimeout < time.Second || cfg.SandboxAllocationBindTimeout > 5*time.Minute {
+		return Config{}, errors.New("SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT must be between 1s and 5m")
+	}
 	if cfg.ArtifactTimeout, err = durationEnv("SYNARA_AGENTD_ARTIFACT_TIMEOUT", 30*time.Minute); err != nil {
 		return Config{}, err
 	}
@@ -274,6 +279,39 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("agentd image digest is invalid")
 	}
 	return cfg, nil
+}
+
+func loadAssignedExecutionID() (*uuid.UUID, error) {
+	raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID"))
+	assignmentFile := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE"))
+	if raw != "" && assignmentFile != "" {
+		return nil, errors.New("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID and SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE are mutually exclusive")
+	}
+	if raw != "" {
+		assignedExecutionID, err := uuid.Parse(raw)
+		if err != nil {
+			return nil, errors.New("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID must be a UUID")
+		}
+		return &assignedExecutionID, nil
+	}
+	if assignmentFile == "" {
+		return nil, nil
+	}
+	assignmentFile = filepath.Clean(assignmentFile)
+	if !filepath.IsAbs(assignmentFile) {
+		return nil, errors.New("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE must be an absolute path")
+	}
+	for {
+		contents, err := os.ReadFile(assignmentFile)
+		if err == nil {
+			if assignedExecutionID, parseErr := uuid.Parse(strings.TrimSpace(string(contents))); parseErr == nil {
+				return &assignedExecutionID, nil
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func parsePrivateNetworkCIDRsJSON(raw string) ([]string, error) {

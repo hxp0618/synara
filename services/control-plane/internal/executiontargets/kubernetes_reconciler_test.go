@@ -649,6 +649,50 @@ func TestKubernetesNetworkConfigurationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestKubernetesSandboxTenantAllowlistFailsClosedBeforeClusterMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		allowlist []string
+		status    int
+		code      string
+	}{
+		{
+			name: "sandbox allowlist is empty", backend: "sandbox-operator-standard",
+			allowlist: []string{}, status: 403, code: "kubernetes_sandbox_tenant_not_allowed",
+		},
+		{
+			name: "sandbox allowlist contains another tenant", backend: "sandbox-operator-standard",
+			allowlist: []string{uuid.NewString()}, status: 403, code: "kubernetes_sandbox_tenant_not_allowed",
+		},
+		{
+			name: "native backend cannot carry sandbox allowlist", backend: "native-pod",
+			allowlist: []string{uuid.NewString()}, status: 400, code: "invalid_kubernetes_allocation_backend_configuration",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newKubernetesReconcileFixture(t)
+			configuration := kubernetesTestConfiguration("")
+			configuration["allocationBackend"] = test.backend
+			configuration["sandboxAllowedTenantIds"] = test.allowlist
+			if test.backend != "native-pod" {
+				configuration["sandboxTemplateName"] = "synara-worker"
+				configuration["sandboxWarmPoolName"] = "synara-interactive"
+			}
+			fixture.updateConfiguration(t, configuration)
+			client := newFakeKubernetesClient()
+			fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+			err := fixture.reconciler.ReconcileOnce(context.Background())
+			assertProblemCode(t, err, test.status, test.code)
+			if len(client.applied) != 0 {
+				t.Fatalf("tenant-denied configuration mutated Kubernetes: %#v", client.applied)
+			}
+		})
+	}
+}
+
 func TestKubernetesReconcilerRequiresNodeSpread(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	configuration := kubernetesTestConfiguration("")
@@ -2372,6 +2416,11 @@ func containsAnyString(values []any, expected string) bool {
 
 func (f kubernetesReconcileFixture) updateConfiguration(t *testing.T, configuration map[string]any) {
 	t.Helper()
+	if backend, _ := configuration["allocationBackend"].(string); strings.HasPrefix(backend, "sandbox-operator-") {
+		if _, configured := configuration["sandboxAllowedTenantIds"]; !configured {
+			configuration["sandboxAllowedTenantIds"] = []string{f.tenantID.String()}
+		}
+	}
 	encrypted, err := encryptConfiguration(f.reconciler.targets.cipher, configuration)
 	if err != nil {
 		t.Fatal(err)
@@ -2971,7 +3020,7 @@ func TestKubernetesClientParsesPodFailureEvidence(t *testing.T) {
 		_, _ = fmt.Fprintf(writer, `{
 			"metadata":{"continue":""},
 			"items":[{
-				"metadata":{"name":"failed-worker","uid":%q,"labels":{"synara.io/execution-target-id":%q}},
+				"metadata":{"name":"failed-worker","uid":%q,"labels":{"synara.io/execution-target-id":%q},"ownerReferences":[{"kind":"Sandbox","uid":"sandbox-uid","controller":true}]},
 				"status":{
 					"phase":"Failed","reason":"Evicted",
 					"conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable"}],
@@ -2992,7 +3041,8 @@ func TestKubernetesClientParsesPodFailureEvidence(t *testing.T) {
 	}
 	if len(pods) != 1 || pods[0].Reason != "Evicted" || len(pods[0].Conditions) != 1 ||
 		len(pods[0].Containers) != 1 || pods[0].Containers[0].TerminatedReason != "OOMKilled" ||
-		pods[0].Containers[0].LastTerminatedReason != "OOMKilled" {
+		pods[0].Containers[0].LastTerminatedReason != "OOMKilled" ||
+		pods[0].ControllerOwnerKind != "Sandbox" || pods[0].ControllerOwnerUID != "sandbox-uid" {
 		t.Fatalf("parsed Kubernetes Pod evidence = %#v", pods)
 	}
 	if failureClass, reason := classifyKubernetesExecutionPodFailure(pods[0]); failureClass != KubernetesPodFailureEvicted || reason != "evicted" {

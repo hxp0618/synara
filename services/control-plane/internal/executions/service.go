@@ -191,7 +191,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		resolvedTarget, resolvedKind, err := s.targets.ResolveWorkerRegistrationTargetInTransaction(
 			ctx, tx, normalized.ExecutionTargetID, normalized.TargetKind,
-			normalized.InstanceUID, normalized.SSHBootstrapGeneration,
+			normalized.InstanceUID, normalized.SSHBootstrapGeneration, podIdentity != nil,
 		)
 		if err != nil {
 			return err

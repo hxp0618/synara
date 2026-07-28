@@ -761,7 +761,7 @@ function configurationPlaceholder(kind: ControlPlaneExecutionTargetKind): string
     case "docker":
       return '{"image":"synara-worker:latest","desiredWorkers":2,"runnerCommand":["provider-host","run","--jsonl"],"memoryBytes":1073741824,"nanoCpus":1000000000}';
     case "kubernetes":
-      return '{"namespace":"synara-workers","image":"synara-worker:latest","runnerCommand":["provider-host","run","--jsonl"]}';
+      return '{"allocationBackend":"native-pod","namespace":"synara-workers","image":"synara-worker:latest","runnerCommand":["provider-host","run","--jsonl"]}';
     default:
       return "{}";
   }

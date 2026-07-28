@@ -1,0 +1,132 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: synara-worker
+  namespace: REPLACE_NAMESPACE
+spec:
+  networkPolicyManagement: Unmanaged
+  envVarsInjectionPolicy: Disallowed
+  podTemplate:
+    metadata:
+      annotations:
+        sandbox.cocoonstack.io/runtime: standard
+      labels:
+        synara.io/managed: "true"
+        synara.io/execution-target-id: REPLACE_TARGET_UUID
+    spec:
+      serviceAccountName: REPLACE_SERVICE_ACCOUNT
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentd
+          image: REPLACE_SYNARA_WORKER_IMAGE_BY_DIGEST
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/synara-agentd"]
+          workingDir: /data
+          env:
+            - name: SYNARA_CONTROL_PLANE_URL
+              value: REPLACE_CONTROL_PLANE_URL
+            - name: SYNARA_WORKER_REGISTRATION_TOKEN_FILE
+              value: /var/run/secrets/synara.io/workload-identity/token
+            - name: SYNARA_EXECUTION_TARGET_ID
+              value: REPLACE_TARGET_UUID
+            - name: SYNARA_EXECUTION_TARGET_KIND
+              value: kubernetes
+            - name: SYNARA_AGENTD_WORKER_MODE
+              value: execution-pinned
+            - name: SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE
+              value: /var/run/secrets/synara.io/assignment/execution-id
+            - name: SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT
+              value: 30s
+            - name: SYNARA_AGENTD_CLUSTER_ID
+              value: local
+            - name: SYNARA_AGENTD_NAMESPACE
+              value: REPLACE_NAMESPACE
+            - name: SYNARA_AGENTD_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SYNARA_AGENTD_INSTANCE_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SYNARA_AGENTD_CAPABILITIES_JSON
+              value: '{}'
+            - name: SYNARA_AGENTD_RUNNER_COMMAND_JSON
+              value: '["provider-host","run","--jsonl"]'
+            - name: SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL
+              value: v2
+            - name: SYNARA_AGENTD_WORKSPACE_ROOT
+              value: /data/workspaces
+            - name: SYNARA_AGENTD_GIT_CACHE_ROOT
+              value: /data/git-cache
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: workspace
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/synara
+            - name: workload-identity
+              mountPath: /var/run/secrets/synara.io/workload-identity
+              readOnly: true
+            - name: execution-assignment
+              mountPath: /var/run/secrets/synara.io/assignment
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: workload-identity
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken:
+                  audience: synara.execution-target.REPLACE_TARGET_UUID
+                  expirationSeconds: 600
+                  path: token
+        - name: execution-assignment
+          downwardAPI:
+            items:
+              - path: execution-id
+                fieldRef:
+                  fieldPath: metadata.labels['synara.io/assigned-execution-id']
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: synara-worker-interactive
+  namespace: REPLACE_NAMESPACE
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: synara-worker
+  updateStrategy:
+    type: Recreate

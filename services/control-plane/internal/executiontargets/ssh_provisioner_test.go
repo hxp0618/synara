@@ -511,7 +511,7 @@ func TestOfflineSSHTargetRequiresLockedExactBootstrapAuthority(t *testing.T) {
 	}
 	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
 		_, kind, resolveErr := fixture.provisioner.targets.ResolveWorkerRegistrationTargetInTransaction(
-			context.Background(), tx, fixture.targetID, "ssh", expectedInstanceUID.String(), &fence.Generation,
+			context.Background(), tx, fixture.targetID, "ssh", expectedInstanceUID.String(), &fence.Generation, false,
 		)
 		if resolveErr != nil {
 			return resolveErr

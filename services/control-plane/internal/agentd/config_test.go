@@ -26,6 +26,49 @@ func TestLoadConfigDefaultsExperimentalProvidersToDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadConfigSandboxAllocationBindTimeout(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SandboxAllocationBindTimeout != 30*time.Second {
+		t.Fatalf("default Sandbox allocation bind timeout = %s, want 30s", cfg.SandboxAllocationBindTimeout)
+	}
+	t.Setenv("SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT", "90s")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SandboxAllocationBindTimeout != 90*time.Second {
+		t.Fatalf("Sandbox allocation bind timeout = %s, want 90s", cfg.SandboxAllocationBindTimeout)
+	}
+	for _, invalid := range []string{"500ms", "6m"} {
+		t.Setenv("SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT", invalid)
+		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SYNARA_AGENTD_SANDBOX_ALLOCATION_BIND_TIMEOUT") {
+			t.Fatalf("invalid Sandbox allocation bind timeout %q accepted: %v", invalid, err)
+		}
+	}
+}
+
+func TestLoadAssignedExecutionIDWaitsForProjectedDownwardAPIFile(t *testing.T) {
+	t.Setenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "")
+	assignmentPath := filepath.Join(t.TempDir(), "execution-id")
+	t.Setenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE", assignmentPath)
+	want := uuid.New()
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		_ = os.WriteFile(assignmentPath, []byte(want.String()+"\n"), 0o600)
+	}()
+	got, err := loadAssignedExecutionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != want {
+		t.Fatalf("assigned Execution ID = %v, want %s", got, want)
+	}
+}
+
 func TestLoadConfigParsesExperimentalProviderPolicy(t *testing.T) {
 	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
 	t.Setenv("SYNARA_AGENTD_CAPABILITIES_JSON", `{
@@ -623,6 +666,7 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",
 		"SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW",
+		"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE",
 		"SYNARA_AGENTD_WORKER_MODE",
 		"SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", "SYNARA_AGENTD_VERSION",
 		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE",
