@@ -113,6 +113,11 @@ Static labels are insufficient. The same Node must also carry a non-nil UUID in
 `synara.io/host-supervisor-observed-at`. The heartbeat is accepted for 45
 seconds with at most five seconds of future clock skew. A stopped or partitioned
 supervisor therefore expires without depending on best-effort label cleanup.
+The executable health protocol lives in `internal/cocoonsupervisor`: it returns
+Ready only when KVM, the vsock listener, the host credential broker, and the
+guest identity fence are all positively observed. The package refuses to
+replace an existing Unix socket and bounds concurrent probes; it does not infer
+readiness from process existence.
 
 These labels and short-lived annotations are attestation outputs, not operator
 configuration shortcuts. Manually adding static labels does not constitute
