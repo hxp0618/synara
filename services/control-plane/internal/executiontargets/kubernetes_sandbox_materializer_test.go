@@ -34,6 +34,7 @@ func newFakeSandboxClient(runtime string) *fakeSandboxClient {
 			VirtualNodeReady: runtime == "vk-cocoon", KVMRuntimeReady: runtime == "vk-cocoon",
 			CocoonTemplateSchedulingReady: runtime == "vk-cocoon",
 			CocoonTemplateCleanupReady:    runtime == "vk-cocoon",
+			CocoonTemplateWorkspaceReady:  runtime == "vk-cocoon",
 		},
 		claims: map[string]kubernetesSandboxClaimObservation{}, sandboxes: map[string]kubernetesSandboxObservation{},
 	}
@@ -72,7 +73,8 @@ func TestKubernetesCocoonSandboxMaterializerUsesGuestImageWithoutPodAgentdContra
 	client.pods["cocoon-pod"] = kubernetesPod{
 		Name: "cocoon-pod", UID: uuid.NewString(), SandboxRuntimeImage: "synara-agentd:test",
 		AgentdImage: "ignored-kubernetes-agentd-placeholder:old", Phase: "Running",
-		Labels: map[string]string{kubernetesTargetLabel: fixture.targetID.String()},
+		Labels:      map[string]string{kubernetesTargetLabel: fixture.targetID.String()},
+		Annotations: map[string]string{kubernetesCocoonSharedMemoryAnnotation: "true"},
 	}
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatalf("bind Cocoon allocation by guest image: %v", err)
@@ -82,6 +84,53 @@ func TestKubernetesCocoonSandboxMaterializerUsesGuestImageWithoutPodAgentdContra
 	}
 	if allocation.Status != "bound" || allocation.PodUID == nil {
 		t.Fatalf("Cocoon allocation = %#v, want bound guest", allocation)
+	}
+}
+
+func TestKubernetesCocoonSandboxMaterializerRejectsBoundPodWithoutWorkspacePrerequisite(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t)
+	configuration := kubernetesTestConfiguration("")
+	configuration["allocationBackend"] = "sandbox-operator-cocoon"
+	configuration["sandboxTemplateName"] = "synara-worker"
+	configuration["sandboxWarmPoolName"] = "synara-interactive"
+	fixture.updateConfiguration(t, configuration)
+	seedKubernetesAllocationGenerationFacts(t, fixture)
+	cancelAdditionalSandboxExecutions(t, fixture)
+
+	client := newFakeSandboxClient("vk-cocoon")
+	client.acceptance.HostSupervisorReady = true
+	client.acceptance.FencedVSockReady = true
+	client.acceptance.GuestIsolationReady = true
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var allocation persistence.ExecutionKubernetesAllocation
+	if err := fixture.db.Where("execution_id = ?", fixture.executionIDs[0]).Take(&allocation).Error; err != nil {
+		t.Fatal(err)
+	}
+	claim := client.claims[allocation.ClaimName]
+	claim.Ready = true
+	claim.SandboxName = "cocoon-without-workspace"
+	client.claims[allocation.ClaimName] = claim
+	client.sandboxes[claim.SandboxName] = kubernetesSandboxObservation{UID: uuid.NewString(), PodName: "cocoon-pod"}
+	client.pods["cocoon-pod"] = kubernetesPod{
+		Name: "cocoon-pod", UID: uuid.NewString(), SandboxRuntimeImage: "synara-agentd:test",
+		Phase: "Running", Labels: map[string]string{kubernetesTargetLabel: fixture.targetID.String()},
+	}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "shared-memory workspace prerequisite") {
+		t.Fatalf("bound Cocoon Pod without shared-memory prerequisite returned %v", err)
+	}
+	if len(client.deleted) != 1 || client.deleted[0] != allocation.ClaimName {
+		t.Fatalf("workspace-mismatched Claim cleanup = %#v", client.deleted)
+	}
+	if err := fixture.db.Where("execution_id = ?", fixture.executionIDs[0]).Take(&allocation).Error; err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Status != "deleting" || allocation.FailureReasonCode == nil ||
+		*allocation.FailureReasonCode != "cocoon-workspace-contract-mismatch" {
+		t.Fatalf("workspace-mismatched allocation = %#v", allocation)
 	}
 }
 

@@ -20,19 +20,19 @@ func TestServeHealthConnectionRequiresEveryIsolationBoundary(t *testing.T) {
 	}{
 		{
 			name: "complete", request: `{"operation":"attest","version":1}` + "\n", wantReady: true,
-			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true},
+			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true, WorkspaceMountReady: true},
 		},
 		{
 			name: "credential broker missing", request: `{"operation":"attest","version":1}` + "\n",
-			readiness: Readiness{KVMReady: true, VSockListenerReady: true, GuestIdentityFenceReady: true},
+			readiness: Readiness{KVMReady: true, VSockListenerReady: true, GuestIdentityFenceReady: true, WorkspaceMountReady: true},
 		},
 		{
 			name: "unknown operation", request: `{"operation":"health","version":1}` + "\n",
-			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true},
+			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true, WorkspaceMountReady: true},
 		},
 		{
 			name: "unknown field", request: `{"operation":"attest","version":1,"ready":true}` + "\n",
-			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true},
+			readiness: Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true, WorkspaceMountReady: true},
 		},
 	}
 	for _, test := range tests {
@@ -71,7 +71,7 @@ func TestServeHealthSocketProtectsLifecycleAndRefusesExistingPath(t *testing.T) 
 	done := make(chan error, 1)
 	go func() {
 		done <- ServeHealthSocket(ctx, socketPath, func(context.Context) Readiness {
-			return Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true}
+			return Readiness{KVMReady: true, VSockListenerReady: true, CredentialBrokerReady: true, GuestIdentityFenceReady: true, WorkspaceMountReady: true}
 		})
 	}()
 	deadline := time.Now().Add(2 * time.Second)

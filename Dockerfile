@@ -4,6 +4,7 @@ ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188a
 ARG SERVER_RUNTIME_IMAGE=node:24-bookworm@sha256:d5adb040f90e206d1dc91453d08a4fa4165ec0faebd62a3421e6181a14e7f41f
 ARG AGENTD_BUILD_IMAGE=golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669
 ARG WORKER_RUNTIME_IMAGE=node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+ARG COCOON_GUEST_IMAGE=ghcr.io/cocoonstack/sandbox/rt:24.04@sha256:cc05d8552fb9e56acadbb9ce553cde430992cfeb44e3516e9a66e55c7296def0
 
 FROM ${BUN_IMAGE} AS bun
 
@@ -161,7 +162,9 @@ COPY services/control-plane .
 RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd \
-  && touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd
+  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-provider-transport ./cmd/cocoon-provider-transport \
+  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-supervisor ./cmd/cocoon-supervisor \
+  && touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd /out/synara-cocoon-provider-transport /out/synara-cocoon-supervisor
 
 FROM ${BUN_IMAGE} AS provider-host-build
 
@@ -280,6 +283,8 @@ ARG SYNARA_VERSION
 ARG SYNARA_GIT_SHA
 
 COPY --from=agentd-build /out/synara-agentd /usr/local/bin/synara-agentd
+COPY --from=agentd-build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
+COPY --from=agentd-build /out/synara-cocoon-supervisor /usr/local/bin/synara-cocoon-supervisor
 COPY --from=provider-host-build /out/provider-host.mjs /opt/synara/provider-host/index.mjs
 RUN printf '%s\n' '#!/bin/sh' 'exec node /opt/synara/provider-host/index.mjs "$@"' \
   > /usr/local/bin/provider-host && chmod 0755 /usr/local/bin/provider-host
@@ -297,6 +302,38 @@ LABEL org.opencontainers.image.title="Synara Worker" \
 WORKDIR /data
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/synara-agentd"]
+
+# Cocoon guest data plane. The bootable Cocoon rootfs supplies init, kernel,
+# initramfs and cocoon-agent. Synara injects only Provider Host and its locked
+# Provider CLIs; agentd, Kubernetes identity and Credential brokers stay on the
+# physical host and reach this process through the fenced Cocoon vsock exec
+# transport.
+FROM ${COCOON_GUEST_IMAGE} AS cocoon-guest
+
+ARG SYNARA_VERSION
+ARG SYNARA_GIT_SHA
+
+COPY --from=provider-tools-bookworm /usr/local/bin/node /usr/local/bin/node
+COPY --from=provider-tools-bookworm /opt/synara/provider-tools /opt/synara/provider-tools
+COPY --from=provider-host-build /out/provider-host.mjs /opt/synara/provider-host/index.mjs
+COPY --from=agentd-build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
+RUN printf '%s\n' '#!/bin/sh' \
+  'export PATH=/opt/synara/provider-tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+  'exec node /opt/synara/provider-host/index.mjs "$@"' \
+  > /usr/local/bin/provider-host \
+  && chmod 0755 /usr/local/bin/provider-host \
+  && test ! -e /usr/local/bin/synara-agentd \
+  && node --version \
+  && /opt/synara/provider-tools/node_modules/.bin/codex --version \
+  && /opt/synara/provider-tools/node_modules/.bin/claude --version
+
+ENV PATH=/opt/synara/provider-tools/node_modules/.bin:${PATH} \
+  NPM_CONFIG_UPDATE_NOTIFIER=false
+
+LABEL org.opencontainers.image.title="Synara Cocoon Guest" \
+  org.opencontainers.image.version="${SYNARA_VERSION}" \
+  org.opencontainers.image.revision="${SYNARA_GIT_SHA}" \
+  synara.io/runtime-boundary="provider-host-only"
 
 # Deterministic Target acceptance image. This extends the production Worker
 # image with a bundled Provider Host Protocol fixture, while keeping the

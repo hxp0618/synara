@@ -10,7 +10,10 @@ import {
   startProviderHostRun,
   validateRunnerInput,
 } from "./providerHost";
-import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "./providerOuterSandbox";
+import {
+  PROVIDER_OUTER_SANDBOX_PROFILE_ENV,
+  requireProviderOuterSandboxProfile,
+} from "./providerOuterSandbox";
 
 process.env[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = "single-tenant-trusted-v1";
 
@@ -31,6 +34,14 @@ describe("Provider outer sandbox guard", () => {
       );
     },
   );
+
+  it("accepts a supervisor-attested microVM outer sandbox profile", () => {
+    const environment: NodeJS.ProcessEnv = {
+      PATH: "/bin",
+      [PROVIDER_OUTER_SANDBOX_PROFILE_ENV]: "microvm-isolated-v1",
+    };
+    expect(requireProviderOuterSandboxProfile(environment)).toBe("microvm-isolated-v1");
+  });
 });
 
 describe("provider credential isolation", () => {

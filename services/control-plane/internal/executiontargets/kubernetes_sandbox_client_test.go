@@ -148,7 +148,7 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 				case strings.HasSuffix(request.URL.Path, "/sandboxtemplates/synara-worker"):
 					_, _ = writer.Write([]byte(`{
   "metadata":{"uid":"template-uid","resourceVersion":"42"},
-  "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"vk-cocoon","cocoonset.cocoonstack.io/snapshot-policy":"never"}},"spec":{
+  "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"vk-cocoon","cocoonset.cocoonstack.io/snapshot-policy":"never","vm.cocoonstack.io/shared-memory":"true"}},"spec":{
 					"nodeSelector":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},
 					"tolerations":[
 						{"key":"virtual-kubelet.io/provider","operator":"Equal","value":"cocoon","effect":"NoSchedule"}
@@ -183,7 +183,8 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 			if !observation.WarmPoolTemplateImageFresh {
 				t.Fatalf("Cocoon warm member guest image was not recognized: %#v", observation)
 			}
-			if observation.TemplateSandboxRuntimeName != "agent" || !observation.CocoonTemplateSchedulingReady || !observation.CocoonTemplateCleanupReady {
+			if observation.TemplateSandboxRuntimeName != "agent" || !observation.CocoonTemplateSchedulingReady ||
+				!observation.CocoonTemplateCleanupReady || !observation.CocoonTemplateWorkspaceReady {
 				t.Fatalf("Cocoon template scheduling contract = %#v, want attested-node fence", observation)
 			}
 			if observation.HostSupervisorReady != test.wantSupervisorReady ||

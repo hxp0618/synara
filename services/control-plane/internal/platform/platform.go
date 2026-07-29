@@ -58,6 +58,7 @@ type ExecutionTargetIsolationProfile string
 const (
 	IsolationSingleTenantTrusted  ExecutionTargetIsolationProfile = "single-tenant-trusted-v1"
 	IsolationKubernetesRestricted ExecutionTargetIsolationProfile = "kubernetes-restricted-v1"
+	IsolationMicroVM              ExecutionTargetIsolationProfile = "microvm-isolated-v1"
 )
 
 const (

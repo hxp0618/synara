@@ -136,6 +136,15 @@ func TestKubernetesAllocationTargetAcceptance(t *testing.T) {
 			}(),
 			reasonCode: "sandbox-operator-cocoon-cleanup-policy-unavailable",
 		},
+		{
+			name: "cocoon workspace transport missing", backend: "sandbox-operator-cocoon",
+			observation: func() KubernetesAllocationAcceptanceObservation {
+				observation := withCocoonIsolation(withCocoonTemplate(withCocoonRuntime(base)))
+				observation.CocoonWorkspaceReady = false
+				return observation
+			}(),
+			reasonCode: "sandbox-operator-cocoon-workspace-unavailable",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -174,5 +183,6 @@ func withCocoonTemplate(observation KubernetesAllocationAcceptanceObservation) K
 	observation.CocoonGuestContainerReady = true
 	observation.CocoonSchedulingFenceReady = true
 	observation.CocoonCleanupPolicyReady = true
+	observation.CocoonWorkspaceReady = true
 	return observation
 }

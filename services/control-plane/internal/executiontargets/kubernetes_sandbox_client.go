@@ -56,6 +56,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	GuestIsolationReady            bool
 	CocoonTemplateSchedulingReady  bool
 	CocoonTemplateCleanupReady     bool
+	CocoonTemplateWorkspaceReady   bool
 }
 
 const (
@@ -66,6 +67,7 @@ const (
 	kubernetesCocoonSupervisorInstanceAnnotation   = "synara.io/host-supervisor-instance"
 	kubernetesCocoonSupervisorObservedAtAnnotation = "synara.io/host-supervisor-observed-at"
 	kubernetesCocoonSnapshotPolicyAnnotation       = "cocoonset.cocoonstack.io/snapshot-policy"
+	kubernetesCocoonSharedMemoryAnnotation         = "vm.cocoonstack.io/shared-memory"
 
 	kubernetesCocoonHostSupervisorV1    = "v1"
 	kubernetesCocoonProviderTransportV2 = "vsock-v2"
@@ -270,6 +272,9 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	observation.CocoonTemplateCleanupReady = strings.TrimSpace(
 		template.Spec.PodTemplate.Metadata.Annotations[kubernetesCocoonSnapshotPolicyAnnotation],
 	) == kubernetesCocoonEphemeralPolicy
+	observation.CocoonTemplateWorkspaceReady = strings.EqualFold(strings.TrimSpace(
+		template.Spec.PodTemplate.Metadata.Annotations[kubernetesCocoonSharedMemoryAnnotation],
+	), "true")
 	if uid, resourceVersion := strings.TrimSpace(template.Metadata.UID), strings.TrimSpace(template.Metadata.ResourceVersion); uid != "" && resourceVersion != "" {
 		observation.TemplateIdentity = uid + ":" + resourceVersion
 	}

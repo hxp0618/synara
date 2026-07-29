@@ -122,6 +122,7 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 		CocoonGuestContainerReady:  observedAcceptance.TemplateSandboxRuntimeName == kubernetesCocoonGuestContainerName,
 		CocoonSchedulingFenceReady: observedAcceptance.CocoonTemplateSchedulingReady,
 		CocoonCleanupPolicyReady:   observedAcceptance.CocoonTemplateCleanupReady,
+		CocoonWorkspaceReady:       observedAcceptance.CocoonTemplateWorkspaceReady,
 	}
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) &&
 		observedAcceptance.TemplateRuntime != "vk-cocoon" {
@@ -479,6 +480,20 @@ func (r *KubernetesReconciler) observeKubernetesSandboxAllocation(
 				"The bound Sandbox Pod image does not match the immutable Execution Worker release selection.",
 			)
 		}
+		if backend == string(kubernetesAllocationBackendSandboxOperatorCocoon) &&
+			!strings.EqualFold(strings.TrimSpace(pod.Annotations[kubernetesCocoonSharedMemoryAnnotation]), "true") {
+			if err := r.failKubernetesSandboxAllocation(ctx, allocation, claim, true, "cocoon-workspace-contract-mismatch", observedAt); err != nil {
+				return false, err
+			}
+			if err := sandboxClient.DeleteSandboxClaim(ctx, allocation.Namespace, allocation.ClaimName, claim.UID); err != nil {
+				return false, problem.Wrap(502, "kubernetes_sandbox_claim_delete_failed", "The workspace-contract-mismatched SandboxClaim could not be deleted.", err)
+			}
+			return false, problem.New(
+				409,
+				"kubernetes_sandbox_cocoon_workspace_mismatch",
+				"The bound Cocoon Sandbox Pod was not created with the immutable shared-memory workspace prerequisite.",
+			)
+		}
 		if allocation.Status == "bound" {
 			if !kubernetesOptionalIdentityMatches(allocation.ClaimUID, claim.UID) ||
 				!kubernetesOptionalIdentityMatches(allocation.SandboxName, claim.SandboxName) ||
@@ -713,25 +728,27 @@ func kubernetesSandboxClaimName(targetID uuid.UUID, execution kubernetesExecutio
 func kubernetesSandboxAllocationConfigurationDigest(configuration kubernetesTargetConfiguration, templateIdentity, runtimeImage string) (string, error) {
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
 		payload, err := json.Marshal(struct {
-			Version           string
-			Backend           string
-			Namespace         string
-			TemplateName      string
-			TemplateID        string
-			WarmPoolName      string
-			GuestImage        string
-			HostSupervisor    string
-			ProviderTransport string
-			IsolationProfile  string
-			Timeout           int
+			Version            string
+			Backend            string
+			Namespace          string
+			TemplateName       string
+			TemplateID         string
+			WarmPoolName       string
+			GuestImage         string
+			HostSupervisor     string
+			ProviderTransport  string
+			IsolationProfile   string
+			WorkspaceTransport string
+			Timeout            int
 		}{
-			Version: "cocoon-v1", Backend: configuration.AllocationBackend, Namespace: configuration.Namespace,
+			Version: "cocoon-v2", Backend: configuration.AllocationBackend, Namespace: configuration.Namespace,
 			TemplateName: configuration.SandboxTemplateName, TemplateID: templateIdentity,
 			WarmPoolName: configuration.SandboxWarmPoolName, GuestImage: strings.TrimSpace(runtimeImage),
-			HostSupervisor:    kubernetesCocoonHostSupervisorV1,
-			ProviderTransport: kubernetesCocoonProviderTransportV2,
-			IsolationProfile:  kubernetesCocoonIsolationProfileV1,
-			Timeout:           configuration.SandboxClaimReadyTimeoutSeconds,
+			HostSupervisor:     kubernetesCocoonHostSupervisorV1,
+			ProviderTransport:  kubernetesCocoonProviderTransportV2,
+			IsolationProfile:   kubernetesCocoonIsolationProfileV1,
+			WorkspaceTransport: "virtiofs-v1",
+			Timeout:            configuration.SandboxClaimReadyTimeoutSeconds,
 		})
 		if err != nil {
 			return "", fmt.Errorf("encode Kubernetes Cocoon Sandbox allocation configuration: %w", err)

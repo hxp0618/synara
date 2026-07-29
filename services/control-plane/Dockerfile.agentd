@@ -9,7 +9,9 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-provider-transport ./cmd/cocoon-provider-transport && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-supervisor ./cmd/cocoon-supervisor
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates git openssh-client && \
@@ -17,6 +19,8 @@ RUN apk add --no-cache ca-certificates git openssh-client && \
     adduser -u 10002 -S -D -H -G synara-agentd synara-agentd && \
     mkdir -p /data/workspaces && chown -R 10002:10002 /data
 COPY --from=build /out/synara-agentd /usr/local/bin/synara-agentd
+COPY --from=build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
+COPY --from=build /out/synara-cocoon-supervisor /usr/local/bin/synara-cocoon-supervisor
 USER 10002:10002
 ENV SYNARA_AGENTD_WORKSPACE_ROOT=/data/workspaces
 ENTRYPOINT ["/usr/local/bin/synara-agentd"]

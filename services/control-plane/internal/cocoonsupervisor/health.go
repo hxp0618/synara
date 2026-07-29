@@ -31,10 +31,12 @@ type Readiness struct {
 	VSockListenerReady      bool
 	CredentialBrokerReady   bool
 	GuestIdentityFenceReady bool
+	WorkspaceMountReady     bool
 }
 
 func (r Readiness) Ready() bool {
-	return r.KVMReady && r.VSockListenerReady && r.CredentialBrokerReady && r.GuestIdentityFenceReady
+	return r.KVMReady && r.VSockListenerReady && r.CredentialBrokerReady &&
+		r.GuestIdentityFenceReady && r.WorkspaceMountReady
 }
 
 // ReadinessObserver returns a cached, non-blocking supervisor state snapshot.

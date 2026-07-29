@@ -34,6 +34,7 @@ type KubernetesAllocationAcceptanceObservation struct {
 	CocoonGuestContainerReady  bool
 	CocoonSchedulingFenceReady bool
 	CocoonCleanupPolicyReady   bool
+	CocoonWorkspaceReady       bool
 }
 
 type KubernetesAllocationAcceptance struct {
@@ -110,6 +111,9 @@ func (adapter sandboxOperatorAllocationAdapter) Accept(
 		}
 		if !observation.CocoonCleanupPolicyReady {
 			return rejectedKubernetesAllocation(adapter.Backend(), "sandbox-operator-cocoon-cleanup-policy-unavailable")
+		}
+		if !observation.CocoonWorkspaceReady {
+			return rejectedKubernetesAllocation(adapter.Backend(), "sandbox-operator-cocoon-workspace-unavailable")
 		}
 		if !observation.CocoonHostSupervisorReady || !observation.CocoonFencedVSockReady ||
 			!observation.CocoonGuestIsolationReady {

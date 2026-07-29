@@ -53,6 +53,7 @@ type Config struct {
 	GitCacheRoot                 string
 	PrivateTempRoot              string
 	ProviderOuterSandboxProfile  string
+	CocoonSupervisorAttestation  *CocoonSupervisorAttestation
 	WorkspaceFetchWindow         time.Duration
 	PrivateNetworkCIDRs          []string
 	PollInterval                 time.Duration
@@ -269,6 +270,21 @@ func LoadConfig() (Config, error) {
 	if cfg.RegistrationToken == "" {
 		return Config{}, errors.New("a Worker registration token or token file is required")
 	}
+	cocoonAttestationPath := strings.TrimSpace(os.Getenv(cocoonSupervisorAttestationFileEnvironment))
+	if cocoonAttestationPath != "" {
+		if cfg.TargetKind != platform.TargetKubernetes {
+			return Config{}, errors.New("Cocoon supervisor attestation is only valid for Kubernetes workers")
+		}
+		cfg.CocoonSupervisorAttestation, err = loadCocoonSupervisorAttestation(
+			cocoonAttestationPath, cfg.InstanceUID, cfg.RunnerCommand, time.Now(),
+		)
+		if err != nil {
+			return Config{}, err
+		}
+		if err := removeConsumedCocoonSupervisorAttestation(cocoonAttestationPath); err != nil {
+			return Config{}, fmt.Errorf("remove consumed Cocoon supervisor attestation: %w", err)
+		}
+	}
 	cfg.ProviderOuterSandboxProfile, err = resolveProviderOuterSandboxProfile(cfg)
 	if err != nil {
 		return Config{}, err
@@ -322,6 +338,7 @@ func LoadConfig() (Config, error) {
 
 const (
 	providerOuterSandboxKubernetesRestricted = string(platform.IsolationKubernetesRestricted)
+	providerOuterSandboxMicroVM              = string(platform.IsolationMicroVM)
 	providerOuterSandboxSingleTenantTrusted  = string(platform.IsolationSingleTenantTrusted)
 )
 
@@ -331,7 +348,13 @@ func resolveProviderOuterSandboxProfile(cfg Config) (string, error) {
 			cfg.KubernetesPIDsMax == 0 {
 			return "", errors.New("Kubernetes Provider execution requires Pod-bound registration, a finite kubelet PID declaration, and an explicit Worker-private temporary root")
 		}
+		if cfg.CocoonSupervisorAttestation != nil {
+			return providerOuterSandboxMicroVM, nil
+		}
 		return providerOuterSandboxKubernetesRestricted, nil
+	}
+	if cfg.CocoonSupervisorAttestation != nil {
+		return "", errors.New("Cocoon supervisor attestation is only valid for Kubernetes workers")
 	}
 	return providerOuterSandboxSingleTenantTrusted, nil
 }
