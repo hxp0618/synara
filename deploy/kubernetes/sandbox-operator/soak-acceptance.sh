@@ -116,16 +116,16 @@ text = open(log_path, encoding="utf-8", errors="replace").read()
 operator_text = open(operator_log_path, encoding="utf-8", errors="replace").read()
 match = re.search(
     r"Sandbox real control-plane PASS .*?initialLaunchType=(?P<launch>\S+) "
-    r"providerReady=(?P<provider>[0-9.]+)(?P<provider_unit>ms|s).*?"
+    r"providerReady=(?P<provider>\S+).*?"
     r"staleCode=(?P<stale>\S+) nodeLossMode=(?P<node_loss_mode>\S+) "
     r"nodeLossRecoveryAuthority=(?P<recovery_authority>\S+) "
     r"nodeLossOldNode=(?P<old_node>\S+) nodeLossNewNode=(?P<new_node>\S+) "
     r"nodeLossOldPodUID=(?P<old_pod_uid>\S+) "
     r"nodeLossNewPodUID=(?P<new_pod_uid>\S+) "
-    r"nodeLossRecovery=(?P<node_loss>[0-9.]+)(?P<node_loss_unit>ms|s).*?"
+    r"nodeLossRecovery=(?P<node_loss>\S+).*?"
     r"restartExecutions=\[(?P<restart_executions>.*?)\].*?"
     r"leaderBefore=(?P<leader_before>\S+) leaderAfter=(?P<leader_after>\S+) "
-    r"failover=(?P<failover>[0-9.]+)(?P<failover_unit>ms|s).*?"
+    r"failover=(?P<failover>\S+).*?"
     r"maxWarmPoolDeficit=(?P<max_deficit>\d+) finalWarmPoolDeficit=(?P<final_deficit>\d+)",
     text,
 )
@@ -151,6 +151,27 @@ if re.search(
 ):
     secret_leak_kinds.add("credentialKeyValue")
 duration = time.time() - float(started)
+
+def go_duration_seconds(raw):
+    parts = list(re.finditer(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|h|m|s)", raw))
+    if not parts or "".join(part.group(0) for part in parts) != raw:
+        raise ValueError(f"invalid Go duration: {raw}")
+    scales = {
+        "h": 3600, "m": 60, "s": 1, "ms": 1e-3,
+        "us": 1e-6, "µs": 1e-6, "ns": 1e-9,
+    }
+    return sum(float(part.group(1)) * scales[part.group(2)] for part in parts)
+
+parsed_durations = None
+if match:
+    try:
+        parsed_durations = {
+            "provider": go_duration_seconds(match.group("provider")),
+            "node_loss": go_duration_seconds(match.group("node_loss")),
+            "failover": go_duration_seconds(match.group("failover")),
+        }
+    except ValueError:
+        match = None
 node_loss_fenced = bool(
     match
     and match.group("stale") == "kubernetes_sandbox_allocation_generation_stale"
@@ -173,12 +194,9 @@ record = {
     "backingPodLossFenced": node_loss_fenced,
 }
 if match:
-    provider_value = float(match.group("provider"))
-    failover_value = float(match.group("failover"))
-    node_loss_value = float(match.group("node_loss"))
     record.update({
         "initialLaunchType": match.group("launch"),
-        "providerReadyMilliseconds": round(provider_value * 1000 if match.group("provider_unit") == "s" else provider_value, 3),
+        "providerReadyMilliseconds": round(parsed_durations["provider"] * 1000, 3),
         "executionCount": 1 + len(match.group("restart_executions").split()),
         "generationCompletionCount": 1 + len(match.group("restart_executions").split()),
         "generationTransitionCount": 3 + len(match.group("restart_executions").split()),
@@ -188,10 +206,10 @@ if match:
         "nodeLossNewNode": match.group("new_node"),
         "nodeLossOldPodUID": match.group("old_pod_uid"),
         "nodeLossNewPodUID": match.group("new_pod_uid"),
-        "nodeLossRecoverySeconds": round(node_loss_value / 1000 if match.group("node_loss_unit") == "ms" else node_loss_value, 3),
+        "nodeLossRecoverySeconds": round(parsed_durations["node_loss"], 3),
         "leaderBefore": match.group("leader_before"),
         "leaderAfter": match.group("leader_after"),
-        "failoverSeconds": round(failover_value / 1000 if match.group("failover_unit") == "ms" else failover_value, 3),
+        "failoverSeconds": round(parsed_durations["failover"], 3),
         "maxWarmPoolDeficit": int(match.group("max_deficit")),
         "finalWarmPoolDeficit": int(match.group("final_deficit")),
     })
