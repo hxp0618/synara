@@ -11,6 +11,7 @@ MAX_CONTROLLER_CONFLICT_LINES="${SYNARA_SANDBOX_OPERATOR_SOAK_MAX_CONTROLLER_CON
 MAX_WARM_POOL_DEFICIT="${SYNARA_SANDBOX_OPERATOR_SOAK_MAX_WARM_POOL_DEFICIT:-1}"
 MIN_WARM_HIT_RATE_PERCENT="${SYNARA_SANDBOX_OPERATOR_SOAK_MIN_WARM_HIT_RATE_PERCENT:-95}"
 REQUIRED_NODE_LOSS_MODE="${SYNARA_SANDBOX_OPERATOR_SOAK_REQUIRED_NODE_LOSS_MODE:-pod-delete}"
+OPERATOR_NAMESPACE="${SYNARA_TEST_SANDBOX_OPERATOR_NAMESPACE:-sandbox-operator-system}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULT_DIR="${SYNARA_SANDBOX_OPERATOR_SOAK_RESULT_DIR:-$ROOT_DIR/.tmp/sandbox-operator-soak/$RUN_ID}"
 JOURNAL="$RESULT_DIR/journal.jsonl"
@@ -29,7 +30,7 @@ collect_operator_logs() {
   local output="$1"
   while true; do
     kubectl --context "$SYNARA_TEST_KUBERNETES_CONTEXT" \
-      -n sandbox-operator-system logs -l app.kubernetes.io/name=sandbox-operator \
+      -n "$OPERATOR_NAMESPACE" logs -l app.kubernetes.io/name=sandbox-operator \
       --all-containers=true --prefix --since=2s >>"$output" 2>&1 || true
     sleep 1
   done
@@ -56,6 +57,10 @@ done
 (( MIN_WARM_HIT_RATE_PERCENT <= 100 )) || { echo "SYNARA_SANDBOX_OPERATOR_SOAK_MIN_WARM_HIT_RATE_PERCENT must not exceed 100" >&2; exit 2; }
 [[ "$REQUIRED_NODE_LOSS_MODE" == "pod-delete" || "$REQUIRED_NODE_LOSS_MODE" == "node-hook" ]] || {
   echo "SYNARA_SANDBOX_OPERATOR_SOAK_REQUIRED_NODE_LOSS_MODE must be pod-delete or node-hook" >&2
+  exit 2
+}
+[[ "$OPERATOR_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#OPERATOR_NAMESPACE} -le 63 ]] || {
+  echo "SYNARA_TEST_SANDBOX_OPERATOR_NAMESPACE must be a Kubernetes namespace" >&2
   exit 2
 }
 
