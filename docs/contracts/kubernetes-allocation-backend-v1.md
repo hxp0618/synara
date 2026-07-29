@@ -119,6 +119,20 @@ guest identity fence are all positively observed. The package refuses to
 replace an existing Unix socket and bounds concurrent probes; it does not infer
 readiness from process existence.
 
+The external Cocoon `SandboxTemplate` is part of the same acceptance boundary.
+Its first container must be named `agent` and carry the immutable guest image.
+Its `nodeSelector` must repeat the exact virtual-node, KVM, supervisor,
+provider-transport, and isolation-profile labels above, so the existence of one
+attested node cannot authorize scheduling onto a different unattested node. It
+must tolerate the exact `virtual-kubelet.io/provider=cocoon:NoSchedule` taint.
+Every Ready node matching that scheduling fence must carry a fresh supervisor
+heartbeat; one fresh node cannot mask another stale node that the scheduler may
+still select.
+Node-loss recovery is proved by the Stage C node hook and fenced Synara
+Generation replacement, not inferred from template `NoExecute` tolerations. A
+short toleration can mark a backing Pod for deletion while its Sandbox remains
+terminating, so it is not an authorization signal by itself.
+
 These labels and short-lived annotations are attestation outputs, not operator
 configuration shortcuts. Manually adding static labels does not constitute
 acceptance evidence. The attesting component

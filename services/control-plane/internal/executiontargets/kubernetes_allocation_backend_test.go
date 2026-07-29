@@ -98,7 +98,7 @@ func TestKubernetesAllocationTargetAcceptance(t *testing.T) {
 		},
 		{
 			name: "cocoon", backend: "sandbox-operator-cocoon",
-			observation: withCocoonIsolation(withCocoonRuntime(base)), accepted: true,
+			observation: withCocoonIsolation(withCocoonTemplate(withCocoonRuntime(base))), accepted: true,
 		},
 		{
 			name: "cocoon kvm missing", backend: "sandbox-operator-cocoon",
@@ -109,8 +109,22 @@ func TestKubernetesAllocationTargetAcceptance(t *testing.T) {
 			reasonCode: "sandbox-operator-cocoon-runtime-unavailable",
 		},
 		{
-			name: "cocoon host supervisor missing", backend: "sandbox-operator-cocoon",
+			name: "cocoon guest contract missing", backend: "sandbox-operator-cocoon",
 			observation: withCocoonRuntime(base),
+			reasonCode:  "sandbox-operator-cocoon-guest-contract-unavailable",
+		},
+		{
+			name: "cocoon scheduling fence missing", backend: "sandbox-operator-cocoon",
+			observation: KubernetesAllocationAcceptanceObservation{
+				SandboxAPIReady: true, SandboxClaimAPIReady: true, SandboxWarmPoolAPIReady: true,
+				OperatorReady: true, TemplateReady: true, WarmPoolReady: true,
+				CocoonVirtualNodeReady: true, CocoonKVMRuntimeReady: true, CocoonGuestContainerReady: true,
+			},
+			reasonCode: "sandbox-operator-cocoon-scheduling-fence-unavailable",
+		},
+		{
+			name: "cocoon host supervisor missing", backend: "sandbox-operator-cocoon",
+			observation: withCocoonTemplate(withCocoonRuntime(base)),
 			reasonCode:  "sandbox-operator-cocoon-supervisor-unavailable",
 		},
 	}
@@ -144,5 +158,11 @@ func withCocoonIsolation(observation KubernetesAllocationAcceptanceObservation) 
 	observation.CocoonHostSupervisorReady = true
 	observation.CocoonFencedVSockReady = true
 	observation.CocoonGuestIsolationReady = true
+	return observation
+}
+
+func withCocoonTemplate(observation KubernetesAllocationAcceptanceObservation) KubernetesAllocationAcceptanceObservation {
+	observation.CocoonGuestContainerReady = true
+	observation.CocoonSchedulingFenceReady = true
 	return observation
 }

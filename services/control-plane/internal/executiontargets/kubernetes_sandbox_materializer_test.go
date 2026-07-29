@@ -28,9 +28,11 @@ func newFakeSandboxClient(runtime string) *fakeSandboxClient {
 			SandboxWarmPoolAPIReady: true, OperatorReady: true,
 			TemplateIdentity: "template-uid:1", TemplateRuntime: runtime, TemplateAgentdImage: "synara-agentd:test", AssignedExecutionFieldRefReady: true,
 			TemplateSandboxRuntimeImage: "synara-agentd:test",
+			TemplateSandboxRuntimeName:  kubernetesCocoonGuestContainerName,
 			WarmPoolTemplateReady:       true, WarmPoolReady: true, WarmPoolDesiredReplicas: 0,
 			WarmPoolUpdateStrategy: "Recreate", WarmPoolTemplateImageFresh: true,
 			VirtualNodeReady: runtime == "vk-cocoon", KVMRuntimeReady: runtime == "vk-cocoon",
+			CocoonTemplateSchedulingReady: runtime == "vk-cocoon",
 		},
 		claims: map[string]kubernetesSandboxClaimObservation{}, sandboxes: map[string]kubernetesSandboxObservation{},
 	}

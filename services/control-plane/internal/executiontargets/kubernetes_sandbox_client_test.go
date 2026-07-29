@@ -105,28 +105,35 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 		{
 			name: "split labels across nodes are rejected",
 			nodes: `{"items":[
-  {"metadata":{"labels":{"sandbox.cocoonstack.io/kvm-ready":"true"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
-  {"metadata":{"labels":{"synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
 ]}`,
 		},
 		{
 			name: "static labels without a supervisor heartbeat are rejected",
 			nodes: `{"items":[
-  {"metadata":{"labels":{"sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
 ]}`,
 		},
 		{
 			name: "stale supervisor heartbeat is rejected",
 			nodes: `{"items":[
-  {"metadata":{"labels":{"sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"8debb31c-505a-4ad8-b42d-efa5f81e3261","synara.io/host-supervisor-observed-at":"$STALE$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"8debb31c-505a-4ad8-b42d-efa5f81e3261","synara.io/host-supervisor-observed-at":"$STALE$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
 ]}`,
 		},
 		{
 			name: "complete live attestation on one node is accepted",
 			nodes: `{"items":[
-  {"metadata":{"labels":{"sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"8debb31c-505a-4ad8-b42d-efa5f81e3261","synara.io/host-supervisor-observed-at":"$FRESH$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"8debb31c-505a-4ad8-b42d-efa5f81e3261","synara.io/host-supervisor-observed-at":"$FRESH$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
 ]}`,
 			wantSupervisorReady: true, wantFencedVSockReady: true, wantGuestIsolationReady: true,
+		},
+		{
+			name: "one stale schedulable node poisons a fresh candidate",
+			nodes: `{"items":[
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"8debb31c-505a-4ad8-b42d-efa5f81e3261","synara.io/host-supervisor-observed-at":"$FRESH$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+  {"metadata":{"labels":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},"annotations":{"synara.io/host-supervisor-instance":"1d9757fd-2ccc-4978-8be2-fdd0d6675f77","synara.io/host-supervisor-observed-at":"$STALE$"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+]}`,
 		},
 	}
 	for _, test := range tests {
@@ -142,12 +149,16 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 					_, _ = writer.Write([]byte(`{
   "metadata":{"uid":"template-uid","resourceVersion":"42"},
   "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"vk-cocoon"}},"spec":{
-					"containers":[{"name":"provider-guest","image":"synara-agentd:test"},{"name":"agentd","image":"ignored-agentd:old"}]
+					"nodeSelector":{"node.kubernetes.io/instance-type":"virtual-node","sandbox.cocoonstack.io/kvm-ready":"true","synara.io/host-supervisor":"v1","synara.io/provider-transport":"vsock-v2","synara.io/isolation-profile":"microvm-isolated-v1"},
+					"tolerations":[
+						{"key":"virtual-kubelet.io/provider","operator":"Equal","value":"cocoon","effect":"NoSchedule"}
+					],
+					"containers":[{"name":"agent","image":"synara-agentd:test"},{"name":"agentd","image":"ignored-agentd:old"}]
   }}}}`))
 				case strings.HasSuffix(request.URL.Path, "/sandboxwarmpools/synara-interactive"):
 					_, _ = writer.Write([]byte(`{"metadata":{"uid":"pool-uid"},"spec":{"replicas":1,"sandboxTemplateRef":{"name":"synara-worker"},"updateStrategy":{"type":"Recreate"}},"status":{"replicas":1,"readyReplicas":1}}`))
 				case strings.HasSuffix(request.URL.Path, "/sandboxes"):
-					_, _ = writer.Write([]byte(`{"items":[{"metadata":{"ownerReferences":[{"uid":"pool-uid"}]},"spec":{"podTemplate":{"spec":{"containers":[{"name":"provider-guest","image":"synara-agentd:test"},{"name":"agentd","image":"ignored-agentd:old"}]}}}}]}`))
+					_, _ = writer.Write([]byte(`{"items":[{"metadata":{"ownerReferences":[{"uid":"pool-uid"}]},"spec":{"podTemplate":{"spec":{"containers":[{"name":"agent","image":"synara-agentd:test"},{"name":"agentd","image":"ignored-agentd:old"}]}}}}]}`))
 				case request.URL.Path == "/api/v1/nodes":
 					_, _ = writer.Write([]byte(nodes))
 				default:
@@ -171,6 +182,9 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 			}
 			if !observation.WarmPoolTemplateImageFresh {
 				t.Fatalf("Cocoon warm member guest image was not recognized: %#v", observation)
+			}
+			if observation.TemplateSandboxRuntimeName != "agent" || !observation.CocoonTemplateSchedulingReady {
+				t.Fatalf("Cocoon template scheduling contract = %#v, want attested-node fence", observation)
 			}
 			if observation.HostSupervisorReady != test.wantSupervisorReady ||
 				observation.FencedVSockReady != test.wantFencedVSockReady ||
@@ -203,5 +217,36 @@ func TestKubernetesCocoonSupervisorHeartbeatReadyUsesBoundedFreshness(t *testing
 				t.Fatalf("heartbeat ready = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestKubernetesCocoonTemplateSchedulingRequiresAttestedNodesAndExactProviderTaint(t *testing.T) {
+	selectors := map[string]string{
+		"node.kubernetes.io/instance-type":     "virtual-node",
+		kubernetesCocoonKVMReadyLabel:          "true",
+		kubernetesCocoonHostSupervisorLabel:    kubernetesCocoonHostSupervisorV1,
+		kubernetesCocoonProviderTransportLabel: kubernetesCocoonProviderTransportV2,
+		kubernetesCocoonIsolationProfileLabel:  kubernetesCocoonIsolationProfileV1,
+	}
+	provider := []kubernetesSandboxTemplateToleration{{
+		Key: "virtual-kubelet.io/provider", Operator: "Equal", Value: "cocoon", Effect: "NoSchedule",
+	}}
+	if !kubernetesCocoonTemplateSchedulingReady(selectors, provider) {
+		t.Fatal("complete Cocoon scheduling fence was rejected")
+	}
+	missingIsolation := maps.Clone(selectors)
+	delete(missingIsolation, kubernetesCocoonIsolationProfileLabel)
+	if kubernetesCocoonTemplateSchedulingReady(missingIsolation, provider) {
+		t.Fatal("template without an isolation-profile selector was accepted")
+	}
+	if kubernetesCocoonTemplateSchedulingReady(selectors, []kubernetesSandboxTemplateToleration{{
+		Operator: "Exists", Effect: "NoSchedule",
+	}}) {
+		t.Fatal("broad NoSchedule toleration replaced the exact Cocoon provider fence")
+	}
+	if kubernetesCocoonTemplateSchedulingReady(selectors, []kubernetesSandboxTemplateToleration{{
+		Key: "virtual-kubelet.io/provider", Operator: "Equal", Value: "cocoon",
+	}}) {
+		t.Fatal("provider toleration without an exact NoSchedule effect was accepted")
 	}
 }

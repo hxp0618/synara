@@ -1063,6 +1063,20 @@ func (a *sandboxControlPlaneWorkerAPI) writeError(writer http.ResponseWriter, er
 
 func applySandboxControlPlaneTemplate(t *testing.T, ctx context.Context, kubernetesContext, namespace string, targetID, executionID uuid.UUID, serviceAccount, image, controlPlaneURL, templateRuntime string) {
 	t.Helper()
+	containerName := "agentd"
+	cocoonScheduling := ""
+	if templateRuntime == "vk-cocoon" {
+		containerName = "agent"
+		cocoonScheduling = `      nodeSelector:
+        node.kubernetes.io/instance-type: virtual-node
+        sandbox.cocoonstack.io/kvm-ready: "true"
+        synara.io/host-supervisor: v1
+        synara.io/provider-transport: vsock-v2
+        synara.io/isolation-profile: microvm-isolated-v1
+      tolerations:
+      - {key: virtual-kubelet.io/provider, operator: Equal, value: cocoon, effect: NoSchedule}
+`
+	}
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Namespace
 metadata: {name: %s}
@@ -1085,8 +1099,8 @@ spec:
       serviceAccountName: %s
       automountServiceAccountToken: false
       restartPolicy: Never
-      containers:
-      - name: agentd
+%s      containers:
+      - name: %s
         image: %s
         imagePullPolicy: IfNotPresent
         command: ["/usr/local/bin/synara-agentd"]
@@ -1130,7 +1144,7 @@ apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata: {name: synara-worker-interactive, namespace: %s}
 spec: {replicas: 0, sandboxTemplateRef: {name: synara-worker}, updateStrategy: {type: Recreate}}
-`, namespace, serviceAccount, namespace, namespace, templateRuntime, targetID, serviceAccount, image, controlPlaneURL, targetID, namespace, targetID, namespace)
+`, namespace, serviceAccount, namespace, namespace, templateRuntime, targetID, serviceAccount, cocoonScheduling, containerName, image, controlPlaneURL, targetID, namespace, targetID, namespace)
 	sandboxKubectl(t, ctx, kubernetesContext, []byte(manifest), "apply", "-f", "-")
 	_ = executionID
 }

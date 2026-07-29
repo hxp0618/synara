@@ -1,0 +1,54 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: synara-worker
+  namespace: REPLACE_NAMESPACE
+spec:
+  networkPolicyManagement: Unmanaged
+  envVarsInjectionPolicy: Disallowed
+  podTemplate:
+    metadata:
+      annotations:
+        sandbox.cocoonstack.io/runtime: vk-cocoon
+      labels:
+        synara.io/managed: "true"
+        synara.io/execution-target-id: REPLACE_TARGET_UUID
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        node.kubernetes.io/instance-type: virtual-node
+        sandbox.cocoonstack.io/kvm-ready: "true"
+        synara.io/host-supervisor: v1
+        synara.io/provider-transport: vsock-v2
+        synara.io/isolation-profile: microvm-isolated-v1
+      tolerations:
+        - key: virtual-kubelet.io/provider
+          operator: Equal
+          value: cocoon
+          effect: NoSchedule
+      containers:
+        - name: agent
+          image: REPLACE_SYNARA_COCOON_GUEST_IMAGE_BY_DIGEST
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: synara-worker-interactive
+  namespace: REPLACE_NAMESPACE
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: synara-worker
+  updateStrategy:
+    type: Recreate

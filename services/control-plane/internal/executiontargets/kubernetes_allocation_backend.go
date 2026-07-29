@@ -19,18 +19,20 @@ const (
 )
 
 type KubernetesAllocationAcceptanceObservation struct {
-	SandboxAPIReady           bool
-	SandboxClaimAPIReady      bool
-	SandboxWarmPoolAPIReady   bool
-	OperatorReady             bool
-	TemplateReady             bool
-	WarmPoolReady             bool
-	StandardRuntimeReady      bool
-	CocoonVirtualNodeReady    bool
-	CocoonKVMRuntimeReady     bool
-	CocoonHostSupervisorReady bool
-	CocoonFencedVSockReady    bool
-	CocoonGuestIsolationReady bool
+	SandboxAPIReady            bool
+	SandboxClaimAPIReady       bool
+	SandboxWarmPoolAPIReady    bool
+	OperatorReady              bool
+	TemplateReady              bool
+	WarmPoolReady              bool
+	StandardRuntimeReady       bool
+	CocoonVirtualNodeReady     bool
+	CocoonKVMRuntimeReady      bool
+	CocoonHostSupervisorReady  bool
+	CocoonFencedVSockReady     bool
+	CocoonGuestIsolationReady  bool
+	CocoonGuestContainerReady  bool
+	CocoonSchedulingFenceReady bool
 }
 
 type KubernetesAllocationAcceptance struct {
@@ -98,6 +100,12 @@ func (adapter sandboxOperatorAllocationAdapter) Accept(
 	case kubernetesAllocationBackendSandboxOperatorCocoon:
 		if !observation.CocoonVirtualNodeReady || !observation.CocoonKVMRuntimeReady {
 			return rejectedKubernetesAllocation(adapter.Backend(), "sandbox-operator-cocoon-runtime-unavailable")
+		}
+		if !observation.CocoonGuestContainerReady {
+			return rejectedKubernetesAllocation(adapter.Backend(), "sandbox-operator-cocoon-guest-contract-unavailable")
+		}
+		if !observation.CocoonSchedulingFenceReady {
+			return rejectedKubernetesAllocation(adapter.Backend(), "sandbox-operator-cocoon-scheduling-fence-unavailable")
 		}
 		if !observation.CocoonHostSupervisorReady || !observation.CocoonFencedVSockReady ||
 			!observation.CocoonGuestIsolationReady {

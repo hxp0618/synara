@@ -25,6 +25,13 @@ type kubernetesSandboxObservation struct {
 	PodName string
 }
 
+type kubernetesSandboxTemplateToleration struct {
+	Key      string `json:"key"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+	Effect   string `json:"effect"`
+}
+
 type kubernetesSandboxAcceptanceObservation struct {
 	SandboxAPIReady                bool
 	SandboxClaimAPIReady           bool
@@ -35,6 +42,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	TemplateRuntime                string
 	TemplateAgentdImage            string
 	TemplateSandboxRuntimeImage    string
+	TemplateSandboxRuntimeName     string
 	AssignedExecutionFieldRefReady bool
 	WarmPoolTemplateReady          bool
 	WarmPoolReady                  bool
@@ -46,6 +54,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	HostSupervisorReady            bool
 	FencedVSockReady               bool
 	GuestIsolationReady            bool
+	CocoonTemplateSchedulingReady  bool
 }
 
 const (
@@ -59,6 +68,9 @@ const (
 	kubernetesCocoonHostSupervisorV1    = "v1"
 	kubernetesCocoonProviderTransportV2 = "vsock-v2"
 	kubernetesCocoonIsolationProfileV1  = "microvm-isolated-v1"
+	kubernetesCocoonVirtualNodeType     = "virtual-node"
+	kubernetesCocoonVirtualProvider     = "cocoon"
+	kubernetesCocoonGuestContainerName  = "agent"
 
 	kubernetesCocoonSupervisorHeartbeatMaxAge     = 45 * time.Second
 	kubernetesCocoonSupervisorHeartbeatFutureSkew = 5 * time.Second
@@ -185,7 +197,9 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 					Annotations map[string]string `json:"annotations"`
 				} `json:"metadata"`
 				Spec struct {
-					Containers []struct {
+					NodeSelector map[string]string                     `json:"nodeSelector"`
+					Tolerations  []kubernetesSandboxTemplateToleration `json:"tolerations"`
+					Containers   []struct {
 						Name  string `json:"name"`
 						Image string `json:"image"`
 						Env   []struct {
@@ -260,6 +274,7 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	observation.WarmPoolUpdateStrategy = strings.TrimSpace(pool.Spec.UpdateStrategy.Type)
 	for index, container := range template.Spec.PodTemplate.Spec.Containers {
 		if index == 0 {
+			observation.TemplateSandboxRuntimeName = strings.TrimSpace(container.Name)
 			observation.TemplateSandboxRuntimeImage = strings.TrimSpace(container.Image)
 		}
 		if strings.TrimSpace(container.Name) == "agentd" {
@@ -357,6 +372,10 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	if configuration.AllocationBackend != string(kubernetesAllocationBackendSandboxOperatorCocoon) {
 		return observation, nil
 	}
+	observation.CocoonTemplateSchedulingReady = kubernetesCocoonTemplateSchedulingReady(
+		template.Spec.PodTemplate.Spec.NodeSelector,
+		template.Spec.PodTemplate.Spec.Tolerations,
+	)
 	var nodes struct {
 		Items []struct {
 			Metadata struct {
@@ -376,6 +395,8 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		return kubernetesSandboxAcceptanceObservation{}, err
 	}
 	observedAt := time.Now().UTC()
+	liveSchedulableNodes := 0
+	staleSchedulableNode := false
 	for _, node := range nodes.Items {
 		ready := false
 		for _, condition := range node.Status.Conditions {
@@ -390,17 +411,61 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		observation.VirtualNodeReady = true
 		if node.Metadata.Labels[kubernetesCocoonKVMReadyLabel] == "true" {
 			observation.KVMRuntimeReady = true
-			if node.Metadata.Labels[kubernetesCocoonHostSupervisorLabel] == kubernetesCocoonHostSupervisorV1 &&
-				node.Metadata.Labels[kubernetesCocoonProviderTransportLabel] == kubernetesCocoonProviderTransportV2 &&
-				node.Metadata.Labels[kubernetesCocoonIsolationProfileLabel] == kubernetesCocoonIsolationProfileV1 &&
-				kubernetesCocoonSupervisorHeartbeatReady(node.Metadata.Annotations, observedAt) {
-				observation.HostSupervisorReady = true
-				observation.FencedVSockReady = true
-				observation.GuestIsolationReady = true
-			}
+		}
+		if !kubernetesCocoonNodeMatchesSchedulingFence(node.Metadata.Labels) {
+			continue
+		}
+		if kubernetesCocoonSupervisorHeartbeatReady(node.Metadata.Annotations, observedAt) {
+			liveSchedulableNodes++
+		} else {
+			staleSchedulableNode = true
 		}
 	}
+	if liveSchedulableNodes > 0 && !staleSchedulableNode {
+		observation.HostSupervisorReady = true
+		observation.FencedVSockReady = true
+		observation.GuestIsolationReady = true
+	}
 	return observation, nil
+}
+
+func kubernetesCocoonNodeMatchesSchedulingFence(labels map[string]string) bool {
+	return strings.TrimSpace(labels["node.kubernetes.io/instance-type"]) == kubernetesCocoonVirtualNodeType &&
+		strings.TrimSpace(labels[kubernetesCocoonKVMReadyLabel]) == "true" &&
+		strings.TrimSpace(labels[kubernetesCocoonHostSupervisorLabel]) == kubernetesCocoonHostSupervisorV1 &&
+		strings.TrimSpace(labels[kubernetesCocoonProviderTransportLabel]) == kubernetesCocoonProviderTransportV2 &&
+		strings.TrimSpace(labels[kubernetesCocoonIsolationProfileLabel]) == kubernetesCocoonIsolationProfileV1
+}
+
+func kubernetesCocoonTemplateSchedulingReady(
+	nodeSelector map[string]string,
+	tolerations []kubernetesSandboxTemplateToleration,
+) bool {
+	requiredSelectors := map[string]string{
+		"node.kubernetes.io/instance-type":     kubernetesCocoonVirtualNodeType,
+		kubernetesCocoonKVMReadyLabel:          "true",
+		kubernetesCocoonHostSupervisorLabel:    kubernetesCocoonHostSupervisorV1,
+		kubernetesCocoonProviderTransportLabel: kubernetesCocoonProviderTransportV2,
+		kubernetesCocoonIsolationProfileLabel:  kubernetesCocoonIsolationProfileV1,
+	}
+	for key, value := range requiredSelectors {
+		if strings.TrimSpace(nodeSelector[key]) != value {
+			return false
+		}
+	}
+	for _, toleration := range tolerations {
+		operator := strings.TrimSpace(toleration.Operator)
+		if operator == "" {
+			operator = "Equal"
+		}
+		effect := strings.TrimSpace(toleration.Effect)
+		if strings.TrimSpace(toleration.Key) == "virtual-kubelet.io/provider" &&
+			operator == "Equal" && strings.TrimSpace(toleration.Value) == kubernetesCocoonVirtualProvider &&
+			effect == "NoSchedule" {
+			return true
+		}
+	}
+	return false
 }
 
 func kubernetesCocoonSupervisorHeartbeatReady(annotations map[string]string, observedAt time.Time) bool {

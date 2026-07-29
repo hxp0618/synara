@@ -2,7 +2,8 @@
 
 These assets bootstrap the externally managed `SandboxTemplate` and
 `SandboxWarmPool` required by a Synara Kubernetes target whose
-`allocationBackend` is `sandbox-operator-standard`.
+`allocationBackend` is `sandbox-operator-standard` or
+`sandbox-operator-cocoon`.
 
 Copy `standard.example.yaml`, replace every `REPLACE_*` value, pin the worker
 image by digest, and apply it to the same cluster and namespace as the target.
@@ -10,6 +11,17 @@ The target configuration then references `synara-worker` and
 `synara-worker-interactive`, and must include the selected Target tenant UUID in
 `sandboxAllowedTenantIds`. Copying the configuration to another tenant fails
 closed until that tenant is deliberately selected.
+
+For Cocoon, start from `cocoon.example.yaml` and pin the first `agent`
+container to the immutable guest image. The container name is part of
+vk-cocoon's exec/logs contract. Target acceptance also requires the template to
+select only virtual nodes carrying the complete KVM/supervisor/vsock/isolation
+labels and to tolerate only the exact Cocoon virtual-kubelet taint. The two
+physical-host acceptance uses an explicit node-loss hook and fenced Generation
+recovery; template `NoExecute` tolerations are not accepted as recovery proof.
+In the two-host runtime checkpoint, a 20-second toleration marked the backing
+Pod for deletion but left the Sandbox terminating and did not replenish it on
+the other host.
 
 Keep the pool update strategy at `Recreate`. Synara reapplies that strategy and
 will not create new Claims while any pool-owned idle Sandbox still carries the
