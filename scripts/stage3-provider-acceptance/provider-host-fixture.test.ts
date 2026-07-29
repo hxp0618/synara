@@ -673,6 +673,46 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     });
   });
 
+  it("accepts a brokered task Credential without exposing its token", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "synara-stage3-brokered-credential-"));
+    temporaryDirectories.push(workspace);
+    const credentialPath = join(workspace, "credential.json");
+    const taskToken = "synara_task_fixture_only";
+    writeFileSync(
+      credentialPath,
+      JSON.stringify({ payload: { apiKey: taskToken, baseUrl: "http://127.0.0.1:43123" } }),
+      { mode: 0o600 },
+    );
+    const descriptor = openSync(credentialPath, "r");
+    const previousDescriptor = process.env.SYNARA_PROVIDER_CREDENTIAL_FD;
+    process.env.SYNARA_PROVIDER_CREDENTIAL_FD = String(descriptor);
+    const encoded: string[] = [];
+    try {
+      const host = new Stage3ProviderAcceptanceHost({
+        enabledProviders: new Set(["codex"]),
+        emitLine: (line) => encoded.push(line),
+      });
+      startCodexSession(host);
+      host.handleCommand(command("SendTurn", "brokered-credential-turn", { inputText: "[credential]" }));
+    } finally {
+      if (previousDescriptor === undefined) delete process.env.SYNARA_PROVIDER_CREDENTIAL_FD;
+      else process.env.SYNARA_PROVIDER_CREDENTIAL_FD = previousDescriptor;
+    }
+
+    expect(encoded.join("\n")).not.toContain(taskToken);
+    expect(JSON.parse(encoded.at(-1) ?? "{}")).toMatchObject({
+      messageType: "Result",
+      payload: {
+        output: {
+          credentialEvidence: {
+            credentialVerified: true,
+            credentialPayloadKeys: ["apiKey", "baseUrl"],
+          },
+        },
+      },
+    });
+  });
+
   it("runs as JSONL and exposes opt-in malformed and oversized protocol fault hooks", () => {
     const fixturePath = join(import.meta.dirname, "provider-host-fixture.ts");
     const describe = JSON.stringify(command("Describe", "describe-cli", { provider: "codex" }));

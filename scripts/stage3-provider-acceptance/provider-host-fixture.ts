@@ -1239,7 +1239,7 @@ export class Stage3ProviderAcceptanceHost {
     try {
       const decoded = JSON.parse(encoded.toString("utf8"));
       const payload = asRecord(asRecord(decoded)?.payload);
-      if (payload?.apiKey !== STAGE3_FIXTURE_CREDENTIAL_SENTINEL) {
+      if (!validFixtureCredentialPayload(payload)) {
         this.#credentialReadResult = { ok: false, code: "credential_invalid" };
       } else {
         this.#credentialReadResult = {
@@ -1335,6 +1335,28 @@ export class Stage3ProviderAcceptanceHost {
     const occurredAt = new Date(this.#timeOrigin + this.#messageSequence).toISOString();
     this.#messageSequence += 1;
     return occurredAt;
+  }
+}
+
+function validFixtureCredentialPayload(payload: Record<string, unknown> | undefined): boolean {
+  if (payload?.apiKey === STAGE3_FIXTURE_CREDENTIAL_SENTINEL) return true;
+  const apiKey = optionalString(payload?.apiKey);
+  const baseUrl = optionalString(payload?.baseUrl);
+  if (!apiKey?.startsWith("synara_task_") || !baseUrl) return false;
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.protocol === "http:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.port !== "" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]") &&
+      url.pathname === "/" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
   }
 }
 

@@ -1091,6 +1091,10 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 	if err := s.markStaleWorkers(ctx); err != nil {
 		return err
 	}
+	// The stale-Worker sweep records its own observation timestamp. Refresh the
+	// lease-recovery timestamp afterwards so the following fact transition can
+	// never move the same Worker incarnation timeline backwards.
+	now = s.now()
 	appended := make([]persistence.SessionEvent, 0)
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		leases := make([]persistence.WorkerLease, 0)

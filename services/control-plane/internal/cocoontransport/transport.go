@@ -374,20 +374,16 @@ func runGuest(ctx context.Context, arguments []string, stdin io.Reader, stdout, 
 	if err != nil {
 		return err
 	}
-	providerStdout, err := command.StdoutPipe()
-	if err != nil {
-		_ = providerStdin.Close()
-		return err
-	}
-	providerStderr, err := command.StderrPipe()
-	if err != nil {
-		_ = providerStdin.Close()
-		return err
-	}
+	providerStdout, providerStdoutWriter := io.Pipe()
+	providerStderr, providerStderrWriter := io.Pipe()
+	command.Stdout = providerStdoutWriter
+	command.Stderr = providerStderrWriter
 	var credentialWriter *os.File
 	if string(credential) != "null" {
 		credentialReader, writer, err := os.Pipe()
 		if err != nil {
+			_ = providerStdoutWriter.Close()
+			_ = providerStderrWriter.Close()
 			return err
 		}
 		command.ExtraFiles = []*os.File{credentialReader}
@@ -396,6 +392,8 @@ func runGuest(ctx context.Context, arguments []string, stdin io.Reader, stdout, 
 		defer credentialReader.Close()
 	}
 	if err := command.Start(); err != nil {
+		_ = providerStdoutWriter.Close()
+		_ = providerStderrWriter.Close()
 		if credentialWriter != nil {
 			_ = credentialWriter.Close()
 		}
@@ -406,6 +404,8 @@ func runGuest(ctx context.Context, arguments []string, stdin io.Reader, stdout, 
 			_ = credentialWriter.Close()
 			_ = command.Process.Kill()
 			_ = command.Wait()
+			_ = providerStdoutWriter.Close()
+			_ = providerStderrWriter.Close()
 			return errors.New("deliver guest Provider credential descriptor")
 		}
 		_ = credentialWriter.Close()
@@ -414,7 +414,12 @@ func runGuest(ctx context.Context, arguments []string, stdin io.Reader, stdout, 
 	go func() { outputDone <- copyStreamToFrames(providerStdout, wire, frameProviderStdout, 0) }()
 	go func() { outputDone <- copyStreamToFrames(providerStderr, wire, frameProviderStderr, 0) }()
 	processDone := make(chan error, 1)
-	go func() { processDone <- command.Wait() }()
+	go func() {
+		waitErr := command.Wait()
+		_ = providerStdoutWriter.Close()
+		_ = providerStderrWriter.Close()
+		processDone <- waitErr
+	}()
 	frames := make(chan frame)
 	frameErrors := make(chan error, 1)
 	go func() {

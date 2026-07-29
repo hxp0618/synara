@@ -35,6 +35,9 @@ func NewDaemon(config Config, logger *slog.Logger) *Daemon {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if len(config.GuestProviderCommand) == 0 {
+		config.GuestProviderCommand = []string{"/usr/local/bin/provider-host"}
+	}
 	return &Daemon{
 		config: config, logger: logger, instanceID: uuid.New(), now: time.Now,
 		workers: make(map[uuid.UUID]*workerHandle), retryAfter: make(map[uuid.UUID]time.Time),

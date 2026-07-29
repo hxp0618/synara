@@ -214,21 +214,49 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 	if err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
 	}
-	if err := verifyKubernetesPodOuterSandbox(targetID, pod, configuration.PIDsLimit); err != nil {
-		return VerifiedKubernetesWorkloadIdentity{}, err
-	}
-	if err := client.attestNodePodPIDsLimit(ctx, pod.Spec.NodeName, configuration.PIDsLimit); err != nil {
-		return VerifiedKubernetesWorkloadIdentity{}, problem.Wrap(
-			401,
-			"kubernetes_workload_identity_pids_limit_invalid",
-			"The Kubernetes workload Pod is scheduled on a node without the required finite PID confinement.",
-			err,
-		)
+	resourceRequests := pod.AgentdResourceRequests
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		if err := verifyKubernetesCocoonOuterSandbox(pod); err != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, err
+		}
+		node, err := client.GetNode(ctx, pod.Spec.NodeName)
+		if err != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, problem.Wrap(
+				401, "kubernetes_workload_identity_cocoon_node_invalid",
+				"The Cocoon workload node attestation could not be loaded.", err,
+			)
+		}
+		if !node.Ready || !kubernetesCocoonNodeMatchesSchedulingFence(node.Labels) ||
+			!kubernetesCocoonSupervisorHeartbeatReady(node.Annotations, time.Now().UTC()) {
+			return VerifiedKubernetesWorkloadIdentity{}, problem.New(
+				401, "kubernetes_workload_identity_cocoon_node_invalid",
+				"The Cocoon workload node does not have a live supervisor isolation attestation.",
+			)
+		}
+		if err := attestCocoonHostPIDsLimit(pod.Spec.NodeName, node.Annotations, configuration.PIDsLimit); err != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, problem.Wrap(
+				401, "kubernetes_workload_identity_pids_limit_invalid",
+				"The Cocoon host agentd does not have the required finite PID confinement.", err,
+			)
+		}
+		resourceRequests = pod.CocoonGuestResourceRequests
+	} else {
+		if err := verifyKubernetesPodOuterSandbox(targetID, pod, configuration.PIDsLimit); err != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, err
+		}
+		if err := client.attestNodePodPIDsLimit(ctx, pod.Spec.NodeName, configuration.PIDsLimit); err != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, problem.Wrap(
+				401,
+				"kubernetes_workload_identity_pids_limit_invalid",
+				"The Kubernetes workload Pod is scheduled on a node without the required finite PID confinement.",
+				err,
+			)
+		}
 	}
 	if err := s.verifyKubernetesSandboxAllocationIdentity(ctx, targetID, configuration, pod, identity); err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
 	}
-	resources, err := kubernetesRequestedResourceSnapshot(pod.AgentdResourceRequests)
+	resources, err := kubernetesRequestedResourceSnapshot(resourceRequests)
 	if err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, problem.New(
 			401,
@@ -594,13 +622,15 @@ type kubernetesTokenReviewStatus struct {
 }
 
 type kubernetesVerifiedPod struct {
-	Name                   string
-	UID                    string
-	DeletionTimestamp      *time.Time
-	Labels                 map[string]string
-	ServiceAccountName     string
-	AgentdResourceRequests map[string]string
-	Spec                   kubernetesVerifiedPodSpec
+	Name                        string
+	UID                         string
+	DeletionTimestamp           *time.Time
+	Labels                      map[string]string
+	Annotations                 map[string]string
+	ServiceAccountName          string
+	AgentdResourceRequests      map[string]string
+	CocoonGuestResourceRequests map[string]string
+	Spec                        kubernetesVerifiedPodSpec
 }
 
 type kubernetesVerifiedPodSpec struct {
@@ -711,6 +741,7 @@ func (c *kubernetesHTTPClient) GetPod(
 			UID               string            `json:"uid"`
 			DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
 			Labels            map[string]string `json:"labels"`
+			Annotations       map[string]string `json:"annotations"`
 		} `json:"metadata"`
 		Spec kubernetesVerifiedPodSpec `json:"spec"`
 	}
@@ -726,21 +757,83 @@ func (c *kubernetesHTTPClient) GetPod(
 		return kubernetesVerifiedPod{}, err
 	}
 	var agentdRequests map[string]string
+	var cocoonGuestRequests map[string]string
 	for _, container := range response.Spec.Containers {
 		if strings.TrimSpace(container.Name) == "agentd" {
 			agentdRequests = container.Resources.Requests
 			break
 		}
+		if strings.TrimSpace(container.Name) == kubernetesCocoonGuestContainerName {
+			cocoonGuestRequests = container.Resources.Requests
+		}
 	}
 	return kubernetesVerifiedPod{
-		Name:                   strings.TrimSpace(podName),
-		UID:                    strings.TrimSpace(response.Metadata.UID),
-		DeletionTimestamp:      response.Metadata.DeletionTimestamp,
-		Labels:                 response.Metadata.Labels,
-		ServiceAccountName:     strings.TrimSpace(response.Spec.ServiceAccountName),
-		AgentdResourceRequests: agentdRequests,
-		Spec:                   response.Spec,
+		Name:                        strings.TrimSpace(podName),
+		UID:                         strings.TrimSpace(response.Metadata.UID),
+		DeletionTimestamp:           response.Metadata.DeletionTimestamp,
+		Labels:                      response.Metadata.Labels,
+		Annotations:                 response.Metadata.Annotations,
+		ServiceAccountName:          strings.TrimSpace(response.Spec.ServiceAccountName),
+		AgentdResourceRequests:      agentdRequests,
+		CocoonGuestResourceRequests: cocoonGuestRequests,
+		Spec:                        response.Spec,
 	}, nil
+}
+
+type kubernetesVerifiedNode struct {
+	Labels      map[string]string
+	Annotations map[string]string
+	Ready       bool
+}
+
+func (c *kubernetesHTTPClient) GetNode(ctx context.Context, name string) (kubernetesVerifiedNode, error) {
+	var response struct {
+		Metadata struct {
+			Labels      map[string]string `json:"labels"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := c.requestJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(strings.TrimSpace(name)), nil, &response, http.StatusOK); err != nil {
+		return kubernetesVerifiedNode{}, err
+	}
+	result := kubernetesVerifiedNode{Labels: response.Metadata.Labels, Annotations: response.Metadata.Annotations}
+	for _, condition := range response.Status.Conditions {
+		if condition.Type == "Ready" && condition.Status == "True" {
+			result.Ready = true
+			break
+		}
+	}
+	return result, nil
+}
+
+func verifyKubernetesCocoonOuterSandbox(pod kubernetesVerifiedPod) error {
+	invalid := func() error {
+		return problem.New(
+			401, "kubernetes_workload_identity_outer_sandbox_invalid",
+			"Kubernetes workload Pod does not satisfy the required Cocoon microVM outer sandbox profile.",
+		)
+	}
+	spec := pod.Spec
+	if strings.TrimSpace(spec.NodeName) == "" || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken ||
+		spec.HostNetwork || spec.HostPID || spec.HostIPC || (spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace) ||
+		len(spec.InitContainers) != 0 || len(spec.EphemeralContainers) != 0 || len(spec.Containers) != 1 {
+		return invalid()
+	}
+	container := spec.Containers[0]
+	if strings.TrimSpace(container.Name) != kubernetesCocoonGuestContainerName ||
+		!strings.Contains(strings.TrimSpace(container.Image), "@sha256:") ||
+		!strings.EqualFold(strings.TrimSpace(pod.Annotations[kubernetesCocoonSharedMemoryAnnotation]), "true") ||
+		strings.TrimSpace(pod.Annotations[kubernetesCocoonSnapshotPolicyAnnotation]) != kubernetesCocoonEphemeralPolicy ||
+		strings.TrimSpace(pod.Annotations["vm.cocoonstack.io/id"]) == "" {
+		return invalid()
+	}
+	return nil
 }
 
 func verifyKubernetesPodOuterSandbox(

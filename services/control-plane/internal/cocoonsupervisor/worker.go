@@ -120,9 +120,9 @@ func (d *Daemon) runWorker(ctx context.Context, pod Pod) (returned error) {
 	if err := writePrivateFile(attestationPath, append(encodedAttestation, '\n')); err != nil {
 		return fmt.Errorf("stage Cocoon Worker attestation: %w", err)
 	}
-	runnerCommand, err := json.Marshal([]string{
-		d.config.TransportCommand, "host", "--vm-id", pod.VMID, "--", "/usr/local/bin/provider-host",
-	})
+	runner := []string{d.config.TransportCommand, "host", "--vm-id", pod.VMID, "--"}
+	runner = append(runner, d.config.GuestProviderCommand...)
+	runnerCommand, err := json.Marshal(runner)
 	if err != nil {
 		return fmt.Errorf("encode Cocoon Provider transport command: %w", err)
 	}
@@ -149,6 +149,7 @@ func (d *Daemon) runWorker(ctx context.Context, pod Pod) (returned error) {
 		"SYNARA_AGENTD_IMAGE_DIGEST=" + imageDigest,
 		"SYNARA_AGENTD_COCOON_SUPERVISOR_ATTESTATION_FILE=" + attestationPath,
 		"SYNARA_AGENTD_KUBERNETES_PIDS_MAX=" + strconv.FormatUint(d.config.PIDsMax, 10),
+		"SYNARA_AGENTD_REQUEST_TIMEOUT=" + d.config.AgentRequestTimeout.String(),
 	}
 	if d.config.WorkerVersion != "" {
 		environment = append(environment, "SYNARA_AGENTD_VERSION="+d.config.WorkerVersion)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -37,6 +38,7 @@ import (
 )
 
 const sandboxOperatorControlPlaneIntegrationEnv = "SYNARA_SANDBOX_OPERATOR_CONTROL_PLANE_TEST"
+const sandboxOperatorNamespaceEnv = "SYNARA_TEST_SANDBOX_OPERATOR_NAMESPACE"
 
 func TestSandboxOperatorRealControlPlaneRegistrationAndGenerationFencing(t *testing.T) {
 	if os.Getenv(sandboxOperatorControlPlaneIntegrationEnv) != "1" {
@@ -99,7 +101,17 @@ func TestSandboxOperatorRealControlPlaneRegistrationAndGenerationFencing(t *test
 		30*time.Second, 2*time.Minute, time.Hour, cipher, targetService,
 	)
 	workerAPI := newSandboxControlPlaneWorkerAPI(targetService, executionService)
-	server := httptest.NewServer(workerAPI)
+	listenAddress := strings.TrimSpace(os.Getenv("SYNARA_TEST_KUBERNETES_CONTROL_PLANE_LISTEN_ADDRESS"))
+	if listenAddress == "" {
+		listenAddress = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", listenAddress)
+	if err != nil {
+		t.Fatalf("listen for Sandbox control plane on %s: %v", listenAddress, err)
+	}
+	server := httptest.NewUnstartedServer(workerAPI)
+	server.Listener = listener
+	server.Start()
 	defer server.Close()
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -115,29 +127,46 @@ func TestSandboxOperatorRealControlPlaneRegistrationAndGenerationFencing(t *test
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
 	targetCapabilities := workerManifestTestTargetCapabilities()
 	targetCapabilities["workspaceModes"] = []string{"local", "worktree"}
+	targetConfiguration := map[string]any{
+		"allocationBackend": allocationBackend, "sandboxTemplateName": "synara-worker",
+		"sandboxWarmPoolName": "synara-worker-interactive", "sandboxClaimReadyTimeoutSeconds": 180,
+		"sandboxAllowedTenantIds": []string{domain.TenantID.String()},
+		"apiServer":               apiServer, "bearerToken": bearerToken, "caCertificate": caCertificate,
+		"namespace": namespace, "manageNamespace": false, "serviceAccountName": serviceAccount,
+		"image": workerImage, "imagePullPolicy": "IfNotPresent", "controlPlaneUrl": controlPlaneURL,
+		"allowInsecureControlPlane": true, "runnerCommand": []string{"provider-host", "run", "--jsonl"},
+		"maxActivePods": 4, "egressCidrs": []string{"0.0.0.0/0"},
+		"cpuRequest": "100m", "cpuLimit": "2", "pidsLimit": 512, "memoryRequest": "256Mi", "memoryLimit": "2Gi",
+		"ephemeralStorageRequest": "512Mi", "ephemeralStorageLimit": "4Gi",
+		"workspaceSizeLimit": "256Mi", "quotaCpuRequests": "2", "quotaCpuLimits": "8",
+		"quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "8Gi", "quotaEphemeralStorage": "4Gi",
+	}
+	if allocationBackend == "sandbox-operator-cocoon" {
+		targetConfiguration["memoryRequest"] = "512Mi"
+		targetConfiguration["nodeSelector"] = map[string]any{
+			"node.kubernetes.io/instance-type": "virtual-node",
+			"sandbox.cocoonstack.io/kvm-ready": "true",
+			"synara.io/host-supervisor":        "v1",
+			"synara.io/provider-transport":     "vsock-v2",
+			"synara.io/isolation-profile":      "microvm-isolated-v1",
+		}
+		targetConfiguration["tolerations"] = []any{map[string]any{
+			"key": "virtual-kubelet.io/provider", "operator": "Equal", "value": "cocoon", "effect": "NoSchedule",
+		}}
+	}
 	target, err := targetService.Create(ctx, principal, domain.TenantID, executiontargets.CreateInput{
 		OrganizationID: &domain.OrganizationID, Kind: "kubernetes", Name: "sandbox-control-plane",
-		Configuration: map[string]any{
-			"allocationBackend": allocationBackend, "sandboxTemplateName": "synara-worker",
-			"sandboxWarmPoolName": "synara-worker-interactive", "sandboxClaimReadyTimeoutSeconds": 180,
-			"sandboxAllowedTenantIds": []string{domain.TenantID.String()},
-			"apiServer":               apiServer, "bearerToken": bearerToken, "caCertificate": caCertificate,
-			"namespace": namespace, "manageNamespace": false, "serviceAccountName": serviceAccount,
-			"image": workerImage, "imagePullPolicy": "IfNotPresent", "controlPlaneUrl": controlPlaneURL,
-			"allowInsecureControlPlane": true, "runnerCommand": []string{"provider-host", "run", "--jsonl"},
-			"maxActivePods": 4, "egressCidrs": []string{"0.0.0.0/0"},
-			"cpuRequest": "100m", "cpuLimit": "2", "pidsLimit": 512, "memoryRequest": "256Mi", "memoryLimit": "2Gi",
-			"ephemeralStorageRequest": "512Mi", "ephemeralStorageLimit": "4Gi",
-			"workspaceSizeLimit": "256Mi", "quotaCpuRequests": "2", "quotaCpuLimits": "8",
-			"quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "8Gi", "quotaEphemeralStorage": "4Gi",
-		},
-		Capabilities: targetCapabilities,
+		Configuration: targetConfiguration,
+		Capabilities:  targetCapabilities,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	workerAPI.targetID = target.ID
 	workerAPI.targetKind = target.Kind
+	if allocationBackend == "sandbox-operator-cocoon" {
+		configureSandboxCocoonSupervisors(t, ctx, target.ID, namespace, controlPlaneURL)
+	}
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	projectID, sessionID, turnID, executionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -171,9 +200,19 @@ func TestSandboxOperatorRealControlPlaneRegistrationAndGenerationFencing(t *test
 	reconciler := executiontargets.NewKubernetesReconciler(targetService, executiontargets.KubernetesReconcilerConfig{
 		PublicControlPlaneURL: controlPlaneURL, WorkerLeaseTTL: 30 * time.Second, WorkerHeartbeatTimeout: 2 * time.Minute,
 	}, slog.Default())
-	prewarmDeadline := time.Now().Add(90 * time.Second)
+	prewarmTimeout := 90 * time.Second
+	if configured := strings.TrimSpace(os.Getenv("SYNARA_TEST_KUBERNETES_PREWARM_TIMEOUT")); configured != "" {
+		parsed, parseErr := time.ParseDuration(configured)
+		if parseErr != nil || parsed < 5*time.Second || parsed > 3*time.Minute {
+			t.Fatalf("SYNARA_TEST_KUBERNETES_PREWARM_TIMEOUT = %q, want a duration from 5s through 3m", configured)
+		}
+		prewarmTimeout = parsed
+	}
+	prewarmDeadline := time.Now().Add(prewarmTimeout)
+	var lastPrewarmErr error
 	for time.Now().Before(prewarmDeadline) {
 		reconcileErr := reconciler.ReconcileOnce(ctx)
+		lastPrewarmErr = reconcileErr
 		if reconcileErr != nil {
 			var apiError *problem.Error
 			if !errors.As(reconcileErr, &apiError) || apiError.Status < 500 {
@@ -188,7 +227,7 @@ func TestSandboxOperatorRealControlPlaneRegistrationAndGenerationFencing(t *test
 	}
 	desired, ready := sandboxWarmPoolCapacity(t, ctx, kubernetesContext, namespace, "synara-worker-interactive")
 	if desired != 1 || ready != 1 {
-		t.Fatalf("SandboxWarmPool did not prewarm before dispatch: desired=%d ready=%d", desired, ready)
+		t.Fatalf("SandboxWarmPool did not prewarm before dispatch: desired=%d ready=%d lastReconcile=%v", desired, ready, lastPrewarmErr)
 	}
 	if err := store.DB().Model(&persistence.AgentExecution{}).Where("id = ?", executionID).Update("status", "queued").Error; err != nil {
 		t.Fatal(err)
@@ -520,6 +559,7 @@ func runSandboxOperatorConcurrentRestartAcceptance(
 	providerCredentialID uuid.UUID,
 ) sandboxOperatorRestartEvidence {
 	t.Helper()
+	operatorNamespace := sandboxOperatorNamespace(t)
 	startedAt := time.Now()
 	executionIDs := make([]uuid.UUID, 0, 3)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -563,9 +603,29 @@ func runSandboxOperatorConcurrentRestartAcceptance(
 	for index := 0; index < 2; index++ {
 		seedExecution(index, "[credential] concurrent operator restart")
 	}
+	originalReplicasRaw := strings.TrimSpace(string(sandboxKubectlOutput(
+		t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "get", "deployment/sandbox-operator",
+		"-o", "jsonpath={.spec.replicas}",
+	)))
+	originalReplicas, err := strconv.Atoi(originalReplicasRaw)
+	if err != nil || originalReplicas < 1 {
+		t.Fatalf("sandbox-operator original replicas = %q, want a positive integer", originalReplicasRaw)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		sandboxKubectl(
+			t, cleanupCtx, kubernetesContext, nil, "-n", operatorNamespace, "scale",
+			"deployment/sandbox-operator", "--replicas="+strconv.Itoa(originalReplicas),
+		)
+		sandboxKubectl(
+			t, cleanupCtx, kubernetesContext, nil, "-n", operatorNamespace, "rollout", "status",
+			"deployment/sandbox-operator", "--timeout=120s",
+		)
+	})
 
-	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", "sandbox-operator-system", "scale", "deployment/sandbox-operator", "--replicas=0")
-	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", "sandbox-operator-system", "rollout", "status", "deployment/sandbox-operator", "--timeout=60s")
+	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "scale", "deployment/sandbox-operator", "--replicas=0")
+	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "rollout", "status", "deployment/sandbox-operator", "--timeout=60s")
 	if err := reconciler.ReconcileOnce(ctx); err != nil {
 		t.Fatalf("persist Claims while sandbox-operator is stopped: %v", err)
 	}
@@ -596,12 +656,12 @@ func runSandboxOperatorConcurrentRestartAcceptance(
 		}
 	}
 
-	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", "sandbox-operator-system", "scale", "deployment/sandbox-operator", "--replicas=2")
-	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", "sandbox-operator-system", "rollout", "status", "deployment/sandbox-operator", "--timeout=120s")
+	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "scale", "deployment/sandbox-operator", "--replicas=2")
+	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "rollout", "status", "deployment/sandbox-operator", "--timeout=120s")
 	leaderBefore := waitForSandboxOperatorActiveLeader(t, ctx, kubernetesContext, "", 60*time.Second)
 	leaderPod := strings.SplitN(leaderBefore, "_", 2)[0]
 	failoverStartedAt := time.Now()
-	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", "sandbox-operator-system", "delete", "pod", leaderPod, "--wait=false")
+	sandboxKubectl(t, ctx, kubernetesContext, nil, "-n", operatorNamespace, "delete", "pod", leaderPod, "--wait=false")
 	seedExecution(2, "[credential] operator leader failover")
 	if err := reconciler.ReconcileOnce(ctx); err != nil {
 		var apiError *problem.Error
@@ -1065,8 +1125,12 @@ func applySandboxControlPlaneTemplate(t *testing.T, ctx context.Context, kuberne
 	t.Helper()
 	containerName := "agentd"
 	cocoonScheduling := ""
+	runtimeAnnotations := "sandbox.cocoonstack.io/runtime: " + templateRuntime
+	memoryRequest := "256Mi"
 	if templateRuntime == "vk-cocoon" {
 		containerName = "agent"
+		memoryRequest = "512Mi"
+		runtimeAnnotations += `, cocoonset.cocoonstack.io/snapshot-policy: never, vm.cocoonstack.io/shared-memory: "true"`
 		cocoonScheduling = `      nodeSelector:
         node.kubernetes.io/instance-type: virtual-node
         sandbox.cocoonstack.io/kvm-ready: "true"
@@ -1093,7 +1157,7 @@ spec:
   envVarsInjectionPolicy: Disallowed
   podTemplate:
     metadata:
-      annotations: {sandbox.cocoonstack.io/runtime: %s}
+      annotations: {%s}
       labels: {synara.io/managed: "true", synara.io/execution-target-id: "%s"}
     spec:
       serviceAccountName: %s
@@ -1123,7 +1187,7 @@ spec:
         - {name: SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL, value: v2}
         - {name: SYNARA_AGENTD_WORKSPACE_ROOT, value: /data/workspaces}
         - {name: SYNARA_AGENTD_GIT_CACHE_ROOT, value: /data/git-cache}
-        resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "2", memory: 2Gi}}
+        resources: {requests: {cpu: 100m, memory: %s}, limits: {cpu: "2", memory: 2Gi}}
         securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, capabilities: {drop: [ALL]}}
         volumeMounts:
         - {name: workspace, mountPath: /data}
@@ -1144,9 +1208,40 @@ apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata: {name: synara-worker-interactive, namespace: %s}
 spec: {replicas: 0, sandboxTemplateRef: {name: synara-worker}, updateStrategy: {type: Recreate}}
-`, namespace, serviceAccount, namespace, namespace, templateRuntime, targetID, serviceAccount, cocoonScheduling, containerName, image, controlPlaneURL, targetID, namespace, targetID, namespace)
+`, namespace, serviceAccount, namespace, namespace, runtimeAnnotations, targetID, serviceAccount, cocoonScheduling, containerName, image, controlPlaneURL, targetID, namespace, memoryRequest, targetID, namespace)
 	sandboxKubectl(t, ctx, kubernetesContext, []byte(manifest), "apply", "-f", "-")
 	_ = executionID
+}
+
+func configureSandboxCocoonSupervisors(
+	t *testing.T,
+	ctx context.Context,
+	targetID uuid.UUID,
+	namespace string,
+	controlPlaneURL string,
+) {
+	t.Helper()
+	hook := strings.TrimSpace(os.Getenv("SYNARA_TEST_KUBERNETES_SUPERVISOR_CONFIGURE_HOOK"))
+	if !filepath.IsAbs(hook) {
+		t.Fatal("SYNARA_TEST_KUBERNETES_SUPERVISOR_CONFIGURE_HOOK must be an absolute executable path for Cocoon acceptance")
+	}
+	run := func(runCtx context.Context, action string, arguments ...string) error {
+		command := exec.CommandContext(runCtx, hook, append([]string{action}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("Cocoon supervisor hook %s: %w (%s)", action, err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	if err := run(ctx, "configure", targetID.String(), namespace, controlPlaneURL); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		restoreCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if err := run(restoreCtx, "restore"); err != nil {
+			t.Errorf("restore Cocoon supervisors: %v", err)
+		}
+	})
 }
 
 func sandboxKubectl(t *testing.T, ctx context.Context, kubernetesContext string, input []byte, args ...string) {
@@ -1288,7 +1383,7 @@ func sandboxOperatorLeaderIdentity(t *testing.T, ctx context.Context, kubernetes
 	t.Helper()
 	return strings.TrimSpace(string(sandboxKubectlOutput(
 		t, ctx, kubernetesContext, nil,
-		"-n", "sandbox-operator-system", "get", "lease", "sandbox-operator.agents.x-k8s.io",
+		"-n", sandboxOperatorNamespace(t), "get", "lease", "sandbox-operator.agents.x-k8s.io",
 		"-o", "jsonpath={.spec.holderIdentity}",
 	)))
 }
@@ -1307,7 +1402,7 @@ func waitForSandboxOperatorActiveLeader(
 		lastIdentity = sandboxOperatorLeaderIdentity(t, ctx, kubernetesContext)
 		podNames := strings.Fields(string(sandboxKubectlOutput(
 			t, ctx, kubernetesContext, nil,
-			"-n", "sandbox-operator-system", "get", "pods", "-l", "app.kubernetes.io/name=sandbox-operator",
+			"-n", sandboxOperatorNamespace(t), "get", "pods", "-l", "app.kubernetes.io/name=sandbox-operator",
 			"-o", "jsonpath={range .items[*]}{.metadata.name}{' '}{end}",
 		)))
 		leaderPod := strings.SplitN(lastIdentity, "_", 2)[0]
@@ -1318,6 +1413,18 @@ func waitForSandboxOperatorActiveLeader(
 	}
 	t.Fatalf("sandbox-operator did not expose an active leader: previous=%q last=%q", previousIdentity, lastIdentity)
 	return ""
+}
+
+func sandboxOperatorNamespace(t *testing.T) string {
+	t.Helper()
+	namespace := strings.TrimSpace(os.Getenv(sandboxOperatorNamespaceEnv))
+	if namespace == "" {
+		namespace = "sandbox-operator-system"
+	}
+	if len(namespace) > 253 || strings.ContainsAny(namespace, " /\\\t\r\n\x00") {
+		t.Fatalf("%s is not a safe Kubernetes namespace", sandboxOperatorNamespaceEnv)
+	}
+	return namespace
 }
 
 func sandboxWarmPoolDeficit(
@@ -1474,7 +1581,11 @@ func assertSandboxControlPlaneIsolationAndQuota(
 		!slices.Contains(policy.Spec.PolicyTypes, "Ingress") || !slices.Contains(policy.Spec.PolicyTypes, "Egress") {
 		t.Fatalf("Sandbox NetworkPolicy is incomplete: %s", policyJSON)
 	}
-	assertSandboxNetworkPolicyEnforced(t, ctx, kubernetesContext, namespace, targetID)
+	baselineUsedPods, err := strconv.Atoi(quota.Status.Used["pods"])
+	if err != nil || baselineUsedPods < 1 || baselineUsedPods > 4 {
+		t.Fatalf("Sandbox namespace baseline used.pods = %q", quota.Status.Used["pods"])
+	}
+	assertSandboxNetworkPolicyEnforced(t, ctx, kubernetesContext, namespace, targetID, baselineUsedPods)
 	quotaJSON = sandboxKubectlOutput(t, ctx, kubernetesContext, nil, "-n", namespace, "get", "resourcequota", resourceName, "-o", "json")
 	if err := json.Unmarshal(quotaJSON, &quota); err != nil {
 		t.Fatal(err)
@@ -1525,6 +1636,7 @@ func assertSandboxNetworkPolicyEnforced(
 	kubernetesContext string,
 	namespace string,
 	targetID uuid.UUID,
+	baselineUsedPods int,
 ) {
 	t.Helper()
 	manifest := fmt.Sprintf(`apiVersion: v1
@@ -1569,7 +1681,7 @@ spec:
 	for time.Now().Before(deadline) {
 		usedRaw := strings.TrimSpace(string(sandboxKubectlOutput(t, ctx, kubernetesContext, nil, "-n", namespace, "get", "resourcequota", "-o", "jsonpath={.items[0].status.used.pods}")))
 		used, err := strconv.Atoi(usedRaw)
-		if err == nil && used <= 1 {
+		if err == nil && used <= baselineUsedPods {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)

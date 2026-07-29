@@ -212,7 +212,7 @@ type KubernetesPodTerminalObservation struct {
 
 type kubernetesClient interface {
 	Apply(context.Context, string, map[string]any) error
-	AttestPodPIDsLimit(context.Context, map[string]string, uint64) error
+	AttestPodPIDsLimit(context.Context, map[string]string, uint64, string) error
 	GetPriorityClass(context.Context, string) (kubernetesPriorityClass, error)
 	GetResourceQuota(context.Context, string, string) (kubernetesResourceQuota, error)
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
@@ -409,7 +409,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
 		return problem.Wrap(503, "kubernetes_api_unavailable", "Kubernetes API configuration is unavailable.", err)
 	}
-	if err := client.AttestPodPIDsLimit(ctx, configuration.NodeSelector, configuration.PIDsLimit); err != nil {
+	if err := client.AttestPodPIDsLimit(ctx, configuration.NodeSelector, configuration.PIDsLimit, configuration.AllocationBackend); err != nil {
 		healthObservation.Status = routing.HealthUnreachable
 		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
 			"Managed Kubernetes node PID confinement is unavailable.",

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
 	ctx context.Context,
 	nodeSelector map[string]string,
 	maximum uint64,
+	allocationBackend string,
 ) error {
 	if maximum == 0 {
 		return errors.New("Kubernetes Target pidsLimit is required")
@@ -57,7 +59,8 @@ func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
 	var nodes struct {
 		Items []struct {
 			Metadata struct {
-				Name string `json:"name"`
+				Name        string            `json:"name"`
+				Annotations map[string]string `json:"annotations"`
 			} `json:"metadata"`
 		} `json:"items"`
 	}
@@ -67,7 +70,11 @@ func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
 	if len(nodes.Items) == 0 {
 		return errors.New("Kubernetes Target has no eligible nodes for PID-limit attestation")
 	}
-	names := make([]string, 0, len(nodes.Items))
+	type eligibleNode struct {
+		name        string
+		annotations map[string]string
+	}
+	eligible := make([]eligibleNode, 0, len(nodes.Items))
 	seen := make(map[string]struct{}, len(nodes.Items))
 	for _, item := range nodes.Items {
 		name := strings.TrimSpace(item.Metadata.Name)
@@ -78,13 +85,28 @@ func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
 			return fmt.Errorf("Kubernetes node list contains duplicate node %q", name)
 		}
 		seen[name] = struct{}{}
-		names = append(names, name)
+		eligible = append(eligible, eligibleNode{name: name, annotations: item.Metadata.Annotations})
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := c.attestNodePodPIDsLimit(ctx, name, maximum); err != nil {
+	sort.Slice(eligible, func(left, right int) bool { return eligible[left].name < eligible[right].name })
+	for _, node := range eligible {
+		if allocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+			if err := attestCocoonHostPIDsLimit(node.name, node.annotations, maximum); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := c.attestNodePodPIDsLimit(ctx, node.name, maximum); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func attestCocoonHostPIDsLimit(name string, annotations map[string]string, maximum uint64) error {
+	value := strings.TrimSpace(annotations["synara.io/host-pids-limit"])
+	limit, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || limit == 0 || limit > maximum {
+		return fmt.Errorf("Cocoon node %q host agentd pidsLimit=%q is not within 1..%d", name, value, maximum)
 	}
 	return nil
 }

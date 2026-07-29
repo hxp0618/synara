@@ -2809,6 +2809,7 @@ func (c *fakeKubernetesClient) AttestPodPIDsLimit(
 	_ context.Context,
 	_ map[string]string,
 	_ uint64,
+	_ string,
 ) error {
 	return c.pidsLimitAttestationErr
 }

@@ -25,23 +25,25 @@ const (
 var kubernetesNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 
 type Config struct {
-	VirtualNodeName   string
-	Namespace         string
-	ExecutionTargetID uuid.UUID
-	ControlPlaneURL   *url.URL
-	ClusterID         string
-	PIDsMax           uint64
-	CapabilitiesJSON  string
-	WorkerVersion     string
-	WorkerBuildGitSHA string
-	PollInterval      time.Duration
-	HealthSocketPath  string
-	StateRoot         string
-	KubectlCommand    string
-	CocoonCommand     string
-	VirtiofsdCommand  string
-	AgentdCommand     string
-	TransportCommand  string
+	VirtualNodeName      string
+	Namespace            string
+	ExecutionTargetID    uuid.UUID
+	ControlPlaneURL      *url.URL
+	ClusterID            string
+	PIDsMax              uint64
+	CapabilitiesJSON     string
+	WorkerVersion        string
+	WorkerBuildGitSHA    string
+	PollInterval         time.Duration
+	AgentRequestTimeout  time.Duration
+	HealthSocketPath     string
+	StateRoot            string
+	KubectlCommand       string
+	CocoonCommand        string
+	VirtiofsdCommand     string
+	AgentdCommand        string
+	TransportCommand     string
+	GuestProviderCommand []string
 }
 
 func LoadConfig() (Config, error) {
@@ -71,27 +73,37 @@ func LoadConfig() (Config, error) {
 	if json.Unmarshal([]byte(capabilities), &parsedCapabilities) != nil || parsedCapabilities == nil {
 		return Config{}, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON must be a JSON object")
 	}
+	guestProviderCommand, err := loadGuestProviderCommand()
+	if err != nil {
+		return Config{}, err
+	}
 	pollInterval, err := time.ParseDuration(envDefault("SYNARA_COCOON_SUPERVISOR_POLL_INTERVAL", "2s"))
 	if err != nil || pollInterval < 500*time.Millisecond || pollInterval > time.Minute {
 		return Config{}, errors.New("SYNARA_COCOON_SUPERVISOR_POLL_INTERVAL must be between 500ms and 1m")
+	}
+	agentRequestTimeout, err := time.ParseDuration(envDefault("SYNARA_AGENTD_REQUEST_TIMEOUT", "30s"))
+	if err != nil || agentRequestTimeout < 5*time.Second || agentRequestTimeout > 5*time.Minute {
+		return Config{}, errors.New("SYNARA_AGENTD_REQUEST_TIMEOUT must be between 5s and 5m")
 	}
 	cfg := Config{
 		VirtualNodeName: virtualNode, Namespace: namespace, ExecutionTargetID: targetID,
 		ControlPlaneURL: controlPlaneURL, ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"),
 		PIDsMax: pidsMax, CapabilitiesJSON: capabilities,
-		WorkerVersion:     strings.TrimSpace(os.Getenv("SYNARA_AGENTD_VERSION")),
-		WorkerBuildGitSHA: strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
-		PollInterval:      pollInterval,
-		HealthSocketPath:  envDefault("SYNARA_COCOON_SUPERVISOR_HEALTH_SOCKET", defaultHealthSocketPath),
-		StateRoot:         envDefault("SYNARA_COCOON_SUPERVISOR_STATE_ROOT", defaultStateRoot),
+		WorkerVersion:       strings.TrimSpace(os.Getenv("SYNARA_AGENTD_VERSION")),
+		WorkerBuildGitSHA:   strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
+		PollInterval:        pollInterval,
+		AgentRequestTimeout: agentRequestTimeout,
+		HealthSocketPath:    envDefault("SYNARA_COCOON_SUPERVISOR_HEALTH_SOCKET", defaultHealthSocketPath),
+		StateRoot:           envDefault("SYNARA_COCOON_SUPERVISOR_STATE_ROOT", defaultStateRoot),
 		KubectlCommand: envDefault(
 			"SYNARA_COCOON_SUPERVISOR_KUBECTL",
 			firstExecutable("/usr/local/bin/kubectl", "/usr/bin/kubectl"),
 		),
-		CocoonCommand:    envDefault("SYNARA_COCOON_SUPERVISOR_COCOON", "/usr/local/bin/cocoon"),
-		VirtiofsdCommand: envDefault("SYNARA_COCOON_SUPERVISOR_VIRTIOFSD", "/usr/lib/qemu/virtiofsd"),
-		AgentdCommand:    envDefault("SYNARA_COCOON_SUPERVISOR_AGENTD", "/usr/local/bin/synara-agentd"),
-		TransportCommand: envDefault("SYNARA_COCOON_SUPERVISOR_TRANSPORT", "/usr/local/bin/synara-cocoon-provider-transport"),
+		CocoonCommand:        envDefault("SYNARA_COCOON_SUPERVISOR_COCOON", "/usr/local/bin/cocoon"),
+		VirtiofsdCommand:     envDefault("SYNARA_COCOON_SUPERVISOR_VIRTIOFSD", "/usr/lib/qemu/virtiofsd"),
+		AgentdCommand:        envDefault("SYNARA_COCOON_SUPERVISOR_AGENTD", "/usr/local/bin/synara-agentd"),
+		TransportCommand:     envDefault("SYNARA_COCOON_SUPERVISOR_TRANSPORT", "/usr/local/bin/synara-cocoon-provider-transport"),
+		GuestProviderCommand: guestProviderCommand,
 	}
 	for name, path := range map[string]*string{
 		"health socket": &cfg.HealthSocketPath, "state root": &cfg.StateRoot,
@@ -109,6 +121,28 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("Cocoon supervisor health socket must be outside the durable state root")
 	}
 	return cfg, nil
+}
+
+func loadGuestProviderCommand() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv("SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON"))
+	if raw == "" {
+		return []string{"/usr/local/bin/provider-host"}, nil
+	}
+	var command []string
+	if err := json.Unmarshal([]byte(raw), &command); err != nil || len(command) == 0 || len(command) > 16 {
+		return nil, errors.New("SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON must be a JSON array with 1 through 16 arguments")
+	}
+	for _, argument := range command {
+		if argument == "" || len(argument) > 4096 || strings.ContainsAny(argument, "\r\n\x00") {
+			return nil, errors.New("SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON contains an invalid argument")
+		}
+	}
+	providerPath := filepath.Clean(command[0])
+	if !filepath.IsAbs(providerPath) || providerPath == string(filepath.Separator) || filepath.Base(providerPath) != "provider-host" {
+		return nil, errors.New("SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON must start an absolute provider-host path")
+	}
+	command[0] = providerPath
+	return command, nil
 }
 
 func validKubernetesName(value string) bool {

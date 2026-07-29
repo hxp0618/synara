@@ -16,14 +16,15 @@ import (
 )
 
 const (
-	targetLabel            = "synara.io/execution-target-id"
-	executionLabel         = "synara.io/execution-id"
-	generationLabel        = "synara.io/generation"
-	workerModeLabel        = "synara.io/worker-mode"
-	allocationBackendLabel = "synara.io/allocation-backend"
-	assignedExecutionLabel = "synara.io/assigned-execution-id"
-	sharedMemoryAnnotation = "vm.cocoonstack.io/shared-memory"
-	vmIDAnnotation         = "vm.cocoonstack.io/id"
+	targetLabel             = "synara.io/execution-target-id"
+	executionLabel          = "synara.io/execution-id"
+	generationLabel         = "synara.io/generation"
+	workerModeLabel         = "synara.io/worker-mode"
+	allocationBackendLabel  = "synara.io/allocation-backend"
+	assignedExecutionLabel  = "synara.io/assigned-execution-id"
+	sharedMemoryAnnotation  = "vm.cocoonstack.io/shared-memory"
+	vmIDAnnotation          = "vm.cocoonstack.io/id"
+	hostPIDsLimitAnnotation = "synara.io/host-pids-limit"
 
 	maximumCommandOutputBytes = 4 << 20
 )
@@ -184,13 +185,14 @@ func (d *Daemon) publishNodeAttestation(ctx context.Context, ready bool) error {
 	annotations := []string{
 		"synara.io/host-supervisor-instance=" + d.instanceID.String(),
 		"synara.io/host-supervisor-observed-at=" + d.now().UTC().Format(time.RFC3339Nano),
+		hostPIDsLimitAnnotation + "=" + strconv.FormatUint(d.config.PIDsMax, 10),
 	}
 	if !ready {
 		labels = []string{
 			"synara.io/host-supervisor-", "synara.io/provider-transport-", "synara.io/isolation-profile-",
 		}
 		annotations = []string{
-			"synara.io/host-supervisor-instance-", "synara.io/host-supervisor-observed-at-",
+			"synara.io/host-supervisor-instance-", "synara.io/host-supervisor-observed-at-", hostPIDsLimitAnnotation + "-",
 		}
 	}
 	if _, err := d.commandOutput(ctx, d.config.KubectlCommand, append(

@@ -132,7 +132,18 @@ func TestExpiredExecutionClaimReleaseUsesOriginalLeaseDeadline(t *testing.T) {
 		t.Fatalf("claim Execution: %#v, %v", claim.Value, err)
 	}
 	recordedAt := claim.Value.Lease.ExpiresAt.Add(7 * time.Second)
-	service.now = func() time.Time { return recordedAt }
+	service.heartbeatTimeout = time.Nanosecond
+	nowCalls := 0
+	service.now = func() time.Time {
+		nowCalls++
+		if nowCalls == 1 {
+			return recordedAt
+		}
+		if nowCalls == 2 {
+			return recordedAt.Add(time.Microsecond)
+		}
+		return recordedAt.Add(2 * time.Microsecond)
+	}
 	if err := service.RecoverExpired(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +151,7 @@ func TestExpiredExecutionClaimReleaseUsesOriginalLeaseDeadline(t *testing.T) {
 		t, db, fixture.ExecutionID, claim.Value.Lease.Generation,
 	)
 	if release.ReleaseReason != workerClaimReleaseLeaseExpired ||
-		!release.ReleasedAt.Equal(claim.Value.Lease.ExpiresAt) || !release.RecordedAt.Equal(recordedAt) {
+		!release.ReleasedAt.Equal(claim.Value.Lease.ExpiresAt) || !release.RecordedAt.Equal(recordedAt.Add(2*time.Microsecond)) {
 		t.Fatalf("expired execution release fact = %#v", release)
 	}
 }

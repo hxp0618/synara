@@ -42,6 +42,7 @@ func TestKubernetesHTTPClientAttestsEveryEligibleNodePodPIDsLimit(t *testing.T) 
 		context.Background(),
 		map[string]string{"synara.io/pool": "provider", "kubernetes.io/os": "linux"},
 		512,
+		"native-pod",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestKubernetesHTTPClientRejectsUnboundedOrExcessivePodPIDsLimit(t *testing.
 			}))
 			t.Cleanup(server.Close)
 			client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-			err := client.AttestPodPIDsLimit(context.Background(), nil, 512)
+			err := client.AttestPodPIDsLimit(context.Background(), nil, 512, "native-pod")
 			if err == nil || !strings.Contains(err.Error(), "not within") {
 				t.Fatalf("podPidsLimit %d was accepted: %v", limit, err)
 			}
@@ -83,8 +84,41 @@ func TestKubernetesHTTPClientRejectsMissingEligiblePIDAttestationNodes(t *testin
 	}))
 	t.Cleanup(server.Close)
 	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-	if err := client.AttestPodPIDsLimit(context.Background(), nil, 512); err == nil ||
+	if err := client.AttestPodPIDsLimit(context.Background(), nil, 512, "native-pod"); err == nil ||
 		!strings.Contains(err.Error(), "no eligible nodes") {
 		t.Fatalf("empty eligible-node set was accepted: %v", err)
+	}
+}
+
+func TestKubernetesHTTPClientAttestsCocoonHostAgentdPIDsLimit(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		annotation string
+		wantError  bool
+	}{
+		{name: "bounded", annotation: "512"},
+		{name: "missing", wantError: true},
+		{name: "unbounded", annotation: "0", wantError: true},
+		{name: "excessive", annotation: "513", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/api/v1/nodes" {
+					http.NotFound(response, request)
+					return
+				}
+				_ = json.NewEncoder(response).Encode(map[string]any{"items": []any{
+					map[string]any{"metadata": map[string]any{
+						"name": "vk-cocoon-a", "annotations": map[string]string{"synara.io/host-pids-limit": test.annotation},
+					}},
+				}})
+			}))
+			t.Cleanup(server.Close)
+			client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+			err := client.AttestPodPIDsLimit(context.Background(), nil, 512, "sandbox-operator-cocoon")
+			if (err != nil) != test.wantError {
+				t.Fatalf("Cocoon host pidsLimit %q returned %v", test.annotation, err)
+			}
+		})
 	}
 }

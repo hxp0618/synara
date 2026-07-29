@@ -3,8 +3,10 @@ package cocoonsupervisor
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -20,8 +22,15 @@ func TestLoadConfigRequiresTargetScopedHostBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.ExecutionTargetID != targetID || config.VirtualNodeName != "vk-cocoon-stage-c-a" ||
-		config.Namespace != "synara-workers" || config.PIDsMax != 512 || config.CapabilitiesJSON != "{}" {
+		config.Namespace != "synara-workers" || config.PIDsMax != 512 || config.CapabilitiesJSON != "{}" ||
+		config.AgentRequestTimeout != 30*time.Second ||
+		!slices.Equal(config.GuestProviderCommand, []string{"/usr/local/bin/provider-host"}) {
 		t.Fatalf("Cocoon supervisor config = %#v", config)
+	}
+	t.Setenv("SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON", `["/opt/synara/acceptance/provider-host","--fixture"]`)
+	config, err = LoadConfig()
+	if err != nil || !slices.Equal(config.GuestProviderCommand, []string{"/opt/synara/acceptance/provider-host", "--fixture"}) {
+		t.Fatalf("custom Cocoon guest Provider command = %#v err=%v", config.GuestProviderCommand, err)
 	}
 }
 
@@ -37,6 +46,9 @@ func TestLoadConfigRejectsUnsafeSupervisorBoundary(t *testing.T) {
 		{name: "relative binary", field: "SYNARA_COCOON_SUPERVISOR_AGENTD", value: "agentd", want: "absolute path"},
 		{name: "unbounded pids", field: platform.KubernetesPIDsLimitEnvironment, value: "0", want: platform.KubernetesPIDsLimitEnvironment},
 		{name: "non object capabilities", field: "SYNARA_AGENTD_CAPABILITIES_JSON", value: "[]", want: "JSON object"},
+		{name: "relative guest provider", field: "SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON", value: `["provider-host"]`, want: "absolute provider-host path"},
+		{name: "wrong guest executable", field: "SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON", value: `["/usr/local/bin/node"]`, want: "absolute provider-host path"},
+		{name: "excessive request timeout", field: "SYNARA_AGENTD_REQUEST_TIMEOUT", value: "6m", want: "between 5s and 5m"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -99,7 +111,9 @@ func setSupervisorConfigEnvironment(t *testing.T, root string, targetID uuid.UUI
 		"SYNARA_COCOON_SUPERVISOR_KUBECTL", "SYNARA_COCOON_SUPERVISOR_COCOON",
 		"SYNARA_COCOON_SUPERVISOR_VIRTIOFSD", "SYNARA_COCOON_SUPERVISOR_AGENTD",
 		"SYNARA_COCOON_SUPERVISOR_TRANSPORT", "SYNARA_COCOON_SUPERVISOR_POLL_INTERVAL",
+		"SYNARA_COCOON_SUPERVISOR_GUEST_PROVIDER_COMMAND_JSON",
 		"SYNARA_AGENTD_VERSION", "SYNARA_AGENTD_BUILD_GIT_SHA", "SYNARA_AGENTD_CLUSTER_ID",
+		"SYNARA_AGENTD_REQUEST_TIMEOUT",
 	} {
 		t.Setenv(name, "")
 	}

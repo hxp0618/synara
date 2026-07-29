@@ -335,6 +335,30 @@ LABEL org.opencontainers.image.title="Synara Cocoon Guest" \
   org.opencontainers.image.revision="${SYNARA_GIT_SHA}" \
   synara.io/runtime-boundary="provider-host-only"
 
+# Stage C acceptance guest. The production cocoon-guest remains free of test
+# behavior; this target exposes the Protocol-v2 fixture behind a separately
+# selected provider-host path so the host supervisor can run the complete
+# control-plane lifecycle without using a real Provider credential.
+FROM ${COCOON_GUEST_IMAGE} AS cocoon-guest-acceptance
+
+ARG SYNARA_VERSION
+ARG SYNARA_GIT_SHA
+
+COPY --from=provider-tools-bookworm /usr/local/bin/node /usr/local/bin/node
+COPY --from=provider-host-fixture-build /out/provider-host-fixture.mjs /opt/synara/acceptance/provider-host-fixture.mjs
+COPY --from=agentd-build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
+RUN mkdir -p /opt/synara/acceptance \
+  && printf '%s\n' '#!/bin/sh' \
+    'exec node /opt/synara/acceptance/provider-host-fixture.mjs --protocol-v2 "$@"' \
+    > /opt/synara/acceptance/provider-host \
+  && chmod 0755 /opt/synara/acceptance/provider-host \
+  && test ! -e /usr/local/bin/synara-agentd
+
+LABEL org.opencontainers.image.title="Synara Cocoon Guest Acceptance" \
+  org.opencontainers.image.version="${SYNARA_VERSION}" \
+  org.opencontainers.image.revision="${SYNARA_GIT_SHA}" \
+  synara.io/runtime-boundary="provider-host-acceptance-fixture"
+
 # Deterministic Target acceptance image. This extends the production Worker
 # image with a bundled Provider Host Protocol fixture, while keeping the
 # default and production `worker` targets free of test-only runtime behavior.
