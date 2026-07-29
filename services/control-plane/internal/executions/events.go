@@ -277,9 +277,11 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 	case "content.delta":
 		return validContentDelta(payload)
 	case "request.opened":
-		return requiredCanonicalRequestType(payload) && optionalTrimmedString(payload, "detail")
+		return requiredCanonicalRequestType(payload) && optionalTrimmedString(payload, "detail") &&
+			optionalSensitiveActionAssessment(payload)
 	case "request.resolved":
-		return requiredCanonicalRequestType(payload) && optionalTrimmedString(payload, "decision")
+		return requiredCanonicalRequestType(payload) && optionalTrimmedString(payload, "decision") &&
+			optionalSensitiveActionAssessment(payload)
 	case "user-input.requested":
 		questions, ok := arrayField(payload, "questions")
 		return ok && allObjects(questions, validUserInputQuestion)
@@ -647,6 +649,49 @@ func optionalBool(value map[string]any, key string) bool {
 		return true
 	}
 	return requiredBool(value, key)
+}
+
+func optionalSensitiveActionAssessment(payload map[string]any) bool {
+	value, found := payload["sensitiveAction"]
+	if !found {
+		return true
+	}
+	_, valid := canonicalSensitiveActionAssessment(value)
+	return valid
+}
+
+func canonicalSensitiveActionAssessment(value any) (map[string]any, bool) {
+	assessment, ok := value.(map[string]any)
+	if !ok || assessment == nil || len(assessment) != 3 ||
+		assessment["requiresFreshApproval"] != true || assessment["allowSessionApproval"] != false {
+		return nil, false
+	}
+	categories, ok := assessment["categories"].([]any)
+	if !ok || len(categories) == 0 || len(categories) > 6 {
+		return nil, false
+	}
+	canonicalCategories := make([]any, 0, len(categories))
+	previous := ""
+	for _, value := range categories {
+		category, ok := value.(string)
+		if !ok || !containsRuntimeEventValue([]string{
+			"protected-branch-publish",
+			"ci-workflow-change",
+			"dependency-change",
+			"credential-access",
+			"network-egress",
+			"external-mcp-action",
+		}, category) || (previous != "" && category <= previous) {
+			return nil, false
+		}
+		canonicalCategories = append(canonicalCategories, category)
+		previous = category
+	}
+	return map[string]any{
+		"categories":            canonicalCategories,
+		"requiresFreshApproval": true,
+		"allowSessionApproval":  false,
+	}, true
 }
 
 func optionalInteger(value map[string]any, key string) bool {

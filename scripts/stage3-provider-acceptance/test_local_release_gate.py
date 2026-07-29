@@ -265,6 +265,20 @@ class ChildCommandTest(unittest.TestCase):
 
 
 class ChildReportValidationTest(unittest.TestCase):
+    def test_product_matrix_excludes_explicit_stage5_cases(self) -> None:
+        expected = frozenset(
+            acceptance.REAL_PROVIDER_CASE_METADATA[case]["id"]
+            for case in acceptance.REAL_PROVIDER_CASES
+        )
+        stage5_ids = {
+            acceptance.REAL_PROVIDER_CASE_METADATA[case]["id"]
+            for case in acceptance.REAL_PROVIDER_STAGE5_CASES
+        }
+
+        self.assertEqual(gate.expected_case_ids("product"), expected)
+        self.assertTrue(stage5_ids)
+        self.assertTrue(gate.expected_case_ids("product").isdisjoint(stage5_ids))
+
     def test_accepts_complete_product_and_failure_reports(self) -> None:
         options = release_options(pathlib.Path("/tmp/synara").resolve())
         for provider in gate.PROVIDERS:

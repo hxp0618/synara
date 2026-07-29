@@ -110,6 +110,12 @@ export interface ExternalMcpRepositoryShape {
     readonly projectId: string | null;
     readonly runtimeMode: string | null;
     readonly environment: string | null;
+    readonly contentSource?: string | null;
+    readonly contentTrust?: string | null;
+    readonly contentSha256?: string | null;
+    readonly contentRisk?: string | null;
+    readonly contentIndicatorIds?: ReadonlyArray<string>;
+    readonly securityAlertKind?: string | null;
     readonly now: string;
     readonly windowId: number;
     readonly rateLimitAuditId: string;

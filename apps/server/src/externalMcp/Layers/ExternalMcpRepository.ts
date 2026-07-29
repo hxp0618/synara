@@ -328,10 +328,16 @@ export const makeExternalMcpRepository = Effect.gen(function* () {
             yield* sql`
               INSERT INTO external_mcp_audit_log (
                 audit_id, integration_id, tool, request_id, project_id, runtime_mode,
-                environment, outcome, created_task_ids_json, detail, created_at
+                environment, content_source, content_trust, content_sha256, content_risk,
+                content_indicator_ids_json, security_alert_kind,
+                outcome, created_task_ids_json, detail, created_at
               ) VALUES (
                 ${input.auditId}, ${input.integrationId}, ${input.tool}, ${input.requestId},
                 ${input.projectId}, ${input.runtimeMode}, ${input.environment},
+                ${input.contentSource ?? null}, ${input.contentTrust ?? null},
+                ${input.contentSha256 ?? null}, ${input.contentRisk ?? null},
+                ${JSON.stringify(input.contentIndicatorIds ?? [])},
+                ${input.securityAlertKind ?? null},
                 'started', '[]', NULL, ${input.now}
               )
             `;
@@ -339,10 +345,13 @@ export const makeExternalMcpRepository = Effect.gen(function* () {
             yield* sql`
               INSERT INTO external_mcp_audit_log (
                 audit_id, integration_id, tool, request_id, project_id, runtime_mode,
-                environment, outcome, created_task_ids_json, detail, created_at
+                environment, content_source, content_trust, content_sha256, content_risk,
+                content_indicator_ids_json, security_alert_kind,
+                outcome, created_task_ids_json, detail, created_at
               ) VALUES (
                 ${input.rateLimitAuditId}, ${input.integrationId}, ${input.tool}, NULL, NULL, NULL,
-                NULL, 'rate_limited', '[]', ${`Rejected ${rejectedCount + 1} calls in this window.`}, ${input.now}
+                NULL, NULL, NULL, NULL, NULL, '[]', NULL,
+                'rate_limited', '[]', ${`Rejected ${rejectedCount + 1} calls in this window.`}, ${input.now}
               )
               ON CONFLICT (audit_id) DO UPDATE SET
                 detail = ${`Rejected ${rejectedCount + 1} calls in this window.`}

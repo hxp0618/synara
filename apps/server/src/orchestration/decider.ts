@@ -10,6 +10,7 @@ import {
   EventId,
   MAX_PINNED_PROJECTS,
   PINNED_MESSAGES_MAX_COUNT,
+  ProviderKind,
   RESERVED_VOID_SPACE_ID,
   SPACES_MAX_COUNT,
   THREAD_MARKERS_MAX_COUNT,
@@ -26,9 +27,13 @@ import {
   collectTailTurnIds,
   resolveTailUserMessageEditTarget,
 } from "@synara/shared/conversationEdit";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
+import {
+  isUntrustedContentSource,
+  untrustedProviderAdmissionIssue,
+} from "../security/untrustedContent.ts";
 import { hasNativeHandoffMessages } from "./handoff.ts";
 import { resolveStableMessageTurnId } from "./messageTurnId.ts";
 import {
@@ -1547,10 +1552,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const sourceProposedPlan = command.sourceProposedPlan;
+      const untrustedSource =
+        command.dispatchOrigin === "automation"
+          ? "automation"
+          : command.message.source !== undefined && isUntrustedContentSource(command.message.source)
+            ? command.message.source
+            : null;
+      const effectiveRuntimeMode =
+        untrustedSource !== null ? "approval-required" : command.runtimeMode;
+      if (untrustedSource !== null) {
+        const provider = Schema.is(ProviderKind)(targetThread.session?.providerName)
+          ? targetThread.session.providerName
+          : targetThread.modelSelection.provider;
+        const providerAdmissionIssue = untrustedProviderAdmissionIssue({
+          provider,
+          source: untrustedSource,
+          ...(command.providerOptions ? { providerOptions: command.providerOptions } : {}),
+        });
+        if (providerAdmissionIssue !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: providerAdmissionIssue,
+          });
+        }
+      }
       yield* validateAutoRuntimeMode(
         command,
         command.modelSelection ?? targetThread.modelSelection,
-        command.runtimeMode,
+        effectiveRuntimeMode,
       );
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1601,7 +1630,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           dispatchOrigin: command.dispatchOrigin ?? "user",
           turnId: null,
           streaming: false,
-          source: "native",
+          source:
+            command.message.source ??
+            (command.dispatchOrigin === "automation" ? "automation" : "native"),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -1617,7 +1648,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         assistantDeliveryMode: command.assistantDeliveryMode ?? DEFAULT_ASSISTANT_DELIVERY_MODE,
         dispatchMode,
         dispatchOrigin: command.dispatchOrigin ?? "user",
-        runtimeMode: command.runtimeMode,
+        runtimeMode: effectiveRuntimeMode,
         interactionMode: command.interactionMode,
         ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
         createdAt: command.createdAt,

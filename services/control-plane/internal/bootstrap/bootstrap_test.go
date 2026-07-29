@@ -97,9 +97,9 @@ func TestPlatformBootstrapBackfillsLocalTargetProviderPolicy(t *testing.T) {
 	}
 	legacyTarget := persistence.ExecutionTarget{Capabilities: map[string]any{
 		"workspaceModes": []string{"platform-custom"}, "customPublic": "preserved",
-	}}
+	}, Status: "active"}
 	if err := store.DB().Model(&persistence.ExecutionTarget{}).
-		Where("id = ?", first.ExecutionTargetID).Select("capabilities").Updates(&legacyTarget).Error; err != nil {
+		Where("id = ?", first.ExecutionTargetID).Select("capabilities", "status").Updates(&legacyTarget).Error; err != nil {
 		t.Fatal(err)
 	}
 	second, err := Ensure(ctx, store.DB(), platform.ProfileSingleNode, "installation-test-platform")
@@ -110,6 +110,13 @@ func TestPlatformBootstrapBackfillsLocalTargetProviderPolicy(t *testing.T) {
 		t.Fatalf("platform bootstrap ids changed: first=%#v second=%#v", first, second)
 	}
 	assertBuiltInLocalTargetPolicy(t, store.DB(), first.ExecutionTargetID, "platform-custom")
+	var platformTarget persistence.ExecutionTarget
+	if err := store.DB().Where("id = ?", first.ExecutionTargetID).Take(&platformTarget).Error; err != nil {
+		t.Fatal(err)
+	}
+	if platformTarget.Status != "disabled" {
+		t.Fatalf("platform-local status = %q, want disabled", platformTarget.Status)
+	}
 }
 
 func assertBuiltInLocalTargetPolicy(t *testing.T, db *gorm.DB, targetID uuid.UUID, workspaceMode string) {

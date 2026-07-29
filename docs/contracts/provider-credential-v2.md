@@ -216,6 +216,28 @@ closed refresh stream. Authoritative inventory is exposed as
 `synara_provider_credential_access_leases{state}` (see
 [Control-plane observability v1](control-plane-observability-v1.md)).
 
+### Execution-lifetime Provider API broker
+
+Grant resolution no longer means the long-lived payload is handed to Provider Host. Agentd registers the original
+secret with Secret Guard, starts a loopback reverse proxy bound to the Execution context, and replaces the resolved
+payload with a random `synara_task_*` token plus a local base URL. The proxy:
+
+- accepts only the task token and GET/POST/DELETE/HEAD;
+- fixes the configured/default Provider origin and path prefix instead of honoring a caller-supplied destination;
+- strips caller authentication, applies the real Codex bearer or Claude API/Auth token only on the upstream request;
+- uses only the controlled Provider proxy aliases, never agentd ambient proxy configuration; the aliases must resolve
+  to credential-free authorities before Provider Host starts, so no upstream proxy username/password enters the
+  Provider or tool environment; and
+- shuts down on Execution cancellation, Provider Credential access expiry, or normal completion.
+
+Provider Host and arbitrary tool subprocesses can observe and use the task token during that Execution. They cannot
+read the long-lived Provider key. Loopback is forcibly added to `NO_PROXY` for a brokered payload so the task token is
+not sent to an operator proxy while reaching the local broker.
+
+An authenticated upstream egress proxy must terminate behind an Execution-local credential-hiding gateway. Passing
+proxy userinfo through `SYNARA_PROVIDER_{HTTP,HTTPS,ALL}_PROXY` is not a redaction-supported compatibility mode: agentd
+and Provider Host reject it before a Provider child starts.
+
 ## Stable errors
 
 | Code                                        | Meaning                                                                      |

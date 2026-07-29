@@ -65,6 +65,12 @@ Provider-specific tool names are retained only as bounded title/data references.
 canonical values from `ProviderRuntimeEventV2`. Raw Provider payloads, credentials, token values, complete stderr,
 and presigned URLs do not cross this boundary.
 
+Classified `request.opened` and `request.resolved` Events carry the same top-level `sensitiveAction` assessment.
+Categories are known, unique, and lexically sorted; `requiresFreshApproval` is true exactly when the category list is
+non-empty, and `allowSessionApproval` is always false. Local orchestration projection retains this assessment on both
+Approval activities and derives `sessionApprovalAvailable=false` for a sensitive request even if a Provider-specific
+argument omitted that compatibility flag. The assessment contains no command, path, host, or Credential value.
+
 ## Terminal projection
 
 Terminal activity reuses the frozen canonical event vocabulary; it does not add top-level Runtime Event v2 types.

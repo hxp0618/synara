@@ -142,7 +142,8 @@ def repository_state(repo_root: pathlib.Path) -> dict[str, Any]:
 def expected_case_ids(matrix: str) -> frozenset[str]:
     if matrix == "product":
         return frozenset(
-            metadata["id"] for metadata in acceptance.REAL_PROVIDER_CASE_METADATA.values()
+            acceptance.REAL_PROVIDER_CASE_METADATA[case]["id"]
+            for case in acceptance.REAL_PROVIDER_CASES
         )
     if matrix == REMOTE_LOAD_MATRIX:
         return frozenset({acceptance.REAL_PROVIDER_LOAD_CASE_ID})

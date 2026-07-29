@@ -16,6 +16,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
@@ -27,6 +28,86 @@ func kubernetesPodName(execution kubernetesExecution) string {
 	}
 	compactID := strings.ReplaceAll(execution.ID.String(), "-", "")
 	return "synara-exec-" + compactID[:28] + "-g" + strconv.FormatInt(generation, 16)
+}
+
+func kubernetesRegistrationTokenVolumes(targetID uuid.UUID) []any {
+	return []any{
+		map[string]any{
+			"name": kubernetesWorkloadIdentityVolume,
+			"projected": map[string]any{
+				"defaultMode": 0o440,
+				"sources": []any{map[string]any{
+					"serviceAccountToken": map[string]any{
+						"audience":          KubernetesWorkerRegistrationAudience(targetID),
+						"expirationSeconds": 600,
+						"path":              "token",
+					},
+				}},
+			},
+		},
+		map[string]any{"name": kubernetesRegistrationTokenVolume, "emptyDir": map[string]any{}},
+	}
+}
+
+func kubernetesRegistrationTokenMainMount() map[string]any {
+	return map[string]any{
+		"name": kubernetesRegistrationTokenVolume, "mountPath": "/var/run/secrets/synara.io/registration",
+	}
+}
+
+func kubernetesNetworkBoundaryInitContainer(
+	image string,
+	imagePullPolicy string,
+	requests map[string]any,
+	limits map[string]any,
+) map[string]any {
+	return map[string]any{
+		"name": kubernetesNetworkBoundaryInitName, "image": image,
+		"imagePullPolicy": imagePullPolicy,
+		"command": []any{
+			"/usr/local/bin/synara-agentd",
+			platform.KubernetesNetworkBoundaryVerifyArgument,
+		},
+		"securityContext": kubernetesRestrictedContainerSecurityContext(),
+		"resources":       map[string]any{"requests": requests, "limits": limits},
+	}
+}
+
+func kubernetesRegistrationTokenInitContainer(
+	image string,
+	imagePullPolicy string,
+	requests map[string]any,
+	limits map[string]any,
+) map[string]any {
+	return map[string]any{
+		"name": kubernetesRegistrationTokenInitName, "image": image,
+		"imagePullPolicy": imagePullPolicy,
+		"command": []any{
+			"/usr/local/bin/synara-agentd",
+			platform.KubernetesRegistrationTokenStageArgument,
+		},
+		"volumeMounts": []any{
+			map[string]any{
+				"name":      kubernetesWorkloadIdentityVolume,
+				"mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
+			},
+			map[string]any{
+				"name":      kubernetesRegistrationTokenVolume,
+				"mountPath": "/var/run/secrets/synara.io/registration",
+			},
+		},
+		"securityContext": kubernetesRestrictedContainerSecurityContext(),
+		"resources":       map[string]any{"requests": requests, "limits": limits},
+	}
+}
+
+func kubernetesRestrictedContainerSecurityContext() map[string]any {
+	return map[string]any{
+		"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+		"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+		"capabilities":   map[string]any{"drop": []any{"ALL"}},
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}
 }
 
 func (r *KubernetesReconciler) foundationHash(
@@ -266,7 +347,7 @@ func (r *KubernetesReconciler) executionPod(
 	}
 	environment := []any{
 		map[string]any{"name": "SYNARA_CONTROL_PLANE_URL", "value": configuration.ControlPlaneURL},
-		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesWorkloadIdentityTokenPath},
+		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesStagedRegistrationTokenPath},
 		map[string]any{"name": "SYNARA_EXECUTION_TARGET_ID", "value": target.ID.String()},
 		map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
 		map[string]any{"name": "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "value": execution.ID.String()},
@@ -277,10 +358,12 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
 		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
 		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
+		map[string]any{"name": platform.KubernetesPIDsLimitEnvironment, "value": strconv.FormatUint(configuration.PIDsLimit, 10)},
 		map[string]any{"name": "SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "value": workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String()},
 		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
+		map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
 	}
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
@@ -290,19 +373,8 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
 		map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
 		map[string]any{"name": "home", "emptyDir": map[string]any{}},
-		map[string]any{
-			"name": kubernetesWorkloadIdentityVolume,
-			"projected": map[string]any{
-				"defaultMode": 0o440,
-				"sources": []any{map[string]any{
-					"serviceAccountToken": map[string]any{
-						"audience":          KubernetesWorkerRegistrationAudience(target.ID),
-						"expirationSeconds": 600, "path": "token",
-					},
-				}},
-			},
-		},
 	}
+	volumes = append(volumes, kubernetesRegistrationTokenVolumes(target.ID)...)
 	if configuration.WorkspaceSizeLimit != "" {
 		volumes[0] = map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": configuration.WorkspaceSizeLimit}}
 	}
@@ -310,10 +382,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "workspace", "mountPath": "/data"},
 		map[string]any{"name": "tmp", "mountPath": "/tmp"},
 		map[string]any{"name": "home", "mountPath": "/home/synara"},
-		map[string]any{
-			"name":      kubernetesWorkloadIdentityVolume,
-			"mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
-		},
+		kubernetesRegistrationTokenMainMount(),
 	}
 	if configuration.GitCachePersistentVolumeClaim != "" {
 		volumes = append(volumes, map[string]any{
@@ -325,13 +394,8 @@ func (r *KubernetesReconciler) executionPod(
 		"name": "agentd", "image": image, "imagePullPolicy": configuration.ImagePullPolicy,
 		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
 		"workingDir": "/data", "volumeMounts": volumeMounts,
-		"securityContext": map[string]any{
-			"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
-			"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
-			"capabilities":   map[string]any{"drop": []any{"ALL"}},
-			"seccompProfile": map[string]any{"type": "RuntimeDefault"},
-		},
-		"resources": map[string]any{"requests": requests, "limits": limits},
+		"securityContext": kubernetesRestrictedContainerSecurityContext(),
+		"resources":       map[string]any{"requests": requests, "limits": limits},
 	}
 	podSpec := map[string]any{
 		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
@@ -340,7 +404,11 @@ func (r *KubernetesReconciler) executionPod(
 		"priorityClassName": kubernetesWorkerDefaultPriorityClassName,
 		"preemptionPolicy":  placement.KubernetesPreemptionPolicyNever,
 		"securityContext":   map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":        []any{container}, "volumes": volumes,
+		"initContainers": []any{
+			kubernetesNetworkBoundaryInitContainer(image, configuration.ImagePullPolicy, requests, limits),
+			kubernetesRegistrationTokenInitContainer(image, configuration.ImagePullPolicy, requests, limits),
+		},
+		"containers": []any{container}, "volumes": volumes,
 	}
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
@@ -482,7 +550,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 	}
 	environment := []any{
 		map[string]any{"name": "SYNARA_CONTROL_PLANE_URL", "value": configuration.ControlPlaneURL},
-		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesWorkloadIdentityTokenPath},
+		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesStagedRegistrationTokenPath},
 		map[string]any{"name": "SYNARA_EXECUTION_TARGET_ID", "value": target.ID.String()},
 		map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKER_MODE", "value": kubernetesWorkerModeWarmPool},
@@ -493,10 +561,12 @@ func (r *KubernetesReconciler) warmPoolPod(
 		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
 		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
 		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
+		map[string]any{"name": platform.KubernetesPIDsLimitEnvironment, "value": strconv.FormatUint(configuration.PIDsLimit, 10)},
 		map[string]any{"name": "SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "value": workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String()},
 		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
+		map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
 	}
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
@@ -506,19 +576,8 @@ func (r *KubernetesReconciler) warmPoolPod(
 		map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
 		map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
 		map[string]any{"name": "home", "emptyDir": map[string]any{}},
-		map[string]any{
-			"name": kubernetesWorkloadIdentityVolume,
-			"projected": map[string]any{
-				"defaultMode": 0o440,
-				"sources": []any{map[string]any{
-					"serviceAccountToken": map[string]any{
-						"audience":          KubernetesWorkerRegistrationAudience(target.ID),
-						"expirationSeconds": 600, "path": "token",
-					},
-				}},
-			},
-		},
 	}
+	volumes = append(volumes, kubernetesRegistrationTokenVolumes(target.ID)...)
 	if configuration.WorkspaceSizeLimit != "" {
 		volumes[0] = map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": configuration.WorkspaceSizeLimit}}
 	}
@@ -526,10 +585,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 		map[string]any{"name": "workspace", "mountPath": "/data"},
 		map[string]any{"name": "tmp", "mountPath": "/tmp"},
 		map[string]any{"name": "home", "mountPath": "/home/synara"},
-		map[string]any{
-			"name":      kubernetesWorkloadIdentityVolume,
-			"mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
-		},
+		kubernetesRegistrationTokenMainMount(),
 	}
 	if configuration.GitCachePersistentVolumeClaim != "" {
 		volumes = append(volumes, map[string]any{
@@ -541,13 +597,8 @@ func (r *KubernetesReconciler) warmPoolPod(
 		"name": "agentd", "image": image, "imagePullPolicy": configuration.ImagePullPolicy,
 		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
 		"workingDir": "/data", "volumeMounts": volumeMounts,
-		"securityContext": map[string]any{
-			"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
-			"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
-			"capabilities":   map[string]any{"drop": []any{"ALL"}},
-			"seccompProfile": map[string]any{"type": "RuntimeDefault"},
-		},
-		"resources": map[string]any{"requests": requests, "limits": limits},
+		"securityContext": kubernetesRestrictedContainerSecurityContext(),
+		"resources":       map[string]any{"requests": requests, "limits": limits},
 	}
 	podSpec := map[string]any{
 		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
@@ -556,7 +607,11 @@ func (r *KubernetesReconciler) warmPoolPod(
 		"priorityClassName": kubernetesWorkerDefaultPriorityClassName,
 		"preemptionPolicy":  placement.KubernetesPreemptionPolicyNever,
 		"securityContext":   map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":        []any{container}, "volumes": volumes,
+		"initContainers": []any{
+			kubernetesNetworkBoundaryInitContainer(image, configuration.ImagePullPolicy, requests, limits),
+			kubernetesRegistrationTokenInitContainer(image, configuration.ImagePullPolicy, requests, limits),
+		},
+		"containers": []any{container}, "volumes": volumes,
 	}
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)

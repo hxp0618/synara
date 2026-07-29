@@ -46,6 +46,7 @@ import {
   teardownProviderProcessTree,
 } from "./supervisedProcessTeardown.ts";
 import { isWindowsShellCommandMissingResult } from "../shell-command-detection.ts";
+import { compareSemverVersions, parseGenericCliVersion } from "./providerMaintenance.ts";
 
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 20_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -62,6 +63,9 @@ export interface OpenCodeCompatibleCliSpec {
   readonly displayName: string;
   readonly serverReadyPrefix: string;
   readonly configContentEnvVar: string;
+  readonly disableProjectConfigEnvVar: string;
+  readonly pureModeEnvVar: string;
+  readonly minimumPureModeVersion: string;
   readonly dataDirectoryName: string;
   readonly serverAuthUsername: string;
 }
@@ -71,6 +75,9 @@ export const OPENCODE_CLI_SPEC: OpenCodeCompatibleCliSpec = {
   displayName: "OpenCode",
   serverReadyPrefix: "opencode server listening",
   configContentEnvVar: "OPENCODE_CONFIG_CONTENT",
+  disableProjectConfigEnvVar: "OPENCODE_DISABLE_PROJECT_CONFIG",
+  pureModeEnvVar: "OPENCODE_PURE",
+  minimumPureModeVersion: "1.15.11",
   dataDirectoryName: "opencode",
   serverAuthUsername: "opencode",
 };
@@ -80,6 +87,9 @@ export const KILO_CLI_SPEC: OpenCodeCompatibleCliSpec = {
   displayName: "Kilo",
   serverReadyPrefix: "kilo server listening",
   configContentEnvVar: "KILO_CONFIG_CONTENT",
+  disableProjectConfigEnvVar: "KILO_DISABLE_PROJECT_CONFIG",
+  pureModeEnvVar: "KILO_PURE",
+  minimumPureModeVersion: "7.4.16",
   dataDirectoryName: "kilo",
   serverAuthUsername: "kilo",
 };
@@ -325,6 +335,9 @@ function pooledOpenCodeServerKey(input: {
       displayName: cliSpec.displayName,
       serverReadyPrefix: cliSpec.serverReadyPrefix,
       configContentEnvVar: cliSpec.configContentEnvVar,
+      disableProjectConfigEnvVar: cliSpec.disableProjectConfigEnvVar,
+      pureModeEnvVar: cliSpec.pureModeEnvVar,
+      minimumPureModeVersion: cliSpec.minimumPureModeVersion,
       dataDirectoryName: cliSpec.dataDirectoryName,
       serverAuthUsername: cliSpec.serverAuthUsername,
     },
@@ -761,39 +774,43 @@ export function buildOpenCodePermissionRules(
   interactionMode: "default" | "plan" = "default",
 ): PermissionRuleset {
   if (interactionMode === "plan") {
-    // OpenCode evaluates the last matching rule. Start closed, then allow only
-    // read-only planning tools. This also blocks custom/MCP tools and future
-    // mutating tools that a short denylist would accidentally leave enabled.
+    // Route every filesystem, command, network, and custom tool through the
+    // host callback. The adapter grants ordinary read-only Plan requests once
+    // and rejects sensitive or mutating requests. A provider-side allow rule
+    // would hide credential-path reads and web egress from that classifier.
     return [
-      { permission: "*", pattern: "*", action: "deny" },
-      { permission: "read", pattern: "*", action: "allow" },
-      { permission: "glob", pattern: "*", action: "allow" },
-      { permission: "grep", pattern: "*", action: "allow" },
-      { permission: "list", pattern: "*", action: "allow" },
-      { permission: "lsp", pattern: "*", action: "allow" },
-      { permission: "webfetch", pattern: "*", action: "allow" },
-      { permission: "websearch", pattern: "*", action: "allow" },
-      { permission: "codesearch", pattern: "*", action: "allow" },
+      { permission: "*", pattern: "*", action: "ask" },
       { permission: "todoread", pattern: "*", action: "allow" },
       { permission: "todowrite", pattern: "*", action: "allow" },
       { permission: "question", pattern: "*", action: "allow" },
     ];
   }
 
-  const runtimeRules: PermissionRuleset =
-    runtimeMode === "full-access"
-      ? [{ permission: "*", pattern: "*", action: "allow" }]
-      : [
-          { permission: "*", pattern: "*", action: "ask" },
-          { permission: "bash", pattern: "*", action: "ask" },
-          { permission: "edit", pattern: "*", action: "ask" },
-          { permission: "webfetch", pattern: "*", action: "ask" },
-          { permission: "websearch", pattern: "*", action: "ask" },
-          { permission: "codesearch", pattern: "*", action: "ask" },
-          { permission: "external_directory", pattern: "*", action: "ask" },
-          { permission: "doom_loop", pattern: "*", action: "ask" },
-          { permission: "question", pattern: "*", action: "allow" },
-        ];
+  if (runtimeMode !== "full-access") {
+    return [
+      { permission: "*", pattern: "*", action: "ask" },
+      { permission: "bash", pattern: "*", action: "ask" },
+      { permission: "edit", pattern: "*", action: "ask" },
+      { permission: "webfetch", pattern: "*", action: "ask" },
+      { permission: "websearch", pattern: "*", action: "ask" },
+      { permission: "codesearch", pattern: "*", action: "ask" },
+      { permission: "external_directory", pattern: "*", action: "ask" },
+      { permission: "doom_loop", pattern: "*", action: "ask" },
+      { permission: "question", pattern: "*", action: "allow" },
+    ];
+  }
+
+  // Full Access remains non-interactive for ordinary operations because the
+  // adapter answers non-sensitive asks with a request-scoped grant. Keeping
+  // potentially mutating/network/custom tools in `ask` is what lets the host
+  // classifier intercept a sensitive action instead of losing it behind an
+  // unconditional provider-side allow rule.
+  const runtimeRules: PermissionRuleset = [
+    { permission: "*", pattern: "*", action: "ask" },
+    { permission: "todoread", pattern: "*", action: "allow" },
+    { permission: "todowrite", pattern: "*", action: "allow" },
+    { permission: "question", pattern: "*", action: "allow" },
+  ];
 
   return runtimeRules;
 }
@@ -803,12 +820,46 @@ export function buildOpenCodeServerProcessEnv(input: {
   readonly experimentalWebSockets?: boolean;
   readonly baseEnv?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
+  const cliSpec = input.cliSpec ?? OPENCODE_CLI_SPEC;
   return buildProviderChildEnvironment({
-    provider:
-      input.cliSpec?.dataDirectoryName === KILO_CLI_SPEC.dataDirectoryName ? "kilo" : "opencode",
+    provider: cliSpec.dataDirectoryName === KILO_CLI_SPEC.dataDirectoryName ? "kilo" : "opencode",
     baseEnv: input.baseEnv ?? process.env,
-    overrides: input.experimentalWebSockets ? { OPENCODE_EXPERIMENTAL_WEBSOCKETS: "true" } : {},
+    overrides: {
+      // Project config directories can contain executable plugins. Repository
+      // content is untrusted in Synara, so a managed Provider process must not
+      // turn opening a checkout into same-process code execution.
+      [cliSpec.disableProjectConfigEnvVar]: "1",
+      // User/global configuration can also register same-process executable
+      // plugins. Pure mode retains OpenCode/Kilo's built-in plugins while
+      // excluding every external plugin before any workspace is opened.
+      [cliSpec.pureModeEnvVar]: "1",
+      ...(input.experimentalWebSockets ? { OPENCODE_EXPERIMENTAL_WEBSOCKETS: "true" } : {}),
+    },
   });
+}
+
+/**
+ * Require the audited global pure-mode flag for every CLI command. The matching
+ * environment variable above protects child/bootstrap paths, while this flag
+ * makes older binaries that do not implement pure mode fail closed instead of
+ * silently loading external plugins.
+ */
+export function openCodePureCliArguments(args: ReadonlyArray<string>): Array<string> {
+  return args[0] === "--pure" ? [...args] : ["--pure", ...args];
+}
+
+export function openCodePureModeVersionIssue(
+  cliSpec: OpenCodeCompatibleCliSpec,
+  output: string,
+): string | null {
+  const version = parseGenericCliVersion(output);
+  if (version === null) {
+    return `${cliSpec.displayName} CLI version could not be determined. Synara requires v${cliSpec.minimumPureModeVersion} or newer for the audited pure-mode startup boundary.`;
+  }
+  if (compareSemverVersions(version, cliSpec.minimumPureModeVersion) < 0) {
+    return `${cliSpec.displayName} CLI v${version} is too old for Synara's audited pure-mode startup boundary. Upgrade to v${cliSpec.minimumPureModeVersion} or newer.`;
+  }
+  return null;
 }
 
 export function toOpenCodePermissionReply(
@@ -877,12 +928,13 @@ const makeOpenCodeRuntime = (options?: OpenCodeRuntimeLiveOptions) =>
     const pooledServerMutex = yield* Semaphore.make(1);
     const pooledServers = new Map<string, PooledOpenCodeServer>();
 
-    const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
-      Effect.gen(function* () {
+    const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) => {
+      const pureArgs = openCodePureCliArguments(input.args);
+      return Effect.gen(function* () {
         const childEnv = buildOpenCodeServerProcessEnv({
           ...(input.cliSpec ? { cliSpec: input.cliSpec } : {}),
         });
-        const prepared = prepareWindowsSafeProcess(input.binaryPath, input.args, {
+        const prepared = prepareWindowsSafeProcess(input.binaryPath, pureArgs, {
           cwd: input.cwd,
           env: childEnv,
         });
@@ -919,11 +971,12 @@ const makeOpenCodeRuntime = (options?: OpenCodeRuntimeLiveOptions) =>
         Effect.mapError((cause) =>
           ensureRuntimeError(
             "runOpenCodeCommand",
-            `Failed to execute '${input.binaryPath} ${input.args.join(" ")}': ${openCodeRuntimeErrorDetail(cause)}`,
+            `Failed to execute '${input.binaryPath} ${pureArgs.join(" ")}': ${openCodeRuntimeErrorDetail(cause)}`,
             cause,
           ),
         ),
       );
+    };
 
     const startOpenCodeServerProcess: OpenCodeRuntimeShape["startOpenCodeServerProcess"] = (
       input,
@@ -931,6 +984,26 @@ const makeOpenCodeRuntime = (options?: OpenCodeRuntimeLiveOptions) =>
       Effect.gen(function* () {
         const runtimeScope = yield* Scope.Scope;
         const cliSpec = input.cliSpec ?? OPENCODE_CLI_SPEC;
+
+        const versionResult = yield* runOpenCodeCommand({
+          binaryPath: input.binaryPath,
+          cliSpec,
+          args: ["--version"],
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+        });
+        const versionOutput = `${versionResult.stdout}\n${versionResult.stderr}`;
+        const versionIssue = openCodePureModeVersionIssue(cliSpec, versionOutput);
+        if (versionResult.code !== 0 || versionIssue !== null) {
+          const output = truncateStartupOutput(versionOutput) ?? "<empty>";
+          return yield* new OpenCodeRuntimeError({
+            operation: "verifyPureModeVersion",
+            detail:
+              versionResult.code !== 0
+                ? `${cliSpec.displayName} rejected the required --pure version probe (exit code ${String(versionResult.code)}). Upgrade to v${cliSpec.minimumPureModeVersion} or newer.\n\noutput:\n${output}`
+                : versionIssue!,
+            cause: { code: versionResult.code, output },
+          });
+        }
 
         const hostname = input.hostname ?? DEFAULT_HOSTNAME;
         const port =
@@ -946,7 +1019,13 @@ const makeOpenCodeRuntime = (options?: OpenCodeRuntimeLiveOptions) =>
             ),
           ));
         const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
-        const args = ["serve", "--hostname", hostname, "--port", String(port)];
+        const args = openCodePureCliArguments([
+          "serve",
+          "--hostname",
+          hostname,
+          "--port",
+          String(port),
+        ]);
 
         const child = yield* spawner
           .spawn(

@@ -564,6 +564,115 @@ layer("AutomationService", (it) => {
     }),
   );
 
+  it.effect("rejects automation providers missing any untrusted-content boundary", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const repository = yield* AutomationRepository;
+
+      for (const modelSelection of [
+        { provider: "pi" as const, model: "test-pi" },
+        { provider: "antigravity" as const, model: "Gemini 3.5 Flash" },
+        { provider: "cursor" as const, model: "auto" },
+        { provider: "grok" as const, model: "grok-build" },
+        { provider: "droid" as const, model: "claude-opus-4-8" },
+        { provider: "opencode" as const, model: "openai/gpt-5" },
+        { provider: "kilo" as const, model: "kilo/kilo-auto/free" },
+      ]) {
+        const createError = yield* service
+          .create({
+            ...createInput("worktree"),
+            modelSelection,
+          })
+          .pipe(Effect.flip);
+        assert.include(
+          createError.message,
+          `Provider '${modelSelection.provider}' cannot process automation content`,
+        );
+      }
+
+      const definition = yield* service.create(createInput("worktree"));
+      const updateError = yield* service
+        .update({
+          id: definition.id,
+          modelSelection: { provider: "opencode", model: "openai/gpt-5" },
+        })
+        .pipe(Effect.flip);
+      assert.include(updateError.message, "no attested Host provenance");
+
+      const automationId = AutomationId.makeUnsafe("automation-policy-only-runnow");
+      yield* repository.createDefinition({
+        id: automationId,
+        input: {
+          ...createInput("worktree"),
+          modelSelection: { provider: "kilo", model: "kilo/kilo-auto/free" },
+        },
+        now,
+      });
+      const runError = yield* service.runNow({ automationId }).pipe(Effect.flip);
+      assert.include(runError.message, "no attested Host provenance");
+      assert.strictEqual(
+        dispatchedCommands.filter((command) => command.type === "thread.create").length,
+        0,
+      );
+    }),
+  );
+
+  it.effect("rejects unattested external OpenCode-family runtimes at create, update, and run", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const repository = yield* AutomationRepository;
+
+      for (const target of [
+        {
+          modelSelection: { provider: "opencode" as const, model: "openai/gpt-5" },
+          providerOptions: { opencode: { serverUrl: "http://127.0.0.1:4096" } },
+        },
+        {
+          modelSelection: { provider: "kilo" as const, model: "kilo/kilo-auto/free" },
+          providerOptions: { kilo: { serverUrl: "http://127.0.0.1:4095" } },
+        },
+      ]) {
+        const createError = yield* service
+          .create({
+            ...createInput("worktree"),
+            ...target,
+          })
+          .pipe(Effect.flip);
+        assert.include(createError.message, "externally managed server");
+      }
+
+      const definition = yield* service.create(createInput("worktree"));
+      const updateError = yield* service
+        .update({
+          id: definition.id,
+          modelSelection: { provider: "opencode", model: "openai/gpt-5" },
+          providerOptions: { opencode: { serverUrl: "http://127.0.0.1:4096" } },
+        })
+        .pipe(Effect.flip);
+      assert.include(updateError.message, "externally managed server");
+
+      const automationId = AutomationId.makeUnsafe("automation-external-runtime-runnow");
+      yield* repository.createDefinition({
+        id: automationId,
+        input: {
+          ...createInput("worktree"),
+          modelSelection: { provider: "opencode", model: "openai/gpt-5" },
+          providerOptions: { opencode: { serverUrl: "http://127.0.0.1:4096" } },
+        },
+        now,
+      });
+
+      const runError = yield* service.runNow({ automationId }).pipe(Effect.flip);
+      assert.include(runError.message, "externally managed server");
+      assert.strictEqual(
+        dispatchedCommands.filter((command) => command.type === "thread.create").length,
+        0,
+      );
+    }),
+  );
+
   it.effect("accepts and dismisses persisted automation proposals", () =>
     Effect.gen(function* () {
       resetHarness();
@@ -1173,6 +1282,36 @@ layer("AutomationService", (it) => {
       const error = yield* service.runNow({ automationId }).pipe(Effect.flip);
 
       assert.match(error.message, /full-access/);
+      assert.strictEqual(
+        dispatchedCommands.filter((command) => command.type === "thread.create").length,
+        0,
+      );
+      const listed = yield* service.list({ projectId });
+      assert.strictEqual(
+        listed.runs.find((run) => run.automationId === automationId)?.status,
+        "failed",
+      );
+    }),
+  );
+
+  it.effect("blocks persisted unobservable providers at automation dispatch", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const repository = yield* AutomationRepository;
+      const automationId = AutomationId.makeUnsafe("automation-unobservable-provider-runnow");
+      yield* repository.createDefinition({
+        id: automationId,
+        input: {
+          ...createInput("worktree"),
+          modelSelection: { provider: "pi", model: "test-pi" },
+        },
+        now,
+      });
+
+      const error = yield* service.runNow({ automationId }).pipe(Effect.flip);
+
+      assert.include(error.message, "Provider 'pi' cannot process automation content");
       assert.strictEqual(
         dispatchedCommands.filter((command) => command.type === "thread.create").length,
         0,

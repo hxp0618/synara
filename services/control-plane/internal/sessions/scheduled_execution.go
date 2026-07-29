@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -166,12 +167,84 @@ func CreateScheduledExecution(
 			err,
 		)
 	}
+	if err := createInitialExecutionGenerationFact(ctx, tx, execution, decidedAt); err != nil {
+		return ScheduledExecution{}, err
+	}
 	if err := routing.CreateCapacityAdmission(ctx, tx, capacityAdmission); err != nil {
 		return ScheduledExecution{}, err
 	}
 	return ScheduledExecution{
 		Execution: execution, Decision: decision, CapacityAdmission: capacityAdmission.Evidence,
 	}, nil
+}
+
+func createInitialExecutionGenerationFact(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	dispatchRequestedAt time.Time,
+) error {
+	if tx.Dialector.Name() == "sqlite" &&
+		!tx.Migrator().HasTable(&persistence.ExecutionGenerationFact{}) {
+		return nil
+	}
+	provider := ""
+	if execution.Provider != nil {
+		provider = strings.TrimSpace(*execution.Provider)
+	}
+	warmPoolMode := strings.TrimSpace(execution.WarmPoolModeSnapshot)
+	if provider == "" || execution.Generation != 0 ||
+		(warmPoolMode != "disabled" && warmPoolMode != "balanced" && warmPoolMode != "low-latency") {
+		return problem.New(
+			500,
+			"execution_generation_fact_initial_scope_invalid",
+			"Initial Execution generation observability requires a Provider, Generation zero, and valid warm-pool snapshot.",
+		)
+	}
+	recoveryReason := "initial-claim"
+	if execution.NextRecoveryReason != nil {
+		switch strings.TrimSpace(*execution.NextRecoveryReason) {
+		case "disaster-recovery":
+			if execution.PredecessorExecutionID == nil {
+				return problem.New(
+					500,
+					"execution_generation_fact_initial_recovery_invalid",
+					"Initial disaster-recovery generation observability requires a predecessor Execution.",
+				)
+			}
+			recoveryReason = "disaster-recovery"
+		case "":
+		default:
+			return problem.New(
+				500,
+				"execution_generation_fact_initial_recovery_invalid",
+				"Initial Execution generation observability received an unsupported recovery reason.",
+			)
+		}
+	}
+	warmPoolResult := "pending"
+	if warmPoolMode == "disabled" {
+		warmPoolResult = "not-requested"
+	}
+	dispatchCopy := dispatchRequestedAt
+	fact := persistence.ExecutionGenerationFact{
+		TenantID: execution.TenantID, ExecutionID: execution.ID, Generation: 1,
+		SessionID: execution.SessionID, TurnID: execution.TurnID,
+		ExecutionTargetID: execution.ExecutionTargetID, TargetKind: execution.TargetKind,
+		Provider: provider, RecoveryReason: recoveryReason,
+		WarmPoolMode: warmPoolMode, WarmPoolResult: warmPoolResult,
+		DispatchRequestedAt: &dispatchCopy,
+		CreatedAt:           dispatchRequestedAt, UpdatedAt: dispatchRequestedAt,
+	}
+	if err := tx.WithContext(ctx).Create(&fact).Error; err != nil {
+		return problem.Wrap(
+			500,
+			"execution_generation_fact_initial_create_failed",
+			"Initial Execution generation observability could not be created atomically with scheduling evidence.",
+			err,
+		)
+	}
+	return nil
 }
 
 func schedulingCandidateFromLaunchEvidence(

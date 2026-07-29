@@ -1063,6 +1063,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             method: "item/commandExecution/requestApproval",
           },
           decision: "accept",
+          sensitiveAction: {
+            categories: ["credential-access"],
+            requiresFreshApproval: true,
+            allowSessionApproval: false,
+          },
         },
       };
 
@@ -1078,6 +1083,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       assert.equal(firstEvent.value.payload.requestType, "command_execution_approval");
+      assert.deepEqual(firstEvent.value.payload.sensitiveAction, {
+        categories: ["credential-access"],
+        requiresFreshApproval: true,
+        allowSessionApproval: false,
+      });
     }),
   );
 
@@ -1098,6 +1108,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         payload: {
           reason: "Needs network access",
           permissions: { network: { enabled: true } },
+          sensitiveAction: {
+            categories: ["network-egress"],
+            requiresFreshApproval: true,
+            allowSessionApproval: false,
+          },
         },
       } satisfies ProviderEvent);
 
@@ -1109,6 +1124,16 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.deepEqual(firstEvent.value.payload.args, {
         reason: "Needs network access",
         permissions: { network: { enabled: true } },
+        sensitiveAction: {
+          categories: ["network-egress"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+      });
+      assert.deepEqual(firstEvent.value.payload.sensitiveAction, {
+        categories: ["network-egress"],
+        requiresFreshApproval: true,
+        allowSessionApproval: false,
       });
     }),
   );

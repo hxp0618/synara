@@ -10,7 +10,7 @@ func AllModels() []any {
 		&PlatformInstallation{}, &MetadataImport{}, &User{}, &UserIdentity{}, &Tenant{},
 		&TenantMembership{}, &Organization{}, &OrganizationMembership{}, &LoginSession{},
 		&TenantInvitation{}, &AuditLog{}, &OutboxMessage{}, &OutboxPressureState{}, &TenantQuota{}, &ExecutionQuotaPolicy{}, &Project{}, &ExecutionTarget{}, &KubernetesPodDeletionFence{},
-		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{}, &WorkerIdentityTombstone{},
+		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{}, &WorkerStorageScrub{}, &WorkerIdentityTombstone{},
 		&AgentExecution{}, &ExecutionSchedulingDecision{}, &ExecutionSchedulingCandidate{}, &ExecutionCapacityAdmission{}, &ExecutionRecoveryBundle{}, &ExecutionSuspendAttempt{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{},
 		&ExecutionControlCommand{}, &Artifact{},
 		&ArtifactPayloadMigration{}, &ArtifactAccessToken{}, &ProviderCredential{}, &ProviderCredentialScopePolicy{},

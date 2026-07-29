@@ -49,7 +49,7 @@ func TestPinnedGeneralWorkerBindsFirstTenantAcrossClaimsAndReregistration(t *tes
 	replacementCapabilities := workerManifestTestCapabilities()
 	addWorkerManifestTestContainmentEvidence(replacementCapabilities)
 	signWorkerManifestTestContainment(t, replacementCapabilities, workerManifestRegistrationContext{
-		ExecutionTargetID: target.ID, TargetKind: platform.TargetDocker, InstanceUID: replacementUID,
+		ExecutionTargetID: target.ID, TargetKind: platform.TargetKubernetes, InstanceUID: replacementUID,
 		ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
 	})
 	replacement, err := service.Register(context.Background(), RegisterWorkerInput{
@@ -57,6 +57,7 @@ func TestPinnedGeneralWorkerBindsFirstTenantAcrossClaimsAndReregistration(t *tes
 		InstanceUID: replacementUID, ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: replacementCapabilities,
 		LeaseSupported: true, FencingSupported: true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,13 +93,126 @@ func TestSharedGeneralWorkerMayRotateTenantsWithoutBinding(t *testing.T) {
 	}
 	completeWorkerTenantIsolationExecution(t, service, worker, first, "shared-first-complete")
 	assertWorkerTenantUnbound(t, db, worker.ID)
+	_, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: target.ID, TargetKind: target.Kind,
+	}, "shared-second-before-scrub")
+	assertProblemCode(t, err, "worker_storage_scrub_required")
+	acknowledgeWorkerTenantStorageScrub(t, service, worker, "shared-first-scrub")
 
 	second := claimWorkerTenantIsolationExecution(t, service, worker, target, "shared-second")
 	if second.Value.Execution == nil || second.Value.Execution.ID != tenantB.ExecutionID {
 		t.Fatalf("second shared claim = %#v, want Tenant B", second.Value.Execution)
 	}
 	completeWorkerTenantIsolationExecution(t, service, worker, second, "shared-second-complete")
+	acknowledgeWorkerTenantStorageScrub(t, service, worker, "shared-second-scrub")
 	assertWorkerTenantUnbound(t, db, worker.ID)
+}
+
+func TestSharedWorkerPendingScrubOnlyResumesOnSamePhysicalInstance(t *testing.T) {
+	db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationShared)
+	execution := seedWorkerTenantIsolationExecution(t, db, target, "shared-reregister", time.Now().UTC())
+	_, worker := registerWorkerTenantIsolationTestWorker(t, service, target, "shared-reregister-worker", uuid.NewString())
+	claim := claimWorkerTenantIsolationExecution(t, service, worker, target, "shared-reregister-claim")
+	if claim.Value.Execution == nil || claim.Value.Execution.ID != execution.ExecutionID {
+		t.Fatalf("shared re-registration claim = %#v", claim.Value.Execution)
+	}
+	completeWorkerTenantIsolationExecution(t, service, worker, claim, "shared-reregister-complete")
+
+	register := func(instanceUID string) (RegisteredWorker, error) {
+		capabilities := workerManifestTestCapabilities()
+		addWorkerManifestTestContainmentEvidence(capabilities)
+		signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
+			ExecutionTargetID: target.ID, TargetKind: platform.TargetKubernetes, InstanceUID: instanceUID,
+			ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
+		})
+		return service.Register(context.Background(), RegisterWorkerInput{
+			ExecutionTargetID: target.ID, TargetKind: target.Kind, InstanceUID: instanceUID,
+			ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
+			Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
+			LeaseSupported: true, FencingSupported: true,
+			RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+		})
+	}
+	_, err := register(uuid.NewString())
+	assertProblemCode(t, err, "worker_storage_scrub_physical_instance_mismatch")
+
+	_, err = register(worker.InstanceUID)
+	assertProblemCode(t, err, "kubernetes_worker_instance_already_registered")
+	var pending persistence.WorkerStorageScrub
+	if err := db.Where("worker_id = ? AND status = ?", worker.ID, workerStorageScrubStatusPending).
+		Take(&pending).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pending.TenantID != execution.TenantID {
+		t.Fatalf("pending scrub lost its Tenant fence: %#v", pending)
+	}
+}
+
+func TestSharedWorkerStorageScrubFailureDrainsPhysicalWorker(t *testing.T) {
+	db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationShared)
+	seedWorkerTenantIsolationExecution(t, db, target, "shared-scrub-failure", time.Now().UTC())
+	_, worker := registerWorkerTenantIsolationTestWorker(t, service, target, "shared-scrub-failure-worker", uuid.NewString())
+	claim := claimWorkerTenantIsolationExecution(t, service, worker, target, "shared-scrub-failure-claim")
+	completeWorkerTenantIsolationExecution(t, service, worker, claim, "shared-scrub-failure-complete")
+	pending, err := service.ClaimWorkerStorageScrub(context.Background(), worker)
+	if err != nil || pending.Scrub == nil {
+		t.Fatalf("pending failed storage scrub = %#v, err=%v", pending.Scrub, err)
+	}
+	failed, err := service.FailWorkerStorageScrub(
+		context.Background(), worker, pending.Scrub.ID,
+		WorkerStorageScrubFailureInput{
+			ScrubGeneration: pending.Scrub.ScrubGeneration,
+			FailureCode:     "workspace_scrub_failed", FailureMessage: "injected deletion failure",
+		},
+		"shared-scrub-failure-report",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Value.Status != workerStorageScrubStatusFailed || failed.Value.FailedAt == nil {
+		t.Fatalf("failed storage scrub = %#v", failed.Value)
+	}
+	var storedWorker persistence.WorkerInstance
+	if err := db.Where("id = ?", worker.ID).Take(&storedWorker).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedWorker.Status != "draining" || storedWorker.DrainingAt == nil {
+		t.Fatalf("Worker after storage scrub failure = %#v", storedWorker)
+	}
+	_, err = service.AcknowledgeWorkerStorageScrub(
+		context.Background(), worker, pending.Scrub.ID,
+		WorkerStorageScrubReceiptInput{ScrubGeneration: pending.Scrub.ScrubGeneration},
+		"shared-scrub-failure-late-ack",
+	)
+	assertProblemCode(t, err, "worker_storage_scrub_failed")
+}
+
+func TestSharedWorkerUnresolvedScrubBlocksNewLogicalWorkerRow(t *testing.T) {
+	db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationShared)
+	seedWorkerTenantIsolationExecution(t, db, target, "shared-scrub-replacement", time.Now().UTC())
+	_, worker := registerWorkerTenantIsolationTestWorker(t, service, target, "shared-scrub-replacement-worker", uuid.NewString())
+	claim := claimWorkerTenantIsolationExecution(t, service, worker, target, "shared-scrub-replacement-claim")
+	completeWorkerTenantIsolationExecution(t, service, worker, claim, "shared-scrub-replacement-complete")
+	terminatedAt := time.Now().UTC()
+	if err := db.Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Updates(map[string]any{"status": "terminated", "terminated_at": terminatedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	replacementUID := uuid.NewString()
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
+		ExecutionTargetID: target.ID, TargetKind: platform.TargetKubernetes, InstanceUID: replacementUID,
+		ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
+	})
+	_, err := service.Register(context.Background(), RegisterWorkerInput{
+		ExecutionTargetID: target.ID, TargetKind: target.Kind, InstanceUID: replacementUID,
+		ClusterID: worker.ClusterID, Namespace: worker.Namespace, PodName: worker.PodName,
+		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
+		LeaseSupported: true, FencingSupported: true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+	})
+	assertProblemCode(t, err, "worker_storage_scrub_replacement_blocked")
 }
 
 func TestSQLiteWorkerTenantBindingIndexCoversClaimFilter(t *testing.T) {
@@ -226,7 +340,7 @@ func seedWorkerTenantIsolationTarget(
 	db *gorm.DB,
 	tenantIsolation string,
 ) persistence.ExecutionTarget {
-	return seedWorkerTenantIsolationTargetKind(t, db, tenantIsolation, "docker")
+	return seedWorkerTenantIsolationTargetKind(t, db, tenantIsolation, "kubernetes")
 }
 
 func seedWorkerTenantIsolationTargetKind(
@@ -431,14 +545,15 @@ func registerWorkerTenantIsolationTestWorker(
 	addWorkerManifestTestContainmentEvidence(capabilities)
 	fullPodName := podName + "-" + uuid.NewString()
 	signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
-		ExecutionTargetID: target.ID, TargetKind: platform.TargetDocker, InstanceUID: instanceUID,
-		ClusterID: "tenant-isolation", Namespace: "default", PodName: fullPodName,
+		ExecutionTargetID: target.ID, TargetKind: platform.TargetKubernetes, InstanceUID: instanceUID,
+		ClusterID: "kubernetes", Namespace: "default", PodName: fullPodName,
 	})
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: target.ID, TargetKind: target.Kind, InstanceUID: instanceUID,
-		ClusterID: "tenant-isolation", Namespace: "default", PodName: fullPodName,
+		ClusterID: "kubernetes", Namespace: "default", PodName: fullPodName,
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
 		LeaseSupported: true, FencingSupported: true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -485,6 +600,38 @@ func completeWorkerTenantIsolationExecution(
 		},
 	}, requestID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func acknowledgeWorkerTenantStorageScrub(
+	t *testing.T,
+	service *Service,
+	worker persistence.WorkerInstance,
+	requestID string,
+) {
+	t.Helper()
+	claimed, err := service.ClaimWorkerStorageScrub(context.Background(), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Scrub == nil || claimed.Scrub.Status != workerStorageScrubStatusPending {
+		t.Fatalf("pending Worker storage scrub = %#v", claimed.Scrub)
+	}
+	_, err = service.AcknowledgeWorkerStorageScrub(
+		context.Background(), worker, claimed.Scrub.ID,
+		WorkerStorageScrubReceiptInput{ScrubGeneration: claimed.Scrub.ScrubGeneration + 1},
+		requestID+"-wrong-generation",
+	)
+	assertProblemCode(t, err, "worker_storage_scrub_fenced")
+	acknowledged, err := service.AcknowledgeWorkerStorageScrub(
+		context.Background(), worker, claimed.Scrub.ID,
+		WorkerStorageScrubReceiptInput{ScrubGeneration: claimed.Scrub.ScrubGeneration}, requestID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.Value.Status != workerStorageScrubStatusAcknowledged || acknowledged.Value.AcknowledgedAt == nil {
+		t.Fatalf("acknowledged Worker storage scrub = %#v", acknowledged.Value)
 	}
 }
 

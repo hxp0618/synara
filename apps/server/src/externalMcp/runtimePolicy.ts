@@ -22,17 +22,17 @@ export function resolveExternalMcpRuntimePolicy(input: {
       "Auto execution is available only to Codex and Claude sessions.",
     );
   }
-  if (environment === "local" && !input.capabilities.has("runtime:local")) {
+  if (environment === "local") {
     throw new GatewayToolError(
       "capability_denied",
-      'Local-checkout execution requires the explicit "runtime:local" scope.',
+      "External MCP content is untrusted and cannot execute in a local checkout.",
     );
   }
-  if (runtimeMode === "full-access" && !input.capabilities.has("runtime:full-access")) {
+  if (runtimeMode === "full-access") {
     throw new GatewayToolError(
       "capability_denied",
-      'Full-access execution requires the explicit "runtime:full-access" scope.',
+      "External MCP content is untrusted and cannot disable approval-required execution.",
     );
   }
-  return { environment, runtimeMode };
+  return { environment: "worktree", runtimeMode: "approval-required" };
 }

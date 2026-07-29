@@ -43,6 +43,7 @@ import { ProjectionSnapshotQuery } from "../../orchestration/Services/Projection
 import { threadHasInFlightTurn } from "../../orchestration/commandInvariants.ts";
 import { AutomationRepository } from "../../persistence/Services/AutomationRepository.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { untrustedProviderAdmissionIssue } from "../../security/untrustedContent.ts";
 import { runWorktreeSetupScript } from "../../worktreeSetup.ts";
 import type { ProjectionTurn } from "../../persistence/Services/ProjectionTurns.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -795,6 +796,27 @@ export const AutomationServiceLive = Layer.effect(
         : Effect.fail(new AutomationServiceError({ message: issue }));
     };
 
+    const validateProviderApprovalBoundary = (input: {
+      readonly modelSelection: AutomationDefinition["modelSelection"];
+      readonly providerOptions?: ProviderStartOptions;
+    }) =>
+      Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(toServiceError("Failed to load Server settings.")),
+        );
+        const currentProviderOptions = providerStartOptionsFromServerSettings(settings);
+        for (const providerOptions of [input.providerOptions, currentProviderOptions]) {
+          const issue = untrustedProviderAdmissionIssue({
+            provider: input.modelSelection.provider,
+            source: "automation",
+            ...(providerOptions ? { providerOptions } : {}),
+          });
+          if (issue !== null) {
+            return yield* new AutomationServiceError({ message: issue });
+          }
+        }
+      });
+
     // Run-path backstop for the fast-interval policy. validateSchedulePolicy enforces this at
     // create/update; this guards the run path it never covers. Effect.try converts a throwing
     // schedule (invalid cron/timezone in a persisted row) into a typed error so the dispatch
@@ -970,6 +992,10 @@ export const AutomationServiceLive = Layer.effect(
           acknowledgedRisks: definition.acknowledgedRisks,
         });
         yield* validateAutoRuntimeMode(definition);
+        yield* validateProviderApprovalBoundary({
+          modelSelection: definition.modelSelection,
+          ...(definition.providerOptions ? { providerOptions: definition.providerOptions } : {}),
+        });
         yield* validateFastIntervalPolicy({
           schedule: definition.schedule,
           enabled: definition.enabled,
@@ -2374,6 +2400,10 @@ export const AutomationServiceLive = Layer.effect(
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode ?? "approval-required",
         });
+        yield* validateProviderApprovalBoundary({
+          modelSelection: input.modelSelection,
+          ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+        });
         yield* validateHeartbeatTarget({
           mode: input.mode ?? "standalone",
           projectId: input.projectId,
@@ -2430,6 +2460,10 @@ export const AutomationServiceLive = Layer.effect(
           acknowledgedRisks: updated.acknowledgedRisks,
         });
         yield* validateAutoRuntimeMode(updated);
+        yield* validateProviderApprovalBoundary({
+          modelSelection: updated.modelSelection,
+          ...(updated.providerOptions ? { providerOptions: updated.providerOptions } : {}),
+        });
         yield* validateHeartbeatTarget(updated);
         const saved = yield* automationRepository
           .saveDefinition(updated)

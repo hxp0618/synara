@@ -93,6 +93,50 @@ func (c *Client) Heartbeat(ctx context.Context, cfg Config, draining bool) error
 	}, nil)
 }
 
+func (c *Client) ClaimWorkerStorageScrub(ctx context.Context) (executions.WorkerStorageScrubClaimResult, error) {
+	var output executions.WorkerStorageScrubClaimResult
+	err := c.doJSON(
+		ctx, http.MethodPost, "/v1/workers/storage-scrubs/claim", c.workerToken, uuid.NewString(), nil, &output,
+	)
+	return output, err
+}
+
+func (c *Client) AcknowledgeWorkerStorageScrub(
+	ctx context.Context,
+	scrub executions.WorkerStorageScrub,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost, workerStorageScrubPath(scrub.ID, "acknowledged"), c.workerToken,
+		workerStorageScrubRequestID(scrub, "acknowledged"),
+		executions.WorkerStorageScrubReceiptInput{ScrubGeneration: scrub.ScrubGeneration}, nil,
+	)
+}
+
+func (c *Client) FailWorkerStorageScrub(
+	ctx context.Context,
+	scrub executions.WorkerStorageScrub,
+	code, message string,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost, workerStorageScrubPath(scrub.ID, "failed"), c.workerToken,
+		workerStorageScrubRequestID(scrub, "failed:"+code),
+		executions.WorkerStorageScrubFailureInput{
+			ScrubGeneration: scrub.ScrubGeneration, FailureCode: code, FailureMessage: message,
+		}, nil,
+	)
+}
+
+func workerStorageScrubPath(scrubID uuid.UUID, action string) string {
+	return "/v1/workers/storage-scrubs/" + scrubID.String() + "/" + action
+}
+
+func workerStorageScrubRequestID(scrub executions.WorkerStorageScrub, action string) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		scrub.ID.String(), fmt.Sprintf("%d", scrub.ScrubGeneration), action,
+	}, "\x00")))
+	return "worker-storage-scrub-" + hex.EncodeToString(digest[:16])
+}
+
 func (c *Client) Claim(ctx context.Context, cfg Config) (executions.ClaimResult, error) {
 	var output executions.ClaimResult
 	err := c.doJSON(ctx, http.MethodPost, "/v1/workers/executions/claim", c.workerToken, uuid.NewString(), executions.ClaimExecutionInput{

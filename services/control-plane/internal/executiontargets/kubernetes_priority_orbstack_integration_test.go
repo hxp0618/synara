@@ -51,7 +51,7 @@ func TestKubernetesWorkerPriorityOrbStackIntegration(t *testing.T) {
 		Namespace: namespace, ServiceAccountName: serviceAccountName,
 		Image: image, ImagePullPolicy: "IfNotPresent",
 		ControlPlaneURL: "http://control-plane.invalid:3780", AllowInsecureControlPlane: true,
-		RunnerCommand: []string{"true"}, CPURequest: "10m", CPULimit: "100m",
+		RunnerCommand: []string{"true"}, CPURequest: "10m", CPULimit: "100m", PIDsLimit: 512,
 		MemoryRequest: "16Mi", MemoryLimit: "64Mi", WorkspaceSizeLimit: "64Mi",
 	}
 	client, err := newKubernetesHTTPClient(configuration)

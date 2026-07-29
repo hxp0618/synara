@@ -29,6 +29,9 @@ func TestDaemonStopsAfterWorkerTokenRevokedDuringClaim(t *testing.T) {
 			writeRevocationRegisteredWorker(t, response, workerID, targetID)
 		case "/v1/workers/heartbeat":
 			response.WriteHeader(http.StatusNoContent)
+		case "/v1/workers/storage-scrubs/claim":
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(executions.WorkerStorageScrubClaimResult{})
 		case "/v1/workers/executions/claim":
 			claimCalls.Add(1)
 			writeWorkerRevocationProblem(response, http.StatusUnauthorized, "worker_token_revoked")
@@ -62,6 +65,9 @@ func TestDaemonStopsAfterWorkerIdentityRevokedDuringHeartbeat(t *testing.T) {
 		case "/v1/workers/heartbeat":
 			heartbeatCalls.Add(1)
 			writeWorkerRevocationProblem(response, http.StatusForbidden, "worker_identity_revoked")
+		case "/v1/workers/storage-scrubs/claim":
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(executions.WorkerStorageScrubClaimResult{})
 		case "/v1/workers/executions/claim":
 			claimCalls.Add(1)
 			response.Header().Set("Content-Type", "application/json")
@@ -101,6 +107,9 @@ func TestDaemonStopsAfterKubernetesPodDeletionFencedDuringHeartbeat(t *testing.T
 		case "/v1/workers/heartbeat":
 			heartbeatCalls.Add(1)
 			writeWorkerRevocationProblem(response, http.StatusConflict, "kubernetes_pod_deletion_fenced")
+		case "/v1/workers/storage-scrubs/claim":
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(executions.WorkerStorageScrubClaimResult{})
 		case "/v1/workers/executions/claim":
 			claimCalls.Add(1)
 			response.Header().Set("Content-Type", "application/json")

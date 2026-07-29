@@ -1,8 +1,10 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { isAbsolute, join } from "node:path";
 
 import { startClaudeAgentSdkRun, type ClaudeQueryFactory } from "./claudeAgentSdkRuntime";
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
+import { requireProviderOuterSandboxProfile } from "./providerOuterSandbox";
 import type { TerminalRedactor } from "./terminalEvents";
 
 export type RunnerInput = {
@@ -123,6 +125,8 @@ export type ProviderRunOptions = {
   claudeQueryFactory?: ClaudeQueryFactory;
   environment?: NodeJS.ProcessEnv;
   operation?: ProviderPrimaryOperation;
+  /** Exact immutable Host command used by the controlled Codex tool-policy hook. */
+  codexToolPolicyHookCommand?: string;
 };
 
 export type ProviderReviewTarget =
@@ -183,25 +187,32 @@ const PROVIDER_PROCESS_ENVIRONMENT_ALLOWLIST = [
 ] as const;
 
 const CONTROLLED_PROVIDER_PROXY_ENVIRONMENT = [
-  { source: "SYNARA_PROVIDER_HTTP_PROXY", target: "HTTP_PROXY", mayContainAuthentication: true },
+  {
+    source: "SYNARA_PROVIDER_HTTP_PROXY",
+    target: "HTTP_PROXY",
+    allowedProtocols: ["http:", "https:"],
+  },
   {
     source: "SYNARA_PROVIDER_HTTPS_PROXY",
     target: "HTTPS_PROXY",
-    mayContainAuthentication: true,
+    allowedProtocols: ["http:", "https:"],
   },
-  { source: "SYNARA_PROVIDER_ALL_PROXY", target: "ALL_PROXY", mayContainAuthentication: true },
-  { source: "SYNARA_PROVIDER_NO_PROXY", target: "NO_PROXY", mayContainAuthentication: false },
+  {
+    source: "SYNARA_PROVIDER_ALL_PROXY",
+    target: "ALL_PROXY",
+    allowedProtocols: ["http:", "https:", "socks5:"],
+  },
 ] as const;
+
+const CONTROLLED_PROVIDER_NO_PROXY_ENVIRONMENT = {
+  source: "SYNARA_PROVIDER_NO_PROXY",
+  target: "NO_PROXY",
+} as const;
 
 const CONTROLLED_PROVIDER_PACKAGE_ENVIRONMENT = [
   { source: "SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG", target: "NPM_CONFIG_USERCONFIG" },
   { source: "SYNARA_PROVIDER_PIP_CONFIG_FILE", target: "PIP_CONFIG_FILE" },
 ] as const;
-
-type SelectedProviderProcessEnvironment = {
-  environment: NodeJS.ProcessEnv;
-  proxySecrets: string[];
-};
 
 export function readRunnerCredential(environment: NodeJS.ProcessEnv): RunnerCredential | null {
   const value = environment.SYNARA_PROVIDER_CREDENTIAL_FD?.trim();
@@ -226,25 +237,47 @@ export function providerEnvironment(
   provider: string,
   credential: RunnerCredential | null,
 ): { environment: NodeJS.ProcessEnv; redact: TerminalRedactor } {
-  const selected = selectProviderProcessEnvironment(source);
+  const environment = selectProviderProcessEnvironment(source);
 
-  const secrets = [
-    ...selected.proxySecrets,
-    ...(credential ? collectSecretStrings(credential.payload) : []),
-  ];
+  const secrets = credential ? collectSecretStrings(credential.payload) : [];
   if (credential) {
-    applyCredentialEnvironment(selected.environment, provider, credential.payload);
+    applyCredentialEnvironment(environment, provider, credential.payload);
+    if (providerCredentialUsesLoopbackBroker(credential.payload)) {
+      environment.NO_PROXY = mergeNoProxyLoopback(environment.NO_PROXY);
+    }
   }
-  return { environment: selected.environment, redact: createRedactor(secrets) };
+  return { environment, redact: createRedactor(secrets) };
+}
+
+function providerCredentialUsesLoopbackBroker(payload: Record<string, unknown>): boolean {
+  if (typeof payload.baseUrl !== "string") return false;
+  try {
+    const hostname = new URL(payload.baseUrl).hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+function mergeNoProxyLoopback(value: string | undefined): string {
+  const entries = (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const normalized = new Set(entries.map((entry) => entry.toLowerCase()));
+  const missing = ["127.0.0.1", "localhost", "::1"].filter((loopback) => !normalized.has(loopback));
+  if (entries.length + missing.length > 64) {
+    throw new Error("SYNARA_PROVIDER_NO_PROXY exceeds 64 entries after loopback exclusion");
+  }
+  entries.push(...missing);
+  return entries.join(",");
 }
 
 export function providerProcessEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return selectProviderProcessEnvironment(source).environment;
+  return selectProviderProcessEnvironment(source);
 }
 
-function selectProviderProcessEnvironment(
-  source: NodeJS.ProcessEnv,
-): SelectedProviderProcessEnvironment {
+function selectProviderProcessEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const values = new Map<string, string>();
   for (const [name, value] of Object.entries(source)) {
     if (value !== undefined) values.set(name.trim().toUpperCase(), value);
@@ -255,17 +288,19 @@ function selectProviderProcessEnvironment(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const proxySecrets: string[] = [];
   for (const proxy of CONTROLLED_PROVIDER_PROXY_ENVIRONMENT) {
     const value = values.get(proxy.source);
     if (value === undefined) continue;
-    if (/[\r\n\0]/u.test(value)) {
-      throw new Error(`${proxy.source} is invalid`);
-    }
-    environment[proxy.target] = value;
-    if (proxy.mayContainAuthentication) {
-      proxySecrets.push(...proxyAuthenticationSecrets(value));
-    }
+    const normalized = normalizeProviderProxy(value, proxy.source, proxy.allowedProtocols);
+    if (normalized) environment[proxy.target] = normalized;
+  }
+  const noProxyValue = values.get(CONTROLLED_PROVIDER_NO_PROXY_ENVIRONMENT.source);
+  if (noProxyValue !== undefined) {
+    const normalized = normalizeProviderNoProxy(
+      noProxyValue,
+      CONTROLLED_PROVIDER_NO_PROXY_ENVIRONMENT.source,
+    );
+    if (normalized) environment[CONTROLLED_PROVIDER_NO_PROXY_ENVIRONMENT.target] = normalized;
   }
   for (const config of CONTROLLED_PROVIDER_PACKAGE_ENVIRONMENT) {
     const value = values.get(config.source);
@@ -275,31 +310,76 @@ function selectProviderProcessEnvironment(
     }
     environment[config.target] = value;
   }
-  return { environment, proxySecrets };
+  return environment;
 }
 
-function proxyAuthenticationSecrets(value: string): string[] {
-  let username = "";
-  let password = "";
-  try {
-    const parsed = new URL(value);
-    username = parsed.username;
-    password = parsed.password;
-  } catch {
-    if (!value.includes("@")) return [];
-    return [value];
+function normalizeProviderProxy(
+  value: string,
+  name: string,
+  allowedProtocols: ReadonlyArray<string>,
+): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  if (
+    /[\r\n\t\0]/u.test(value) ||
+    !/^[a-z][a-z\d+.-]*:\/\//iu.test(normalized) ||
+    normalized.includes("?") ||
+    normalized.includes("#")
+  ) {
+    throw new Error(`${name} must be a credential-free proxy authority`);
   }
-  if (!username && !password) return [];
-  const decoded = [decodeUrlComponent(username), decodeUrlComponent(password)];
-  return [value, username, password, ...decoded];
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(`${name} must be a credential-free proxy authority`);
+  }
+  const authority = normalized.slice(normalized.indexOf("://") + 3).split(/[/?#]/u, 1)[0] ?? "";
+  const hostname = parsed.hostname.replace(/^\[|\]$/gu, "").replace(/\.$/u, "");
+  if (
+    !allowedProtocols.includes(parsed.protocol) ||
+    !authority ||
+    authority.includes("@") ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    !validProviderProxyHostname(hostname) ||
+    (parsed.pathname !== "" && parsed.pathname !== "/")
+  ) {
+    throw new Error(`${name} must be a credential-free proxy authority`);
+  }
+  if (parsed.port) {
+    const port = Number(parsed.port);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`${name} must use a valid proxy port`);
+    }
+  } else if (parsed.protocol === "socks5:") {
+    throw new Error(`${name} SOCKS5 proxy requires an explicit port`);
+  }
+  return normalized;
 }
 
-function decodeUrlComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+function validProviderProxyHostname(value: string): boolean {
+  if (!value || value.length > 253 || /[\s\p{Cc}/\\@?#\[\]]/u.test(value)) return false;
+  if (isIP(value) !== 0) return true;
+  for (const label of value.toLowerCase().split(".")) {
+    if (!/^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/u.test(label)) return false;
   }
+  return true;
+}
+
+function normalizeProviderNoProxy(value: string, name: string): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  const entries = normalized.split(",").map((entry) => entry.trim());
+  if (
+    entries.length > 64 ||
+    entries.some(
+      (entry) => !entry || entry === "*" || entry.length > 253 || /[\r\n\t\0]/u.test(entry),
+    )
+  ) {
+    throw new Error(`${name} contains an invalid entry`);
+  }
+  return entries.join(",");
 }
 
 function applyCredentialEnvironment(
@@ -352,8 +432,12 @@ export async function runProviderHost(
   input: RunnerInput,
   credential: RunnerCredential | null,
   emit: (message: RunnerMessage) => void,
+  options: ProviderRunOptions = {},
 ): Promise<void> {
-  const run = startProviderHostRun(input, credential, emit, { interactive: false });
+  const run = startProviderHostRun(input, credential, emit, {
+    ...options,
+    interactive: false,
+  });
   emit(await run.result);
 }
 
@@ -364,6 +448,7 @@ export function startProviderHostRun(
   options: ProviderRunOptions = {},
 ): ProviderRunController {
   validateRunnerInput(input);
+  requireProviderOuterSandboxProfile(options.environment ?? process.env);
   const normalizedProvider = input.workload.provider.trim().toLowerCase();
   const { environment, redact } = providerEnvironment(
     options.environment ?? process.env,
@@ -384,6 +469,11 @@ export function startProviderHostRun(
       );
     }
     environment.CODEX_HOME = writeControlledCodexConfig(providerStateDirectory, environment);
+    if (!options.codexToolPolicyHookCommand) {
+      throw new Error(
+        "Codex Credential requires the immutable Provider Host tool-policy hook command.",
+      );
+    }
   }
   const hasDurableHistory = hasAuthoritativeResumeData(input.workload, input.memoryDocuments);
   const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
@@ -398,6 +488,11 @@ export function startProviderHostRun(
       authoritativePrompt: prompt,
       nativeResumePrompt,
       interactive,
+      ...(options.codexToolPolicyHookCommand
+        ? {
+            toolPolicyHookCommand: options.codexToolPolicyHookCommand,
+          }
+        : {}),
       ...(options.operation ? { operation: options.operation } : {}),
     });
   }

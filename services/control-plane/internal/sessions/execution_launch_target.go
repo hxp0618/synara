@@ -10,6 +10,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
@@ -307,7 +308,7 @@ func lockFixedExecutionTargetForCommit(
 	var target persistence.ExecutionTarget
 	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 		Where("id = ? AND status = ?", targetID, "active").
-		Where("tenant_id IS NULL OR tenant_id = ?", policyScope.TenantID).
+		Where("tenant_id = ? OR (tenant_id IS NULL AND kind = ?)", policyScope.TenantID, platform.TargetKubernetes).
 		Where("organization_id IS NULL OR organization_id = ?", policyScope.OrganizationID).
 		Take(&target).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

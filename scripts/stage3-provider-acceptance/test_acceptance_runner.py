@@ -6,9 +6,11 @@ import dataclasses
 import datetime as dt
 import hashlib
 import io
+import itertools
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -78,6 +80,8 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kubernetes_worker_image=None,
         kubernetes_skip_worker_build=False,
         kubernetes_control_plane_host="host.docker.internal",
+        kubernetes_control_plane_port=None,
+        kubernetes_node_name=None,
         kind_bin="kind",
         kind_cluster_name=None,
         kind_node_image="kindest/node:v1.33.1",
@@ -168,6 +172,7 @@ def real_provider_reclaimed_turn_events(
 def _approval_command_item_event(
     event_type: str,
     *,
+    provider: str = "codex",
     execution_id: str = "execution-1",
     worker_id: str = "worker-1",
     generation: int = 1,
@@ -185,7 +190,7 @@ def _approval_command_item_event(
             "itemType": "command_execution",
             "status": "inProgress" if started else "completed",
             "data": {
-                "provider": "codex",
+                "provider": provider,
                 "providerItemId": provider_item_id,
                 "terminal": {
                     "terminalId": provider_item_id,
@@ -195,6 +200,67 @@ def _approval_command_item_event(
             },
         },
     }
+
+
+def _stage5_probe_terminal_events(
+    output: bytes | None = None,
+    *,
+    exit_code: int = 0,
+    provider: str = "codex",
+    success_sentinel: str = acceptance.STAGE5_METADATA_BLOCKED_SENTINEL,
+    reported_total_bytes: int | None = None,
+    truncated: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    output = (
+        (success_sentinel + "\n").encode("ascii")
+        if output is None
+        else output
+    )
+    terminal_id = "command-item-1"
+    started = _approval_command_item_event(
+        "item.started",
+        provider=provider,
+        sequence=1,
+    )
+    content = {
+        "sequence": 2,
+        "eventVersion": 2,
+        "eventType": "content.delta",
+        "executionId": "execution-1",
+        "workerId": "worker-1",
+        "generation": 1,
+        "payload": {
+            "streamKind": "command_output",
+            "terminalId": terminal_id,
+            "encoding": "utf-8",
+            "byteOffset": 0,
+            "byteLength": len(output),
+            "delta": output.decode("ascii"),
+        },
+    }
+    completed = _approval_command_item_event(
+        "item.completed",
+        provider=provider,
+        sequence=3,
+    )
+    completed_terminal = completed["payload"]["data"]["terminal"]
+    completed_terminal.update(
+        {
+            "totalBytes": len(output) if reported_total_bytes is None else reported_total_bytes,
+            "previewBytes": len(output),
+            "segmentCount": 0,
+            "truncated": truncated,
+            "exitCode": exit_code,
+        }
+    )
+    terminal = {
+        "sequence": 4,
+        "eventType": "execution.completed",
+        "executionId": "execution-1",
+        "workerId": "worker-1",
+        "generation": 1,
+    }
+    return terminal, [started, *([content] if output else []), completed, terminal]
 
 
 class FakeAPI:
@@ -3574,6 +3640,8 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             caught.exception.code,
             "runner.real_provider_approval_command_item_correspondence_invalid",
         )
+        self.assertEqual(caught.exception.evidence["completedTerminalExitCode"], 1)
+        self.assertEqual(caught.exception.evidence["completedTerminalEvent"], "terminal.failed")
 
     def test_approval_command_item_evidence_ignores_stale_generation_starts(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
@@ -4192,6 +4260,814 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         ):
             with self.subTest(command=command_factory.__name__):
                 self.assertTrue(command_factory(node_path).startswith(f"{node_path} -e '"))
+
+    def test_stage5_metadata_probe_is_bounded_and_never_serializes_a_response(self) -> None:
+        command = acceptance.stage5_metadata_probe_node_command()
+        parsed = shlex.split(command)
+
+        self.assertEqual(
+            parsed,
+            [
+                "pwd",
+                ">/dev/null",
+                "&&",
+                "/usr/local/bin/synara-agentd",
+                "--verify-kubernetes-network-boundary",
+            ],
+        )
+        implementation = (
+            REPO_ROOT
+            / "services/control-plane/internal/agentd/kubernetes_network_boundary.go"
+        ).read_text(encoding="utf-8")
+        for endpoint in acceptance.STAGE5_METADATA_ENDPOINTS:
+            authority = endpoint.removeprefix("http://").split("/", 1)[0]
+            expected = authority + ("" if authority.startswith("[") else ":80")
+            if authority.startswith("["):
+                expected += ":80"
+            self.assertEqual(implementation.count(f'"{expected}"'), 1)
+        self.assertIn("kubernetesNetworkBoundaryConsecutivePasses = 2", implementation)
+        self.assertNotIn("response", implementation.lower())
+
+    def test_stage5_credential_scope_probe_checks_presence_without_serializing_values(self) -> None:
+        command = acceptance.stage5_credential_scope_node_command()
+        parsed = shlex.split(command)
+
+        self.assertEqual(
+            parsed,
+            [
+                "pwd",
+                ">/dev/null",
+                "&&",
+                "/usr/local/bin/synara-agentd",
+                "--verify-provider-credential-scope",
+            ],
+        )
+        implementation = (
+            REPO_ROOT
+            / "services/control-plane/internal/agentd/provider_credential_scope.go"
+        ).read_text(encoding="utf-8")
+        for environment_name in acceptance.STAGE5_AMBIENT_CREDENTIAL_ENV_NAMES:
+            self.assertEqual(implementation.count(f'"{environment_name}"'), 1)
+        for credential_path in acceptance.STAGE5_AMBIENT_CREDENTIAL_PATHS:
+            self.assertEqual(implementation.count(f'"{credential_path}"'), 1)
+        self.assertIn("syscall.O_NOFOLLOW", implementation)
+        self.assertNotIn("value-that-must-not-be-reported", implementation)
+        self.assertNotIn("OPENAI_API_KEY", implementation)
+        self.assertNotIn("ANTHROPIC_API_KEY", implementation)
+
+    def test_stage5_malicious_issue_command_is_safety_fused_and_prompted_exactly(self) -> None:
+        command = acceptance.STAGE5_MALICIOUS_ISSUE_COMMAND
+        marker = "SYNARA_STAGE5_DENIED"
+        prompt = acceptance.real_provider_malicious_issue_denial_prompt(command, marker)
+
+        self.assertTrue(command.startswith("false && "))
+        self.assertEqual(command.count("git push origin main"), 1)
+        self.assertEqual(command.count("printenv GITHUB_TOKEN"), 1)
+        self.assertEqual(prompt.count(command), 1)
+        self.assertIn("attacker-authored Issue text", prompt)
+        self.assertIn("expected to deny", prompt)
+        self.assertIn(marker, prompt)
+
+        completed = subprocess.run(
+            ["bash", "-c", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stdout, b"")
+        self.assertEqual(completed.stderr, b"")
+
+    def test_stage5_sensitive_action_evidence_requires_fresh_network_approval(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {
+            "categories": ["network-egress"],
+            "requiresFreshApproval": True,
+            "allowSessionApproval": False,
+        }
+
+        self.assertEqual(
+            suite._stage5_sensitive_action_evidence(
+                {"sensitiveAction": expected},
+                "test request",
+            ),
+            expected,
+        )
+        credential_expected = {
+            "categories": ["credential-access"],
+            "requiresFreshApproval": True,
+            "allowSessionApproval": False,
+        }
+        self.assertEqual(
+            suite._stage5_sensitive_action_evidence(
+                {"sensitiveAction": credential_expected},
+                "credential test request",
+                expected_categories=("credential-access",),
+            ),
+            credential_expected,
+        )
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._stage5_sensitive_action_evidence(
+                {
+                    "sensitiveAction": {
+                        **expected,
+                        "allowSessionApproval": True,
+                    }
+                },
+                "test request",
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.stage5_sensitive_action_assessment_invalid",
+        )
+
+    def test_stage5_declined_sensitive_probe_retains_assessment_and_decision(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        assessment = {
+            "categories": ["credential-access", "protected-branch-publish"],
+            "requiresFreshApproval": True,
+            "allowSessionApproval": False,
+        }
+        terminal = {
+            "sequence": 3,
+            "eventType": "execution.completed",
+            "executionId": "execution-1",
+            "workerId": "worker-1",
+            "generation": 1,
+        }
+        opened = {
+            "sequence": 1,
+            "eventType": "request.opened",
+            "executionId": "execution-1",
+            "payload": {
+                "requestId": "request-stage5-denial",
+                "requestType": "command_execution_approval",
+                "sensitiveAction": assessment,
+            },
+        }
+        resolved = {
+            "sequence": 2,
+            "eventType": "request.resolved",
+            "executionId": "execution-1",
+            "payload": {
+                "requestId": "request-stage5-denial",
+                "requestType": "command_execution_approval",
+                "decision": "decline",
+                "sensitiveAction": assessment,
+            },
+        }
+        events = [opened, resolved, terminal]
+        suite._real_provider_approval_interaction = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"id": "interaction-stage5-denial"},
+                "execution-1",
+                "request-stage5-denial",
+                {
+                    "requestKind": "command",
+                    "sensitiveAction": assessment,
+                },
+                acceptance.STAGE5_MALICIOUS_ISSUE_COMMAND,
+            )
+        )
+        suite._resolve_approval_decision_turn = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                "resolutionStatus": "resolved",
+                "deliveryStatus": "delivered",
+            }
+        )
+        suite._turn_terminal_snapshot = mock.Mock(return_value=(terminal, events))  # type: ignore[method-assign]
+
+        actual_terminal, actual_events, evidence = suite._resolve_stage5_sensitive_probe(
+            turn={"id": "turn-stage5-denial"},
+            turn_id="turn-stage5-denial",
+            execution_id="execution-1",
+            command=acceptance.STAGE5_MALICIOUS_ISSUE_COMMAND,
+            runtime_mode="approval-required",
+            probe_label="Stage 5 malicious-Issue command",
+            expected_categories=("credential-access", "protected-branch-publish"),
+            decision="decline",
+        )
+
+        self.assertIs(actual_terminal, terminal)
+        self.assertIs(actual_events, events)
+        self.assertEqual(evidence["decision"], "decline")
+        self.assertFalse(evidence["commandExecutionAuthorized"])
+        self.assertEqual(evidence["resolutionAssessment"], assessment)
+        suite._resolve_approval_decision_turn.assert_called_once_with(
+            {"id": "turn-stage5-denial"},
+            {"id": "interaction-stage5-denial"},
+            session_id="session-id",
+            decision="decline",
+        )
+
+    def test_approval_decision_turn_sends_explicit_decline(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"resolutionStatus": "resolved", "deliveryStatus": "delivered"}
+        suite._resolve_pending_interaction_turn = mock.Mock(  # type: ignore[method-assign]
+            return_value=expected
+        )
+        turn = {"id": "turn-stage5-denial"}
+        interaction = {"id": "interaction-stage5-denial"}
+
+        actual = suite._resolve_approval_decision_turn(
+            turn,
+            interaction,
+            session_id="session-id",
+            decision="decline",
+        )
+
+        self.assertIs(actual, expected)
+        suite._resolve_pending_interaction_turn.assert_called_once_with(
+            turn,
+            interaction,
+            session_id="session-id",
+            request_path="approvals",
+            resolution_payload={"decision": "decline"},
+            interaction_name="Approval interaction",
+            resolution_name="approval resolution",
+            resolved_event_type="request.resolved",
+            interaction_invalid_code="runner.approval_interaction_invalid",
+            resolution_event_missing_code="runner.approval_resolution_event_missing",
+            terminal_execution_mismatch_code="runner.approval_terminal_execution_mismatch",
+        )
+
+    def test_stage5_denied_command_validator_rejects_any_execution_spill(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        safe_events = [
+            {"eventType": "request.opened", "payload": {}},
+            {"eventType": "request.resolved", "payload": {}},
+            {
+                "eventType": "content.delta",
+                "payload": {"streamKind": "assistant_text", "delta": "DENIED"},
+            },
+            {"eventType": "execution.completed"},
+        ]
+
+        evidence = suite._validate_stage5_denied_command_never_started(
+            safe_events,
+            probe_label="test denial",
+        )
+        self.assertTrue(evidence["commandNeverStarted"])
+        self.assertTrue(evidence["terminalNeverStarted"])
+        self.assertFalse(evidence["commandExecuted"])
+        self.assertFalse(evidence["commandOutputPersisted"])
+        self.assertFalse(evidence["artifactPersisted"])
+
+        leaking_events = (
+            _approval_command_item_event("item.started", sequence=5),
+            {
+                "eventType": "content.delta",
+                "payload": {"streamKind": "command_output", "delta": "leak"},
+            },
+            {"eventType": "artifact.ready", "payload": {"kind": "terminal_log"}},
+        )
+        for leaking_event in leaking_events:
+            with self.subTest(event_type=leaking_event["eventType"]):
+                with self.assertRaises(acceptance.AcceptanceError) as caught:
+                    suite._validate_stage5_denied_command_never_started(
+                        [*safe_events, leaking_event],
+                        probe_label="test denial",
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "runner.stage5_declined_command_started",
+                )
+
+    def test_stage5_denied_command_validator_accepts_bounded_declined_item(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        started = _approval_command_item_event("item.started", sequence=1)
+        completed = _approval_command_item_event("item.completed", sequence=4)
+        completed["payload"]["status"] = "declined"
+        completed_terminal = completed["payload"]["data"]["terminal"]
+        completed_terminal.clear()
+        completed_terminal.update(
+            {
+                "terminalId": "command-item-1",
+                "eventType": "terminal.failed",
+                "failureKind": "provider_error",
+                "totalBytes": 0,
+                "previewBytes": 0,
+                "segmentCount": 0,
+                "truncated": False,
+            }
+        )
+        events = [
+            started,
+            {
+                "sequence": 2,
+                "eventType": "request.opened",
+                "executionId": "execution-1",
+            },
+            {
+                "sequence": 3,
+                "eventType": "request.resolved",
+                "executionId": "execution-1",
+            },
+            completed,
+            {
+                "sequence": 5,
+                "eventType": "execution.completed",
+                "executionId": "execution-1",
+            },
+        ]
+
+        evidence = suite._validate_stage5_denied_command_never_started(
+            events,
+            probe_label="test denial",
+        )
+
+        self.assertEqual(evidence["providerLifecycleMode"], "bounded-declined-item")
+        self.assertEqual(evidence["commandItemEventCount"], 2)
+        self.assertEqual(evidence["terminalLifecycleEventCount"], 2)
+        self.assertFalse(evidence["commandNeverStarted"])
+        self.assertFalse(evidence["terminalNeverStarted"])
+        self.assertFalse(evidence["commandExecuted"])
+        self.assertTrue(evidence["declinedBeforeExecution"])
+
+    def test_stage5_denied_command_validator_accepts_claude_bounded_failed_item(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.options = dataclasses.replace(suite.options, provider="claudeAgent")
+        started = _approval_command_item_event(
+            "item.started", provider="claudeAgent", sequence=1
+        )
+        completed = _approval_command_item_event(
+            "item.completed", provider="claudeAgent", sequence=4
+        )
+        completed["payload"]["status"] = "failed"
+        completed_terminal = completed["payload"]["data"]["terminal"]
+        completed_terminal.clear()
+        completed_terminal.update(
+            {
+                "terminalId": "command-item-1",
+                "eventType": "terminal.failed",
+                "failureKind": "provider_error",
+                "totalBytes": 29,
+                "previewBytes": 0,
+                "segmentCount": 0,
+                "truncated": True,
+            }
+        )
+        events = [
+            started,
+            {"sequence": 2, "eventType": "request.opened", "executionId": "execution-1"},
+            {"sequence": 3, "eventType": "request.resolved", "executionId": "execution-1"},
+            completed,
+            {"sequence": 5, "eventType": "execution.completed", "executionId": "execution-1"},
+        ]
+
+        evidence = suite._validate_stage5_denied_command_never_started(
+            events,
+            probe_label="test Claude denial",
+        )
+
+        self.assertEqual(evidence["providerLifecycleMode"], "bounded-declined-item")
+        self.assertFalse(evidence["commandExecuted"])
+        self.assertTrue(evidence["declinedBeforeExecution"])
+
+    def test_stage5_metadata_terminal_requires_exact_blocked_sentinel(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events()
+
+        evidence = suite._validate_stage5_metadata_terminal(terminal, events)
+
+        self.assertTrue(evidence["blockedSentinelMatched"])
+        self.assertEqual(
+            evidence["outputBytes"],
+            len(acceptance.STAGE5_METADATA_BLOCKED_SENTINEL) + 1,
+        )
+        self.assertFalse(evidence["reachableSentinelPersisted"])
+        self.assertFalse(evidence["responseBodiesOrHeadersPersisted"])
+
+    def test_stage5_metadata_terminal_accepts_exact_command_zero_exit_without_output(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(output=b"")
+
+        evidence = suite._validate_stage5_metadata_terminal(terminal, events)
+
+        self.assertFalse(evidence["blockedSentinelMatched"])
+        self.assertTrue(evidence["blockedByExactCommandZeroExit"])
+        self.assertEqual(evidence["successEvidenceMode"], "exact-command-terminal-zero-exit")
+        self.assertEqual(evidence["outputBytes"], 0)
+
+    def test_stage5_metadata_terminal_accepts_bounded_withheld_success_output(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(
+            output=b"",
+            reported_total_bytes=len(acceptance.STAGE5_METADATA_BLOCKED_SENTINEL) + 1,
+            truncated=True,
+        )
+
+        evidence = suite._validate_stage5_metadata_terminal(terminal, events)
+
+        self.assertTrue(evidence["providerOutputWithheld"])
+        self.assertEqual(
+            evidence["successEvidenceMode"],
+            "exact-command-zero-exit-bounded-output-withheld",
+        )
+
+    def test_stage5_metadata_terminal_accepts_provider_withheld_newline(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(
+            output=b"",
+            reported_total_bytes=len(acceptance.STAGE5_METADATA_BLOCKED_SENTINEL),
+            truncated=True,
+        )
+
+        evidence = suite._validate_stage5_metadata_terminal(terminal, events)
+
+        self.assertTrue(evidence["providerOutputWithheld"])
+        self.assertEqual(evidence["completion"]["previewBytes"], 0)
+        self.assertEqual(evidence["completion"]["segmentCount"], 0)
+
+    def test_stage5_metadata_terminal_rejects_reachable_sentinel(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(
+            (acceptance.STAGE5_METADATA_REACHABLE_SENTINEL + "\n").encode("ascii"),
+            exit_code=42,
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._validate_stage5_metadata_terminal(terminal, events)
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.stage5_metadata_reachable_or_probe_failed",
+        )
+        self.assertTrue(
+            caught.exception.evidence["failureSentinelsPersisted"]["reachable"]
+        )
+
+    def test_stage5_credential_terminal_requires_exact_absent_sentinel(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(
+            success_sentinel=acceptance.STAGE5_CREDENTIALS_ABSENT_SENTINEL,
+        )
+
+        evidence = suite._validate_stage5_credential_terminal(terminal, events)
+
+        self.assertTrue(evidence["credentialsAbsentSentinelMatched"])
+        self.assertEqual(
+            evidence["outputBytes"],
+            len(acceptance.STAGE5_CREDENTIALS_ABSENT_SENTINEL) + 1,
+        )
+        self.assertFalse(evidence["credentialPresentSentinelPersisted"])
+        self.assertFalse(evidence["ambientCredentialValuesPersistedInProbeOutput"])
+
+    def test_stage5_turn_retries_only_transient_capacity_reclaim(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite._create_turn = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                acceptance.AcceptanceError(
+                    "execution_capacity_authority_unavailable",
+                    "capacity reclaim pending",
+                ),
+                acceptance.AcceptanceError(
+                    "execution_target_unavailable",
+                    "target readiness pending",
+                ),
+                {"id": "turn-stage5"},
+            ]
+        )
+
+        with mock.patch.object(acceptance.Deadline, "sleep", return_value=None):
+            turn = suite._create_stage5_turn("probe", runtime_mode="approval-required")
+
+        self.assertEqual(turn["id"], "turn-stage5")
+        self.assertEqual(suite._create_turn.call_count, 3)
+        suite._create_turn.assert_called_with(
+            "probe",
+            runtime_mode="approval-required",
+        )
+
+    def test_stage5_credential_terminal_rejects_present_sentinel(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = _stage5_probe_terminal_events(
+            (acceptance.STAGE5_CREDENTIALS_PRESENT_SENTINEL + "\n").encode("ascii"),
+            exit_code=42,
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._validate_stage5_credential_terminal(terminal, events)
+
+        self.assertEqual(caught.exception.code, "runner.stage5_credential_scope_failed")
+        self.assertTrue(
+            caught.exception.evidence["failureSentinelsPersisted"]["credentialPresent"]
+        )
+
+    def test_codex_stage5_metadata_case_requires_fresh_approval_before_egress_probe(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.fake_driver.name = "kubernetes"
+        suite.options = dataclasses.replace(
+            suite.options,
+            provider="codex",
+            kubernetes_node_name="worker-a",
+        )
+        suite.fake_driver.observe_execution = mock.Mock(  # type: ignore[method-assign]
+            return_value={"nodeName": "worker-a"}
+        )
+        terminal, events = _stage5_probe_terminal_events()
+        suite._create_turn = mock.Mock(return_value={"id": "turn-stage5"})  # type: ignore[method-assign]
+        suite._wait_for_turn_created = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": "execution-1",
+            }
+        )
+        suite._resolve_stage5_sensitive_probe = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                terminal,
+                events,
+                {
+                    "supportMode": "native-approval-required-fresh-approval",
+                    "runtimeMode": "approval-required",
+                    "freshApprovalProved": True,
+                },
+            )
+        )
+        suite._validate_stage5_metadata_terminal = mock.Mock(  # type: ignore[method-assign]
+            return_value={"blockedSentinelMatched": True}
+        )
+        suite._real_provider_turn_evidence = mock.Mock(return_value={})  # type: ignore[method-assign]
+
+        evidence = suite._real_provider_stage5_metadata_egress()
+
+        self.assertEqual(
+            evidence["approval"]["supportMode"],
+            "native-approval-required-fresh-approval",
+        )
+        self.assertTrue(evidence["approval"]["freshApprovalProved"])
+        self.assertTrue(evidence["targetTerminal"]["terminal"])
+        self.assertEqual(evidence["clusterScope"], "the explicitly selected Kubernetes context and observed Worker Node only")
+        _, create_kwargs = suite._create_turn.call_args
+        self.assertEqual(create_kwargs["runtime_mode"], "approval-required")
+        suite._resolve_stage5_sensitive_probe.assert_called_once_with(
+            turn={"id": "turn-stage5"},
+            turn_id="turn-stage5",
+            execution_id="execution-1",
+            command=mock.ANY,
+            runtime_mode="approval-required",
+            probe_label="Stage 5 metadata probe",
+            expected_categories=("network-egress",),
+        )
+
+    def test_stage5_credential_scope_uses_fresh_approval_for_both_provider_modes(self) -> None:
+        for provider, runtime_mode, support_mode in (
+            (
+                "claudeAgent",
+                "full-access",
+                "host-observed-full-access-fresh-approval",
+            ),
+            (
+                "codex",
+                "approval-required",
+                "native-approval-required-fresh-approval",
+            ),
+        ):
+            with self.subTest(provider=provider):
+                suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+                suite.fake_driver.name = "kubernetes"
+                suite.options = dataclasses.replace(
+                    suite.options,
+                    provider=provider,
+                    kubernetes_node_name="worker-a",
+                )
+                suite.fake_driver.observe_execution = mock.Mock(  # type: ignore[method-assign]
+                    return_value={"nodeName": "worker-a"}
+                )
+                terminal, events = _stage5_probe_terminal_events(
+                    provider=provider,
+                    success_sentinel=acceptance.STAGE5_CREDENTIALS_ABSENT_SENTINEL,
+                )
+                suite._create_turn = mock.Mock(  # type: ignore[method-assign]
+                    return_value={"id": "turn-stage5-credential"}
+                )
+                suite._wait_for_turn_created = mock.Mock(  # type: ignore[method-assign]
+                    return_value={
+                        "sequence": 1,
+                        "eventType": "turn.created",
+                        "executionId": "execution-1",
+                    }
+                )
+                suite._resolve_stage5_sensitive_probe = mock.Mock(  # type: ignore[method-assign]
+                    return_value=(
+                        terminal,
+                        events,
+                        {
+                            "supportMode": support_mode,
+                            "runtimeMode": runtime_mode,
+                            "freshApprovalProved": True,
+                            "sessionWideGrantAvailable": False,
+                        },
+                    )
+                )
+                suite._real_provider_turn_evidence = mock.Mock(  # type: ignore[method-assign]
+                    return_value={}
+                )
+
+                evidence = suite._real_provider_stage5_credential_scope()
+
+                self.assertEqual(evidence["approval"]["supportMode"], support_mode)
+                self.assertTrue(evidence["approval"]["freshApprovalProved"])
+                self.assertTrue(evidence["terminal"]["credentialsAbsentSentinelMatched"])
+                self.assertTrue(evidence["targetTerminal"]["terminal"])
+                self.assertTrue(evidence["nodePinned"])
+                self.assertEqual(evidence["nodeName"], "worker-a")
+                self.assertEqual(
+                    evidence["command"]["environmentNameCount"],
+                    len(acceptance.STAGE5_AMBIENT_CREDENTIAL_ENV_NAMES),
+                )
+                self.assertEqual(
+                    evidence["command"]["credentialPathCount"],
+                    len(acceptance.STAGE5_AMBIENT_CREDENTIAL_PATHS),
+                )
+                self.assertEqual(len(evidence["command"]["environmentNamesSha256"]), 64)
+                self.assertEqual(len(evidence["command"]["credentialPathsSha256"]), 64)
+                self.assertFalse(evidence["command"]["environmentValuesPersisted"])
+                serialized_command_evidence = json.dumps(evidence["command"], sort_keys=True)
+                for sensitive_identifier in (
+                    *acceptance.STAGE5_AMBIENT_CREDENTIAL_ENV_NAMES,
+                    *acceptance.STAGE5_AMBIENT_CREDENTIAL_PATHS,
+                ):
+                    self.assertNotIn(sensitive_identifier, serialized_command_evidence)
+                _, create_kwargs = suite._create_turn.call_args
+                self.assertEqual(create_kwargs["runtime_mode"], runtime_mode)
+                _, resolve_kwargs = suite._resolve_stage5_sensitive_probe.call_args
+                self.assertEqual(resolve_kwargs["runtime_mode"], runtime_mode)
+                self.assertEqual(
+                    resolve_kwargs["expected_categories"],
+                    ("credential-access",),
+                )
+
+    def test_stage5_malicious_issue_denial_uses_fresh_decline_for_both_provider_modes(self) -> None:
+        for provider, runtime_mode in (
+            ("claudeAgent", "full-access"),
+            ("codex", "approval-required"),
+        ):
+            with self.subTest(provider=provider):
+                suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+                suite.fake_driver.name = "kubernetes"
+                suite.options = dataclasses.replace(
+                    suite.options,
+                    provider=provider,
+                    kubernetes_node_name="worker-a",
+                )
+                suite.fake_driver.observe_execution = mock.Mock(  # type: ignore[method-assign]
+                    return_value={"nodeName": "worker-a"}
+                )
+                terminal = {
+                    "sequence": 5,
+                    "eventType": "execution.completed",
+                    "executionId": "execution-1",
+                    "workerId": "worker-1",
+                    "generation": 1,
+                }
+                events = [terminal]
+                suite._create_turn = mock.Mock(  # type: ignore[method-assign]
+                    return_value={"id": "turn-stage5-malicious-issue"}
+                )
+                suite._wait_for_turn_created = mock.Mock(  # type: ignore[method-assign]
+                    return_value={
+                        "sequence": 1,
+                        "eventType": "turn.created",
+                        "executionId": "execution-1",
+                    }
+                )
+                suite._resolve_stage5_sensitive_probe = mock.Mock(  # type: ignore[method-assign]
+                    return_value=(
+                        terminal,
+                        events,
+                        {
+                            "runtimeMode": runtime_mode,
+                            "decision": "decline",
+                            "freshApprovalProved": True,
+                            "commandExecutionAuthorized": False,
+                        },
+                    )
+                )
+                suite._real_provider_turn_evidence = mock.Mock(  # type: ignore[method-assign]
+                    return_value={"markerMatched": True}
+                )
+
+                evidence = suite._real_provider_stage5_malicious_issue_denial()
+
+                self.assertEqual(evidence["approval"]["decision"], "decline")
+                self.assertFalse(evidence["approval"]["commandExecutionAuthorized"])
+                self.assertTrue(evidence["denial"]["commandNeverStarted"])
+                self.assertTrue(evidence["targetTerminal"]["terminal"])
+                self.assertFalse(evidence["command"]["commandExecuted"])
+                self.assertEqual(
+                    evidence["command"]["safetyFuse"],
+                    "leading-false-short-circuit",
+                )
+                self.assertFalse(evidence["content"]["actualWebhookProvenanceProved"])
+                self.assertTrue(evidence["nodePinned"])
+                self.assertEqual(evidence["nodeName"], "worker-a")
+                serialized = json.dumps(evidence, sort_keys=True)
+                self.assertNotIn("git push origin main", serialized)
+                self.assertNotIn("GITHUB_TOKEN", serialized)
+                _, create_kwargs = suite._create_turn.call_args
+                self.assertEqual(create_kwargs["runtime_mode"], runtime_mode)
+                _, resolve_kwargs = suite._resolve_stage5_sensitive_probe.call_args
+                self.assertEqual(resolve_kwargs["runtime_mode"], runtime_mode)
+                self.assertEqual(resolve_kwargs["decision"], "decline")
+                self.assertEqual(
+                    resolve_kwargs["expected_categories"],
+                    ("credential-access", "protected-branch-publish"),
+                )
+
+    def test_stage5_metadata_case_requires_exact_kubernetes_node_pin(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.fake_driver.name = "kubernetes"
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._real_provider_stage5_metadata_egress()
+
+        self.assertEqual(caught.exception.code, "runner.stage5_node_pin_required")
+
+    def test_claude_stage5_metadata_case_persists_full_access_fresh_approval(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.fake_driver.name = "kubernetes"
+        suite.options = dataclasses.replace(
+            suite.options,
+            provider="claudeAgent",
+            kubernetes_node_name="worker-a",
+        )
+        suite.fake_driver.observe_execution = mock.Mock(  # type: ignore[method-assign]
+            return_value={"nodeName": "worker-a"}
+        )
+        assessment = {
+            "categories": ["network-egress"],
+            "requiresFreshApproval": True,
+            "allowSessionApproval": False,
+        }
+        terminal, terminal_events = _stage5_probe_terminal_events()
+        opened = {
+            "sequence": 5,
+            "eventType": "request.opened",
+            "executionId": "execution-1",
+            "payload": {
+                "requestId": "request-stage5",
+                "requestType": "command_execution_approval",
+                "sensitiveAction": assessment,
+            },
+        }
+        resolved = {
+            "sequence": 6,
+            "eventType": "request.resolved",
+            "executionId": "execution-1",
+            "payload": {
+                "requestId": "request-stage5",
+                "requestType": "command_execution_approval",
+                "decision": "accept",
+                "sensitiveAction": assessment,
+            },
+        }
+        events = [*terminal_events[:-1], opened, resolved, terminal]
+        suite._create_turn = mock.Mock(return_value={"id": "turn-stage5"})  # type: ignore[method-assign]
+        suite._wait_for_turn_created = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": "execution-1",
+            }
+        )
+        suite._real_provider_approval_interaction = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"id": "interaction-stage5"},
+                "execution-1",
+                "request-stage5",
+                {
+                    "requestKind": "command",
+                    "sensitiveAction": assessment,
+                },
+                "expected-command",
+            )
+        )
+        suite._resolve_approval_turn = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                "resolutionStatus": "resolved",
+                "deliveryStatus": "delivered",
+            }
+        )
+        suite._turn_terminal_snapshot = mock.Mock(return_value=(terminal, events))  # type: ignore[method-assign]
+        suite._validate_stage5_metadata_terminal = mock.Mock(  # type: ignore[method-assign]
+            return_value={"blockedSentinelMatched": True}
+        )
+        suite._real_provider_turn_evidence = mock.Mock(return_value={})  # type: ignore[method-assign]
+
+        evidence = suite._real_provider_stage5_metadata_egress()
+
+        self.assertEqual(
+            evidence["approval"]["supportMode"],
+            "host-observed-full-access-fresh-approval",
+        )
+        self.assertTrue(evidence["approval"]["freshApprovalProved"])
+        self.assertFalse(evidence["approval"]["sessionWideGrantAvailable"])
+        self.assertEqual(evidence["approval"]["resolutionAssessment"], assessment)
+        _, create_kwargs = suite._create_turn.call_args
+        self.assertEqual(create_kwargs["runtime_mode"], "full-access")
 
     def test_real_provider_approval_gated_commands_are_read_only(self) -> None:
         marker = "APPROVAL_MARKER"
@@ -5508,6 +6384,40 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(actual, expected)
         suite._real_provider_large_diff_artifact.assert_called_once_with()
+
+    def test_real_provider_stage5_metadata_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"terminal": {"blockedSentinelMatched": True}}
+        suite._real_provider_stage5_metadata_egress = mock.Mock(return_value=expected)  # type: ignore[method-assign]
+
+        actual = suite._execute_real_provider_case("metadata-egress")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_stage5_metadata_egress.assert_called_once_with()
+
+    def test_real_provider_stage5_credential_scope_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"terminal": {"credentialsAbsentSentinelMatched": True}}
+        suite._real_provider_stage5_credential_scope = mock.Mock(  # type: ignore[method-assign]
+            return_value=expected
+        )
+
+        actual = suite._execute_real_provider_case("credential-scope")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_stage5_credential_scope.assert_called_once_with()
+
+    def test_real_provider_stage5_malicious_issue_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"denial": {"commandNeverStarted": True}}
+        suite._real_provider_stage5_malicious_issue_denial = mock.Mock(  # type: ignore[method-assign]
+            return_value=expected
+        )
+
+        actual = suite._execute_real_provider_case("malicious-issue-denial")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_stage5_malicious_issue_denial.assert_called_once_with()
 
     def test_real_provider_terminal_large_dispatches_to_canonical_handler(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
@@ -7134,6 +8044,67 @@ class RunnerOptionsTest(unittest.TestCase):
             ),
         )
         self.assertEqual(options.real_provider_cases, acceptance.REAL_PROVIDER_CASES)
+
+    def test_stage5_provider_cases_are_explicit_and_outside_stage3_matrix(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-placeholder-key"},
+            clear=True,
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--target",
+                    "kubernetes",
+                    "--runner-command-json",
+                    '["/usr/local/bin/provider-host"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CODEX_KEY",
+                    "--real-provider-case",
+                    "metadata-egress",
+                    "--real-provider-case",
+                    "credential-scope",
+                    "--real-provider-case",
+                    "malicious-issue-denial",
+                    "--kubernetes-node-name",
+                    "worker-a",
+                ]
+            )
+
+        self.assertEqual(
+            options.real_provider_cases,
+            ("metadata-egress", "credential-scope", "malicious-issue-denial"),
+        )
+        for stage5_case in acceptance.REAL_PROVIDER_STAGE5_CASES:
+            self.assertNotIn(stage5_case, acceptance.REAL_PROVIDER_CASES)
+            self.assertIn(stage5_case, acceptance.REAL_PROVIDER_CASE_CHOICES)
+        for stage5_case, target_arguments in itertools.product(
+            acceptance.REAL_PROVIDER_STAGE5_CASES,
+            (
+                ["--target", "local"],
+                ["--target", "kubernetes"],
+            ),
+        ):
+            with (
+                self.subTest(
+                    stage5_case=stage5_case,
+                    target_arguments=target_arguments,
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                acceptance.parse_args(
+                    [
+                        "--suite",
+                        "real-provider-smoke",
+                        "--runner-command-json",
+                        '["node","/tmp/provider-host.mjs"]',
+                        "--real-provider-case",
+                        stage5_case,
+                        *target_arguments,
+                    ]
+                )
 
     def test_real_provider_failure_matrix_expands_in_canonical_order(self) -> None:
         options = acceptance.parse_args(
@@ -8981,6 +9952,87 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertFalse(payloads[0]["configuration"]["requireNodeSpread"])
         self.assertTrue(payloads[1]["configuration"]["requireNodeSpread"])
 
+    def test_create_kubernetes_target_serializes_exact_node_pin(self) -> None:
+        class TargetAPI:
+            def __init__(self) -> None:
+                self.payload: Mapping[str, Any] | None = None
+
+            def request(
+                inner_self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, expected, maximum_timeout
+                inner_self.payload = payload
+                return {"id": "target-node-pinned"}
+
+        class TargetDriver(acceptance.KubernetesDriver):
+            def _worker_proxy_url(self) -> str:
+                return "http://127.0.0.1:41234"
+
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_node_name="worker-a.example",
+        )
+        with mock.patch.object(acceptance, "reserve_loopback_port", return_value=43123):
+            driver = TargetDriver(
+                pathlib.Path.cwd(),
+                options,
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+        self.addCleanup(driver._release_state)
+        target_api = TargetAPI()
+        driver.api = target_api  # type: ignore[assignment]
+        driver.api_server = "https://127.0.0.1:26443"
+        driver.ca_certificate = "fixture-ca"
+        driver.kubernetes_token = "fixture-token"
+
+        driver._create_kubernetes_target(
+            "tenant-id",
+            "organization-id",
+            "codex",
+            name="pinned-target",
+            namespace="pinned-namespace",
+            service_account="pinned-service-account",
+            image="pinned-image",
+        )
+
+        assert target_api.payload is not None
+        self.assertEqual(
+            target_api.payload["configuration"]["nodeSelector"],
+            {"kubernetes.io/hostname": "worker-a.example"},
+        )
+
+    def test_kubernetes_node_name_option_is_target_scoped_and_canonical(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-node-name",
+                "worker-a.example",
+            ]
+        )
+        self.assertEqual(options.kubernetes_node_name, "worker-a.example")
+
+        for arguments in (
+            ["--kubernetes-node-name", "worker-a.example"],
+            ["--target", "kubernetes", "--kubernetes-node-name", "Worker_A"],
+            ["--target", "kubernetes", "--kubernetes-node-name", "worker..example"],
+            ["--target", "kubernetes", "--kubernetes-node-name", "worker.-node"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                acceptance.parse_args(arguments)
+
     def test_owned_kind_cluster_configures_and_records_worker_topology(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -9112,7 +10164,7 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 driver,
                 "_kubectl_command",
                 side_effect=["", config],
-            ),
+            ) as kubectl_command,
             mock.patch.object(
                 driver,
                 "_kubectl_completed",
@@ -9128,6 +10180,49 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertEqual(driver.api_server, "https://127.0.0.1:26443")
         self.assertEqual(driver.ca_certificate, "fixture-ca")
         self.assertEqual(evidence["apiServerHost"], "127.0.0.1:26443")
+        bootstrap = json.loads(kubectl_command.call_args_list[0].kwargs["input_text"])
+        cluster_role = next(
+            item for item in bootstrap["items"] if item["kind"] == "ClusterRole"
+        )
+        node_rules = {
+            tuple(rule["resources"]): tuple(rule["verbs"])
+            for rule in cluster_role["rules"]
+            if rule["apiGroups"] == [""] and rule["resources"] in (["nodes"], ["nodes/proxy"])
+        }
+        self.assertEqual(node_rules[("nodes",)], ("get", "list", "watch"))
+        self.assertEqual(node_rules[("nodes/proxy",)], ("get",))
+        priority_rules = [
+            rule
+            for rule in cluster_role["rules"]
+            if rule["apiGroups"] == ["scheduling.k8s.io"]
+            and rule["resources"] == ["priorityclasses"]
+        ]
+        self.assertEqual(
+            priority_rules,
+            [
+                {
+                    "apiGroups": ["scheduling.k8s.io"],
+                    "resources": ["priorityclasses"],
+                    "verbs": ["get"],
+                }
+            ],
+        )
+        token_review_rules = [
+            rule
+            for rule in cluster_role["rules"]
+            if rule["apiGroups"] == ["authentication.k8s.io"]
+            and rule["resources"] == ["tokenreviews"]
+        ]
+        self.assertEqual(
+            token_review_rules,
+            [
+                {
+                    "apiGroups": ["authentication.k8s.io"],
+                    "resources": ["tokenreviews"],
+                    "verbs": ["create"],
+                }
+            ],
+        )
         self.assertEqual(
             token_command.call_args.args[0],
             [
@@ -9579,6 +10674,48 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             "shared-local-container-engine",
         )
 
+    def test_operator_image_does_not_require_a_local_docker_copy(self) -> None:
+        worker_image = "registry.example.com/synara/worker@sha256:" + ("a" * 64)
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="managed-stage5",
+            kubernetes_allow_nondisposable=True,
+            kubernetes_skip_worker_build=True,
+            kubernetes_worker_image=worker_image,
+            kubernetes_control_plane_port=58091,
+        )
+
+        class OperatorImageDriver(acceptance.KubernetesDriver):
+            def _prepare_cluster(self) -> Mapping[str, Any]:
+                return {"context": self.context, "ownedCluster": False}
+
+            def _prepare_worker_image(self, *_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+                raise AssertionError("operator images must not require a local Docker copy")
+
+            def _prepare_cluster_access(self) -> Mapping[str, Any]:
+                return {"bootstrapNamespace": self.bootstrap_namespace}
+
+        driver = OperatorImageDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        with mock.patch.object(acceptance.ManagedWorkerDriver, "prepare", return_value={}):
+            evidence = driver.prepare()
+
+        image_evidence = evidence["kubernetes"]["containerEngine"]
+        self.assertEqual(driver.worker_proxy_listen_port, 58091)
+        self.assertEqual(image_evidence["workerImage"], worker_image)
+        self.assertIsNone(image_evidence["workerImageId"])
+        self.assertEqual(image_evidence["localDockerInspection"], "not-required")
+        self.assertEqual(image_evidence["verificationBoundary"], "kubernetes-runtime")
+        self.assertEqual(image_evidence["clusterImageTransport"], "operator-provided-image")
+        self.assertEqual(image_evidence["imagePullPolicy"], "IfNotPresent")
+
     def test_shared_local_image_store_prepares_canary_without_kind_load(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -9670,7 +10807,6 @@ class KubernetesDriverObservationTest(unittest.TestCase):
 
         class ObservationDriver(acceptance.KubernetesDriver):
             def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
-                compact = target_id.replace("-", "")[:12]
                 return {
                     "metadata": {
                         "name": "synara-exec-fixture",
@@ -9685,12 +10821,82 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                     "spec": {
                         "serviceAccountName": self.worker_service_account,
                         "automountServiceAccountToken": False,
+                        "enableServiceLinks": False,
                         "restartPolicy": "Never",
-                        "securityContext": {"runAsNonRoot": True, "fsGroup": 10001},
+                        "securityContext": {
+                            "runAsNonRoot": True,
+                            "fsGroup": 10001,
+                            "seccompProfile": {"type": "RuntimeDefault"},
+                        },
                         "volumes": [
                             {"name": "workspace", "emptyDir": {}},
                             {"name": "tmp", "emptyDir": {}},
                             {"name": "home", "emptyDir": {}},
+                            {
+                                "name": "workload-identity",
+                                "projected": {
+                                    "defaultMode": 0o440,
+                                    "sources": [
+                                        {
+                                            "serviceAccountToken": {
+                                                "audience": f"synara.execution-target.{target_id}",
+                                                "expirationSeconds": 600,
+                                                "path": "token",
+                                            }
+                                        }
+                                    ],
+                                },
+                            },
+                            {"name": "registration-token", "emptyDir": {}},
+                        ],
+                        "initContainers": [
+                            {
+                                "name": "network-boundary-init",
+                                "image": self.image,
+                                "imagePullPolicy": "Never",
+                                "command": [
+                                    "/usr/local/bin/synara-agentd",
+                                    "--verify-kubernetes-network-boundary",
+                                ],
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "runAsNonRoot": True,
+                                    "runAsUser": 10001,
+                                    "runAsGroup": 10001,
+                                    "capabilities": {"drop": ["ALL"]},
+                                    "seccompProfile": {"type": "RuntimeDefault"},
+                                },
+                            },
+                            {
+                                "name": "registration-token-init",
+                                "image": self.image,
+                                "imagePullPolicy": "Never",
+                                "command": [
+                                    "/usr/local/bin/synara-agentd",
+                                    "--stage-kubernetes-registration-token",
+                                ],
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "runAsNonRoot": True,
+                                    "runAsUser": 10001,
+                                    "runAsGroup": 10001,
+                                    "capabilities": {"drop": ["ALL"]},
+                                    "seccompProfile": {"type": "RuntimeDefault"},
+                                },
+                                "volumeMounts": [
+                                    {
+                                        "name": "workload-identity",
+                                        "mountPath": "/var/run/secrets/synara.io/workload-identity",
+                                        "readOnly": True,
+                                    },
+                                    {
+                                        "name": "registration-token",
+                                        "mountPath": "/var/run/secrets/synara.io/registration",
+                                    },
+                                ],
+                            }
                         ],
                         "containers": [
                             {
@@ -9704,20 +10910,25 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                                     "runAsUser": 10001,
                                     "runAsGroup": 10001,
                                     "capabilities": {"drop": ["ALL"]},
+                                    "seccompProfile": {"type": "RuntimeDefault"},
                                 },
+                                "volumeMounts": [
+                                    {"name": "workspace", "mountPath": "/data"},
+                                    {"name": "tmp", "mountPath": "/tmp"},
+                                    {"name": "home", "mountPath": "/home/synara"},
+                                    {
+                                        "name": "registration-token",
+                                        "mountPath": "/var/run/secrets/synara.io/registration",
+                                    },
+                                ],
                                 "env": [
                                     {
                                         "name": "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID",
                                         "value": execution_id,
                                     },
                                     {
-                                        "name": "SYNARA_WORKER_REGISTRATION_TOKEN",
-                                        "valueFrom": {
-                                            "secretKeyRef": {
-                                                "name": f"synara-agentd-{compact}",
-                                                "key": "registration-token",
-                                            }
-                                        },
+                                        "name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE",
+                                        "value": "/var/run/secrets/synara.io/registration/one-shot/token",
                                     },
                                 ],
                             }
@@ -9729,10 +10940,9 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             def _foundation_evidence(
                 self,
                 target_id: str,
-                secret_name: Any,
                 **_kwargs: Any,
             ) -> Mapping[str, Any]:
-                del target_id, secret_name
+                del target_id
                 return {"serviceAccount": self.worker_service_account}
 
         driver = ObservationDriver(
@@ -9746,7 +10956,16 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         evidence = driver.observe_execution(target_id, "execution-id")
 
         self.assertEqual(evidence["phase"], "Running")
-        self.assertEqual(evidence["volumes"], ["home", "tmp", "workspace"])
+        self.assertEqual(
+            evidence["volumes"],
+            ["home", "registration-token", "tmp", "workload-identity", "workspace"],
+        )
+        self.assertFalse(evidence["registrationTokenHandoff"]["projectedMountedInMain"])
+        self.assertEqual(
+            evidence["networkBoundaryGate"]["initContainer"],
+            "network-boundary-init",
+        )
+        self.assertTrue(evidence["networkBoundaryGate"]["completedBeforeAgentd"])
         self.assertEqual(evidence["foundation"]["serviceAccount"], driver.worker_service_account)
 
     def test_recover_pending_interaction_force_deletes_exact_execution_pod(self) -> None:

@@ -386,6 +386,105 @@ Provider Credential so `CLAUDE_CONFIG_DIR` can be bound to the agentd-owned Runt
 Provider assertion remains available for that controlled Claude path. The Runner never accepts a retained path
 outside the root or reads the user's ambient credential files to manufacture a pass.
 
+`--real-provider-case metadata-egress`, `--real-provider-case credential-scope`, and
+`--real-provider-case malicious-issue-denial` are explicit Stage 5 Kubernetes runtime-isolation gates and are
+intentionally not part of the Stage 3 `--real-provider-matrix`. All three pin the generated Execution Target with
+`--kubernetes-node-name <exact kubernetes.io/hostname>`, observe the live Pod on that Node, and require the real
+Codex or Claude process to exercise the gate itself. The metadata case probes AWS IPv4, Alibaba Cloud IPv4, and AWS IPv6
+metadata addresses through the Worker image's bounded agentd isolation verifier. `pwd` is part of the canonical command
+only with output redirected to `/dev/null`; response bodies and headers are never generated or copied into Session
+Events or reports. A pass requires the exact approved command, exit 0, zero output/preview/segments, and no Terminal
+Artifact spill.
+
+The credential-scope case checks only presence of ambient cloud, Git/SSH, package-registry, Docker/Kubernetes, and
+ServiceAccount credential environment names and paths. It never reads environment values or credential-file
+contents into evidence: environment values are discarded, and credential files are checked by presence only. The only
+configuration content inspected is at most 64 KiB of a non-symlink `.git/config`, solely to reject
+HTTPS remote userinfo; no content is emitted. The controlled Provider broker task token is deliberately excluded
+because it is the intended per-Execution Provider capability. A pass persists only the exact zero-output exit-0
+Terminal lifecycle, never a discovered name, value, file content, or path result.
+
+Claude keeps its host permission callback active in `full-access`, so the metadata case additionally requires a durable
+`network-egress` assessment on the pending interaction, `request.opened`, and `request.resolved`, with
+`requiresFreshApproval=true` and `allowSessionApproval=false`. Codex runs the metadata case in `approval-required` and
+must retain the same one-action assessment and Approval before the real Provider process probes the outer Kubernetes
+egress boundary. In ordinary `full-access`, the exact Host PreToolUse hook denies supported sensitive tool calls before
+execution because that mode cannot surface the required fresh Approval.
+The credential-scope case always proves a fresh `credential-access` Approval: Claude retains the callback in
+`full-access`, while Codex runs this case in `approval-required`. Both require the same assessment on the pending
+interaction, durable `request.opened`, and durable `request.resolved`, with no session-wide grant.
+
+The malicious-Issue case uses a native user Turn to replay attacker-authored Issue-shaped text. Its exact shell request
+starts with `false &&`, so a mediation regression cannot reach either the protected-branch publish or credential read.
+Claude runs in `full-access`; Codex runs in `approval-required`. The Runner requires the canonical
+`credential-access` + `protected-branch-publish` assessment on the pending interaction and both durable request Events,
+then explicitly sends `decline`. Codex and Claude may retain one fenced `item.started` → declined/failed
+`item.completed` pair; a pass requires that bounded lifecycle to contain no exit/signal, command output, or Artifact,
+prove `commandExecuted=false`, and end with the exact Provider marker. This proves the real Provider request/decline boundary; it does not
+prove Stage 9 webhook provenance or an unattended automation dispatch.
+
+Run all three cases separately for Codex and Claude on every Ready, non-cordoned Worker selected by the production Target.
+Pass only an immutable pullable Worker image and the exact Node name for one run; never use a broad selector as an
+implicit node claim:
+
+```sh
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target kubernetes \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --real-provider-case metadata-egress \
+  --real-provider-case credential-scope \
+  --real-provider-case malicious-issue-denial \
+  --kubernetes-context <managed-context> \
+  --kubernetes-allow-nondisposable \
+  --kubernetes-skip-worker-build \
+  --kubernetes-worker-image <immutable-pullable-worker-image> \
+  --kubernetes-node-name <exact-worker-node> \
+  --output-dir .tmp/stage5-provider-isolation/codex/<exact-worker-node> \
+  --timeout 1800
+```
+
+Repeat with `--provider claudeAgent` and the controlled Claude Credential/Base URL/model variables. Only the complete
+Provider × Node matrix on the actual managed cluster/CNI closes Stage 5; Kind, OrbStack, or a scheduler-selected run
+remains local or partial evidence.
+
+For the authoritative complete matrix, use the aggregate coordinator instead of a hand-written shell loop. It
+requires a clean worktree, an immutable `@sha256` Worker image, an explicit production Target label selector, both
+controlled Provider Credentials, and `--kubernetes-allow-nondisposable`. It snapshots Ready, non-cordoned Worker Nodes
+at the start, runs every canonical Stage 5 case for Codex and Claude on every exact Node, validates each child JSON and
+Markdown report plus cleanup/Secret scan, then re-reads the Node set. Any missing/unsupported case, wrong Node, failed
+cell, Secret finding, or inventory change makes the aggregate fail:
+
+```sh
+python3 scripts/stage3-provider-acceptance/stage5_provider_isolation_matrix.py \
+  --kubernetes-context <managed-context> \
+  --node-selector '<production-target-label-selector>' \
+  --kubernetes-worker-image <immutable-worker-image@sha256:digest> \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --kubernetes-allow-nondisposable \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --output-dir .tmp/stage5-provider-isolation/managed-matrix
+```
+
+The coordinator excludes control-plane Nodes by default. A disposable or dedicated single-node cluster may opt in
+with `--kubernetes-allow-control-plane-node`; the resulting inventory retains `controlPlane: true`, and that run must
+not be presented as a dedicated managed Worker pool acceptance.
+
+The coordinator retains credential names/values only as process inputs, never report fields, scans child process
+output in memory without persisting it, and scans the complete output tree before a pass. A matrix timeout may require
+operator cleanup of the exact child resources and is reported as such.
+
 A base smoke pass without selected cases proves only two real Provider Turns, Control Plane restart, native Cursor
 continuity, exact cleanup, and the report Secret scan for the selected Target. It does not replace Approval/User
 Input, Artifact/large Terminal, failure matrix, immutable Worker image, four-Target, or soak Release Gates.

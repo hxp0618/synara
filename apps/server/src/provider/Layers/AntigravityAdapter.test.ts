@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "@synara/shared/providerContentTrustPolicy";
+import { SYNARA_HARNESS_POLICY_MARKER } from "../../agentGateway/harnessPolicy.ts";
 
 import {
   antigravityPromptCommandLineIssue,
@@ -14,6 +16,7 @@ import {
   makeAntigravityRuntimeEventBase,
   parseAntigravityCliModelLabel,
   parseAntigravityModelLines,
+  prependAntigravityHostContext,
   readCompleteAntigravityLines,
   resolveAntigravityCliModelLabel,
   runAntigravityHelperProcess,
@@ -259,6 +262,34 @@ describe("Antigravity CLI integration helpers", () => {
       "limited to 24,000 characters",
     );
     expect(antigravityPromptCommandLineIssue("x".repeat(120_000), "darwin")).toBeNull();
+  });
+
+  it("carries the canonical content-trust boundary on every Antigravity Turn", () => {
+    const first = prependAntigravityHostContext("Inspect the repository.");
+    const retry = prependAntigravityHostContext("Retry after a failed process.");
+
+    for (const prompt of [first, retry]) {
+      expect(prompt).toContain(SYNARA_HARNESS_POLICY_MARKER);
+      expect(prompt).toContain(PROVIDER_CONTENT_TRUST_POLICY_MARKER);
+      expect(prompt).toContain("Synara MCP control is unavailable");
+      expect(prompt).not.toContain("Use the synara_* tools");
+      expect(prompt.split(SYNARA_HARNESS_POLICY_MARKER)).toHaveLength(2);
+    }
+    expect(first).toMatch(/<\/synara_host_context>\n\nInspect the repository\.$/u);
+
+    const hostContextChars = prependAntigravityHostContext("").length;
+    expect(
+      antigravityPromptCommandLineIssue(
+        prependAntigravityHostContext("x".repeat(24_000 - hostContextChars)),
+        "win32",
+      ),
+    ).toBeNull();
+    expect(
+      antigravityPromptCommandLineIssue(
+        prependAntigravityHostContext("x".repeat(24_001 - hostContextChars)),
+        "win32",
+      ),
+    ).toContain("limited to 24,000 characters");
   });
 
   it("marks every generated hook as a command hook", () => {

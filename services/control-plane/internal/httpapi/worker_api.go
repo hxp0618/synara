@@ -25,6 +25,55 @@ func (s *Server) listTenantWorkers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) claimWorkerStorageScrub(w http.ResponseWriter, r *http.Request) {
+	result, err := s.executions.ClaimWorkerStorageScrub(r.Context(), mustWorker(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) acknowledgeWorkerStorageScrub(w http.ResponseWriter, r *http.Request) {
+	scrubID, ok := s.pathUUID(w, r, "scrubID")
+	if !ok {
+		return
+	}
+	var input executions.WorkerStorageScrubReceiptInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.AcknowledgeWorkerStorageScrub(
+		r.Context(), mustWorker(r), scrubID, input, requestID(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) failWorkerStorageScrub(w http.ResponseWriter, r *http.Request) {
+	scrubID, ok := s.pathUUID(w, r, "scrubID")
+	if !ok {
+		return
+	}
+	var input executions.WorkerStorageScrubFailureInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.FailWorkerStorageScrub(
+		r.Context(), mustWorker(r), scrubID, input, requestID(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) revokeTenantWorker(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.pathUUID(w, r, "tenantID")
 	if !ok {

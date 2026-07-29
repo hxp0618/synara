@@ -103,6 +103,11 @@ import {
 import { isClaudeAutoModeCliVersionSupported } from "../claudeCliVersion.ts";
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText";
 import { buildCodexProcessEnv } from "../../codexProcessEnv.ts";
+import {
+  KILO_CLI_SPEC,
+  OPENCODE_CLI_SPEC,
+  openCodePureModeVersionIssue,
+} from "../opencodeRuntime.ts";
 
 export { parseClaudeAuthStatusFromOutput } from "../claudeAuthStatus";
 export type { CommandResult } from "../providerCliOutput";
@@ -472,7 +477,10 @@ const probeClaudeSubscription = () => {
       options: {
         persistSession: false,
         abortController: abort,
-        settingSources: ["user", "project", "local"],
+        // Capability discovery must not execute repository/user hooks or start
+        // configured MCP processes before an actual Provider session exists.
+        settingSources: [],
+        strictMcpConfig: true,
         allowedTools: [],
         stderr: () => {},
       },
@@ -1400,7 +1408,7 @@ export const makeCheckOpenCodeProviderStatus = (
     const executable = nonEmptyTrimmed(binaryPath) ?? "opencode";
 
     const versionProbe = yield* probeProviderCliVersion(
-      runOpenCodeCommand(["--version"], executable),
+      runOpenCodeCommand(["--pure", "--version"], executable),
       OPENCODE_HEALTH_TIMEOUT_MS,
     );
 
@@ -1445,7 +1453,20 @@ export const makeCheckOpenCodeProviderStatus = (
       } satisfies ServerProviderStatus;
     }
     const version = versionProbe.result;
-    const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
+    const versionOutput = `${version.stdout}\n${version.stderr}`;
+    const parsedVersion = parseGenericCliVersion(versionOutput);
+    const pureModeVersionIssue = openCodePureModeVersionIssue(OPENCODE_CLI_SPEC, versionOutput);
+    if (pureModeVersionIssue !== null) {
+      return {
+        provider: OPENCODE_PROVIDER,
+        status: "error" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        version: parsedVersion,
+        checkedAt,
+        message: pureModeVersionIssue,
+      } satisfies ServerProviderStatus;
+    }
 
     return {
       provider: OPENCODE_PROVIDER,
@@ -1471,7 +1492,7 @@ export const makeCheckKiloProviderStatus = (
     const executable = nonEmptyTrimmed(binaryPath) ?? "kilo";
 
     const versionProbe = yield* probeProviderCliVersion(
-      runKiloCommand(["--version"], executable),
+      runKiloCommand(["--pure", "--version"], executable),
       DEFAULT_TIMEOUT_MS,
     );
 
@@ -1516,7 +1537,20 @@ export const makeCheckKiloProviderStatus = (
       } satisfies ServerProviderStatus;
     }
     const version = versionProbe.result;
-    const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
+    const versionOutput = `${version.stdout}\n${version.stderr}`;
+    const parsedVersion = parseGenericCliVersion(versionOutput);
+    const pureModeVersionIssue = openCodePureModeVersionIssue(KILO_CLI_SPEC, versionOutput);
+    if (pureModeVersionIssue !== null) {
+      return {
+        provider: KILO_PROVIDER,
+        status: "error" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        version: parsedVersion,
+        checkedAt,
+        message: pureModeVersionIssue,
+      } satisfies ServerProviderStatus;
+    }
 
     return {
       provider: KILO_PROVIDER,

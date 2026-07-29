@@ -63,6 +63,7 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	assertCount(t, fixture, &persistence.ExecutionSchedulingDecision{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ExecutionSchedulingCandidate{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ExecutionCapacityAdmission{}, "tenant_id = ?", 1, fixture.tenantID)
+	assertCount(t, fixture, &persistence.ExecutionGenerationFact{}, "tenant_id = ?", 1, fixture.tenantID)
 	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.WorkspaceMaterialization{}, "session_id = ?", 1, fixture.sessionID)
@@ -94,6 +95,23 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	if capacityAdmission.AdmissionMode != routing.CapacityAdmissionFixedUnboundedV1 ||
 		capacityAdmission.SnapshotSHA256 != routing.CapacityAdmissionSHA256(capacityAdmission) {
 		t.Fatalf("Turn Execution capacity admission = %#v", capacityAdmission)
+	}
+	var generationFact persistence.ExecutionGenerationFact
+	if err := fixture.db.Where(
+		"tenant_id = ? AND execution_id = ? AND generation = ?",
+		fixture.tenantID,
+		execution.ID,
+		1,
+	).Take(&generationFact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if generationFact.SessionID != fixture.sessionID || generationFact.TurnID != first.ID ||
+		generationFact.ExecutionTargetID != execution.ExecutionTargetID ||
+		generationFact.TargetKind != execution.TargetKind || generationFact.Provider != "codex" ||
+		generationFact.RecoveryReason != "initial-claim" || generationFact.WarmPoolMode != "disabled" ||
+		generationFact.WarmPoolResult != "not-requested" || generationFact.DispatchRequestedAt == nil ||
+		!generationFact.DispatchRequestedAt.Equal(execution.QueuedAt) {
+		t.Fatalf("Turn initial generation fact = %#v", generationFact)
 	}
 	var workspace persistence.RemoteWorkspace
 	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).

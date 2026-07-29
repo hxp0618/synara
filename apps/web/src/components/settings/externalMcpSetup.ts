@@ -185,10 +185,10 @@ export function describeExternalMcpPermissions(
     descriptions.push("Read other tasks in selected projects");
   }
   if (capabilities.includes("runtime:local")) {
-    descriptions.push("Use the shared local checkout");
+    descriptions.push("Legacy local-checkout scope disabled");
   }
   if (capabilities.includes("runtime:full-access")) {
-    descriptions.push("Run without approval prompts");
+    descriptions.push("Legacy full-access scope disabled");
   }
   return descriptions.join(" · ");
 }

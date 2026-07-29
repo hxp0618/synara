@@ -10,6 +10,28 @@ import {
   startProviderHostRun,
   validateRunnerInput,
 } from "./providerHost";
+import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "./providerOuterSandbox";
+
+process.env[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = "single-tenant-trusted-v1";
+
+describe("Provider outer sandbox guard", () => {
+  const input = {
+    execution: { id: "execution-outer-sandbox" },
+    workload: { provider: "codex", inputText: "continue" },
+    workspaceDirectory: "/tmp/workspace",
+  };
+
+  it.each([undefined, "", "unknown-profile"])(
+    "rejects an unattested outer sandbox profile %s",
+    (profile) => {
+      const environment: NodeJS.ProcessEnv = { PATH: "/bin" };
+      if (profile !== undefined) environment[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = profile;
+      expect(() => startProviderHostRun(input, null, () => {}, { environment })).toThrow(
+        "did not attest an allowed outer sandbox profile",
+      );
+    },
+  );
+});
 
 describe("provider credential isolation", () => {
   it("builds Codex child environment from an explicit runtime allowlist", () => {
@@ -83,8 +105,8 @@ describe("provider credential isolation", () => {
     ).toEqual({ PATH: "/bin" });
   });
 
-  it("maps only controlled Provider proxy aliases and redacts authenticated URLs", () => {
-    const authenticatedProxy = "http://provider-user:provider-password@proxy.example.test:8080";
+  it("maps only controlled credential-free Provider proxy aliases", () => {
+    const controlledProxy = "http://proxy.example.test:8080";
     const result = providerEnvironment(
       {
         PATH: "/bin",
@@ -92,7 +114,7 @@ describe("provider credential isolation", () => {
         HTTPS_PROXY: "https://ambient-user:ambient-secret@ambient.example.test",
         ALL_PROXY: "socks5://ambient-user:ambient-secret@ambient.example.test",
         NO_PROXY: "ambient.internal",
-        SYNARA_PROVIDER_HTTP_PROXY: authenticatedProxy,
+        SYNARA_PROVIDER_HTTP_PROXY: controlledProxy,
         SYNARA_PROVIDER_HTTPS_PROXY: "https://proxy.example.test:8443",
         SYNARA_PROVIDER_ALL_PROXY: "socks5://proxy.example.test:1080",
         SYNARA_PROVIDER_NO_PROXY: "127.0.0.1,localhost,.svc",
@@ -103,15 +125,99 @@ describe("provider credential isolation", () => {
 
     expect(result.environment).toEqual({
       PATH: "/bin",
-      HTTP_PROXY: authenticatedProxy,
+      HTTP_PROXY: controlledProxy,
       HTTPS_PROXY: "https://proxy.example.test:8443",
       ALL_PROXY: "socks5://proxy.example.test:1080",
       NO_PROXY: "127.0.0.1,localhost,.svc",
     });
     expect(Object.keys(result.environment)).not.toContain("SYNARA_PROVIDER_HTTP_PROXY");
-    const rendered = result.redact(`error=${authenticatedProxy} output=${authenticatedProxy}`);
-    expect(rendered).not.toContain(authenticatedProxy);
-    expect(rendered).toBe("error=[REDACTED] output=[REDACTED]");
+    expect(result.redact(`proxy=${controlledProxy}`)).toBe(`proxy=${controlledProxy}`);
+  });
+
+  it.each([
+    [
+      "SYNARA_PROVIDER_HTTP_PROXY",
+      "http://user:password@proxy.example.test:8080",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_HTTP_PROXY",
+      "http://@proxy.example.test:8080",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_HTTP_PROXY",
+      "socks5://proxy.example.test:1080",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_HTTPS_PROXY",
+      "https://proxy.example.test:8443/path",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_HTTPS_PROXY",
+      "https://proxy.example.test:8443?token=secret",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_ALL_PROXY",
+      "socks5://proxy.example.test",
+      "SOCKS5 proxy requires an explicit port",
+    ],
+    [
+      "SYNARA_PROVIDER_ALL_PROXY",
+      "socks5h://proxy.example.test:1080",
+      "must be a credential-free proxy authority",
+    ],
+    [
+      "SYNARA_PROVIDER_ALL_PROXY",
+      "http:proxy.example.test",
+      "must be a credential-free proxy authority",
+    ],
+    ["SYNARA_PROVIDER_ALL_PROXY", "http://proxy.example.test:0", "must use a valid proxy port"],
+  ])("rejects unsafe controlled Provider proxy %s=%s", (name, value, expected) => {
+    expect(() => providerEnvironment({ [name]: value }, "codex", null)).toThrow(
+      `${name} ${expected}`,
+    );
+  });
+
+  it.each([
+    "*",
+    "localhost,,.svc",
+    `localhost,${"a".repeat(254)}`,
+    Array.from({ length: 65 }, (_, index) => `host-${index}.example.test`).join(","),
+  ])("rejects unsafe controlled Provider no-proxy value %s", (value) => {
+    expect(() => providerEnvironment({ SYNARA_PROVIDER_NO_PROXY: value }, "codex", null)).toThrow(
+      "SYNARA_PROVIDER_NO_PROXY contains an invalid entry",
+    );
+  });
+
+  it("keeps a task Credential broker on loopback outside configured proxies", () => {
+    const result = providerEnvironment(
+      {
+        PATH: "/bin",
+        SYNARA_PROVIDER_HTTPS_PROXY: "https://proxy.example.test:8443",
+        SYNARA_PROVIDER_NO_PROXY: ".svc",
+      },
+      "codex",
+      { payload: { apiKey: "task-token", baseUrl: "http://127.0.0.1:54321" } },
+    );
+    expect(result.environment.NO_PROXY?.split(",")).toEqual([
+      ".svc",
+      "127.0.0.1",
+      "localhost",
+      "::1",
+    ]);
+  });
+
+  it("keeps the brokered no-proxy list within its bounded contract", () => {
+    const entries = Array.from({ length: 64 }, (_, index) => `host-${index}.example.test`);
+    expect(() =>
+      providerEnvironment({ SYNARA_PROVIDER_NO_PROXY: entries.join(",") }, "codex", {
+        payload: { apiKey: "task-token", baseUrl: "http://127.0.0.1:54321" },
+      }),
+    ).toThrow("SYNARA_PROVIDER_NO_PROXY exceeds 64 entries after loopback exclusion");
   });
 
   it("maps only controlled absolute Package Registry config paths", () => {
@@ -132,9 +238,7 @@ describe("provider credential isolation", () => {
       NPM_CONFIG_USERCONFIG: "/run/synara/package/npmrc",
       PIP_CONFIG_FILE: "/run/synara/package/pip.conf",
     });
-    expect(Object.keys(result.environment)).not.toContain(
-      "SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG",
-    );
+    expect(Object.keys(result.environment)).not.toContain("SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG");
     expect(() =>
       providerEnvironment(
         { SYNARA_PROVIDER_NPM_CONFIG_USERCONFIG: "relative/npmrc" },
@@ -151,9 +255,7 @@ describe("provider credential isolation", () => {
     "SYNARA_PROVIDER_NO_PROXY",
   ])("rejects control characters in %s", (name) => {
     for (const value of ["http://proxy.example.test\rheader", "line\nvalue", "nul\0value"]) {
-      expect(() => providerEnvironment({ [name]: value }, "codex", null)).toThrow(
-        `${name} is invalid`,
-      );
+      expect(() => providerEnvironment({ [name]: value }, "codex", null)).toThrow(name);
     }
   });
 
@@ -179,7 +281,10 @@ describe("provider credential isolation", () => {
     };
     expect(() =>
       startProviderHostRun(input, { payload: { apiKey: "provider-secret" } }, () => {}, {
-        environment: { PATH: "/bin" },
+        environment: {
+          PATH: "/bin",
+          [PROVIDER_OUTER_SANDBOX_PROFILE_ENV]: "single-tenant-trusted-v1",
+        },
       }),
     ).toThrow("isolated CODEX_HOME");
     expect(() =>
@@ -192,7 +297,12 @@ describe("provider credential isolation", () => {
           },
         },
         () => {},
-        { environment: { PATH: "/bin" } },
+        {
+          environment: {
+            PATH: "/bin",
+            [PROVIDER_OUTER_SANDBOX_PROFILE_ENV]: "single-tenant-trusted-v1",
+          },
+        },
       ),
     ).toThrow("without userinfo");
   });

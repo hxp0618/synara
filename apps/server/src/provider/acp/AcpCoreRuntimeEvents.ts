@@ -13,7 +13,11 @@ import {
   type TurnId,
 } from "@synara/contracts";
 
-import { canonicalItemTypeFromAcpToolKind } from "./AcpAdapterSupport.ts";
+import {
+  assessAcpPermissionRequest,
+  canonicalItemTypeFromAcpToolKind,
+  effectiveAcpApprovalDecision,
+} from "./AcpAdapterSupport.ts";
 import type { AcpPermissionRequest, AcpPlanUpdate, AcpToolCallState } from "./AcpRuntimeModel.ts";
 
 type AcpTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -98,6 +102,11 @@ export function makeAcpRequestOpenedEvent(input: {
   readonly method: string;
   readonly rawPayload: unknown;
 }): ProviderRuntimeEvent {
+  const sensitiveAction = assessAcpPermissionRequest(input.permissionRequest);
+  const providerArgs =
+    input.args !== null && typeof input.args === "object" && !Array.isArray(input.args)
+      ? (input.args as Record<string, unknown>)
+      : { value: input.args };
   return {
     type: "request.opened",
     ...input.stamp,
@@ -108,7 +117,14 @@ export function makeAcpRequestOpenedEvent(input: {
     payload: {
       requestType: canonicalRequestTypeFromAcpKind(input.permissionRequest.kind),
       detail: input.detail,
-      args: input.args,
+      ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
+      args: sensitiveAction.requiresFreshApproval
+        ? {
+            ...providerArgs,
+            sessionApprovalAvailable: false,
+            sensitiveAction,
+          }
+        : input.args,
     },
     raw: {
       source: input.source,
@@ -126,7 +142,11 @@ export function makeAcpRequestResolvedEvent(input: {
   readonly requestId: RuntimeRequestId;
   readonly permissionRequest: AcpPermissionRequest;
   readonly decision: ProviderApprovalDecision;
+  readonly appliedDecision?: ProviderApprovalDecision;
 }): ProviderRuntimeEvent {
+  const sensitiveAction = assessAcpPermissionRequest(input.permissionRequest);
+  const effectiveDecision =
+    input.appliedDecision ?? effectiveAcpApprovalDecision(input.permissionRequest, input.decision);
   return {
     type: "request.resolved",
     ...input.stamp,
@@ -136,7 +156,9 @@ export function makeAcpRequestResolvedEvent(input: {
     requestId: input.requestId,
     payload: {
       requestType: canonicalRequestTypeFromAcpKind(input.permissionRequest.kind),
-      decision: input.decision,
+      decision: effectiveDecision,
+      ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
+      ...(effectiveDecision !== input.decision ? { requestedDecision: input.decision } : {}),
     },
   };
 }

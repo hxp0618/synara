@@ -232,6 +232,8 @@ func TestDaemonProbesWorkspaceCleanupAfterBoundedContinuousExecutions(t *testing
 			})
 		case "/v1/workers/heartbeat":
 			response.WriteHeader(http.StatusNoContent)
+		case "/v1/workers/storage-scrubs/claim":
+			_ = json.NewEncoder(response).Encode(executions.WorkerStorageScrubClaimResult{})
 		case "/v1/workers/executions/claim":
 			mu.Lock()
 			executionClaims++

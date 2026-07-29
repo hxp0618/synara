@@ -15,6 +15,7 @@ import type {
   AgentSessionEvent,
   CreateAgentSessionRuntimeFactory,
   ExtensionUIContext,
+  InlineExtension,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -39,6 +40,11 @@ import {
   type UserInputQuestion,
 } from "@synara/contracts";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
+
+import {
+  providerUntrustedToolFailureContext,
+  providerUntrustedToolResultContext,
+} from "@synara/shared/providerContentTrustPolicy";
 
 import { takeSynaraHarnessPolicyForProviderSession } from "../../agentGateway/harnessPolicy.ts";
 import {
@@ -88,6 +94,7 @@ import {
 } from "../supervisedProcessTeardown.ts";
 
 const PROVIDER = "pi" as const;
+export const PI_HOST_RESULT_PROVENANCE_EXTENSION_NAME = "synara-provider-result-provenance";
 const DEFAULT_PI_THINKING_LEVEL: ThinkingLevel = "medium";
 const PI_THINKING_OPTIONS: ReadonlyArray<{
   readonly value: ThinkingLevel;
@@ -158,6 +165,71 @@ type PiModelRegistry = Pick<ModelRegistry, "find" | "getAll" | "getAvailable">;
 type PiCodingAgentModule = typeof import("@earendil-works/pi-coding-agent");
 type PiAgentRuntime = Awaited<ReturnType<PiCodingAgentModule["createAgentSessionRuntime"]>>;
 type PiShellConfig = ReturnType<PiCodingAgentModule["getShellConfig"]>;
+
+export function makePiUntrustedToolResultContent(input: {
+  readonly toolName: unknown;
+  readonly isError: boolean;
+  readonly content: ReadonlyArray<TextContent | ImageContent>;
+}): Array<TextContent | ImageContent> {
+  const toolName =
+    typeof input.toolName === "string" &&
+    input.toolName.trim().length > 0 &&
+    input.toolName.trim().length <= 256 &&
+    !/[\r\n\0]/u.test(input.toolName)
+      ? input.toolName.trim()
+      : "unknown";
+  return [
+    {
+      type: "text",
+      text: input.isError
+        ? providerUntrustedToolFailureContext(toolName)
+        : providerUntrustedToolResultContext(toolName),
+    },
+    ...input.content,
+  ];
+}
+
+export function makePiHostResultProvenanceExtension(): InlineExtension {
+  return {
+    name: PI_HOST_RESULT_PROVENANCE_EXTENSION_NAME,
+    hidden: true,
+    factory: (pi) => {
+      pi.on("tool_result", (event) => ({
+        content: makePiUntrustedToolResultContent({
+          toolName: event.toolName,
+          isError: event.isError,
+          content: event.content,
+        }),
+      }));
+    },
+  };
+}
+
+/**
+ * Synara never executes project-local Pi extensions. Global user extensions
+ * may still load, while the hidden Host extension is appended last so its
+ * model-visible provenance cannot be overwritten by an earlier result hook.
+ */
+export function buildPiResourceLoaderSecurityOptions(input: {
+  readonly includeResultProvenance: boolean;
+}) {
+  return {
+    ...(input.includeResultProvenance
+      ? {
+          resourceLoaderOptions: {
+            extensionFactories: [makePiHostResultProvenanceExtension()],
+          },
+        }
+      : {}),
+    resourceLoaderReloadOptions: {
+      resolveProjectTrust: async () => false,
+    },
+  };
+}
+
+function isPiHostResultProvenanceExtension(extension: { readonly path?: string }): boolean {
+  return extension.path === `<inline:${PI_HOST_RESULT_PROVENANCE_EXTENSION_NAME}>`;
+}
 
 interface PiActiveProcess {
   readonly child: ChildProcess;
@@ -2017,6 +2089,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           cwd,
           agentDir,
           modelRuntime,
+          ...buildPiResourceLoaderSecurityOptions({ includeResultProvenance: true }),
         });
         const registry = modelRegistryFacade(services.modelRuntime, input.sdk);
         const model = findModelInRegistry(registry, input.modelId);
@@ -2238,7 +2311,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             }),
           ),
         );
-        const loadedExtensions = runtime.session.resourceLoader.getExtensions().extensions;
+        const loadedExtensions = runtime.session.resourceLoader
+          .getExtensions()
+          .extensions.filter((extension) => !isPiHostResultProvenanceExtension(extension));
         if (loadedExtensions.length > 0) {
           const extensionNames = loadedExtensions.map(extensionDisplayName);
           offerRuntimeEvent({
@@ -2649,6 +2724,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             cwd,
             agentDir,
             modelRuntime,
+            ...buildPiResourceLoaderSecurityOptions({ includeResultProvenance: false }),
           });
           const registry = modelRegistryFacade(services.modelRuntime, piSdk);
           const extensionCount = services.resourceLoader.getExtensions().extensions.length;
@@ -2708,6 +2784,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             services = await piSdk.createAgentSessionServices({
               cwd: input.cwd,
               agentDir: makeAgentDir(input.agentDir, piSdk),
+              ...buildPiResourceLoaderSecurityOptions({ includeResultProvenance: false }),
             });
           }
           if (services && input.forceReload) {
@@ -2782,6 +2859,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           const services = await piSdk.createAgentSessionServices({
             cwd: input.cwd,
             agentDir: makeAgentDir(input.agentDir, piSdk),
+            ...buildPiResourceLoaderSecurityOptions({ includeResultProvenance: false }),
           });
           if (input.forceReload) {
             await services.resourceLoader.reload();

@@ -29,6 +29,13 @@ export interface ExternalMcpAuditMetadata {
   readonly projectId?: string | null;
   readonly runtimeMode?: string | null;
   readonly environment?: string | null;
+  readonly contentProvenance?: {
+    readonly source: "external-mcp";
+    readonly trust: "untrusted-external";
+    readonly sha256: string;
+    readonly indicators: ReadonlyArray<string>;
+    readonly risk: "unclassified" | "suspicious";
+  } | null;
 }
 
 export interface ExternalMcpServiceShape {

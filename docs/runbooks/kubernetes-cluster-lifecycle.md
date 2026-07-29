@@ -12,18 +12,18 @@ Workload Identity、AWS/GCP/Azure 原生账单导出、托管云多可用区及�
 
 ## 1. 当前能力边界
 
-| 操作 | 当前权威入口 | 边界 |
-| --- | --- | --- |
-| 创建 Target / Group / Member | Tenant API | 支持；Target 加密配置不会回显 |
-| 停止 Group Member 的新调度 | Member `PATCH status=draining` | 支持；不打断已有 Execution |
-| 放弃计划维护 | Member `PATCH status=active` | 只允许 `draining -> active` |
-| 永久停止一个 Member 的路由 | Member `PATCH status=disabled` | 支持；存在非终态 Group Execution 时拒绝，`disabled` 不可恢复 |
-| 触发 Region/Cluster evacuation | Location Outage `PUT` | 支持；TTL authority，只迁移满足 lease-free/DR 门禁的 Execution |
-| SSH Target 物理撤销 | SSH `revoke` API | 支持，先提交本地 fence 再清远端 |
-| 托管 Kubernetes Target 终态 disable | Target `POST .../kubernetes/disable` | 支持；与 Reconciler 同锁，全部 durable/health 门禁通过后才提交 |
-| Kubernetes Target 历史行 delete/reactivate | 无 | **不支持且不需要**；`disabled` 行保留历史 FK 与审计，不得回写 |
-| 已有固定 Target Session 改绑 Group/Target | 无通用迁移 API | **不支持**；存在此类 Session 时 disable 会拒绝，需归档或保持 blocked |
-| 外部 Kubernetes inline API Credential 原地更新 | 无 Target configuration update API | **不支持**；使用新 Target/新 Namespace 的蓝绿接入 |
+| 操作                                           | 当前权威入口                         | 边界                                                                 |
+| ---------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------- |
+| 创建 Target / Group / Member                   | Tenant API                           | 支持；Target 加密配置不会回显                                        |
+| 停止 Group Member 的新调度                     | Member `PATCH status=draining`       | 支持；不打断已有 Execution                                           |
+| 放弃计划维护                                   | Member `PATCH status=active`         | 只允许 `draining -> active`                                          |
+| 永久停止一个 Member 的路由                     | Member `PATCH status=disabled`       | 支持；存在非终态 Group Execution 时拒绝，`disabled` 不可恢复         |
+| 触发 Region/Cluster evacuation                 | Location Outage `PUT`                | 支持；TTL authority，只迁移满足 lease-free/DR 门禁的 Execution       |
+| SSH Target 物理撤销                            | SSH `revoke` API                     | 支持，先提交本地 fence 再清远端                                      |
+| 托管 Kubernetes Target 终态 disable            | Target `POST .../kubernetes/disable` | 支持；与 Reconciler 同锁，全部 durable/health 门禁通过后才提交       |
+| Kubernetes Target 历史行 delete/reactivate     | 无                                   | **不支持且不需要**；`disabled` 行保留历史 FK 与审计，不得回写        |
+| 已有固定 Target Session 改绑 Group/Target      | 无通用迁移 API                       | **不支持**；存在此类 Session 时 disable 会拒绝，需归档或保持 blocked |
+| 外部 Kubernetes inline API Credential 原地更新 | 无 Target configuration update API   | **不支持**；使用新 Target/新 Namespace 的蓝绿接入                    |
 
 所以本文可以完整完成“接入、计划维护、路由下线、恢复、Provider/Registry/Publisher Credential 轮换和事故
 隔离”。托管 Kubernetes Target 在无固定 Session 等残留时可以完成受审计终态 disable，并在其后清理精确
@@ -181,7 +181,7 @@ POST /v1/tenants/{tenantId}/execution-target-groups/{targetGroupId}/members
 读取最新 Member version，把非秘密 JSON 写入受控文件：
 
 ```json
-{"expectedVersion":1,"status":"draining"}
+{ "expectedVersion": 1, "status": "draining" }
 ```
 
 然后调用：

@@ -173,6 +173,22 @@ func currentWorkerFactStateLocked(
 	if leases > 0 {
 		return workerFactStateActive, nil
 	}
+	if workerStorageScrubsAvailable(tx) {
+		var storageScrubs int64
+		if err := tx.WithContext(ctx).Model(&persistence.WorkerStorageScrub{}).
+			Where(
+				"worker_id = ? AND worker_incarnation = ? AND status IN ?",
+				worker.ID,
+				worker.Incarnation,
+				[]string{workerStorageScrubStatusPending, workerStorageScrubStatusFailed},
+			).
+			Count(&storageScrubs).Error; err != nil {
+			return "", problem.Wrap(500, "worker_fact_storage_scrub_probe_failed", "The Worker storage scrub state could not be loaded.", err)
+		}
+		if storageScrubs > 0 {
+			return workerFactStateActive, nil
+		}
+	}
 	if tx.Dialector.Name() != "sqlite" || tx.Migrator().HasTable(&persistence.WorkspaceCleanupCommand{}) {
 		referenceTime := worker.LastHeartbeatAt.UTC()
 		if referenceTime.IsZero() {
@@ -218,6 +234,9 @@ func transitionWorkerAfterLeaseReleasedLocked(
 	}
 
 	now := observedAt.UTC()
+	if err := ensureExecutionStorageScrubLocked(ctx, tx, worker, lease, now); err != nil {
+		return err
+	}
 	if worker.WorkerMode != WorkerModeGeneralPool && worker.Status == "online" && worker.AdministrativeStatus != "revoked" {
 		updated := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ? AND incarnation = ? AND instance_uid = ? AND status = ?",
@@ -265,6 +284,9 @@ func transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(
 	}
 
 	now := observedAt.UTC()
+	if err := ensureWorkspaceCleanupStorageScrubLocked(ctx, tx, worker, command, now); err != nil {
+		return err
+	}
 	if worker.WorkerMode != WorkerModeGeneralPool && worker.Status == "online" && worker.AdministrativeStatus != "revoked" {
 		updated := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ? AND incarnation = ? AND status = ?",

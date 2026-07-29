@@ -343,7 +343,11 @@ describe("provider runtime activity projection", () => {
         payload: {
           requestType: "command_execution_approval",
           detail: "pwd",
-          args: { sessionApprovalAvailable: false },
+          sensitiveAction: {
+            categories: ["credential-access"],
+            requiresFreshApproval: true,
+            allowSessionApproval: false,
+          },
         },
       }),
     )[0];
@@ -357,6 +361,40 @@ describe("provider runtime activity projection", () => {
         requestType: "command_execution_approval",
         detail: "pwd",
         sessionApprovalAvailable: false,
+        sensitiveAction: {
+          categories: ["credential-access"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+      },
+    });
+
+    const resolvedApproval = projectProviderRuntimeActivities(
+      runtimeEvent({
+        type: "request.resolved",
+        eventId: "approval-resolved",
+        lifecycleGeneration: "generation-1",
+        requestId: ApprovalRequestId.makeUnsafe("request-1"),
+        payload: {
+          requestType: "command_execution_approval",
+          decision: "decline",
+          sensitiveAction: {
+            categories: ["credential-access"],
+            requiresFreshApproval: true,
+            allowSessionApproval: false,
+          },
+        },
+      }),
+    )[0];
+    expect(resolvedApproval).toMatchObject({
+      kind: "approval.resolved",
+      payload: {
+        decision: "decline",
+        sensitiveAction: {
+          categories: ["credential-access"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
       },
     });
 

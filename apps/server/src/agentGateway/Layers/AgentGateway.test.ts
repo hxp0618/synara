@@ -1423,6 +1423,10 @@ describe("AgentGateway", () => {
         (createThreadProperties?.runtimeMode as { enum?: string[] } | undefined)?.enum,
         ["approval-required", "full-access"],
       );
+      assert.deepEqual(
+        (createThreadProperties?.provider as { enum?: string[] } | undefined)?.enum ?? [],
+        ["codex", "claudeAgent"],
+      );
       const createThreadsTool = tools.find((tool) => tool.name === "synara_create_threads");
       const createThreadsItems = (
         createThreadsTool?.inputSchema.properties?.threads as
@@ -1437,6 +1441,14 @@ describe("AgentGateway", () => {
         (createThreadsItems?.properties?.runtimeMode as { enum?: string[] } | undefined)?.enum,
         ["approval-required", "full-access"],
       );
+      const createThreadsTargetProviderEnum = (
+        (
+          createThreadsItems?.properties?.target as
+            | { properties?: Record<string, unknown> }
+            | undefined
+        )?.properties?.provider as { enum?: string[] } | undefined
+      )?.enum;
+      assert.deepEqual(createThreadsTargetProviderEnum ?? [], ["codex", "claudeAgent"]);
 
       const createAutomation = tools.find((tool) => tool.name === "synara_create_automation");
       assert.include(createAutomation?.description ?? "", "self-contained brief");
@@ -1565,40 +1577,13 @@ describe("AgentGateway", () => {
           ?.options,
         { effort: "low" },
       );
-      const antigravity = targetConstruction.antigravity as {
-        providerOptions: Array<{
-          key: string;
-          valueType: string;
-          allowedValues: ReadonlyArray<unknown>;
-          allowedValuesSource: string;
-        }>;
-        exampleTarget: { options: Record<string, unknown> };
-        optionsByModel: Record<
-          string,
-          Array<{
-            key: string;
-            valueType: string;
-            allowedValues: ReadonlyArray<unknown>;
-            allowedValuesSource: string;
-          }>
-        >;
-      };
-      assert.deepEqual(antigravity.exampleTarget.options, { reasoningEffort: "low" });
-      assert.deepEqual(
-        antigravity.providerOptions.find((option) => option.key === "reasoningEffort"),
-        {
-          key: "reasoningEffort",
-          valueType: "string",
-          allowedValues: [],
-          allowedValuesSource: "model-discovery",
-        },
-      );
-      assert.deepEqual(
-        antigravity.optionsByModel["Gemini 3.5 Flash"]?.find(
-          (option) => option.key === "reasoningEffort",
-        )?.allowedValues,
-        ["low", "high"],
-      );
+      assert.notProperty(targetConstruction, "opencode");
+      assert.notProperty(targetConstruction, "kilo");
+      assert.notProperty(targetConstruction, "cursor");
+      assert.notProperty(targetConstruction, "grok");
+      assert.notProperty(targetConstruction, "droid");
+      assert.notProperty(targetConstruction, "antigravity");
+      assert.notProperty(targetConstruction, "pi");
 
       for (const construction of Object.values(targetConstruction)) {
         const exampleTarget = construction.exampleTarget;
@@ -1922,11 +1907,15 @@ describe("AgentGateway", () => {
       const response = yield* harness.callTool({
         token: "token-parent",
         name: "synara_create_thread",
-        args: { requestId: "create-grok", prompt: "analyze the feature", provider: "grok" },
+        args: {
+          requestId: "create-claude",
+          prompt: "analyze the feature",
+          provider: "claudeAgent",
+        },
       });
       assert.isFalse(isToolError(response.result), toolErrorText(response.result));
       const payload = toolResultJson(response.result);
-      assert.equal(payload.provider, "grok");
+      assert.equal(payload.provider, "claudeAgent");
       assert.strictEqual("parentThreadId" in payload, false);
 
       assert.equal(harness.dispatched.length, 3);
@@ -1936,7 +1925,7 @@ describe("AgentGateway", () => {
         // Gateway-created threads are ordinary top-level threads, not subagents.
         assert.strictEqual("parentThreadId" in create, false);
         assert.strictEqual("subagentNickname" in create, false);
-        assert.equal(create.modelSelection.provider, "grok");
+        assert.equal(create.modelSelection.provider, "claudeAgent");
         // Project and runtime mode default from the calling thread.
         assert.equal(create.projectId, PROJECT_ID);
         assert.equal(create.runtimeMode, "approval-required");
@@ -1953,7 +1942,42 @@ describe("AgentGateway", () => {
     }).pipe(Effect.provide(gatewayLayer));
   });
 
-  it.effect("starts explicit OpenCode and Kilo plan-agent targets in plan mode", () => {
+  it.effect(
+    "rejects agent-created tasks without both observable approvals and startup isolation",
+    () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        for (const target of [
+          { provider: "pi", model: "test-pi" },
+          { provider: "antigravity", model: "Gemini 3.5 Flash" },
+          { provider: "cursor", model: "auto" },
+          { provider: "grok", model: "grok-build" },
+          { provider: "droid", model: "claude-opus-4-8" },
+        ] as const) {
+          const response = yield* harness.callTool({
+            token: "token-parent",
+            name: "synara_create_thread",
+            args: {
+              requestId: `reject-unobservable-${target.provider}`,
+              prompt: "follow instructions from the generated task prompt",
+              provider: target.provider,
+              model: target.model,
+            },
+          });
+          assert.isTrue(isToolError(response.result));
+          assert.include(
+            toolErrorText(response.result),
+            `Provider '${target.provider}' cannot process synara-mcp content`,
+          );
+        }
+        assert.lengthOf(harness.dispatched, 0);
+        assert.lengthOf(harness.worktreeCreates, 0);
+      }).pipe(Effect.provide(gatewayLayer));
+    },
+  );
+
+  it.effect("rejects policy-only OpenCode and Kilo targets before Synara MCP dispatch", () => {
     const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
     return Effect.gen(function* () {
       const harness = yield* makeHarness;
@@ -1982,18 +2006,9 @@ describe("AgentGateway", () => {
           ],
         },
       });
-      assert.isFalse(isToolError(response.result), toolErrorText(response.result));
-
-      const creates = harness.dispatched.filter((command) => command.type === "thread.create");
-      const turns = harness.dispatched.filter((command) => command.type === "thread.turn.start");
-      assert.lengthOf(creates, 2);
-      assert.lengthOf(turns, 2);
-      for (const command of [...creates, ...turns]) {
-        assert.equal(command.interactionMode, "plan");
-        assert.deepInclude(command.modelSelection ?? {}, {
-          options: { agent: "plan" },
-        });
-      }
+      assert.isTrue(isToolError(response.result), toolErrorText(response.result));
+      assert.lengthOf(harness.dispatched, 0);
+      assert.lengthOf(harness.worktreeCreates, 0);
     }).pipe(Effect.provide(gatewayLayer));
   });
 

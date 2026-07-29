@@ -901,7 +901,7 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         assert.strictEqual(status.authStatus, "unknown");
         assert.strictEqual(
           status.message,
-          "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+          "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.145.0 or newer and restart Synara.",
         );
       }).pipe(
         Effect.provide(
@@ -914,18 +914,18 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       ),
     );
 
-    it.effect("reports Auto unavailable for a supported but older Codex CLI", () =>
+    it.effect("reports Auto available at the Stage 5 Codex CLI floor", () =>
       Effect.gen(function* () {
         yield* withTempCodexHome();
         const status = yield* checkCodexProviderStatus;
         assert.strictEqual(status.status, "ready");
         assert.strictEqual(status.available, true);
-        assert.strictEqual(status.supportsAutoRuntimeMode, false);
+        assert.strictEqual(status.supportsAutoRuntimeMode, true);
       }).pipe(
         Effect.provide(
           mockSpawnerLayer((args) => {
             const joined = args.join(" ");
-            if (joined === "--version") return { stdout: "codex 0.123.0\n", stderr: "", code: 0 };
+            if (joined === "--version") return { stdout: "codex 0.145.0\n", stderr: "", code: 0 };
             if (joined === "login status") return { stdout: "Logged in\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
           }),
@@ -1758,7 +1758,8 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         Effect.provide(
           mockSpawnerLayer((args) => {
             const joined = args.join(" ");
-            if (joined === "--version") return { stdout: "opencode 1.3.17\n", stderr: "", code: 0 };
+            if (joined === "--pure --version")
+              return { stdout: "opencode 1.15.11\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
           }),
         ),
@@ -1774,7 +1775,8 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           mockSpawnerLayer((args, command) => {
             assert.strictEqual(command, "/custom/bin/opencode");
             const joined = args.join(" ");
-            if (joined === "--version") return { stdout: "opencode 1.3.17\n", stderr: "", code: 0 };
+            if (joined === "--pure --version")
+              return { stdout: "opencode 1.15.11\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
           }),
         ),
@@ -1794,6 +1796,22 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         );
       }).pipe(Effect.provide(failingSpawnerLayer("spawn opencode ENOENT"))),
     );
+
+    it.effect("returns unavailable below the audited OpenCode pure-mode floor", () =>
+      Effect.gen(function* () {
+        const status = yield* checkOpenCodeProviderStatus;
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.available, false);
+        assert.include(status.message ?? "", "too old");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args) => {
+            assert.deepStrictEqual(args, ["--pure", "--version"]);
+            return { stdout: "opencode 1.15.10\n", stderr: "", code: 0 };
+          }),
+        ),
+      ),
+    );
   });
 
   describe("checkKiloProviderStatus", () => {
@@ -1806,8 +1824,25 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           mockSpawnerLayer((args, command) => {
             assert.strictEqual(command, "/custom/bin/kilo");
             const joined = args.join(" ");
-            if (joined === "--version") return { stdout: "kilo 7.2.52\n", stderr: "", code: 0 };
+            if (joined === "--pure --version")
+              return { stdout: "kilo 7.4.16\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("returns unavailable when the Kilo version cannot prove the pure-mode floor", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckKiloProviderStatus();
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.available, false);
+        assert.include(status.message ?? "", "could not be determined");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args) => {
+            assert.deepStrictEqual(args, ["--pure", "--version"]);
+            return { stdout: "kilo development build\n", stderr: "", code: 0 };
           }),
         ),
       ),

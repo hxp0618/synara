@@ -65,8 +65,6 @@ export function ExternalMcpSettingsPanel(props: { active: boolean }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [allowProjectRead, setAllowProjectRead] = useState(false);
-  const [allowLocal, setAllowLocal] = useState(false);
-  const [allowFullAccess, setAllowFullAccess] = useState(false);
   const [setup, setSetup] = useState<ExternalMcpCreateIntegrationResult | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -93,10 +91,8 @@ export function ExternalMcpSettingsPanel(props: { active: boolean }) {
   const capabilities = useMemo(() => {
     const next = [...CORE_CAPABILITIES];
     if (allowProjectRead) next.push("tasks:read-project");
-    if (allowLocal) next.push("runtime:local");
-    if (allowFullAccess) next.push("runtime:full-access");
     return next;
-  }, [allowFullAccess, allowLocal, allowProjectRead]);
+  }, [allowProjectRead]);
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -303,7 +299,7 @@ export function ExternalMcpSettingsPanel(props: { active: boolean }) {
           </SettingsRow>
           <SettingsRow
             title="Advanced permissions"
-            description="Optional access for existing tasks, shared checkouts, or execution without approvals. The safe defaults are recommended."
+            description="External prompts always run in a managed worktree with approvals. You can optionally let this connection read existing project tasks."
             control={
               <Button
                 size="xs"
@@ -328,26 +324,6 @@ export function ExternalMcpSettingsPanel(props: { active: boolean }) {
                   </div>
                 </div>
                 <Switch checked={allowProjectRead} onCheckedChange={setAllowProjectRead} />
-              </div>
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-xs font-medium">Use the shared local checkout</div>
-                  <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                    High impact. Tasks may modify the checkout you are actively using instead of an
-                    isolated worktree.
-                  </div>
-                </div>
-                <Switch checked={allowLocal} onCheckedChange={setAllowLocal} />
-              </div>
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-xs font-medium">Run without approval prompts</div>
-                  <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                    High impact. The external agent may start full-access execution without asking
-                    you to approve tool actions.
-                  </div>
-                </div>
-                <Switch checked={allowFullAccess} onCheckedChange={setAllowFullAccess} />
               </div>
             </DisclosureRegion>
           </SettingsRow>

@@ -116,7 +116,9 @@ describe("external MCP guided setup", () => {
       "runtime:local",
     ]);
 
-    expect(description).toBe("Create and follow its own tasks · Use the shared local checkout");
+    expect(description).toBe(
+      "Create and follow its own tasks · Legacy local-checkout scope disabled",
+    );
     expect(description).not.toContain("runtime:local");
   });
 

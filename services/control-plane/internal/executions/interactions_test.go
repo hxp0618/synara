@@ -20,7 +20,12 @@ func TestResolvedInteractionRuntimeEventInheritsRequestVersion(t *testing.T) {
 
 	canonicalApproval := persistence.ExecutionInteraction{
 		RequestID: "approval-v2", EventVersion: RuntimeEventVersionV2, Kind: "approval",
-		Payload: map[string]any{"requestType": "command_execution_approval"},
+		Payload: map[string]any{
+			"requestType": "command_execution_approval",
+			"sensitiveAction": map[string]any{
+				"categories": []any{"network-egress"}, "requiresFreshApproval": true, "allowSessionApproval": false,
+			},
+		},
 	}
 	version, eventType, payload, err = resolvedInteractionRuntimeEvent(
 		canonicalApproval, map[string]any{"decision": "decline"},
@@ -32,6 +37,10 @@ func TestResolvedInteractionRuntimeEventInheritsRequestVersion(t *testing.T) {
 		payload["requestId"] != "approval-v2" || payload["requestType"] != "command_execution_approval" ||
 		payload["decision"] != "decline" {
 		t.Fatalf("unexpected canonical approval event: version=%d type=%q payload=%#v", version, eventType, payload)
+	}
+	sensitiveAction, ok := payload["sensitiveAction"].(map[string]any)
+	if !ok || sensitiveAction["requiresFreshApproval"] != true || sensitiveAction["allowSessionApproval"] != false {
+		t.Fatalf("canonical approval resolution omitted sensitive-action assessment: %#v", payload)
 	}
 	if !IsCanonicalRuntimeEventV2Payload(eventType, payload) {
 		t.Fatalf("generated approval resolution is not canonical: %#v", payload)
@@ -58,6 +67,12 @@ func TestResolvedInteractionRuntimeEventRejectsCorruptVersionedState(t *testing.
 	for _, interaction := range []persistence.ExecutionInteraction{
 		{RequestID: "future", EventVersion: 3, Kind: "approval"},
 		{RequestID: "approval", EventVersion: RuntimeEventVersionV2, Kind: "approval", Payload: map[string]any{}},
+		{RequestID: "sensitive", EventVersion: RuntimeEventVersionV2, Kind: "approval", Payload: map[string]any{
+			"requestType": "command_execution_approval",
+			"sensitiveAction": map[string]any{
+				"categories": []any{"network-egress"}, "requiresFreshApproval": true, "allowSessionApproval": true,
+			},
+		}},
 		{RequestID: "input", EventVersion: RuntimeEventVersionV2, Kind: "user-input"},
 	} {
 		if _, _, _, err := resolvedInteractionRuntimeEvent(interaction, map[string]any{}); err == nil {

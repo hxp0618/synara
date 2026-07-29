@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
@@ -212,6 +213,17 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 	identity, err := kubernetesWorkerIdentityFromVerifiedPod(pod)
 	if err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
+	}
+	if err := verifyKubernetesPodOuterSandbox(targetID, pod, configuration.PIDsLimit); err != nil {
+		return VerifiedKubernetesWorkloadIdentity{}, err
+	}
+	if err := client.attestNodePodPIDsLimit(ctx, pod.Spec.NodeName, configuration.PIDsLimit); err != nil {
+		return VerifiedKubernetesWorkloadIdentity{}, problem.Wrap(
+			401,
+			"kubernetes_workload_identity_pids_limit_invalid",
+			"The Kubernetes workload Pod is scheduled on a node without the required finite PID confinement.",
+			err,
+		)
 	}
 	if err := s.verifyKubernetesSandboxAllocationIdentity(ctx, targetID, configuration, pod, identity); err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
@@ -588,6 +600,73 @@ type kubernetesVerifiedPod struct {
 	Labels                 map[string]string
 	ServiceAccountName     string
 	AgentdResourceRequests map[string]string
+	Spec                   kubernetesVerifiedPodSpec
+}
+
+type kubernetesVerifiedPodSpec struct {
+	NodeName                     string                               `json:"nodeName"`
+	AutomountServiceAccountToken *bool                                `json:"automountServiceAccountToken"`
+	HostNetwork                  bool                                 `json:"hostNetwork"`
+	HostPID                      bool                                 `json:"hostPID"`
+	HostIPC                      bool                                 `json:"hostIPC"`
+	ShareProcessNamespace        *bool                                `json:"shareProcessNamespace"`
+	ServiceAccountName           string                               `json:"serviceAccountName"`
+	SecurityContext              kubernetesVerifiedPodSecurityContext `json:"securityContext"`
+	Containers                   []kubernetesVerifiedContainer        `json:"containers"`
+	InitContainers               []kubernetesVerifiedContainer        `json:"initContainers"`
+	EphemeralContainers          []kubernetesVerifiedContainer        `json:"ephemeralContainers"`
+	Volumes                      []map[string]json.RawMessage         `json:"volumes"`
+}
+
+type kubernetesVerifiedPodSecurityContext struct {
+	RunAsNonRoot   *bool                            `json:"runAsNonRoot"`
+	FSGroup        *int64                           `json:"fsGroup"`
+	SeccompProfile kubernetesVerifiedSeccompProfile `json:"seccompProfile"`
+	Sysctls        []map[string]any                 `json:"sysctls"`
+}
+
+type kubernetesVerifiedSeccompProfile struct {
+	Type string `json:"type"`
+}
+
+type kubernetesVerifiedContainer struct {
+	Name            string   `json:"name"`
+	Image           string   `json:"image"`
+	ImagePullPolicy string   `json:"imagePullPolicy"`
+	Command         []string `json:"command"`
+	SecurityContext struct {
+		AllowPrivilegeEscalation *bool                            `json:"allowPrivilegeEscalation"`
+		Privileged               *bool                            `json:"privileged"`
+		ReadOnlyRootFilesystem   *bool                            `json:"readOnlyRootFilesystem"`
+		RunAsNonRoot             *bool                            `json:"runAsNonRoot"`
+		RunAsUser                *int64                           `json:"runAsUser"`
+		RunAsGroup               *int64                           `json:"runAsGroup"`
+		Capabilities             kubernetesVerifiedCapabilities   `json:"capabilities"`
+		SeccompProfile           kubernetesVerifiedSeccompProfile `json:"seccompProfile"`
+	} `json:"securityContext"`
+	Resources struct {
+		Requests map[string]string `json:"requests"`
+		Limits   map[string]string `json:"limits"`
+	} `json:"resources"`
+	Environment []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"env"`
+	VolumeMounts []struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mountPath"`
+		ReadOnly  bool   `json:"readOnly"`
+		SubPath   string `json:"subPath"`
+	} `json:"volumeMounts"`
+	Ports []struct {
+		HostPort int32 `json:"hostPort"`
+	} `json:"ports"`
+	VolumeDevices []map[string]any `json:"volumeDevices"`
+}
+
+type kubernetesVerifiedCapabilities struct {
+	Add  []string `json:"add"`
+	Drop []string `json:"drop"`
 }
 
 func (c *kubernetesHTTPClient) ReviewServiceAccountToken(
@@ -633,15 +712,7 @@ func (c *kubernetesHTTPClient) GetPod(
 			DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
 			Labels            map[string]string `json:"labels"`
 		} `json:"metadata"`
-		Spec struct {
-			ServiceAccountName string `json:"serviceAccountName"`
-			Containers         []struct {
-				Name      string `json:"name"`
-				Resources struct {
-					Requests map[string]string `json:"requests"`
-				} `json:"resources"`
-			} `json:"containers"`
-		} `json:"spec"`
+		Spec kubernetesVerifiedPodSpec `json:"spec"`
 	}
 	err := c.requestJSON(
 		ctx,
@@ -668,7 +739,274 @@ func (c *kubernetesHTTPClient) GetPod(
 		Labels:                 response.Metadata.Labels,
 		ServiceAccountName:     strings.TrimSpace(response.Spec.ServiceAccountName),
 		AgentdResourceRequests: agentdRequests,
+		Spec:                   response.Spec,
 	}, nil
+}
+
+func verifyKubernetesPodOuterSandbox(
+	targetID uuid.UUID,
+	pod kubernetesVerifiedPod,
+	expectedPIDsLimit uint64,
+) error {
+	invalid := func() error {
+		return problem.New(
+			401,
+			"kubernetes_workload_identity_outer_sandbox_invalid",
+			"Kubernetes workload Pod does not satisfy the required Provider outer sandbox profile.",
+		)
+	}
+	spec := pod.Spec
+	if strings.TrimSpace(spec.NodeName) == "" ||
+		spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken ||
+		spec.HostNetwork || spec.HostPID || spec.HostIPC ||
+		(spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace) ||
+		len(spec.InitContainers) != 2 || len(spec.EphemeralContainers) != 0 || len(spec.Containers) != 1 {
+		return invalid()
+	}
+	podSecurity := spec.SecurityContext
+	if podSecurity.RunAsNonRoot == nil || !*podSecurity.RunAsNonRoot ||
+		podSecurity.FSGroup == nil || *podSecurity.FSGroup != 10001 ||
+		strings.TrimSpace(podSecurity.SeccompProfile.Type) != "RuntimeDefault" || len(podSecurity.Sysctls) != 0 {
+		return invalid()
+	}
+	container := spec.Containers[0]
+	networkBoundaryInit := spec.InitContainers[0]
+	registrationTokenInit := spec.InitContainers[1]
+	if strings.TrimSpace(container.Name) != "agentd" ||
+		!kubernetesRestrictedContainerValid(container) ||
+		strings.TrimSpace(networkBoundaryInit.Name) != kubernetesNetworkBoundaryInitName ||
+		!kubernetesRestrictedContainerValid(networkBoundaryInit) ||
+		strings.TrimSpace(registrationTokenInit.Name) != kubernetesRegistrationTokenInitName ||
+		!kubernetesRestrictedContainerValid(registrationTokenInit) ||
+		strings.TrimSpace(container.Image) == "" ||
+		container.Image != networkBoundaryInit.Image || container.Image != registrationTokenInit.Image ||
+		container.ImagePullPolicy != networkBoundaryInit.ImagePullPolicy ||
+		container.ImagePullPolicy != registrationTokenInit.ImagePullPolicy ||
+		len(networkBoundaryInit.Command) != 2 || networkBoundaryInit.Command[0] != "/usr/local/bin/synara-agentd" ||
+		networkBoundaryInit.Command[1] != platform.KubernetesNetworkBoundaryVerifyArgument ||
+		len(networkBoundaryInit.Environment) != 0 || len(networkBoundaryInit.VolumeMounts) != 0 ||
+		len(registrationTokenInit.Command) != 2 || registrationTokenInit.Command[0] != "/usr/local/bin/synara-agentd" ||
+		registrationTokenInit.Command[1] != platform.KubernetesRegistrationTokenStageArgument ||
+		len(registrationTokenInit.Environment) != 0 {
+		return invalid()
+	}
+	limits, err := kubernetesRequestedResourceSnapshot(container.Resources.Limits)
+	if err != nil || limits.CPUMillicores == nil || limits.MemoryBytes == nil || limits.EphemeralStorageBytes == nil {
+		return invalid()
+	}
+	networkBoundaryLimits, err := kubernetesRequestedResourceSnapshot(networkBoundaryInit.Resources.Limits)
+	if err != nil || networkBoundaryLimits.CPUMillicores == nil || networkBoundaryLimits.MemoryBytes == nil || networkBoundaryLimits.EphemeralStorageBytes == nil {
+		return invalid()
+	}
+	registrationTokenLimits, err := kubernetesRequestedResourceSnapshot(registrationTokenInit.Resources.Limits)
+	if err != nil || registrationTokenLimits.CPUMillicores == nil || registrationTokenLimits.MemoryBytes == nil || registrationTokenLimits.EphemeralStorageBytes == nil {
+		return invalid()
+	}
+	if !kubernetesOuterSandboxEnvironmentValid(container.Environment, expectedPIDsLimit) ||
+		!kubernetesOuterSandboxVolumesValid(
+			targetID,
+			spec.Volumes,
+			container.VolumeMounts,
+			registrationTokenInit.VolumeMounts,
+		) {
+		return invalid()
+	}
+	return nil
+}
+
+func kubernetesRestrictedContainerValid(container kubernetesVerifiedContainer) bool {
+	security := container.SecurityContext
+	if security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation ||
+		(security.Privileged != nil && *security.Privileged) ||
+		security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem ||
+		security.RunAsNonRoot == nil || !*security.RunAsNonRoot ||
+		security.RunAsUser == nil || *security.RunAsUser != 10001 ||
+		security.RunAsGroup == nil || *security.RunAsGroup != 10001 ||
+		strings.TrimSpace(security.SeccompProfile.Type) != "RuntimeDefault" ||
+		len(security.Capabilities.Add) != 0 || !containsFold(security.Capabilities.Drop, "ALL") ||
+		len(container.VolumeDevices) != 0 {
+		return false
+	}
+	for _, port := range container.Ports {
+		if port.HostPort != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func containsFold(values []string, expected string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func kubernetesOuterSandboxEnvironmentValid(environment []struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}, expectedPIDsLimit uint64) bool {
+	want := map[string]string{
+		"SYNARA_EXECUTION_TARGET_KIND":          "kubernetes",
+		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE": kubernetesStagedRegistrationTokenPath,
+		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL":  "v2",
+		"SYNARA_AGENTD_PRIVATE_TMP_ROOT":        "/tmp",
+		platform.KubernetesPIDsLimitEnvironment: strconv.FormatUint(expectedPIDsLimit, 10),
+	}
+	seen := make(map[string]struct{}, len(want))
+	for _, item := range environment {
+		name := strings.TrimSpace(item.Name)
+		expected, required := want[name]
+		if !required {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate || strings.TrimSpace(item.Value) != expected {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return expectedPIDsLimit > 0 && expectedPIDsLimit <= platform.MaximumKubernetesPIDsLimit &&
+		len(seen) == len(want)
+}
+
+func kubernetesOuterSandboxVolumesValid(
+	targetID uuid.UUID,
+	volumes []map[string]json.RawMessage,
+	mainMounts []struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mountPath"`
+		ReadOnly  bool   `json:"readOnly"`
+		SubPath   string `json:"subPath"`
+	},
+	initMounts []struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mountPath"`
+		ReadOnly  bool   `json:"readOnly"`
+		SubPath   string `json:"subPath"`
+	},
+) bool {
+	requiredMainMounts := map[string]struct {
+		path     string
+		readOnly bool
+	}{
+		"workspace":                       {path: "/data"},
+		"tmp":                             {path: "/tmp"},
+		"home":                            {path: "/home/synara"},
+		kubernetesRegistrationTokenVolume: {path: "/var/run/secrets/synara.io/registration"},
+	}
+	requiredInitMounts := map[string]struct {
+		path     string
+		readOnly bool
+	}{
+		kubernetesWorkloadIdentityVolume: {
+			path: "/var/run/secrets/synara.io/workload-identity", readOnly: true,
+		},
+		kubernetesRegistrationTokenVolume: {path: "/var/run/secrets/synara.io/registration"},
+	}
+	seenVolumes := make(map[string]struct{}, len(volumes))
+	for _, volume := range volumes {
+		var name string
+		if err := json.Unmarshal(volume["name"], &name); err != nil || strings.TrimSpace(name) == "" {
+			return false
+		}
+		name = strings.TrimSpace(name)
+		if _, duplicate := seenVolumes[name]; duplicate {
+			return false
+		}
+		seenVolumes[name] = struct{}{}
+		sources := make([]string, 0, len(volume)-1)
+		for key := range volume {
+			if key != "name" {
+				sources = append(sources, key)
+			}
+		}
+		if len(sources) != 1 {
+			return false
+		}
+		switch name {
+		case "workspace", "tmp", "home", kubernetesRegistrationTokenVolume:
+			if sources[0] != "emptyDir" {
+				return false
+			}
+		case kubernetesWorkloadIdentityVolume:
+			if sources[0] != "projected" || !kubernetesWorkloadIdentityProjectionValid(volume["projected"], targetID) {
+				return false
+			}
+		case "git-cache":
+			if sources[0] != "persistentVolumeClaim" {
+				return false
+			}
+			requiredMainMounts[name] = struct {
+				path     string
+				readOnly bool
+			}{path: "/git-cache"}
+		default:
+			return false
+		}
+	}
+	for _, required := range []string{
+		"workspace",
+		"tmp",
+		"home",
+		kubernetesWorkloadIdentityVolume,
+		kubernetesRegistrationTokenVolume,
+	} {
+		if _, found := seenVolumes[required]; !found {
+			return false
+		}
+	}
+	seenMounts := make(map[string]struct{}, len(mainMounts))
+	for _, mount := range mainMounts {
+		name := strings.TrimSpace(mount.Name)
+		expected, allowed := requiredMainMounts[name]
+		if !allowed || strings.TrimSpace(mount.MountPath) != expected.path || mount.ReadOnly != expected.readOnly ||
+			strings.TrimSpace(mount.SubPath) != "" {
+			return false
+		}
+		if _, duplicate := seenMounts[name]; duplicate {
+			return false
+		}
+		seenMounts[name] = struct{}{}
+	}
+	if len(seenMounts) != len(requiredMainMounts) {
+		return false
+	}
+	seenInitMounts := make(map[string]struct{}, len(initMounts))
+	for _, mount := range initMounts {
+		name := strings.TrimSpace(mount.Name)
+		expected, allowed := requiredInitMounts[name]
+		if !allowed || strings.TrimSpace(mount.MountPath) != expected.path || mount.ReadOnly != expected.readOnly ||
+			strings.TrimSpace(mount.SubPath) != "" {
+			return false
+		}
+		if _, duplicate := seenInitMounts[name]; duplicate {
+			return false
+		}
+		seenInitMounts[name] = struct{}{}
+	}
+	return len(seenInitMounts) == len(requiredInitMounts)
+}
+
+func kubernetesWorkloadIdentityProjectionValid(raw json.RawMessage, targetID uuid.UUID) bool {
+	var projected struct {
+		DefaultMode int32 `json:"defaultMode"`
+		Sources     []struct {
+			ServiceAccountToken *struct {
+				Audience          string `json:"audience"`
+				ExpirationSeconds int64  `json:"expirationSeconds"`
+				Path              string `json:"path"`
+			} `json:"serviceAccountToken"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(raw, &projected); err != nil || projected.DefaultMode != 0o440 || len(projected.Sources) != 1 ||
+		projected.Sources[0].ServiceAccountToken == nil {
+		return false
+	}
+	token := projected.Sources[0].ServiceAccountToken
+	return strings.TrimSpace(token.Audience) == KubernetesWorkerRegistrationAudience(targetID) &&
+		token.ExpirationSeconds == 600 && strings.TrimSpace(token.Path) == "token"
 }
 
 type kubernetesAPIStatusError struct {

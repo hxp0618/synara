@@ -744,6 +744,7 @@ def run_acceptance(arguments: argparse.Namespace) -> Mapping[str, Any]:
                         "egressCidrs": ["0.0.0.0/0"],
                         "cpuRequest": "100m",
                         "cpuLimit": "1",
+                        "pidsLimit": 512,
                         "memoryRequest": "128Mi",
                         "memoryLimit": "1Gi",
                         "ephemeralStorageRequest": "128Mi",

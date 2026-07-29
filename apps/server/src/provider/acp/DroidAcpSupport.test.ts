@@ -18,6 +18,7 @@ import {
   discoverDroidAcpModels,
   resolveDroidAcpAuthMethodId,
   resolveDroidCliBinaryPath,
+  serializeDroidRuntimeSecuritySettings,
 } from "./DroidAcpSupport.ts";
 
 function initializeWithAuthMethods(ids: ReadonlyArray<string>): Acp.InitializeResponse {
@@ -79,12 +80,15 @@ describe("buildDroidAcpSpawnInput", () => {
         binaryPath: "/usr/local/bin/droid",
         model: "claude-opus-4-8",
         reasoningEffort: "high",
+        runtimeSettingsPath: "/private/session/settings.json",
       },
       "/tmp/project",
     );
 
     expect(spawn.command).toBe("/usr/local/bin/droid");
     expect(spawn.args).toEqual([
+      "--settings",
+      "/private/session/settings.json",
       "exec",
       "--output-format",
       "acp",
@@ -97,6 +101,18 @@ describe("buildDroidAcpSpawnInput", () => {
     ]);
     expect(spawn.cwd).toBe("/tmp/project");
     expect(spawn.env).toBeDefined();
+  });
+
+  it("pins non-interactive startup settings without embedding workspace configuration", () => {
+    expect(JSON.parse(serializeDroidRuntimeSecuritySettings())).toEqual({
+      hooksDisabled: true,
+      ideAutoConnect: false,
+      cloudSessionSync: false,
+      sessionDefaultSettings: {
+        autonomyLevel: "off",
+        interactionMode: "auto",
+      },
+    });
   });
 });
 

@@ -39,6 +39,25 @@ func TestWorkloadCredentialGrantDescriptorDoesNotExposeLegacyOrVaultIdentity(t *
 	}
 }
 
+func TestProviderExecutionCredentialBindingsExcludePublishAuthority(t *testing.T) {
+	for _, kind := range []string{"git_fetch", "package_read"} {
+		if !providerExecutionCredentialBindingKindAllowed(kind) {
+			t.Fatalf("controlled read Binding %q was rejected", kind)
+		}
+	}
+	for _, kind := range []string{
+		"git_push",
+		"registry_pull",
+		"registry_push",
+		"package_publish",
+		"worker_image_pull",
+	} {
+		if providerExecutionCredentialBindingKindAllowed(kind) {
+			t.Fatalf("unbrokered Credential Binding %q entered the Provider workload", kind)
+		}
+	}
+}
+
 func TestExecutionCredentialGrantsSnapshotAndReplayByGeneration(t *testing.T) {
 	ctx := context.Background()
 	profile, err := platform.Defaults(platform.ProfilePersonal)

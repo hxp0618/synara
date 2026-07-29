@@ -80,19 +80,20 @@ describe("resolveCodexGeneratedImagesRoot(s)", () => {
     else process.env.SYNARA_HOME = previousSynaraHome;
   });
 
-  it("returns the overlay generated_images directory as the active write root by default", () => {
+  it("returns the isolated overlay generated_images directory as the active write root", () => {
     process.env.SYNARA_HOME = "/synara-test/runtime";
     assert.equal(
       resolveCodexGeneratedImagesRoot("/codex-test/.codex"),
-      path.join("/synara-test/runtime", "codex-home-overlay", "generated_images"),
+      path.join("/synara-test/runtime", "codex-home-isolated-overlay", "generated_images"),
     );
   });
 
-  it("returns both source and overlay generated_images roots for the allowlist", () => {
+  it("returns source, compatible overlay, and isolated overlay roots for the allowlist", () => {
     process.env.SYNARA_HOME = "/synara-test/runtime";
     assert.deepEqual(resolveCodexGeneratedImagesRoots("/codex-test/.codex"), [
       path.join("/codex-test/.codex", "generated_images"),
       path.join("/synara-test/runtime", "codex-home-overlay", "generated_images"),
+      path.join("/synara-test/runtime", "codex-home-isolated-overlay", "generated_images"),
     ]);
   });
 
@@ -104,7 +105,7 @@ describe("resolveCodexGeneratedImagesRoot(s)", () => {
     // whose dirname happens to equal the overlay root.
     const homePath = "/runtime/.synara/runtime/codex-home-overlay";
     const roots = resolveCodexGeneratedImagesRoots(homePath);
-    assert.ok(roots.length >= 1 && roots.length <= 2, `expected 1-2 roots, got ${roots.length}`);
+    assert.ok(roots.length >= 1 && roots.length <= 3, `expected 1-3 roots, got ${roots.length}`);
     assert.ok(roots.includes(path.join(homePath, "generated_images")));
   });
 });

@@ -1,6 +1,7 @@
-# Fast-Provision Runtime v0（PROPOSAL——未实现，重构输入）
+# Fast-Provision Runtime v0（ARCHITECTURE DECIDED——未实现）
 
-状态：提案草案。本文不是实现契约；在被采纳并实现前，不得作为任何验收或行为的依据。它把
+状态：2026-07-28 已冻结 microVM 位置与可信边界；snapshot-restore 仍未实现，本文不得作为运行期
+验收证据。它把
 [方向评估](cloud-agent-direction-assessment-20260726.md) 的建议具体化为可评审的契约形状。
 
 ## 0. 目标与 SLO
@@ -65,9 +66,42 @@ fresh | stale(<age>)`。
 3. Workspace cache-first（Grant 放行 + freshness 标注）。
 4. `snapshot-restore`（新运行时层，最大件；先单 Target 原型，后接 Release Policy）。
 
-## 7. 开放问题
+## 7. 2026-07-28 microVM 决策：Kubernetes 控制、自管 Firecracker 数据面
 
-- microVM 层落在何处：自管 Firecracker on bare metal / Kata on K8s / 托管（e2b 自托管、Fly
-  Machines）——隔离、成本、运维三角需要 spike 数据。
+隔离与延迟合并评估后的选择是：**由 `sandbox-operator` 在专用 Linux/KVM bare-metal node pool
+上管理自管 Firecracker microVM**。Kubernetes 保留 Placement、SandboxClaim、Release、配额和节点
+生命周期控制面；Execution 的 Provider 数据面不作为普通 Pod 内进程运行。Kata RuntimeClass 可作为
+兼容性 spike，但不作为 `snapshot-restore` 层的权威实现；第三方托管 runtime 也不能成为默认信任根。
+
+可信边界冻结如下：
+
+- agentd supervisor、Control Plane Worker Credential、Provider Credential broker、云/Kubernetes 身份和
+  snapshot key 位于 guest 外；guest 只运行 Provider Host、Provider CLI 与其工具子进程。
+- host agentd 与 guest Provider Host 复用 Provider Host Protocol v2 语义，但 transport 改为带
+  Execution/Generation fence 的 vsock；guest 不获得 Control Plane bearer token。
+- guest 只挂载本 Execution 的 Workspace/Runtime Output 介质，不挂载宿主目录、容器 runtime socket、
+  Kube ServiceAccount、git cache 根或其他 Execution 的块设备。网络由 host tap/CNI egress policy 强制，
+  guest 内配置不能扩大 allowlist。
+- 模板快照只能在 Provider Credential、租户 Workspace 和私有内存进入 guest **之前**创建；快照按
+  Release Revision 签名、加密、短期驻留。restore 后产生新 VM ID、Worker incarnation 和 task broker
+  token，不能复用原实例身份。
+- 新隔离声明预留为 `microvm-isolated-v1`，只有 KVM、jailer、vsock peer、rootfs/设备、egress、snapshot
+  identity 与资源上限全部 attested 且通过负向逃逸测试后才能发布。未声明/未验真的 runtime 继续从
+  多租户产品面排除，不能静默降级为普通容器。
+
+选择理由：直接 Firecracker 同时提供独立 guest kernel 与可控 snapshot/restore；Kata 优先解决 Pod
+兼容而非稳定的应用级内存快照接口，托管 runtime 则把身份、驻留与取证边界交给第三方。专用节点和
+自管运维成本更高，但这条路径复用现有 SandboxClaim/Release/Allocation 权威，并且不会为低延迟再造
+一套绕过 Stage 4 fencing 的调度系统。
+
+仍需用 spike 数据关闭的不是“落在哪里”，而是实现验收：
+
+- template build、restore、vsock ready、Workspace attach 各阶段 P50/P95/P99 与失败率；
+- KVM/Firecracker/Jailer 版本矩阵、节点密度、内存超配与 noisy-neighbor 上限；
+- 快照文件的 KMS envelope、驻留时长、删除证明与跨租户负向恢复；
+- 失去 snapshot/节点时回落既有 cold recovery 的延迟与副作用不重放证明。
+
+## 8. 其余开放问题
+
 - 内存快照的合规边界：快照文件的加密、驻留时长、租户隔离证明需要单独安全评审。
 - `guaranteed-warm` 的空闲成本模型与 min-idle 自动伸缩策略（可复用 queue-depth 指标驱动）。

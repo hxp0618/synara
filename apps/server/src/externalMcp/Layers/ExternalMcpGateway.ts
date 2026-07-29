@@ -21,6 +21,7 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProviderDiscoveryService } from "../../provider/Services/ProviderDiscoveryService.ts";
 import { ProviderHealth } from "../../provider/Services/ProviderHealth.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { assessUntrustedContent } from "../../security/untrustedContent.ts";
 import { AgentGatewayOperationRepository } from "../../agentGateway/Services/AgentGatewayOperationRepository.ts";
 import { makeCreateThreadsHandler } from "../../agentGateway/creationCoordinator.ts";
 import { recoverInterruptedAgentGatewayOperations } from "../../agentGateway/startupRecovery.ts";
@@ -55,6 +56,7 @@ import {
   decodeCreateThreadsInput,
   errorText,
   PROVIDER_KINDS,
+  UNTRUSTED_TASK_PROVIDER_KINDS,
   ToolInputError,
 } from "../../agentGateway/toolInput.ts";
 import {
@@ -71,6 +73,7 @@ import { ExternalMcpRepository } from "../Services/ExternalMcpRepository.ts";
 import {
   ExternalMcpError,
   ExternalMcpService,
+  type ExternalMcpAuditMetadata,
   type ExternalMcpVerifiedClient,
 } from "../Services/ExternalMcpService.ts";
 import { makeExternalMcpAuditCompletion } from "../auditCompletion.ts";
@@ -116,9 +119,20 @@ function externalErrorResult(error: unknown) {
   return mcpToolResultError(errorText(error));
 }
 
-function readAuditMetadata(tool: string, args: Record<string, unknown>) {
+function readAuditMetadata(tool: string, args: Record<string, unknown>): ExternalMcpAuditMetadata {
   const stringOrNull = (key: string) =>
     typeof args[key] === "string" ? (args[key] as string) : null;
+  const assessment =
+    tool === "synara_create_task" && typeof args.prompt === "string"
+      ? assessUntrustedContent("external-mcp", args.prompt)
+      : null;
+  const contentProvenance = assessment
+    ? {
+        ...assessment,
+        source: "external-mcp" as const,
+        trust: "untrusted-external" as const,
+      }
+    : null;
   return {
     tool,
     requestId: stringOrNull("requestId"),
@@ -126,6 +140,7 @@ function readAuditMetadata(tool: string, args: Record<string, unknown>) {
     runtimeMode:
       stringOrNull("runtimeMode") ?? (tool === "synara_create_task" ? "approval-required" : null),
     environment: stringOrNull("environment") ?? (tool === "synara_create_task" ? "worktree" : null),
+    contentProvenance,
   };
 }
 
@@ -254,7 +269,7 @@ export const makeExternalMcpGateway = Effect.gen(function* () {
             ),
           );
         const availabilities = yield* loadProviderAvailabilities;
-        const providers = yield* Effect.forEach(PROVIDER_KINDS, (provider) =>
+        const providers = yield* Effect.forEach(UNTRUSTED_TASK_PROVIDER_KINDS, (provider) =>
           loadAgentGatewayProviderCatalog({
             provider,
             discovery: providerDiscovery,
@@ -345,9 +360,9 @@ export const makeExternalMcpGateway = Effect.gen(function* () {
             capabilities: [...context.client.capabilities],
           },
           projects,
-          providers: [...availabilities].map(([provider, availability]) => ({
+          providers: UNTRUSTED_TASK_PROVIDER_KINDS.map((provider) => ({
             provider,
-            ...availability,
+            ...availabilities.get(provider),
           })),
           defaults: { environment: "worktree", runtimeMode: "approval-required" },
           limits: {
@@ -373,13 +388,13 @@ export const makeExternalMcpGateway = Effect.gen(function* () {
         properties: {
           requestId: { type: "string", maxLength: 256 },
           projectId: { type: "string" },
-          provider: { type: "string", enum: [...PROVIDER_KINDS] },
+          provider: { type: "string", enum: [...UNTRUSTED_TASK_PROVIDER_KINDS] },
           model: { type: "string" },
           options: { type: "object", description: AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION },
           prompt: { type: "string", maxLength: EXTERNAL_MCP_MAX_PROMPT_CHARS },
           title: { type: "string", maxLength: 240 },
-          environment: { type: "string", enum: ["worktree", "local"] },
-          runtimeMode: { type: "string", enum: ["approval-required", "full-access"] },
+          environment: { type: "string", enum: ["worktree"] },
+          runtimeMode: { type: "string", enum: ["approval-required"] },
           baseRef: { type: "string" },
         },
         required: ["requestId", "projectId", "provider", "model", "prompt"],
@@ -399,25 +414,6 @@ export const makeExternalMcpGateway = Effect.gen(function* () {
           Effect.mapError((cause) => new ToolInputError(errorText(cause))),
         );
         yield* externalMcp.assertProject(context.client, input.projectId);
-        if (input.environment === "local" && !context.client.capabilities.has("runtime:local")) {
-          return yield* Effect.fail(
-            new GatewayToolError(
-              "capability_denied",
-              'Local-checkout execution requires the explicit "runtime:local" scope.',
-            ),
-          );
-        }
-        if (
-          input.runtimeMode === "full-access" &&
-          !context.client.capabilities.has("runtime:full-access")
-        ) {
-          return yield* Effect.fail(
-            new GatewayToolError(
-              "capability_denied",
-              'Full-access execution requires the explicit "runtime:full-access" scope.',
-            ),
-          );
-        }
         return yield* runCreateThreads(
           decodeCreateThreadsInput({
             requestId: input.requestId,

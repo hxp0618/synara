@@ -532,8 +532,13 @@ export function projectProviderRuntimeActivities(
       const requestKind = requestKindFromCanonicalRequestType(event.payload.requestType);
       const permissionProfile =
         event.type === "request.opened" ? requestedPermissionProfile(event) : undefined;
+      const sensitiveAction = event.payload.sensitiveAction?.requiresFreshApproval
+        ? event.payload.sensitiveAction
+        : undefined;
       const canApproveForSession =
-        event.type === "request.opened" ? sessionApprovalAvailable(event) : undefined;
+        event.type === "request.opened"
+          ? (sessionApprovalAvailable(event) ?? (sensitiveAction ? false : undefined))
+          : undefined;
       const requestId = nonEmptyTrimmed(event.requestId);
       return [
         {
@@ -569,6 +574,7 @@ export function projectProviderRuntimeActivities(
             ...(canApproveForSession !== undefined
               ? { sessionApprovalAvailable: canApproveForSession }
               : {}),
+            ...(sensitiveAction ? { sensitiveAction } : {}),
             ...(event.type === "request.resolved" && event.payload.decision
               ? { decision: event.payload.decision }
               : {}),

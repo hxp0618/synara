@@ -43,6 +43,76 @@ describe("ProviderRuntimeEvent", () => {
     expect(eventType).toBe("turn.steered");
   });
 
+  it("requires canonical fresh-only sensitive-action assessments on request events", () => {
+    const sensitiveAction = {
+      categories: ["credential-access", "protected-branch-publish"],
+      requiresFreshApproval: true,
+      allowSessionApproval: false,
+    } as const;
+    const opened = decodeRuntimeEvent({
+      type: "request.opened",
+      ...eventBase,
+      requestId: "request-sensitive-opened",
+      payload: {
+        requestType: "command_execution_approval",
+        sensitiveAction,
+      },
+    });
+    const resolved = decodeRuntimeEvent({
+      type: "request.resolved",
+      ...eventBase,
+      requestId: "request-sensitive-resolved",
+      payload: {
+        requestType: "command_execution_approval",
+        decision: "accept",
+        sensitiveAction,
+      },
+    });
+
+    expect(opened.type).toBe("request.opened");
+    expect(resolved.type).toBe("request.resolved");
+    if (opened.type !== "request.opened" || resolved.type !== "request.resolved") {
+      throw new Error("expected canonical request events");
+    }
+    expect(opened.payload.sensitiveAction).toEqual(sensitiveAction);
+    expect(resolved.payload.sensitiveAction).toEqual(sensitiveAction);
+    expect(
+      decodeRuntimeEvent({
+        type: "request.opened",
+        ...eventBase,
+        requestId: "request-not-sensitive",
+        payload: {
+          requestType: "command_execution_approval",
+          sensitiveAction: {
+            categories: [],
+            requiresFreshApproval: false,
+            allowSessionApproval: false,
+          },
+        },
+      }).type,
+    ).toBe("request.opened");
+    for (const invalid of [
+      { ...sensitiveAction, categories: [] },
+      {
+        ...sensitiveAction,
+        categories: ["protected-branch-publish", "credential-access"],
+      },
+      { ...sensitiveAction, allowSessionApproval: true },
+    ]) {
+      expect(() =>
+        decodeRuntimeEvent({
+          type: "request.opened",
+          ...eventBase,
+          requestId: "request-sensitive-invalid",
+          payload: {
+            requestType: "command_execution_approval",
+            sensitiveAction: invalid,
+          },
+        }),
+      ).toThrow();
+    }
+  });
+
   it("decodes turn.tasks.updated for task-list rendering", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.tasks.updated",

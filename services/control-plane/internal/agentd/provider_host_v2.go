@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/providerproxy"
 	"github.com/synara-ai/synara/services/control-plane/internal/secretguard"
 )
 
@@ -1112,6 +1113,7 @@ func (r *Runner) startProviderHostV2WithCredential(
 	if err != nil {
 		return nil, err
 	}
+	command.Env = providerProcessEnvironment(command.Env, r.providerOuterSandboxProfile)
 	var credentialHandoff *providerHostCredentialHandoff
 	credentialHandoffOwned := false
 	defer func() {
@@ -1197,16 +1199,44 @@ func (r *Runner) startProviderHostV2WithCredential(
 	return process, nil
 }
 
-func providerHostEnvironment(source []string, experimentalProviders []string) []string {
+func providerHostEnvironment(source []string, experimentalProviders []string) ([]string, error) {
 	allowlist := make([]string, 0, len(runnerEnvironmentAllowlist)+len(providerHostProxyEnvironmentAllowlist))
 	allowlist = append(allowlist, runnerEnvironmentAllowlist...)
 	allowlist = append(allowlist, providerHostProxyEnvironmentAllowlist...)
 	// Package-manager config paths carry per-Execution credentials. Never inherit
 	// them from agentd's ambient environment; they are added only from the
 	// generation-fenced RunnerInput below.
-	result := selectProcessEnvironment(source, allowlist)
+	selected := selectProcessEnvironment(source, allowlist)
+	result := make([]string, 0, len(selected)+1)
+	for _, entry := range selected {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		var (
+			normalized string
+			err        error
+		)
+		switch name {
+		case "SYNARA_PROVIDER_HTTP_PROXY", "SYNARA_PROVIDER_HTTPS_PROXY":
+			normalized, _, err = providerproxy.Normalize(value, providerproxy.HTTPOrHTTPS)
+		case "SYNARA_PROVIDER_ALL_PROXY":
+			normalized, _, err = providerproxy.Normalize(value, providerproxy.HTTPHTTPSOrSOCKS5)
+		case "SYNARA_PROVIDER_NO_PROXY":
+			normalized, err = providerproxy.NormalizeNoProxy(value)
+		default:
+			result = append(result, entry)
+			continue
+		}
+		if err != nil {
+			return nil, errors.New(name + " contains an unsafe Provider proxy value")
+		}
+		if normalized != "" {
+			result = append(result, name+"="+normalized)
+		}
+	}
 	result = append(result, providerHostExperimentalEnv+"="+strings.Join(experimentalProviders, ","))
-	return result
+	return result, nil
 }
 
 func providerHostEnvironmentForExecution(
@@ -1214,7 +1244,10 @@ func providerHostEnvironmentForExecution(
 	experimentalProviders []string,
 	executionEnvironment map[string]string,
 ) ([]string, error) {
-	result := providerHostEnvironment(source, experimentalProviders)
+	result, err := providerHostEnvironment(source, experimentalProviders)
+	if err != nil {
+		return nil, err
+	}
 	if len(executionEnvironment) == 0 {
 		return result, nil
 	}

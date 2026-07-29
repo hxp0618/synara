@@ -146,6 +146,24 @@ describe("ExternalMcpService", () => {
     );
   });
 
+  it("refuses elevated runtime scopes for untrusted external integrations", async () => {
+    await run(
+      Effect.gen(function* () {
+        const service = yield* loadServiceWithProject;
+        for (const capability of ["runtime:local", "runtime:full-access"] as const) {
+          const result = yield* service
+            .createIntegration({
+              name: `Unsafe ${capability}`,
+              projectIds: [ProjectId.makeUnsafe("project-allowed")],
+              capabilities: ["projects:read", capability],
+            })
+            .pipe(Effect.exit);
+          expect(result._tag).toBe("Failure");
+        }
+      }),
+    );
+  });
+
   it("rejects unknown project grants at management time", async () => {
     await run(
       Effect.gen(function* () {

@@ -40,7 +40,7 @@ func TestRunnerProviderHostV2NegotiatesAndRunsResumeTurn(t *testing.T) {
 	t.Setenv("PGPASSWORD", "postgres-secret")
 	t.Setenv("MINIO_ROOT_PASSWORD", "minio-secret")
 	t.Setenv("HTTP_PROXY", "http://ambient-user:ambient-secret@proxy.example.test")
-	t.Setenv("SYNARA_PROVIDER_HTTP_PROXY", "http://provider-user:provider-secret@proxy.example.test")
+	t.Setenv("SYNARA_PROVIDER_HTTP_PROXY", "http://proxy.example.test:8080")
 	t.Setenv("SYNARA_PROVIDER_NO_PROXY", "127.0.0.1,localhost")
 	commandLog := filepath.Join(t.TempDir(), "commands.log")
 	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
@@ -876,13 +876,14 @@ func TestProviderHostEnvironmentUsesExplicitRuntimeAndPolicyAllowlist(t *testing
 		"TERM=xterm-256color",
 		"SYNARA_PROVIDER_HOST_BUILD_VERSION=ambient-build-must-not-win",
 		providerHostExperimentalEnv + "=ambient-provider-must-not-win",
+		providerOuterSandboxProfileEnvironment + "=ambient-value-must-not-win",
 		"HTTP_PROXY=http://ambient-user:ambient-secret@proxy.example.test",
 		"HTTPS_PROXY=https://ambient-user:ambient-secret@proxy.example.test",
 		"ALL_PROXY=socks5://ambient-user:ambient-secret@proxy.example.test",
 		"NO_PROXY=ambient.internal",
-		"SYNARA_PROVIDER_HTTP_PROXY=http://provider-user:provider-secret@proxy.example.test",
-		"SYNARA_PROVIDER_HTTPS_PROXY=https://provider-user:provider-secret@proxy.example.test",
-		"SYNARA_PROVIDER_ALL_PROXY=socks5://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_HTTP_PROXY=http://proxy.example.test:8080",
+		"SYNARA_PROVIDER_HTTPS_PROXY=https://proxy.example.test:8443",
+		"SYNARA_PROVIDER_ALL_PROXY=socks5://proxy.example.test:1080",
 		"SYNARA_PROVIDER_NO_PROXY=127.0.0.1,localhost",
 		"SECRET=ordinary-secret",
 		"HOST_SECRET=host-secret",
@@ -901,7 +902,11 @@ func TestProviderHostEnvironmentUsesExplicitRuntimeAndPolicyAllowlist(t *testing
 	}
 
 	actual := make(map[string]string)
-	for _, entry := range providerHostEnvironment(source, []string{"claudeAgent", "codex"}) {
+	environment, err := providerHostEnvironment(source, []string{"claudeAgent", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range environment {
 		name, value, found := strings.Cut(entry, "=")
 		if !found {
 			t.Fatalf("invalid Provider Host environment entry %q", entry)
@@ -912,9 +917,9 @@ func TestProviderHostEnvironmentUsesExplicitRuntimeAndPolicyAllowlist(t *testing
 		"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/worker", "TMPDIR": "/tmp/synara",
 		"LANG": "en_US.UTF-8", "TERM": "xterm-256color",
 		providerHostExperimentalEnv:   "claudeAgent,codex",
-		"SYNARA_PROVIDER_HTTP_PROXY":  "http://provider-user:provider-secret@proxy.example.test",
-		"SYNARA_PROVIDER_HTTPS_PROXY": "https://provider-user:provider-secret@proxy.example.test",
-		"SYNARA_PROVIDER_ALL_PROXY":   "socks5://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_HTTP_PROXY":  "http://proxy.example.test:8080",
+		"SYNARA_PROVIDER_HTTPS_PROXY": "https://proxy.example.test:8443",
+		"SYNARA_PROVIDER_ALL_PROXY":   "socks5://proxy.example.test:1080",
 		"SYNARA_PROVIDER_NO_PROXY":    "127.0.0.1,localhost",
 	}
 	if len(actual) != len(want) {
@@ -924,6 +929,29 @@ func TestProviderHostEnvironmentUsesExplicitRuntimeAndPolicyAllowlist(t *testing
 		if actual[name] != value {
 			t.Fatalf("Provider Host environment %s = %q, want %q", name, actual[name], value)
 		}
+	}
+}
+
+func TestProviderHostEnvironmentRejectsUnsafeControlledProxyValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "SYNARA_PROVIDER_HTTP_PROXY", value: "http://user:password@proxy.example.test:8080"},
+		{name: "SYNARA_PROVIDER_HTTP_PROXY", value: "socks5://proxy.example.test:1080"},
+		{name: "SYNARA_PROVIDER_HTTPS_PROXY", value: "https://proxy.example.test/path"},
+		{name: "SYNARA_PROVIDER_HTTPS_PROXY", value: "https://proxy.example.test?token=secret"},
+		{name: "SYNARA_PROVIDER_ALL_PROXY", value: "socks5://proxy.example.test"},
+		{name: "SYNARA_PROVIDER_ALL_PROXY", value: "socks5h://proxy.example.test:1080"},
+		{name: "SYNARA_PROVIDER_NO_PROXY", value: "*"},
+		{name: "SYNARA_PROVIDER_NO_PROXY", value: "localhost,,.svc"},
+	} {
+		t.Run(test.name+"="+test.value, func(t *testing.T) {
+			if _, err := providerHostEnvironment([]string{test.name + "=" + test.value}, nil); err == nil ||
+				!strings.Contains(err.Error(), test.name) {
+				t.Fatalf("unsafe Provider proxy value returned error %v", err)
+			}
+		})
 	}
 }
 
@@ -1463,7 +1491,12 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				_ = credentialFile.Close()
 				credentialResolved = true
 				if credentialErr == nil {
-					if credential.Payload["apiKey"] != "provider-secret" {
+					apiKey, _ := credential.Payload["apiKey"].(string)
+					baseURL, _ := credential.Payload["baseUrl"].(string)
+					directCredential := apiKey == "provider-secret" && baseURL == ""
+					brokeredCredential := strings.HasPrefix(apiKey, "synara_task_") &&
+						strings.HasPrefix(baseURL, "http://127.0.0.1:")
+					if !directCredential && !brokeredCredential {
 						fmt.Fprintln(os.Stderr, "Provider credential was not delivered through FD 3")
 						os.Exit(2)
 					}

@@ -87,6 +87,87 @@ describe("AcpCoreRuntimeEvents", () => {
     });
   });
 
+  it("attaches sensitive-action authority and records ACP session-approval downgrades", () => {
+    const permissionRequest = {
+      kind: "execute" as const,
+      detail: "git push origin main",
+      toolCall: {
+        toolCallId: "tool-push",
+        kind: "execute",
+        status: "pending" as const,
+        command: "git push origin main",
+        data: {
+          toolCallId: "tool-push",
+          kind: "execute",
+          rawInput: { command: "git push origin main" },
+        },
+      },
+    };
+    const common = {
+      stamp: { eventId: "event-sensitive" as never, createdAt: "2026-07-28T00:00:00.000Z" },
+      provider: "cursor" as const,
+      threadId: "thread-sensitive" as never,
+      turnId: TurnId.makeUnsafe("turn-sensitive"),
+      requestId: RuntimeRequestId.makeUnsafe("request-sensitive"),
+      permissionRequest,
+    };
+
+    expect(
+      makeAcpRequestOpenedEvent({
+        ...common,
+        detail: permissionRequest.detail,
+        args: { toolCall: { rawInput: { command: permissionRequest.detail } } },
+        source: "acp.jsonrpc",
+        method: "session/request_permission",
+        rawPayload: {},
+      }),
+    ).toMatchObject({
+      payload: {
+        sensitiveAction: {
+          categories: ["protected-branch-publish"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+        args: {
+          sessionApprovalAvailable: false,
+          sensitiveAction: {
+            categories: ["protected-branch-publish"],
+            requiresFreshApproval: true,
+            allowSessionApproval: false,
+          },
+        },
+      },
+    });
+    expect(makeAcpRequestResolvedEvent({ ...common, decision: "acceptForSession" })).toMatchObject({
+      payload: {
+        decision: "accept",
+        requestedDecision: "acceptForSession",
+        sensitiveAction: {
+          categories: ["protected-branch-publish"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+      },
+    });
+    expect(
+      makeAcpRequestResolvedEvent({
+        ...common,
+        decision: "acceptForSession",
+        appliedDecision: "cancel",
+      }),
+    ).toMatchObject({
+      payload: {
+        decision: "cancel",
+        requestedDecision: "acceptForSession",
+        sensitiveAction: {
+          categories: ["protected-branch-publish"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+      },
+    });
+  });
+
   it("maps ACP core plan, tool-call, and content updates", () => {
     const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
     const turnId = TurnId.makeUnsafe("turn-1");

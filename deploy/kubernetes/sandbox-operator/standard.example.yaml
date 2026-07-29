@@ -58,7 +58,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             - name: SYNARA_AGENTD_CAPABILITIES_JSON
-              value: '{}'
+              value: "{}"
             - name: SYNARA_AGENTD_RUNNER_COMMAND_JSON
               value: '["provider-host","run","--jsonl"]'
             - name: SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL

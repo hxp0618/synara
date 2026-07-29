@@ -10,6 +10,7 @@ import {
   type ModelSelection,
   MessageId,
   type OrchestrationEvent,
+  type OrchestrationMessageSource,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ProviderMentionReference,
   type ProviderRuntimeEvent,
@@ -57,6 +58,12 @@ import {
 } from "@synara/shared/providerDeliveryBlock";
 import { buildStalePendingRequestFailureDetail } from "@synara/shared/threadSummary";
 import { resolveThreadWorkspaceState } from "@synara/shared/threadEnvironment";
+
+import {
+  isUntrustedContentSource,
+  untrustedProviderAdmissionIssue,
+  wrapUntrustedContentForProvider,
+} from "../../security/untrustedContent.ts";
 
 import {
   checkpointRefForThreadMessageStart,
@@ -1252,6 +1259,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly messageId: string;
     readonly messageText: string;
+    readonly messageSource?: OrchestrationMessageSource;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly skills?: ReadonlyArray<ProviderSkillReference>;
     readonly mentions?: ReadonlyArray<ProviderMentionReference>;
@@ -1267,13 +1275,29 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    const messageSource = input.messageSource;
+    const provenanceWrappedMessageText =
+      messageSource !== undefined && isUntrustedContentSource(messageSource)
+        ? yield* Effect.try({
+            try: () =>
+              wrapUntrustedContentForProvider({
+                source: messageSource,
+                text: input.messageText,
+                maxChars: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+              }),
+            catch: (cause) =>
+              new Error(
+                `Provider dispatch refused untrusted content without its provenance boundary: ${String(cause)}`,
+              ),
+          })
+        : input.messageText;
     const threadMentionProjection = yield* resolveThreadMentionPromptProjection({
       mentions: input.mentions,
       snapshotQuery: projectionSnapshotQuery,
-      maxTotalContextChars: availableThreadMentionContextChars(input.messageText),
+      maxTotalContextChars: availableThreadMentionContextChars(provenanceWrappedMessageText),
     });
     const messageText = appendThreadMentionContextBlocks({
-      text: input.messageText,
+      text: provenanceWrappedMessageText,
       contextBlocks: threadMentionProjection.contextBlocks,
     });
     const mentionContextSuffix = threadMentionContextSuffix(threadMentionProjection.contextBlocks);
@@ -1287,6 +1311,30 @@ const make = Effect.gen(function* () {
     const subagentProviderThreadId = providerThread
       ? resolveSubagentProviderThreadId(thread.id, providerThread.id)
       : undefined;
+    if (messageSource !== undefined && isUntrustedContentSource(messageSource)) {
+      // The decider protects the durable command against statically unsupported
+      // providers. Re-evaluate against the current server-authoritative runtime
+      // settings immediately before any provider start/steer so a configured
+      // external OpenCode/Kilo server cannot bypass Synara's pure-mode boundary.
+      const dispatchProvider = (providerThread?.session?.providerName ??
+        providerThread?.modelSelection.provider ??
+        thread.session?.providerName ??
+        thread.modelSelection.provider) as ProviderKind;
+      const settingsSnapshot = yield* serverSettings.getSnapshot;
+      const providerOptions = providerStartOptionsFromServerSettings(settingsSnapshot.settings);
+      const admissionIssue = untrustedProviderAdmissionIssue({
+        provider: dispatchProvider,
+        source: messageSource,
+        providerOptions,
+      });
+      if (admissionIssue !== null) {
+        return yield* new ProviderAdapterValidationError({
+          provider: dispatchProvider,
+          operation: "thread.turn.start",
+          issue: admissionIssue,
+        });
+      }
+    }
     if (providerThread && subagentProviderThreadId) {
       // Parity with the steerTurn path below: inline portable skill
       // instructions, normalize skill/agent mentions, and forward the
@@ -1369,8 +1417,8 @@ const make = Effect.gen(function* () {
     // text below still counts the suffix, keeping the total under the provider
     // input limit regardless of where the suffix sits.
     const boundaryMessageText = thread.sidechatSourceThreadId
-      ? `<sidechat_boundary>\n${SIDECHAT_BOUNDARY_INSTRUCTION}\n</sidechat_boundary>\n\n<latest_user_message>\n${input.messageText}\n</latest_user_message>`
-      : input.messageText;
+      ? `<sidechat_boundary>\n${SIDECHAT_BOUNDARY_INSTRUCTION}\n</sidechat_boundary>\n\n<latest_user_message>\n${provenanceWrappedMessageText}\n</latest_user_message>`
+      : provenanceWrappedMessageText;
     const bootstrapBudgetMessageText = `${boundaryMessageText}${mentionContextSuffix}`;
     const shouldBootstrapHandoff =
       thread.handoff?.bootstrapStatus === "pending" &&
@@ -2225,6 +2273,7 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         messageId: message.id,
         messageText: message.text,
+        messageSource: message.source,
         ...(message.attachments !== undefined ? { attachments: resolvedAttachments } : {}),
         ...(message.skills !== undefined ? { skills: message.skills } : {}),
         ...(message.mentions !== undefined ? { mentions: message.mentions } : {}),

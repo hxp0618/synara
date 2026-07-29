@@ -53,6 +53,48 @@ var executionTargetKinds = []ExecutionTargetKind{
 	TargetKubernetes,
 }
 
+type ExecutionTargetIsolationProfile string
+
+const (
+	IsolationSingleTenantTrusted  ExecutionTargetIsolationProfile = "single-tenant-trusted-v1"
+	IsolationKubernetesRestricted ExecutionTargetIsolationProfile = "kubernetes-restricted-v1"
+)
+
+const (
+	KubernetesWorkloadIdentityTokenPath      = "/var/run/secrets/synara.io/workload-identity/token"
+	KubernetesStagedRegistrationTokenPath    = "/var/run/secrets/synara.io/registration/one-shot/token"
+	KubernetesNetworkBoundaryVerifyArgument  = "--verify-kubernetes-network-boundary"
+	ProviderCredentialScopeVerifyArgument    = "--verify-provider-credential-scope"
+	KubernetesRegistrationTokenStageArgument = "--stage-kubernetes-registration-token"
+	KubernetesPIDsLimitEnvironment           = "SYNARA_AGENTD_KUBERNETES_PIDS_MAX"
+	MaximumKubernetesPIDsLimit               = 1_048_576
+)
+
+type ExecutionTargetIsolationDeclaration struct {
+	Profile                ExecutionTargetIsolationProfile `json:"profile"`
+	PlatformSharedEligible bool                            `json:"platformSharedEligible"`
+	ProductBoundary        string                          `json:"productBoundary"`
+}
+
+func IsolationDeclaration(kind ExecutionTargetKind) ExecutionTargetIsolationDeclaration {
+	if kind == TargetKubernetes {
+		return ExecutionTargetIsolationDeclaration{
+			Profile:                IsolationKubernetesRestricted,
+			PlatformSharedEligible: true,
+			ProductBoundary:        "multi-tenant-restricted",
+		}
+	}
+	return ExecutionTargetIsolationDeclaration{
+		Profile:                IsolationSingleTenantTrusted,
+		PlatformSharedEligible: false,
+		ProductBoundary:        "single-tenant-trusted",
+	}
+}
+
+func IsPlatformSharedTargetEligible(kind ExecutionTargetKind) bool {
+	return IsolationDeclaration(kind).PlatformSharedEligible
+}
+
 type Config struct {
 	Profile              DeploymentProfile
 	MetadataStore        MetadataStore

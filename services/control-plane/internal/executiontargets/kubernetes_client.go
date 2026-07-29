@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,92 @@ type kubernetesHTTPClient struct {
 func (c *kubernetesHTTPClient) Apply(ctx context.Context, path string, object map[string]any) error {
 	query := url.Values{"fieldManager": {"synara-control-plane"}, "force": {"true"}}
 	return c.do(ctx, http.MethodPatch, path+"?"+query.Encode(), object, nil, http.StatusOK, http.StatusCreated)
+}
+
+func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
+	ctx context.Context,
+	nodeSelector map[string]string,
+	maximum uint64,
+) error {
+	if maximum == 0 {
+		return errors.New("Kubernetes Target pidsLimit is required")
+	}
+	selectorParts := make([]string, 0, len(nodeSelector))
+	for key, value := range nodeSelector {
+		selectorParts = append(selectorParts, key+"="+value)
+	}
+	sort.Strings(selectorParts)
+	query := url.Values{}
+	if len(selectorParts) > 0 {
+		query.Set("labelSelector", strings.Join(selectorParts, ","))
+	}
+	path := "/api/v1/nodes"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var nodes struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &nodes, http.StatusOK); err != nil {
+		return fmt.Errorf("list eligible Kubernetes nodes: %w", err)
+	}
+	if len(nodes.Items) == 0 {
+		return errors.New("Kubernetes Target has no eligible nodes for PID-limit attestation")
+	}
+	names := make([]string, 0, len(nodes.Items))
+	seen := make(map[string]struct{}, len(nodes.Items))
+	for _, item := range nodes.Items {
+		name := strings.TrimSpace(item.Metadata.Name)
+		if name == "" {
+			return errors.New("Kubernetes node list contains an empty name")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("Kubernetes node list contains duplicate node %q", name)
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := c.attestNodePodPIDsLimit(ctx, name, maximum); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *kubernetesHTTPClient) attestNodePodPIDsLimit(
+	ctx context.Context,
+	name string,
+	maximum uint64,
+) error {
+	name = strings.TrimSpace(name)
+	if name == "" || maximum == 0 {
+		return errors.New("Kubernetes node name and Target pidsLimit are required")
+	}
+	var config struct {
+		KubeletConfig struct {
+			PodPIDsLimit int64 `json:"podPidsLimit"`
+		} `json:"kubeletconfig"`
+	}
+	configPath := "/api/v1/nodes/" + url.PathEscape(name) + "/proxy/configz"
+	if err := c.do(ctx, http.MethodGet, configPath, nil, &config, http.StatusOK); err != nil {
+		return fmt.Errorf("attest Kubernetes node %q kubelet podPidsLimit: %w", name, err)
+	}
+	if config.KubeletConfig.PodPIDsLimit <= 0 ||
+		uint64(config.KubeletConfig.PodPIDsLimit) > maximum {
+		return fmt.Errorf(
+			"Kubernetes node %q kubelet podPidsLimit=%d is not within 1..%d",
+			name,
+			config.KubeletConfig.PodPIDsLimit,
+			maximum,
+		)
+	}
+	return nil
 }
 
 func (c *kubernetesHTTPClient) GetPriorityClass(ctx context.Context, name string) (kubernetesPriorityClass, error) {

@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
@@ -56,15 +57,7 @@ func TestVerifyKubernetesWorkloadIdentity(t *testing.T) {
 					kubernetesExecutionLabel: executionID.String(),
 				},
 			},
-			"spec": map[string]any{
-				"serviceAccountName": serviceAccountName,
-				"containers": []any{map[string]any{
-					"name": "agentd",
-					"resources": map[string]any{"requests": map[string]any{
-						"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "1Gi",
-					}},
-				}},
-			},
+			"spec": hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName, targetID),
 		},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(serverState.serveHTTP))
@@ -90,14 +83,155 @@ func TestVerifyKubernetesWorkloadIdentity(t *testing.T) {
 	if serverState.clusterAuthHeader != "Bearer kubernetes-api-token" {
 		t.Fatalf("TokenReview used cluster auth header %q", serverState.clusterAuthHeader)
 	}
+	if serverState.pidsAuthHeader != "Bearer kubernetes-api-token" {
+		t.Fatalf("PID-limit attestation used cluster auth header %q", serverState.pidsAuthHeader)
+	}
 	if serverState.reviewToken != "workload-bearer-token" {
 		t.Fatalf("TokenReview reviewed token %q", serverState.reviewToken)
 	}
 	if len(serverState.reviewAudiences) != 1 || serverState.reviewAudiences[0] != audience {
 		t.Fatalf("TokenReview audiences = %#v", serverState.reviewAudiences)
 	}
+	unbounded := int64(-1)
+	serverState.podPIDsLimit = &unbounded
+	_, unboundedErr := service.VerifyKubernetesWorkloadIdentity(
+		context.Background(),
+		targetID,
+		claims,
+		"workload-bearer-token",
+	)
+	assertProblemCode(
+		t,
+		unboundedErr,
+		401,
+		"kubernetes_workload_identity_pids_limit_invalid",
+	)
 	if serverState.podAuthHeader != "Bearer kubernetes-api-token" {
 		t.Fatalf("Pod lookup used cluster auth header %q", serverState.podAuthHeader)
+	}
+}
+
+func TestVerifyKubernetesWorkloadIdentityRejectsWeakenedOuterSandbox(t *testing.T) {
+	claims := KubernetesWorkloadIdentityClaims{
+		Namespace: "synara-target", PodName: "synara-worker-0", PodUID: "pod-uid-1",
+	}
+	serviceAccountName := "synara-worker"
+	fixture := newKubernetesReconcileFixture(t, "")
+	targetID := fixture.targetID
+	executionID := uuid.New()
+	expectedUsername := "system:serviceaccount:" + claims.Namespace + ":" + serviceAccountName
+	state := &kubernetesWorkloadIdentityServerState{
+		t:                  t,
+		targetID:           targetID,
+		serviceAccountName: serviceAccountName,
+		reviewStatusCode:   http.StatusCreated,
+		reviewResponse: map[string]any{"status": map[string]any{
+			"authenticated": true,
+			"user": map[string]any{
+				"username": expectedUsername,
+				"extra": map[string]any{
+					kubernetesPodNameExtraKey: []string{claims.PodName},
+					kubernetesPodUIDExtraKey:  []string{claims.PodUID},
+				},
+			},
+			"audiences": []string{KubernetesWorkloadIdentityAudience(targetID)},
+		}},
+		podStatusCode: http.StatusOK,
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(state.serveHTTP))
+	defer server.Close()
+	service := configureKubernetesWorkloadIdentityService(t, fixture, claims.Namespace, serviceAccountName, server)
+
+	tests := []struct {
+		name   string
+		weaken func(map[string]any)
+	}{
+		{name: "ambient service account token", weaken: func(spec map[string]any) {
+			spec["automountServiceAccountToken"] = true
+		}},
+		{name: "host pid namespace", weaken: func(spec map[string]any) { spec["hostPID"] = true }},
+		{name: "sidecar", weaken: func(spec map[string]any) {
+			spec["containers"] = append(spec["containers"].([]any), map[string]any{"name": "sidecar"})
+		}},
+		{name: "missing registration token init container", weaken: func(spec map[string]any) {
+			spec["initContainers"] = spec["initContainers"].([]any)[:1]
+		}},
+		{name: "missing network boundary init container", weaken: func(spec map[string]any) {
+			spec["initContainers"] = spec["initContainers"].([]any)[1:]
+		}},
+		{name: "network boundary init after registration", weaken: func(spec map[string]any) {
+			initContainers := spec["initContainers"].([]any)
+			initContainers[0], initContainers[1] = initContainers[1], initContainers[0]
+		}},
+		{name: "network boundary init has a volume mount", weaken: func(spec map[string]any) {
+			initContainer := spec["initContainers"].([]any)[0].(map[string]any)
+			initContainer["volumeMounts"] = []any{map[string]any{"name": "tmp", "mountPath": "/tmp"}}
+		}},
+		{name: "projected token exposed to agentd and Provider", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["volumeMounts"] = append(container["volumeMounts"].([]any), map[string]any{
+				"name": kubernetesWorkloadIdentityVolume, "mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
+			})
+		}},
+		{name: "privilege escalation", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["securityContext"].(map[string]any)["allowPrivilegeEscalation"] = true
+		}},
+		{name: "missing ephemeral storage limit", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			limits := container["resources"].(map[string]any)["limits"].(map[string]any)
+			delete(limits, "ephemeral-storage")
+		}},
+		{name: "host path volume", weaken: func(spec map[string]any) {
+			spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
+				"name": "host", "hostPath": map[string]any{"path": "/"},
+			})
+		}},
+		{name: "private temp mismatch", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			for _, raw := range container["env"].([]any) {
+				item := raw.(map[string]any)
+				if item["name"] == "SYNARA_AGENTD_PRIVATE_TMP_ROOT" {
+					item["value"] = "/data/tmp"
+				}
+			}
+		}},
+		{name: "missing PID limit declaration", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			environment := container["env"].([]any)
+			container["env"] = environment[:len(environment)-1]
+		}},
+		{name: "excessive PID limit declaration", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			for _, raw := range container["env"].([]any) {
+				item := raw.(map[string]any)
+				if item["name"] == platform.KubernetesPIDsLimitEnvironment {
+					item["value"] = "1048577"
+				}
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := cloneKubernetesWorkloadIdentityPodSpec(t, hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName, targetID))
+			test.weaken(spec)
+			state.podResponse = map[string]any{
+				"metadata": map[string]any{
+					"name": claims.PodName,
+					"uid":  claims.PodUID,
+					"labels": map[string]any{
+						kubernetesManagedLabel:   "true",
+						kubernetesTargetLabel:    targetID.String(),
+						kubernetesExecutionLabel: executionID.String(),
+					},
+				},
+				"spec": spec,
+			}
+			err := service.VerifyWorkerRegistration(
+				context.Background(), targetID, claims.Namespace, claims.PodName, claims.PodUID, "workload-bearer-token",
+			)
+			assertProblemCode(t, err, 401, "kubernetes_workload_identity_outer_sandbox_invalid")
+		})
 	}
 }
 
@@ -185,7 +319,7 @@ func TestVerifyKubernetesWorkloadIdentityUsesExplicitWorkerModeLabel(t *testing.
 				kubernetesWorkerPoolVersionLabel: "1",
 				kubernetesCapacityClassLabel:     "interactive",
 			}},
-			"spec": map[string]any{"serviceAccountName": serviceAccountName},
+			"spec": hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName, targetID),
 		},
 	}).serveHTTP))
 	defer server.Close()
@@ -547,8 +681,128 @@ type kubernetesWorkloadIdentityServerState struct {
 	podResponse        any
 	clusterAuthHeader  string
 	podAuthHeader      string
+	pidsAuthHeader     string
+	podPIDsLimit       *int64
 	reviewToken        string
 	reviewAudiences    []string
+}
+
+func hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName string, targetID uuid.UUID) map[string]any {
+	return map[string]any{
+		"nodeName":                     "worker-a",
+		"serviceAccountName":           serviceAccountName,
+		"automountServiceAccountToken": false,
+		"hostNetwork":                  false,
+		"hostPID":                      false,
+		"hostIPC":                      false,
+		"securityContext": map[string]any{
+			"runAsNonRoot": true,
+			"fsGroup":      10001,
+			"seccompProfile": map[string]any{
+				"type": "RuntimeDefault",
+			},
+		},
+		"containers": []any{map[string]any{
+			"name": "agentd", "image": "synara/worker:test", "imagePullPolicy": "IfNotPresent",
+			"command": []any{"/usr/local/bin/synara-agentd"},
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"readOnlyRootFilesystem":   true,
+				"runAsNonRoot":             true,
+				"runAsUser":                10001,
+				"runAsGroup":               10001,
+				"capabilities":             map[string]any{"drop": []any{"ALL"}},
+				"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
+			},
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "1Gi"},
+				"limits":   map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"},
+			},
+			"env": []any{
+				map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
+				map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesStagedRegistrationTokenPath},
+				map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
+				map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
+				map[string]any{"name": platform.KubernetesPIDsLimitEnvironment, "value": "512"},
+			},
+			"volumeMounts": []any{
+				map[string]any{"name": "workspace", "mountPath": "/data"},
+				map[string]any{"name": "tmp", "mountPath": "/tmp"},
+				map[string]any{"name": "home", "mountPath": "/home/synara"},
+				map[string]any{
+					"name": kubernetesRegistrationTokenVolume, "mountPath": "/var/run/secrets/synara.io/registration",
+				},
+			},
+		}},
+		"initContainers": []any{map[string]any{
+			"name": kubernetesNetworkBoundaryInitName, "image": "synara/worker:test", "imagePullPolicy": "IfNotPresent",
+			"command": []any{"/usr/local/bin/synara-agentd", platform.KubernetesNetworkBoundaryVerifyArgument},
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"readOnlyRootFilesystem":   true,
+				"runAsNonRoot":             true,
+				"runAsUser":                10001,
+				"runAsGroup":               10001,
+				"capabilities":             map[string]any{"drop": []any{"ALL"}},
+				"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
+			},
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "1Gi"},
+				"limits":   map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"},
+			},
+		}, map[string]any{
+			"name": kubernetesRegistrationTokenInitName, "image": "synara/worker:test", "imagePullPolicy": "IfNotPresent",
+			"command": []any{"/usr/local/bin/synara-agentd", platform.KubernetesRegistrationTokenStageArgument},
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"readOnlyRootFilesystem":   true,
+				"runAsNonRoot":             true,
+				"runAsUser":                10001,
+				"runAsGroup":               10001,
+				"capabilities":             map[string]any{"drop": []any{"ALL"}},
+				"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
+			},
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "1Gi"},
+				"limits":   map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"},
+			},
+			"volumeMounts": []any{
+				map[string]any{
+					"name": kubernetesWorkloadIdentityVolume, "mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
+				},
+				map[string]any{
+					"name": kubernetesRegistrationTokenVolume, "mountPath": "/var/run/secrets/synara.io/registration",
+				},
+			},
+		}},
+		"volumes": []any{
+			map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
+			map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
+			map[string]any{"name": "home", "emptyDir": map[string]any{}},
+			map[string]any{
+				"name": kubernetesWorkloadIdentityVolume,
+				"projected": map[string]any{"defaultMode": 0o440, "sources": []any{map[string]any{
+					"serviceAccountToken": map[string]any{
+						"audience": KubernetesWorkerRegistrationAudience(targetID), "expirationSeconds": 600, "path": "token",
+					},
+				}}},
+			},
+			map[string]any{"name": kubernetesRegistrationTokenVolume, "emptyDir": map[string]any{}},
+		},
+	}
+}
+
+func cloneKubernetesWorkloadIdentityPodSpec(t *testing.T, source map[string]any) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func (s *kubernetesWorkloadIdentityServerState) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -571,6 +825,15 @@ func (s *kubernetesWorkloadIdentityServerState) serveHTTP(w http.ResponseWriter,
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/synara-target/pods/synara-worker-0":
 		s.podAuthHeader = r.Header.Get("Authorization")
 		writeTestJSON(w, s.podStatusCode, s.podResponse)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/worker-a/proxy/configz":
+		s.pidsAuthHeader = r.Header.Get("Authorization")
+		limit := int64(512)
+		if s.podPIDsLimit != nil {
+			limit = *s.podPIDsLimit
+		}
+		writeTestJSON(w, http.StatusOK, map[string]any{
+			"kubeletconfig": map[string]any{"podPidsLimit": limit},
+		})
 	default:
 		s.t.Fatalf("unexpected Kubernetes workload identity request: %s %s", r.Method, r.URL.Path)
 	}

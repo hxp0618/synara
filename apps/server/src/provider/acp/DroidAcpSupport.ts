@@ -30,6 +30,8 @@ export interface DroidAcpRuntimeSettings {
   readonly binaryPath?: string;
   readonly model?: string;
   readonly reasoningEffort?: DroidModelOptions["reasoningEffort"];
+  /** Synara-owned highest-precedence settings for this one child process. */
+  readonly runtimeSettingsPath?: string;
 }
 
 export interface DroidAcpRuntimeInput extends Omit<
@@ -59,6 +61,26 @@ const DROID_PLAN_MODE_ID = "spec";
 const DROID_API_KEY_AUTH_METHOD_ID = "factory-api-key";
 const DROID_DEVICE_PAIRING_AUTH_METHOD_ID = "device-pairing";
 const DROID_API_KEY_ENV_KEYS = ["FACTORY_API_KEY"] as const;
+
+const DROID_RUNTIME_SECURITY_SETTINGS = {
+  // Project, user, and plugin hooks can execute shell commands before the ACP
+  // permission callback exists. This global runtime switch disables them all.
+  hooksDisabled: true,
+  // A Synara ACP child must not silently attach an IDE integration or mirror a
+  // locally controlled session to another control surface.
+  ideAutoConnect: false,
+  cloudSessionSync: false,
+  // Runtime mode is applied explicitly over ACP after startup. Do not inherit
+  // a user/project default that pre-authorizes work during initialization.
+  sessionDefaultSettings: {
+    autonomyLevel: "off",
+    interactionMode: "auto",
+  },
+} as const;
+
+export function serializeDroidRuntimeSecuritySettings(): string {
+  return `${JSON.stringify(DROID_RUNTIME_SECURITY_SETTINGS)}\n`;
+}
 
 export function getDroidApiKeyEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (const key of DROID_API_KEY_ENV_KEYS) {
@@ -104,7 +126,13 @@ export function buildDroidAcpSpawnInput(
   droidSettings: DroidAcpRuntimeSettings | null | undefined,
   cwd: string,
 ): AcpSpawnInput {
-  const args = ["exec", "--output-format", "acp"];
+  const args: Array<string> = [];
+  const runtimeSettingsPath = droidSettings?.runtimeSettingsPath?.trim();
+  if (runtimeSettingsPath) {
+    // --settings is a root Droid option and must precede the exec subcommand.
+    args.push("--settings", runtimeSettingsPath);
+  }
+  args.push("exec", "--output-format", "acp");
   const appendSystemPrompt = droidSettings?.appendSystemPrompt?.trim();
   if (appendSystemPrompt) {
     args.push("--append-system-prompt", appendSystemPrompt);

@@ -1121,8 +1121,9 @@ func dualClusterTargetConfiguration(
 		"image": workerImage, "imagePullPolicy": "Never",
 		"controlPlaneUrl": controlPlaneURL, "allowInsecureControlPlane": true,
 		"runnerCommand": []string{"node", "/opt/synara/acceptance/provider-host-fixture.mjs", "--protocol-v2"}, "maxActivePods": 4,
-		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "50m", "cpuLimit": "1",
-		"memoryRequest": "128Mi", "memoryLimit": "512Mi", "workspaceSizeLimit": "128Mi",
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "50m", "cpuLimit": "1", "pidsLimit": 512,
+		"memoryRequest": "128Mi", "memoryLimit": "512Mi",
+		"ephemeralStorageRequest": "128Mi", "ephemeralStorageLimit": "1Gi", "workspaceSizeLimit": "128Mi",
 		"quotaCpuRequests": "500m", "quotaCpuLimits": "4", "quotaMemoryRequests": "512Mi",
 		"quotaMemoryLimits": "2Gi", "quotaEphemeralStorage": "2Gi",
 	}

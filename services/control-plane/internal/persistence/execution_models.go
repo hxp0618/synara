@@ -55,6 +55,27 @@ type WorkerInstance struct {
 
 func (WorkerInstance) TableName() string { return "worker_instances" }
 
+type WorkerStorageScrub struct {
+	ID                uuid.UUID  `gorm:"column:id;type:uuid;primaryKey;index:idx_worker_storage_scrubs_claim,priority:5"`
+	WorkerID          uuid.UUID  `gorm:"column:worker_id;type:uuid;index:idx_worker_storage_scrubs_claim,priority:1"`
+	WorkerIncarnation int64      `gorm:"column:worker_incarnation;index:idx_worker_storage_scrubs_claim,priority:2"`
+	WorkerInstanceUID string     `gorm:"column:worker_instance_uid"`
+	ExecutionTargetID uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	TenantID          uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	ScopeKind         string     `gorm:"column:scope_kind;uniqueIndex:uq_worker_storage_scrubs_scope,priority:1"`
+	ScopeID           uuid.UUID  `gorm:"column:scope_id;type:uuid;uniqueIndex:uq_worker_storage_scrubs_scope,priority:2"`
+	ScopeGeneration   int64      `gorm:"column:scope_generation;uniqueIndex:uq_worker_storage_scrubs_scope,priority:3"`
+	ScrubGeneration   int64      `gorm:"column:scrub_generation;index:idx_worker_storage_scrubs_claim,priority:4"`
+	Status            string     `gorm:"column:status;index:idx_worker_storage_scrubs_claim,priority:3"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	AcknowledgedAt    *time.Time `gorm:"column:acknowledged_at"`
+	FailedAt          *time.Time `gorm:"column:failed_at"`
+	FailureCode       *string    `gorm:"column:failure_code"`
+	FailureMessage    *string    `gorm:"column:failure_message"`
+}
+
+func (WorkerStorageScrub) TableName() string { return "worker_storage_scrubs" }
+
 type WorkerIdentityTombstone struct {
 	ExecutionTargetID uuid.UUID  `gorm:"column:execution_target_id;type:uuid;primaryKey"`
 	ClusterID         string     `gorm:"column:cluster_id;primaryKey"`

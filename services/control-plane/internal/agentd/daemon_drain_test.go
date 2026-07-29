@@ -450,6 +450,9 @@ func newDaemonDrainHarnessWithOptions(t *testing.T, options daemonDrainHarnessOp
 				state.Unlock()
 			}
 			response.WriteHeader(http.StatusNoContent)
+		case "/v1/workers/storage-scrubs/claim":
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(executions.WorkerStorageScrubClaimResult{})
 		case "/v1/workers/executions/claim":
 			state.Lock()
 			claimed := state.claimIssued

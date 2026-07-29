@@ -704,17 +704,50 @@ function strictBase64DecodedLength(value: string): number | undefined {
   return (value.length / 4) * 3 - padding;
 }
 
+export const SENSITIVE_ACTION_CATEGORIES = [
+  "protected-branch-publish",
+  "ci-workflow-change",
+  "dependency-change",
+  "credential-access",
+  "network-egress",
+  "external-mcp-action",
+] as const;
+
+export const SensitiveActionCategory = Schema.Literals(SENSITIVE_ACTION_CATEGORIES);
+export type SensitiveActionCategory = typeof SensitiveActionCategory.Type;
+
+const SensitiveActionAssessmentBase = Schema.Struct({
+  categories: Schema.Array(SensitiveActionCategory),
+  requiresFreshApproval: Schema.Boolean,
+  allowSessionApproval: Schema.Literal(false),
+});
+
+export const SensitiveActionAssessment = SensitiveActionAssessmentBase.pipe(
+  Schema.refine((value): value is typeof SensitiveActionAssessmentBase.Type => {
+    const canonical = [...new Set(value.categories)].sort();
+    return (
+      value.requiresFreshApproval === value.categories.length > 0 &&
+      canonical.length === value.categories.length &&
+      canonical.every((category, index) => category === value.categories[index])
+    );
+  }),
+);
+export type SensitiveActionAssessment = typeof SensitiveActionAssessment.Type;
+
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   args: Schema.optional(Schema.Unknown),
+  sensitiveAction: Schema.optional(SensitiveActionAssessment),
 });
 export type RequestOpenedPayload = typeof RequestOpenedPayload.Type;
 
 const RequestResolvedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   decision: Schema.optional(TrimmedNonEmptyStringSchema),
+  requestedDecision: Schema.optional(TrimmedNonEmptyStringSchema),
   resolution: Schema.optional(Schema.Unknown),
+  sensitiveAction: Schema.optional(SensitiveActionAssessment),
 });
 export type RequestResolvedPayload = typeof RequestResolvedPayload.Type;
 

@@ -1221,6 +1221,13 @@ func resolvedInteractionRuntimeEvent(
 		payload := map[string]any{
 			"requestId": interaction.RequestID, "requestType": requestType, "resolution": resolution,
 		}
+		if sensitiveAction, found := interaction.Payload["sensitiveAction"]; found {
+			canonical, valid := canonicalSensitiveActionAssessment(sensitiveAction)
+			if !valid {
+				return 0, "", nil, problem.New(500, "interaction_event_payload_corrupt", "The persisted sensitive-action assessment is invalid.")
+			}
+			payload["sensitiveAction"] = canonical
+		}
 		if decision, ok := resolution["decision"].(string); ok && strings.TrimSpace(decision) != "" {
 			payload["decision"] = decision
 		}

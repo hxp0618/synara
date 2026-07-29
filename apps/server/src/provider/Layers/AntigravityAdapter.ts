@@ -18,6 +18,7 @@ import {
 import { Effect, Layer, Queue, Stream } from "effect";
 
 import { ServerConfig } from "../../config.ts";
+import { renderSynaraHarnessPolicy } from "../../agentGateway/harnessPolicy.ts";
 import { buildProviderChildEnvironment } from "../../providerChildEnvironment.ts";
 import {
   ProviderAdapterRequestError,
@@ -52,6 +53,20 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 const PLUGIN_INSTALL_TIMEOUT_MS = 30_000;
 const HELPER_OUTPUT_MAX_CHARS = 128 * 1024;
 const WINDOWS_PROMPT_MAX_CHARS = 24_000;
+const ANTIGRAVITY_HOST_CONTEXT = [
+  "<synara_host_context>",
+  renderSynaraHarnessPolicy({ gatewayControlAvailable: false }),
+  "</synara_host_context>",
+].join("\n");
+
+/**
+ * Antigravity has no system-prompt or thread-scoped MCP transport. Carry the
+ * host authority boundary on every CLI Turn so a failed first process cannot
+ * permanently consume a one-shot delivery flag for the resumed conversation.
+ */
+export function prependAntigravityHostContext(prompt: string): string {
+  return `${ANTIGRAVITY_HOST_CONTEXT}\n\n${prompt}`;
+}
 
 type TranscriptStep = {
   readonly step_index?: number;
@@ -853,14 +868,15 @@ const makeAntigravityAdapter = Effect.gen(function* () {
         attachmentsDir: serverConfig.attachmentsDir,
         include: "all-files",
       });
-      const normalizedPrompt = trim(prompt);
-      if (!normalizedPrompt) {
+      const userPrompt = trim(prompt);
+      if (!userPrompt) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
           operation: "turn/start",
           issue: "A prompt or file attachment is required.",
         });
       }
+      const normalizedPrompt = prependAntigravityHostContext(userPrompt);
       const promptIssue = antigravityPromptCommandLineIssue(normalizedPrompt);
       if (promptIssue) {
         return yield* new ProviderAdapterValidationError({

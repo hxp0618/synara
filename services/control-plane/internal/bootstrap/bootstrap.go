@@ -47,7 +47,7 @@ func Ensure(ctx context.Context, db *gorm.DB, profile platform.DeploymentProfile
 		result.ExecutionTargetID = deterministicID(installationID, "platform-local-target")
 		return ensureBuiltInLocalExecutionTarget(ctx, tx, persistence.ExecutionTarget{
 			ID: result.ExecutionTargetID, Kind: string(platform.TargetLocal), Name: "platform-local",
-			Status: "active", ConfigurationEncrypted: []byte{},
+			Status: "disabled", ConfigurationEncrypted: []byte{},
 			Capabilities: builtInLocalTargetCapabilities(),
 		})
 	})
@@ -166,6 +166,12 @@ func ensureBuiltInLocalExecutionTarget(
 	var persisted persistence.ExecutionTarget
 	if err := tx.WithContext(ctx).Where("id = ?", target.ID).Take(&persisted).Error; err != nil {
 		return err
+	}
+	if target.TenantID == nil && persisted.Status != "disabled" {
+		if err := tx.WithContext(ctx).Model(&persisted).Update("status", "disabled").Error; err != nil {
+			return err
+		}
+		persisted.Status = "disabled"
 	}
 	capabilities := make(map[string]any, len(persisted.Capabilities)+2)
 	for key, value := range persisted.Capabilities {

@@ -791,6 +791,98 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       "workspace-verify",
       "provider-crash",
     ]);
+    expect(
+      parseFixtureScenarios(
+        "[stage5-residue-seed] fixture:stage5-residue-verify [stage5-marker:marker-only]",
+      ),
+    ).toEqual(["stage5-residue-seed", "stage5-residue-verify"]);
+  });
+
+  it("seeds and detects Stage 5 shared Worker residue without relying on guessed Tenant paths", () => {
+    const acceptanceRoot = mkdtempSync(join(tmpdir(), "synara-stage5-fixture-"));
+    temporaryDirectories.push(acceptanceRoot);
+    const workspaceRoot = join(acceptanceRoot, "workspaces");
+    const gitCacheRoot = join(acceptanceRoot, "git-cache");
+    const privateTempRoot = join(acceptanceRoot, "private-tmp");
+    const targetId = "11111111-1111-4111-8111-111111111111";
+    const tenantA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const tenantB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const marker = "stage5-fixture-marker-12345678";
+    const workspaceFor = (tenantId: string) =>
+      join(workspaceRoot, "v2", targetId, tenantId, "project", "session", "execution", "checkout");
+    const workspaceA = workspaceFor(tenantA);
+    const workspaceB = workspaceFor(tenantB);
+    for (const directory of [workspaceA, workspaceB, gitCacheRoot, privateTempRoot]) {
+      mkdirSync(directory, { recursive: true });
+    }
+    const previousTemp = process.env.TMPDIR;
+    process.env.TMPDIR = privateTempRoot;
+    try {
+      const runScenario = (
+        tenantId: string,
+        workspaceDirectory: string,
+        scenario: "stage5-residue-seed" | "stage5-residue-verify",
+      ): Record<string, unknown> => {
+        const output: ProviderHostMessage[] = [];
+        const host = fixtureHost(output);
+        host.handleCommand(
+          command("StartSession", `start-${scenario}`, {
+            runnerInput: {
+              execution: { executionTargetId: targetId },
+              workload: { provider: "codex", tenantId },
+              workspaceDirectory,
+            },
+            runtimeEventVersion: 2,
+          }),
+        );
+        host.handleCommand(
+          command("SendTurn", `turn-${scenario}`, {
+            inputText: `[${scenario}] [stage5-marker:${marker}]`,
+            runtimeEventVersion: 2,
+          }),
+        );
+        const terminal = messagesFor(output, `turn-${scenario}`).find(
+          (message) => message.messageType === "Result",
+        );
+        const evidence = (terminal?.payload.output as Record<string, unknown> | undefined)
+          ?.stage5TenantIsolationEvidence;
+        expect(evidence).toBeDefined();
+        return evidence as Record<string, unknown>;
+      };
+
+      expect(runScenario(tenantA, workspaceA, "stage5-residue-seed")).toMatchObject({
+        stage: "seeded",
+        marker,
+        seededPathCount: 6,
+      });
+      expect(runScenario(tenantB, workspaceB, "stage5-residue-verify")).toMatchObject({
+        stage: "verified",
+        marker,
+        residualMarkerReadable: true,
+      });
+
+      for (const path of [
+        join(workspaceRoot, "v2", targetId, tenantA),
+        join(workspaceRoot, "v3", targetId, tenantA),
+        join(workspaceRoot, tenantA),
+        join(workspaceRoot, ".quarantine"),
+        join(gitCacheRoot, "v1", targetId, tenantA),
+        privateTempRoot,
+      ]) {
+        rmSync(path, { recursive: true, force: true });
+      }
+      mkdirSync(privateTempRoot, { recursive: true });
+
+      expect(runScenario(tenantB, workspaceB, "stage5-residue-verify")).toMatchObject({
+        stage: "verified",
+        marker,
+        residualPathCount: 0,
+        residualMarkerReadable: false,
+      });
+    } finally {
+      if (previousTemp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTemp;
+    }
   });
 });
 

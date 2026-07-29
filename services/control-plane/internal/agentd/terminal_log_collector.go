@@ -45,6 +45,7 @@ type terminalLogCollector struct {
 	tempRoot    string
 	states      map[string]*terminalLogState
 	content     map[string]*guardedContentStreamState
+	completed   map[string]struct{}
 }
 
 type guardedContentStreamState struct {
@@ -90,6 +91,7 @@ func newTerminalLogCollector(
 	return &terminalLogCollector{
 		client: client, executionID: executionID, lease: lease, guard: guard,
 		states: make(map[string]*terminalLogState), content: make(map[string]*guardedContentStreamState),
+		completed: make(map[string]struct{}),
 	}
 }
 
@@ -414,6 +416,9 @@ func (c *terminalLogCollector) handleOutput(ctx context.Context, message RunnerM
 	if terminalID == "" {
 		return protocolFailure("Provider Host command output omitted terminalId")
 	}
+	if _, found := c.completed[terminalID]; found {
+		return protocolFailure("Provider Host emitted terminal output after completion")
+	}
 	encoding := stringMapField(message.Payload, "encoding")
 	delta, ok := message.Payload["delta"].(string)
 	if !ok {
@@ -672,6 +677,15 @@ func (c *terminalLogCollector) handleLifecycle(
 		return protocolFailure("Provider Host terminal lifecycle omitted terminalId")
 	}
 	eventType := stringMapField(terminal, "eventType")
+	if _, found := c.completed[terminalID]; found {
+		// Provider runtimes can repeat a completed item snapshot. Terminal IDs are
+		// single-use and terminal states are immutable, so the first completion is
+		// authoritative. A later start or output for the same ID is still rejected.
+		if eventType == "terminal.exited" || eventType == "terminal.failed" {
+			return nil
+		}
+		return protocolFailure("Provider Host reused terminalId after completion")
+	}
 	state := c.state(terminalID)
 	data, _ := message.Payload["data"].(map[string]any)
 	if data != nil {
@@ -717,6 +731,7 @@ func (c *terminalLogCollector) handleLifecycle(
 		}
 		state.pendingCompletion = nil
 		delete(c.states, terminalID)
+		c.completed[terminalID] = struct{}{}
 		return nil
 	default:
 		return protocolFailure("Provider Host terminal lifecycle type is unsupported")

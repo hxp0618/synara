@@ -1683,8 +1683,9 @@ func managedKubernetesFailoverTestConfiguration(maxActivePods int) map[string]an
 		"manageNamespace": true, "image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
 		"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
 		"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": maxActivePods,
-		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
-		"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1", "pidsLimit": 512,
+		"memoryRequest": "256Mi", "memoryLimit": "1Gi",
+		"ephemeralStorageRequest": "512Mi", "ephemeralStorageLimit": "2Gi", "workspaceSizeLimit": "2Gi",
 		"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
 	}
 }

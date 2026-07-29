@@ -38,8 +38,9 @@ describe("Codex home paths", () => {
       resolveActiveCodexHomeWritePath({
         env: { SYNARA_HOME: "/synara/runtime" },
         homePath: "/users/me/.codex",
+        isolateExecutableConfig: true,
       }),
-      path.join("/synara/runtime", "codex-home-overlay"),
+      path.join("/synara/runtime", "codex-home-isolated-overlay"),
     );
   });
 
@@ -49,7 +50,11 @@ describe("Codex home paths", () => {
         env: { SYNARA_HOME: "/synara/runtime" },
         homePath: "/users/me/.codex",
       }),
-      ["/users/me/.codex", path.join("/synara/runtime", "codex-home-overlay")],
+      [
+        "/users/me/.codex",
+        path.join("/synara/runtime", "codex-home-overlay"),
+        path.join("/synara/runtime", "codex-home-isolated-overlay"),
+      ],
     );
   });
 });

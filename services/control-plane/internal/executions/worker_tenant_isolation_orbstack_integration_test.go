@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -96,6 +97,7 @@ func TestOrbStackKubernetesGeneralWorkerTenantIsolation(t *testing.T) {
 		applyOrbStackTenantIsolationPod(
 			t, ctx, kubernetesContext, namespace, image, controlPlaneURL, registrationToken,
 			expectation.name, expectation.target.ID, expectation.firstExecutionID,
+			expectation.target.ID == sharedTarget.ID,
 		)
 		t.Cleanup(func() {
 			cleanupOrbStackTenantIsolationPod(
@@ -135,6 +137,10 @@ func TestOrbStackKubernetesGeneralWorkerTenantIsolation(t *testing.T) {
 		}
 		if result.PodName != expectation.name || result.InstanceUID == "" || result.WorkerID == uuid.Nil {
 			t.Fatalf("invalid physical OrbStack Worker identity: %#v", result)
+		}
+		if expectation.target.ID == sharedTarget.ID &&
+			(!result.PreScrubClaimBlocked || result.ResidualPathCount != 0 || result.ResidualSecretReadable) {
+			t.Fatalf("shared OrbStack Worker did not prove A -> scrub -> B storage isolation: %#v", result)
 		}
 		var worker persistence.WorkerInstance
 		if err := primaryDB.Where("id = ?", result.WorkerID).Take(&worker).Error; err != nil {
@@ -179,15 +185,18 @@ func TestOrbStackKubernetesGeneralWorkerTenantIsolation(t *testing.T) {
 }
 
 type orbStackTenantIsolationResult struct {
-	TargetID          uuid.UUID `json:"targetId"`
-	WorkerID          uuid.UUID `json:"workerId"`
-	PodName           string    `json:"podName"`
-	InstanceUID       string    `json:"instanceUid"`
-	FirstExecutionID  uuid.UUID `json:"firstExecutionId"`
-	FirstTenantID     uuid.UUID `json:"firstTenantId"`
-	SecondExecutionID uuid.UUID `json:"secondExecutionId"`
-	SecondTenantID    uuid.UUID `json:"secondTenantId"`
-	Error             string    `json:"error,omitempty"`
+	TargetID               uuid.UUID `json:"targetId"`
+	WorkerID               uuid.UUID `json:"workerId"`
+	PodName                string    `json:"podName"`
+	InstanceUID            string    `json:"instanceUid"`
+	FirstExecutionID       uuid.UUID `json:"firstExecutionId"`
+	FirstTenantID          uuid.UUID `json:"firstTenantId"`
+	SecondExecutionID      uuid.UUID `json:"secondExecutionId"`
+	SecondTenantID         uuid.UUID `json:"secondTenantId"`
+	PreScrubClaimBlocked   bool      `json:"preScrubClaimBlocked"`
+	ResidualPathCount      int       `json:"residualPathCount"`
+	ResidualSecretReadable bool      `json:"residualSecretReadable"`
+	Error                  string    `json:"error,omitempty"`
 }
 
 type orbStackTenantIsolationWorkerAPI struct {
@@ -250,6 +259,43 @@ func (a *orbStackTenantIsolationWorkerAPI) ServeHTTP(writer http.ResponseWriter,
 			return
 		}
 		a.writeJSON(writer, http.StatusOK, result.Value)
+	case request.URL.Path == "/v1/workers/storage-scrubs/claim":
+		worker, err := a.authenticate(request)
+		if err != nil {
+			a.writeError(writer, err)
+			return
+		}
+		result, err := a.service.ClaimWorkerStorageScrub(request.Context(), worker)
+		if err != nil {
+			a.writeError(writer, err)
+			return
+		}
+		a.writeJSON(writer, http.StatusOK, result)
+	case strings.HasPrefix(request.URL.Path, "/v1/workers/storage-scrubs/") && strings.HasSuffix(request.URL.Path, "/acknowledged"):
+		worker, err := a.authenticate(request)
+		if err != nil {
+			a.writeError(writer, err)
+			return
+		}
+		rawID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/v1/workers/storage-scrubs/"), "/acknowledged")
+		scrubID, err := uuid.Parse(rawID)
+		if err != nil {
+			a.writeError(writer, problem.New(400, "invalid_worker_storage_scrub_id", "Worker storage scrub ID is invalid."))
+			return
+		}
+		var input WorkerStorageScrubReceiptInput
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			a.writeError(writer, err)
+			return
+		}
+		result, err := a.service.AcknowledgeWorkerStorageScrub(
+			request.Context(), worker, scrubID, input, request.Header.Get("X-Request-ID"),
+		)
+		if err != nil {
+			a.writeError(writer, err)
+			return
+		}
+		a.writeJSON(writer, result.StatusCode, result.Value)
 	case strings.HasPrefix(request.URL.Path, "/v1/workers/executions/") && strings.HasSuffix(request.URL.Path, "/complete"):
 		worker, err := a.authenticate(request)
 		if err != nil {
@@ -333,6 +379,7 @@ func applyOrbStackTenantIsolationPod(
 	ctx context.Context,
 	kubernetesContext, namespace, image, controlPlaneURL, registrationToken, podName string,
 	targetID, firstExecutionID uuid.UUID,
+	requiresScrub bool,
 ) {
 	t.Helper()
 	manifest := map[string]any{
@@ -361,6 +408,7 @@ func applyOrbStackTenantIsolationPod(
 					map[string]any{"name": "REGISTRATION_TOKEN", "value": registrationToken},
 					map[string]any{"name": "EXECUTION_TARGET_ID", "value": targetID.String()},
 					map[string]any{"name": "FIRST_EXECUTION_ID", "value": firstExecutionID.String()},
+					map[string]any{"name": "REQUIRES_SCRUB", "value": strconv.FormatBool(requiresScrub)},
 					map[string]any{"name": "POD_NAME", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}},
 					map[string]any{"name": "POD_UID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.uid"}}},
 					map[string]any{"name": "POD_NAMESPACE", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.namespace"}}},
@@ -374,11 +422,15 @@ func applyOrbStackTenantIsolationPod(
 					"limits":   map[string]any{"cpu": "250m", "memory": "256Mi"},
 				},
 				"volumeMounts": []any{
+					map[string]any{"name": "workspace", "mountPath": "/data/workspaces"},
+					map[string]any{"name": "git-cache", "mountPath": "/data/git-cache"},
 					map[string]any{"name": "tmp", "mountPath": "/tmp"},
 					map[string]any{"name": "home", "mountPath": "/home/synara"},
 				},
 			}},
 			"volumes": []any{
+				map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
+				map[string]any{"name": "git-cache", "emptyDir": map[string]any{}},
 				map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
 				map[string]any{"name": "home", "emptyDir": map[string]any{}},
 			},
@@ -446,12 +498,15 @@ func runOrbStackTenantIsolationKubectl(ctx context.Context, input []byte, argume
 }
 
 const orbStackTenantIsolationPodScript = `
+import fs from "node:fs/promises";
+
 const base = process.env.CONTROL_PLANE_URL;
 const registrationToken = process.env.REGISTRATION_TOKEN;
 const targetId = process.env.EXECUTION_TARGET_ID;
 const podName = process.env.POD_NAME;
 const instanceUid = process.env.POD_UID;
 const namespace = process.env.POD_NAMESPACE;
+const requiresScrub = process.env.REQUIRES_SCRUB === "true";
 
 async function post(path, body, token, requestId) {
   const response = await fetch(base + path, {
@@ -472,6 +527,77 @@ async function post(path, body, token, requestId) {
     throw new Error(path + " returned " + response.status + ":" + JSON.stringify(decoded));
   }
   return decoded;
+}
+
+async function postResult(path, body, token, requestId) {
+  const response = await fetch(base + path, {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/json",
+      "X-Request-ID": requestId,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let decoded = {};
+  if (text) {
+    try { decoded = JSON.parse(text); } catch { decoded = { raw: text }; }
+  }
+  return { status: response.status, decoded };
+}
+
+function tenantStoragePaths(tenantId) {
+  return [
+    "/data/workspaces/v2/" + targetId + "/" + tenantId,
+    "/data/workspaces/v3/" + targetId + "/" + tenantId,
+    "/data/workspaces/" + tenantId,
+    "/data/git-cache/v1/" + targetId + "/" + tenantId,
+  ];
+}
+
+async function seedTenantSecret(tenantId) {
+  for (const directory of tenantStoragePaths(tenantId)) {
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(directory + "/tenant-a-secret.txt", "tenant-a-secret:" + tenantId);
+  }
+  await fs.mkdir("/data/workspaces/.quarantine", { recursive: true });
+  await fs.writeFile("/data/workspaces/.quarantine/tenant-a-secret.txt", "tenant-a-secret:" + tenantId);
+  await fs.writeFile("/tmp/tenant-a-secret.txt", "tenant-a-secret:" + tenantId);
+}
+
+async function scrubTenantSecret(tenantId) {
+  for (const directory of tenantStoragePaths(tenantId)) {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+  await fs.rm("/data/workspaces/.quarantine", { recursive: true, force: true });
+  for (const entry of await fs.readdir("/tmp")) {
+    await fs.rm("/tmp/" + entry, { recursive: true, force: true });
+  }
+}
+
+async function scanForTenantA(root, tenantId) {
+  let residualPaths = 0;
+  let residualSecretReadable = false;
+  async function visit(path) {
+    let entries;
+    try { entries = await fs.readdir(path, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const child = path + "/" + entry.name;
+      if (child.includes(tenantId) || entry.name.includes("tenant-a-secret")) residualPaths += 1;
+      if (entry.isDirectory()) {
+        await visit(child);
+      } else if (entry.isFile()) {
+        try {
+          if ((await fs.readFile(child, "utf8")).includes("tenant-a-secret:" + tenantId)) {
+            residualSecretReadable = true;
+          }
+        } catch {}
+      }
+    }
+  }
+  await visit(root);
+  return { residualPaths, residualSecretReadable };
 }
 
 async function complete(claim, workerToken, step) {
@@ -519,7 +645,33 @@ try {
   if (!first.execution || !first.lease) throw new Error("first claim returned no Execution");
   result.firstExecutionId = first.execution.id;
   result.firstTenantId = first.execution.tenantId;
+  await seedTenantSecret(first.execution.tenantId);
   await complete(first, registration.token, "first");
+
+  if (requiresScrub) {
+    const preScrubClaim = await postResult(
+      "/v1/workers/executions/claim",
+      { executionTargetId: targetId, targetKind: "kubernetes" },
+      registration.token,
+      targetId + "-claim-before-scrub",
+    );
+    result.preScrubClaimBlocked = preScrubClaim.status === 409 &&
+      preScrubClaim.decoded?.error?.code === "worker_storage_scrub_required";
+    if (!result.preScrubClaimBlocked) {
+      throw new Error("second Tenant claim was not fenced before scrub:" + JSON.stringify(preScrubClaim));
+    }
+    const scrubClaim = await post(
+      "/v1/workers/storage-scrubs/claim", {}, registration.token, targetId + "-scrub-claim",
+    );
+    if (!scrubClaim.scrub) throw new Error("shared Worker returned no pending scrub");
+    await scrubTenantSecret(first.execution.tenantId);
+    await post(
+      "/v1/workers/storage-scrubs/" + scrubClaim.scrub.id + "/acknowledged",
+      { scrubGeneration: scrubClaim.scrub.scrubGeneration },
+      registration.token,
+      targetId + "-scrub-ack",
+    );
+  }
 
   const second = await post(
     "/v1/workers/executions/claim",
@@ -530,6 +682,16 @@ try {
   if (!second.execution || !second.lease) throw new Error("second claim returned no Execution");
   result.secondExecutionId = second.execution.id;
   result.secondTenantId = second.execution.tenantId;
+  if (requiresScrub) {
+    const workspaceScan = await scanForTenantA("/data/workspaces", first.execution.tenantId);
+    const cacheScan = await scanForTenantA("/data/git-cache", first.execution.tenantId);
+    const tmpScan = await scanForTenantA("/tmp", first.execution.tenantId);
+    result.residualPathCount = workspaceScan.residualPaths + cacheScan.residualPaths + tmpScan.residualPaths;
+    result.residualSecretReadable = workspaceScan.residualSecretReadable || cacheScan.residualSecretReadable || tmpScan.residualSecretReadable;
+    if (result.residualPathCount !== 0 || result.residualSecretReadable) {
+      throw new Error("Tenant B observed Tenant A residue:" + JSON.stringify(result));
+    }
+  }
   await complete(second, registration.token, "second");
 } catch (error) {
   result.error = String(error && error.stack ? error.stack : error);

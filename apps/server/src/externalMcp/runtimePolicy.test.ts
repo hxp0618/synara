@@ -25,19 +25,19 @@ describe("external MCP runtime policy", () => {
     });
   });
 
-  it("rejects local and full-access execution without their independent scopes", () => {
+  it("rejects local and full-access execution even when legacy elevated scopes exist", () => {
     expect(() =>
       resolveExternalMcpRuntimePolicy({
         requestedEnvironment: "local",
-        capabilities: new Set(["tasks:create"]),
+        capabilities: new Set(["tasks:create", "runtime:local"]),
       }),
-    ).toThrow(/runtime:local/);
+    ).toThrow(/untrusted/u);
     expect(() =>
       resolveExternalMcpRuntimePolicy({
         requestedRuntimeMode: "full-access",
-        capabilities: new Set(["tasks:create"]),
+        capabilities: new Set(["tasks:create", "runtime:full-access"]),
       }),
-    ).toThrow(/runtime:full-access/);
+    ).toThrow(/untrusted/u);
   });
 
   it("rejects Auto execution outside Codex and Claude sessions", () => {
@@ -49,14 +49,14 @@ describe("external MCP runtime policy", () => {
     ).toThrow(/only to Codex and Claude sessions/);
   });
 
-  it("allows each elevated runtime choice only with the matching scope", () => {
-    expect(
+  it("does not let combined legacy scopes bypass the fixed runtime boundary", () => {
+    expect(() =>
       resolveExternalMcpRuntimePolicy({
         requestedEnvironment: "local",
         requestedRuntimeMode: "full-access",
         capabilities: new Set(["runtime:local", "runtime:full-access"]),
       }),
-    ).toEqual({ environment: "local", runtimeMode: "full-access" });
+    ).toThrow(/cannot execute in a local checkout/u);
   });
 });
 

@@ -11,10 +11,12 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 export const SYNARA_CODEX_HOME_OVERLAY_DIR = "codex-home-overlay";
+export const SYNARA_CODEX_ISOLATED_HOME_OVERLAY_DIR = "codex-home-isolated-overlay";
 
 export interface CodexHomePathsInput {
   readonly env?: NodeJS.ProcessEnv;
   readonly homePath?: string;
+  readonly isolateExecutableConfig?: boolean;
 }
 
 export function resolveBaseCodexHomePath(
@@ -27,10 +29,16 @@ export function resolveBaseCodexHomePath(
 export function resolveSynaraCodexHomeOverlayPath(
   env: NodeJS.ProcessEnv,
   sourceHomePath: string,
+  options?: { readonly isolateExecutableConfig?: boolean },
 ): string {
   const runtimeHome = env.SYNARA_HOME?.trim();
   const overlayRoot = runtimeHome || path.join(path.dirname(sourceHomePath), ".synara", "runtime");
-  return path.join(overlayRoot, SYNARA_CODEX_HOME_OVERLAY_DIR);
+  return path.join(
+    overlayRoot,
+    options?.isolateExecutableConfig
+      ? SYNARA_CODEX_ISOLATED_HOME_OVERLAY_DIR
+      : SYNARA_CODEX_HOME_OVERLAY_DIR,
+  );
 }
 
 /**
@@ -41,14 +49,21 @@ export function resolveSynaraCodexHomeOverlayPath(
 export function resolveActiveCodexHomeWritePath(input: CodexHomePathsInput = {}): string {
   const env = input.env ?? process.env;
   const source = resolveBaseCodexHomePath(env, input.homePath);
-  const overlay = resolveSynaraCodexHomeOverlayPath(env, source);
+  const overlay = resolveSynaraCodexHomeOverlayPath(
+    env,
+    source,
+    input.isolateExecutableConfig === undefined
+      ? undefined
+      : { isolateExecutableConfig: input.isolateExecutableConfig },
+  );
   return path.resolve(source) === path.resolve(overlay) ? source : overlay;
 }
 
 /**
  * Returns every Codex home directory we should treat as legitimate when
- * allowlisting locally-generated image files: the source home and the overlay
- * home if they are distinct. Callers pre-`realpath`-resolve these as needed.
+ * allowlisting locally-generated image files: the source home, compatibility
+ * overlay, and executable-config-isolated overlay. Callers pre-`realpath`
+ * resolve these as needed.
  *
  * The overlay candidate remains included so generated images from earlier
  * sessions stay serveable until they are removed.
@@ -59,7 +74,17 @@ export function resolveCodexHomeAllowlistCandidates(
   const env = input.env ?? process.env;
   const source = resolveBaseCodexHomePath(env, input.homePath);
   const overlay = resolveSynaraCodexHomeOverlayPath(env, source);
+  const isolatedOverlay = resolveSynaraCodexHomeOverlayPath(env, source, {
+    isolateExecutableConfig: true,
+  });
   const sourceResolved = path.resolve(source);
   const overlayResolved = path.resolve(overlay);
-  return sourceResolved === overlayResolved ? [source] : [source, overlay];
+  const isolatedOverlayResolved = path.resolve(isolatedOverlay);
+  return [
+    ...new Map([
+      [sourceResolved, source],
+      [overlayResolved, overlay],
+      [isolatedOverlayResolved, isolatedOverlay],
+    ] as const).values(),
+  ];
 }

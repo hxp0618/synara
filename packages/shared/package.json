@@ -64,6 +64,18 @@
       "types": "./src/codexCollaborationMode.ts",
       "import": "./src/codexCollaborationMode.ts"
     },
+    "./codexRuntimeIsolation": {
+      "types": "./src/codexRuntimeIsolation.ts",
+      "import": "./src/codexRuntimeIsolation.ts"
+    },
+    "./codexPostToolUseProvenance": {
+      "types": "./src/codexPostToolUseProvenance.ts",
+      "import": "./src/codexPostToolUseProvenance.ts"
+    },
+    "./providerContentTrustPolicy": {
+      "types": "./src/providerContentTrustPolicy.ts",
+      "import": "./src/providerContentTrustPolicy.ts"
+    },
     "./desktopChrome": {
       "types": "./src/desktopChrome.ts",
       "import": "./src/desktopChrome.ts"
@@ -239,6 +251,10 @@
     "./providerDeliveryBlock": {
       "types": "./src/providerDeliveryBlock.ts",
       "import": "./src/providerDeliveryBlock.ts"
+    },
+    "./sensitiveActionPolicy": {
+      "types": "./src/sensitiveActionPolicy.ts",
+      "import": "./src/sensitiveActionPolicy.ts"
     }
   },
   "scripts": {

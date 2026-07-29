@@ -3,6 +3,8 @@
  *
  * @module DroidAdapterLive
  */
+import * as nodePath from "node:path";
+
 import {
   ApprovalRequestId,
   EventId,
@@ -40,6 +42,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import type * as Acp from "@agentclientprotocol/sdk";
 
 import { buildAcpSynaraMcpServers } from "../../agentGateway/mcpInjection.ts";
+import { writeFileStringAtomically } from "../../atomicWrite.ts";
 import {
   type SynaraHarnessPolicyDeliveryState,
   takeSynaraHarnessPolicyTextPartForProviderSession,
@@ -52,6 +55,7 @@ import {
   type AgentGatewaySessionLease,
 } from "../../agentGateway/sessionLease.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
+import { supportsPosixPermissions } from "../../privatePathPermissions.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { loadProviderPromptImageBlocks } from "../promptAttachments.ts";
 import { listFactoryPlugins, readFactoryPlugin } from "../FactoryPluginDiscovery.ts";
@@ -68,8 +72,8 @@ import {
   classifyAcpPromptTurnCompletion,
   mapAcpToAdapterError,
   readAcpFailedToolDetail,
+  resolveAcpHumanApprovalOutcome,
   resolveAcpPermissionPolicy,
-  selectAcpPermissionOptionId,
 } from "../acp/AcpAdapterSupport.ts";
 import {
   acceptAcpPlanUpdate,
@@ -107,6 +111,7 @@ import {
   applyDroidAcpModelSelection,
   discoverDroidAcpModels,
   makeDroidAcpRuntime,
+  serializeDroidRuntimeSecuritySettings,
   type DroidAcpRuntimeSettings,
 } from "../acp/DroidAcpSupport.ts";
 import { makeDroidSessionTeardownGate } from "../acp/DroidSessionTeardownGate.ts";
@@ -798,13 +803,40 @@ export function makeDroidAdapter(
           const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
+          yield* Effect.addFinalizer(() =>
+            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+          );
+
+          const runtimeSettingsPath = yield* Effect.gen(function* () {
+            const directory = yield* fileSystem
+              .makeTempDirectoryScoped({ prefix: "synara-droid-security-" })
+              .pipe(Effect.provideService(Scope.Scope, sessionScope));
+            if (supportsPosixPermissions()) {
+              yield* fileSystem.chmod(directory, 0o700);
+            }
+            const settingsPath = nodePath.join(directory, "settings.json");
+            yield* writeFileStringAtomically({
+              filePath: settingsPath,
+              contents: serializeDroidRuntimeSecuritySettings(),
+              mode: 0o600,
+            });
+            return settingsPath;
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Could not create isolated Droid runtime security settings.",
+                  cause,
+                }),
+            ),
+          );
+
           const gatewaySessionLease = acquireAgentGatewaySessionLease(
             agentGatewayCredentials,
             input.threadId,
             PROVIDER,
-          );
-          yield* Effect.addFinalizer(() =>
-            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
           yield* Effect.addFinalizer(() =>
             sessionScopeTransferred || !gatewaySessionLease
@@ -840,6 +872,7 @@ export function makeDroidAdapter(
             ...(droidModelSelection?.options?.reasoningEffort
               ? { reasoningEffort: droidModelSelection.options.reasoningEffort }
               : {}),
+            runtimeSettingsPath,
           };
 
           yield* Effect.logInfo("droid.acp.start", {
@@ -851,6 +884,7 @@ export function makeDroidAdapter(
             model: effectiveDroidSettings.model,
             reasoningEffort: effectiveDroidSettings.reasoningEffort,
             binaryPath: effectiveDroidSettings.binaryPath ?? "droid",
+            repositoryHooksDisabled: true,
           });
 
           const acp = yield* makeDroidAcpRuntime({
@@ -883,10 +917,12 @@ export function makeDroidAdapter(
             yield* acp.handleRequestPermission((params) =>
               Effect.gen(function* () {
                 yield* logNative(input.threadId, "session/request_permission", params);
+                const permissionRequest = parsePermissionRequest(params);
                 const policyOutcome = resolveAcpPermissionPolicy({
                   runtimeMode: input.runtimeMode,
                   interactionMode: ctx?.activeInteractionMode,
                   options: params.options,
+                  permissionRequest,
                 });
                 if (policyOutcome !== undefined) {
                   if (policyOutcome.outcome === "selected") {
@@ -913,7 +949,6 @@ export function makeDroidAdapter(
                   }
                   return { outcome: { outcome: "cancelled" as const } };
                 }
-                const permissionRequest = parsePermissionRequest(params);
                 const requestId = ApprovalRequestId.makeUnsafe(crypto.randomUUID());
                 const runtimeRequestId = RuntimeRequestId.makeUnsafe(requestId);
                 const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -934,7 +969,12 @@ export function makeDroidAdapter(
                     rawPayload: params,
                   }),
                 );
-                const resolved = yield* Deferred.await(decision);
+                const requestedDecision = yield* Deferred.await(decision);
+                const approvalOutcome = resolveAcpHumanApprovalOutcome({
+                  permissionRequest,
+                  requestedDecision,
+                  options: params.options,
+                });
                 pendingApprovals.delete(requestId);
                 yield* offerRuntimeEvent(
                   input.lifecycleGeneration,
@@ -945,26 +985,11 @@ export function makeDroidAdapter(
                     turnId: ctx?.activeTurnId,
                     requestId: runtimeRequestId,
                     permissionRequest,
-                    decision: resolved,
+                    decision: requestedDecision,
+                    appliedDecision: approvalOutcome.appliedDecision,
                   }),
                 );
-                return {
-                  outcome:
-                    resolved === "cancel"
-                      ? ({ outcome: "cancelled" } as const)
-                      : (() => {
-                          const selectedOptionId = selectAcpPermissionOptionId(
-                            resolved,
-                            params.options,
-                          );
-                          return selectedOptionId === undefined
-                            ? ({ outcome: "cancelled" } as const)
-                            : ({
-                                outcome: "selected" as const,
-                                optionId: selectedOptionId,
-                              } as const);
-                        })(),
-                };
+                return { outcome: approvalOutcome.outcome };
               }),
             );
             yield* acp.handleElicitation((params) =>

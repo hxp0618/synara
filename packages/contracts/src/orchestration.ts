@@ -279,6 +279,9 @@ export const OrchestrationMessageSource = Schema.Literals([
   "native",
   "handoff-import",
   "fork-import",
+  "external-mcp",
+  "synara-mcp",
+  "automation",
 ]);
 export type OrchestrationMessageSource = typeof OrchestrationMessageSource.Type;
 
@@ -1264,6 +1267,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
     attachments: ChatAttachmentList,
     skills: Schema.optional(Schema.Array(ProviderSkillReference)),
     mentions: Schema.optional(Schema.Array(ProviderMentionReference)),
+    // Server-authored provenance. The client command schema below omits this
+    // field, so browser callers cannot relabel untrusted content as native.
+    source: Schema.optional(OrchestrationMessageSource),
   }).check(TurnMessageContentCheck),
   modelSelection: Schema.optional(ModelSelection),
   providerOptions: Schema.optional(ProviderStartOptions),

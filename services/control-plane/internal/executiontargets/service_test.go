@@ -98,6 +98,69 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	}
 }
 
+func TestPlatformSharedWeakTargetsAreExcludedFromTenantProductSurface(t *testing.T) {
+	ctx := context.Background()
+	config, _ := platform.Defaults(platform.ProfilePersonal)
+	store, err := database.OpenMetadataStore(ctx, config, "", filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	domain, err := bootstrap.Ensure(ctx, store.DB(), platform.ProfilePersonal, "execution-target-isolation-boundary-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB(), config, nil)
+	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
+	weakTargets := make([]persistence.ExecutionTarget, 0, 3)
+	for _, kind := range []string{"local", "ssh", "docker"} {
+		weakTargets = append(weakTargets, persistence.ExecutionTarget{
+			ID: uuid.New(), Kind: kind, Name: "platform-" + kind, Status: "active",
+			ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{},
+		})
+	}
+	platformKubernetes := persistence.ExecutionTarget{
+		ID: uuid.New(), Kind: "kubernetes", Name: "platform-kubernetes", Status: "active",
+		ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{},
+	}
+	models := append(weakTargets, platformKubernetes)
+	if err := store.DB().Create(&models).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := service.List(ctx, principal, domain.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundKubernetes := false
+	for _, target := range listed {
+		if target.TenantID == nil && target.Kind != "kubernetes" {
+			t.Fatalf("weak platform-shared Target leaked into tenant product surface: %#v", target)
+		}
+		if target.ID == platformKubernetes.ID {
+			foundKubernetes = true
+			if target.IsolationProfile != platform.IsolationKubernetesRestricted || !target.PlatformSharedEligible ||
+				target.ProductBoundary != "multi-tenant-restricted" {
+				t.Fatalf("Kubernetes isolation declaration = %#v", target)
+			}
+		}
+	}
+	if !foundKubernetes {
+		t.Fatal("restricted Kubernetes Target was excluded with weak Target kinds")
+	}
+
+	weakID := weakTargets[0].ID
+	_, err = service.Get(ctx, principal, domain.TenantID, weakID)
+	assertExecutionTargetProblem(t, err, 404, "execution_target_not_found")
+	_, err = service.ResolveForSession(ctx, domain.TenantID, domain.OrganizationID, &weakID)
+	assertExecutionTargetProblem(t, err, 409, "execution_target_required")
+	_, _, err = service.ResolveWorkerTarget(ctx, weakID, "local")
+	assertExecutionTargetProblem(t, err, 404, "execution_target_not_found")
+}
+
 func TestCreateNormalizesAndPersistsProviderPolicy(t *testing.T) {
 	ctx := context.Background()
 	config, _ := platform.Defaults(platform.ProfilePersonal)

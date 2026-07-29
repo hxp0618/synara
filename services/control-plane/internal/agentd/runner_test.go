@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,7 @@ func TestRunnerEnvironmentUsesExplicitRuntimeAllowlist(t *testing.T) {
 		"SYNARA_WORKER_REGISTRATION_TOKEN=worker-secret",
 		"SYNARA_LEASE_TOKEN=lease-secret",
 		"SYNARA_CONTROL_PLANE_URL=https://control.example.test",
+		providerOuterSandboxProfileEnvironment + "=ambient-value-must-not-win",
 		"OPENAI_API_KEY=openai-secret",
 		"ANTHROPIC_API_KEY=anthropic-secret",
 		"AWS_ACCESS_KEY_ID=aws-key",
@@ -120,6 +122,20 @@ func TestRunnerEnvironmentUsesExplicitRuntimeAllowlist(t *testing.T) {
 		if actual[name] != value {
 			t.Fatalf("Runner child environment %s = %q, want %q", name, actual[name], value)
 		}
+	}
+}
+
+func TestProviderProcessEnvironmentInjectsOnlyDerivedOuterSandboxProfile(t *testing.T) {
+	actual := providerProcessEnvironment([]string{
+		"PATH=/usr/bin:/bin",
+		providerOuterSandboxProfileEnvironment + "=ambient-value-must-not-win",
+	}, providerOuterSandboxKubernetesRestricted)
+	want := []string{
+		"PATH=/usr/bin:/bin",
+		providerOuterSandboxProfileEnvironment + "=" + providerOuterSandboxKubernetesRestricted,
+	}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("Provider process environment = %#v, want %#v", actual, want)
 	}
 }
 
@@ -525,17 +541,21 @@ func TestWithProviderHostCapabilitiesIncludesTrustedProcessContainmentCapability
 }
 
 func TestCanonicalInteractionRuntimeEventUsesNegotiatedV2(t *testing.T) {
+	sensitiveAction := map[string]any{
+		"categories": []any{"network-egress"}, "requiresFreshApproval": true, "allowSessionApproval": false,
+	}
 	approval, err := canonicalInteractionRuntimeEvent(RunnerMessage{
 		Type: "interaction", EventVersion: executions.RuntimeEventVersionV2,
 		Payload: map[string]any{
 			"interactionType": "approval", "requestId": "approval-1", "requestKind": "file-read", "summary": "Read file",
+			"sensitiveAction": sensitiveAction,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if approval.EventType != "request.opened" || approval.Payload["requestType"] != "file_read_approval" ||
-		approval.Payload["detail"] != "Read file" {
+		approval.Payload["detail"] != "Read file" || !reflect.DeepEqual(approval.Payload["sensitiveAction"], sensitiveAction) {
 		t.Fatalf("unexpected canonical approval event: %#v", approval)
 	}
 

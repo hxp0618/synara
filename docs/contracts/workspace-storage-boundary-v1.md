@@ -15,13 +15,13 @@ path, Pod UID as storage identity, PVC name as live Workspace identity, or infra
 
 ## Supported roles
 
-| Medium | Supported role | Authoritative for recovery | Failure boundary |
-| --- | --- | --- | --- |
-| Ephemeral disk | Active, mutable Workspace for one Worker generation. Kubernetes uses a size-bounded `emptyDir`. | No | Pod, container, VM, or host loss may remove it. |
-| PVC | Optional target-local, rebuildable Git object cache only (`gitCachePersistentVolumeClaim`). | No | May outlive Pods, but corruption or deletion must be handled as a cache miss. It is not a shared writable Workspace. |
-| CSI `VolumeSnapshot` | Optional operator backup/acceleration outside the Synara v1 protocol. | No | Cluster/driver scoped. Synara cannot select it for recovery until its content is imported and verified as a Ready Artifact. |
-| Object Storage | Payload bytes for Patch and Workspace Snapshot Checkpoints, with size and SHA-256 verified by the Control Plane. | Yes, after Artifact and Checkpoint are both `ready` | Survives Worker/Pod/Target loss according to the operator's Object Store durability and replication policy. |
-| Git | Base commit and branch/reference for reproducible tracked content. | Yes, only for the content actually represented by the Ready Checkpoint | Does not preserve uncommitted tracked changes, untracked files, deleted files, ignored non-cache content, or unavailable private remotes. |
+| Medium               | Supported role                                                                                                   | Authoritative for recovery                                             | Failure boundary                                                                                                                          |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Ephemeral disk       | Active, mutable Workspace for one Worker generation. Kubernetes uses a size-bounded `emptyDir`.                  | No                                                                     | Pod, container, VM, or host loss may remove it.                                                                                           |
+| PVC                  | Optional target-local, rebuildable Git object cache only (`gitCachePersistentVolumeClaim`).                      | No                                                                     | May outlive Pods, but corruption or deletion must be handled as a cache miss. It is not a shared writable Workspace.                      |
+| CSI `VolumeSnapshot` | Optional operator backup/acceleration outside the Synara v1 protocol.                                            | No                                                                     | Cluster/driver scoped. Synara cannot select it for recovery until its content is imported and verified as a Ready Artifact.               |
+| Object Storage       | Payload bytes for Patch and Workspace Snapshot Checkpoints, with size and SHA-256 verified by the Control Plane. | Yes, after Artifact and Checkpoint are both `ready`                    | Survives Worker/Pod/Target loss according to the operator's Object Store durability and replication policy.                               |
+| Git                  | Base commit and branch/reference for reproducible tracked content.                                               | Yes, only for the content actually represented by the Ready Checkpoint | Does not preserve uncommitted tracked changes, untracked files, deleted files, ignored non-cache content, or unavailable private remotes. |
 
 The PVC role is intentionally narrow. A future design that introduces a live Workspace PVC or makes a CSI
 snapshot part of RecoveryBundle authority requires a new contract version, tenant isolation model, generation

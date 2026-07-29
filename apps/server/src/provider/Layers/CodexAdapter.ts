@@ -19,6 +19,7 @@ import {
   type ProviderSendTurnInput,
   type ProviderListSkillsResult,
   type ProviderRuntimeEvent,
+  SensitiveActionAssessment,
   type ServerVoiceTranscriptionResult,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
@@ -910,6 +911,10 @@ function mapToRuntimeEvents(
   commandOutputOffsets: Map<string, number>,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   const payload = asObject(event.payload);
+  const sensitiveActionCandidate = payload?.sensitiveAction;
+  const sensitiveAction = Schema.is(SensitiveActionAssessment)(sensitiveActionCandidate)
+    ? sensitiveActionCandidate
+    : undefined;
   const turn = asObject(payload?.turn);
   const generatedImageEndEvent = mapGeneratedImageEndEvent(event, canonicalThreadId);
   if (generatedImageEndEvent) {
@@ -963,6 +968,7 @@ function mapToRuntimeEvents(
           requestType: toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
+          ...(sensitiveAction ? { sensitiveAction } : {}),
         },
       },
     ];
@@ -982,6 +988,7 @@ function mapToRuntimeEvents(
           requestType,
           ...(decision ? { decision } : {}),
           ...(event.payload !== undefined ? { resolution: event.payload } : {}),
+          ...(sensitiveAction ? { sensitiveAction } : {}),
         },
       },
     ];
@@ -1411,6 +1418,7 @@ function mapToRuntimeEvents(
         payload: {
           requestType,
           ...(event.payload !== undefined ? { resolution: event.payload } : {}),
+          ...(sensitiveAction ? { sensitiveAction } : {}),
         },
       },
     ];
@@ -1773,7 +1781,6 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             ...(agentGatewayCredentials
               ? {
                   agentGatewayMcp: {
-                    endpointUrl: () => agentGatewayCredentials.mcpEndpointUrl,
                     acquireSessionLease: (threadId) =>
                       acquireAgentGatewaySessionLease(agentGatewayCredentials, threadId, PROVIDER)!,
                   },

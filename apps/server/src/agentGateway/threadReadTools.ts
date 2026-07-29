@@ -33,6 +33,7 @@ import {
   decodeWaitForThreadsInput,
   errorText,
   PROVIDER_KINDS,
+  UNTRUSTED_TASK_PROVIDER_KINDS,
   readBooleanArg,
   readIsoTimestampArg,
   readNumberArg,
@@ -140,7 +141,7 @@ export function makeThreadReadTools(input: ThreadReadToolsInput): ReadonlyArray<
           ),
         );
         const availabilities = yield* loadProviderAvailabilities;
-        const providers = yield* Effect.forEach(PROVIDER_KINDS, (provider) =>
+        const providers = yield* Effect.forEach(UNTRUSTED_TASK_PROVIDER_KINDS, (provider) =>
           loadAgentGatewayProviderCatalog({
             provider,
             discovery: providerDiscovery,

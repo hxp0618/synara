@@ -50,6 +50,21 @@ func TestPostgresSupportsEveryExecutionTargetKind(t *testing.T) {
 	}
 }
 
+func TestExecutionTargetIsolationDeclarations(t *testing.T) {
+	for _, kind := range []ExecutionTargetKind{TargetLocal, TargetSSH, TargetDocker} {
+		declaration := IsolationDeclaration(kind)
+		if declaration.Profile != IsolationSingleTenantTrusted || declaration.PlatformSharedEligible ||
+			declaration.ProductBoundary != "single-tenant-trusted" {
+			t.Fatalf("%s isolation declaration = %#v", kind, declaration)
+		}
+	}
+	kubernetes := IsolationDeclaration(TargetKubernetes)
+	if kubernetes.Profile != IsolationKubernetesRestricted || !kubernetes.PlatformSharedEligible ||
+		kubernetes.ProductBoundary != "multi-tenant-restricted" {
+		t.Fatalf("Kubernetes isolation declaration = %#v", kubernetes)
+	}
+}
+
 func TestWorkerProtocolValidationNamesCurrentVersion(t *testing.T) {
 	config, err := Defaults(ProfileSingleNode)
 	if err != nil {

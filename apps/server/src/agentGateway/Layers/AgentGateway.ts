@@ -55,6 +55,7 @@ import { gatewayIsoNow as isoNow } from "../creationUtils.ts";
 import {
   MODEL_SELECTION_INPUT_SCHEMA,
   PROVIDER_KINDS,
+  UNTRUSTED_TASK_PROVIDER_KINDS,
   ToolInputError,
   buildModelSelection,
   decodeCreateThreadsInput,
@@ -279,7 +280,7 @@ export const makeAgentGateway = Effect.gen(function* () {
           target: {
             ...MODEL_SELECTION_INPUT_SCHEMA,
           },
-          provider: { type: "string", enum: [...PROVIDER_KINDS] },
+          provider: { type: "string", enum: [...UNTRUSTED_TASK_PROVIDER_KINDS] },
           model: { type: "string" },
           options: {
             type: "object",

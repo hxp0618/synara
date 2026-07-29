@@ -3,11 +3,7 @@
 // Layer: Chat composer UI browser test
 // Depends on: ComposerPendingApprovalPanel and vitest-browser-react.
 
-import {
-  ApprovalRequestId,
-  type ProviderApprovalDecision,
-  type ProviderRequestKind,
-} from "@synara/contracts";
+import { ApprovalRequestId, type ProviderApprovalDecision } from "@synara/contracts";
 import { page } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -35,7 +31,7 @@ async function mountApprovalPanel(input?: { approval?: PendingApproval; isRespon
       _requestId: ApprovalRequestId,
       _decision: ProviderApprovalDecision,
       _lifecycleGeneration?: string,
-      _requestKind?: ProviderRequestKind,
+      _requestKind?: PendingApproval["requestKind"],
     ) => undefined,
   );
   const screen = await render(
@@ -81,7 +77,7 @@ describe("ComposerPendingApprovalPanel", () => {
   });
 
   it("renders the request kind prompt and parsed command detail", async () => {
-    const requestKind: ProviderRequestKind = "command";
+    const requestKind: PendingApproval["requestKind"] = "command";
     const mounted = await mountApprovalPanel({
       approval: makeApproval({ requestKind }),
     });

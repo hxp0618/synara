@@ -28,8 +28,9 @@ func TestKubernetesReconcilerAgainstRealAPIServer(t *testing.T) {
 		"image": "busybox:1.37", "imagePullPolicy": "IfNotPresent",
 		"controlPlaneUrl": "http://127.0.0.1:3780", "allowInsecureControlPlane": true,
 		"runnerCommand": []string{"/bin/true"}, "maxActivePods": 1,
-		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "10m", "cpuLimit": "100m",
-		"memoryRequest": "16Mi", "memoryLimit": "64Mi", "workspaceSizeLimit": "64Mi",
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "10m", "cpuLimit": "100m", "pidsLimit": 512,
+		"memoryRequest": "16Mi", "memoryLimit": "64Mi",
+		"ephemeralStorageRequest": "32Mi", "ephemeralStorageLimit": "128Mi", "workspaceSizeLimit": "64Mi",
 		"quotaCpuRequests": "100m", "quotaCpuLimits": "1", "quotaMemoryRequests": "128Mi",
 		"quotaMemoryLimits": "1Gi", "quotaEphemeralStorage": "1Gi",
 	}

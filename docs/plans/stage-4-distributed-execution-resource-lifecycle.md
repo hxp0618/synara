@@ -507,10 +507,10 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
 - [x] Migration `000051` 将 Worker Lease 绑定到不可变 worker incarnation / instance UID；Worker 重注册后即使
       逻辑 `worker_id` 相同，也不能续租、完成 quiesce 后的 Suspend 或继承旧 Pod 的 Generation 权限。
 - [x] Linux/非 Kubernetes 受保护 cgroup-v2 supervisor 已支持独立 Provider UID/GID、supervisor-owned parent、
-	  启动前 `UseCgroupFD` 绑定、`Pdeathsig=SIGKILL`、单调 incarnation/generation fence、`cgroup.kill`、
-	  `populated=0` 等待与清理。v3 进一步要求 systemd 254+ `DelegateSubgroup=synara-agentd` 与无进程委派根，
-	  在 held parent/bundle 启用并回读 `cpu/memory/pids`，且于 Provider 首条指令前写入并精确回读有限
-	  `pids.max`/`memory.max`/`cpu.max`；缺 controller、配置或内核接口不会回退无上限。Provider workspace/runtime output 会显式移交给低权限身份，Git cache、注册材料和
+      启动前 `UseCgroupFD` 绑定、`Pdeathsig=SIGKILL`、单调 incarnation/generation fence、`cgroup.kill`、
+      `populated=0` 等待与清理。v3 进一步要求 systemd 254+ `DelegateSubgroup=synara-agentd` 与无进程委派根，
+      在 held parent/bundle 启用并回读 `cpu/memory/pids`，且于 Provider 首条指令前写入并精确回读有限
+      `pids.max`/`memory.max`/`cpu.max`；缺 controller、配置或内核接口不会回退无上限。Provider workspace/runtime output 会显式移交给低权限身份，Git cache、注册材料和
       Ed25519 private key 仍由 supervisor/root 保护。只有 live probe 真正证明 credential drop、fd-relative attach、
       `setsid` descendant 清理并由 root-only key 签名时，agentd 才投影可被 Target policy 验证的 capability；legacy
       同身份模式仍不能宣告严格 containment。独立 SSH gate 使用固定 host key、仅读取非秘密 env allowlist，并要求
@@ -520,9 +520,9 @@ general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队�
       才提交，offline bootstrap 只接受当前 install/upgrade expected UID + generation，不能 Claim Execution/
       Workspace cleanup。active 重启只恢复同一逻辑 Worker/UID/generation；revoke 则在单个本地事务先提交 Target
       fence 和 Worker/token/lease/recovery/cleanup 撤权，再访问 KMS/远端，失败可复用同 generation 重试。当前仓库已有
-	  [特权 Linux 容器证明](../reports/stage-4-protected-cgroup-linux-acceptance-20260725.md)，但生产 SSH 宿主机仍需执行
-	  该 gate；[OrbStack VM v3 live containment final3](../reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md)
-	  已让真实 systemd/cgroup controller/limit/fence/recovery 场景和版本限定的 exact-ID RPC 自动清理一起全绿 5/5，且仍禁止名称回退；本地
+      [特权 Linux 容器证明](../reports/stage-4-protected-cgroup-linux-acceptance-20260725.md)，但生产 SSH 宿主机仍需执行
+      该 gate；[OrbStack VM v3 live containment final3](../reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md)
+      已让真实 systemd/cgroup controller/limit/fence/recovery 场景和版本限定的 exact-ID RPC 自动清理一起全绿 5/5，且仍禁止名称回退；本地
       disposable OrbStack SSH final4 已完成 16/16 产品路径验收；Kubernetes waiting/active-turn
       Suspend 继续使用 exact kubelet Pod terminal proof。
 - [x] Claim 已为每个 Generation 创建不可变 opaque Provider Credential Grant；Recovery Bundle/Workload 冻结

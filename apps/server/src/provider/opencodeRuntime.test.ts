@@ -12,10 +12,14 @@ import { describe, expect, it } from "vitest";
 import {
   buildOpenCodePermissionRules,
   buildOpenCodeServerProcessEnv,
+  KILO_CLI_SPEC,
+  OPENCODE_CLI_SPEC,
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   makeOpenCodeRuntimeLive,
   OPENCODE_LOCAL_SERVER_IDLE_TTL_MS,
+  openCodePureCliArguments,
+  openCodePureModeVersionIssue,
   parseOpenCodeCliModelsOutput,
   parseOpenCodeCredentialProviderIDs,
   toOpenCodeFileParts,
@@ -24,20 +28,15 @@ import {
 const encoder = new TextEncoder();
 
 describe("OpenCode permission policy", () => {
-  it("keeps full access non-interactive while enforcing read-only Plan turns", () => {
+  it("routes security-relevant Full Access and Plan tools through the host classifier", () => {
     expect(buildOpenCodePermissionRules("full-access")).toEqual([
-      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "*", pattern: "*", action: "ask" },
+      { permission: "todoread", pattern: "*", action: "allow" },
+      { permission: "todowrite", pattern: "*", action: "allow" },
+      { permission: "question", pattern: "*", action: "allow" },
     ]);
     expect(buildOpenCodePermissionRules("full-access", "plan")).toEqual([
-      { permission: "*", pattern: "*", action: "deny" },
-      { permission: "read", pattern: "*", action: "allow" },
-      { permission: "glob", pattern: "*", action: "allow" },
-      { permission: "grep", pattern: "*", action: "allow" },
-      { permission: "list", pattern: "*", action: "allow" },
-      { permission: "lsp", pattern: "*", action: "allow" },
-      { permission: "webfetch", pattern: "*", action: "allow" },
-      { permission: "websearch", pattern: "*", action: "allow" },
-      { permission: "codesearch", pattern: "*", action: "allow" },
+      { permission: "*", pattern: "*", action: "ask" },
       { permission: "todoread", pattern: "*", action: "allow" },
       { permission: "todowrite", pattern: "*", action: "allow" },
       { permission: "question", pattern: "*", action: "allow" },
@@ -66,10 +65,26 @@ function mockOpenCodeServerHandle(input: {
   });
 }
 
-function mockOpenCodeServerSpawnerLayer(input: { stdout: string; stderr: string }) {
+function mockOpenCodeServerSpawnerLayer(input: {
+  stdout: string;
+  stderr: string;
+  versionOutput?: string;
+  versionCode?: number;
+}) {
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make(() => Effect.succeed(mockOpenCodeServerHandle(input))),
+    ChildProcessSpawner.make((command) =>
+      command._tag === "StandardCommand" && command.args.includes("--version")
+        ? Effect.succeed(
+            mockOpenCodeServerHandle({
+              stdout:
+                input.versionOutput ?? `opencode ${OPENCODE_CLI_SPEC.minimumPureModeVersion}\n`,
+              stderr: "",
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.versionCode ?? 0)),
+            }),
+          )
+        : Effect.succeed(mockOpenCodeServerHandle(input)),
+    ),
   );
 }
 
@@ -82,6 +97,15 @@ function mockPooledOpenCodeServerSpawnerLayer(state: {
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
+      if (command._tag === "StandardCommand" && command.args.includes("--version")) {
+        return Effect.succeed(
+          mockOpenCodeServerHandle({
+            stdout: `opencode ${OPENCODE_CLI_SPEC.minimumPureModeVersion}\n`,
+            stderr: "",
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          }),
+        );
+      }
       const cmd = command as unknown as {
         options?: { cwd?: string };
       };
@@ -184,15 +208,36 @@ describe("toOpenCodeFileParts", () => {
 });
 
 describe("buildOpenCodeServerProcessEnv", () => {
-  it("does not override file-based config with synthetic empty config content", () => {
+  it("disables executable OpenCode config and external plugins without replacing trusted config content", () => {
     const env = buildOpenCodeServerProcessEnv({
       baseEnv: {
         PATH: "/usr/bin",
+        OPENCODE_DISABLE_PROJECT_CONFIG: "0",
+        OPENCODE_PURE: "0",
       },
     });
 
     expect(env.OPENCODE_CONFIG_CONTENT).toBeUndefined();
+    expect(env.OPENCODE_DISABLE_PROJECT_CONFIG).toBe("1");
+    expect(env.OPENCODE_PURE).toBe("1");
+    expect(env.KILO_DISABLE_PROJECT_CONFIG).toBeUndefined();
+    expect(env.KILO_PURE).toBeUndefined();
     expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("uses Kilo's project-config kill switch for Kilo children", () => {
+    const env = buildOpenCodeServerProcessEnv({
+      cliSpec: KILO_CLI_SPEC,
+      baseEnv: {
+        KILO_DISABLE_PROJECT_CONFIG: "false",
+        KILO_PURE: "false",
+      },
+    });
+
+    expect(env.KILO_DISABLE_PROJECT_CONFIG).toBe("1");
+    expect(env.KILO_PURE).toBe("1");
+    expect(env.OPENCODE_DISABLE_PROJECT_CONFIG).toBeUndefined();
+    expect(env.OPENCODE_PURE).toBeUndefined();
   });
 
   it("preserves an explicitly configured config-content environment value", () => {
@@ -220,7 +265,68 @@ describe("buildOpenCodeServerProcessEnv", () => {
   });
 });
 
+describe("openCodePureCliArguments", () => {
+  it("requires pure mode before every OpenCode-compatible command", () => {
+    expect(openCodePureCliArguments(["serve", "--port", "4096"])).toEqual([
+      "--pure",
+      "serve",
+      "--port",
+      "4096",
+    ]);
+    expect(openCodePureCliArguments(["--pure", "models", "--verbose"])).toEqual([
+      "--pure",
+      "models",
+      "--verbose",
+    ]);
+  });
+});
+
+describe("openCodePureModeVersionIssue", () => {
+  it("pins each Provider family to an audited pure-mode implementation", () => {
+    expect(openCodePureModeVersionIssue(OPENCODE_CLI_SPEC, "opencode 1.15.11")).toBeNull();
+    expect(openCodePureModeVersionIssue(KILO_CLI_SPEC, "kilo 7.4.16")).toBeNull();
+    expect(openCodePureModeVersionIssue(OPENCODE_CLI_SPEC, "opencode 1.15.10")).toContain(
+      "too old",
+    );
+    expect(openCodePureModeVersionIssue(KILO_CLI_SPEC, "unknown version")).toContain(
+      "could not be determined",
+    );
+  });
+});
+
 describe("OpenCodeRuntime startup diagnostics", () => {
+  it("fails before server startup when the CLI is below the audited pure-mode floor", async () => {
+    const error = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* OpenCodeRuntime;
+          return yield* runtime
+            .startOpenCodeServerProcess({ binaryPath: "/custom/bin/opencode" })
+            .pipe(Effect.flip);
+        }),
+      ).pipe(
+        Effect.provide(
+          makeOpenCodeRuntimeLive({
+            teardownProcessTree: async () => ({ escalated: false, signalErrors: [] }),
+          }).pipe(
+            Layer.provide(
+              mockOpenCodeServerSpawnerLayer({
+                stdout: "must not start\n",
+                stderr: "",
+                versionOutput: "opencode 1.15.10\n",
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(OpenCodeRuntimeError.is(error)).toBe(true);
+    expect(error.operation).toBe("verifyPureModeVersion");
+    expect(error.detail).toContain("too old");
+    expect(error.detail).toContain(OPENCODE_CLI_SPEC.minimumPureModeVersion);
+  });
+
   it("includes command and partial process output when server startup times out", async () => {
     const error = await Effect.runPromise(
       Effect.scoped(
@@ -257,7 +363,7 @@ describe("OpenCodeRuntime startup diagnostics", () => {
     expect(OpenCodeRuntimeError.is(error)).toBe(true);
     expect(error.detail).toContain("Timed out waiting for OpenCode server start after 5ms.");
     expect(error.detail).toContain(
-      "command: /custom/bin/opencode serve --hostname 127.0.0.1 --port 58123",
+      "command: /custom/bin/opencode --pure serve --hostname 127.0.0.1 --port 58123",
     );
     expect(error.detail).toContain('OpenCode ready prefix: "opencode server listening"');
     expect(error.detail).toContain("stdout:\nbooting custom OpenCode wrapper");

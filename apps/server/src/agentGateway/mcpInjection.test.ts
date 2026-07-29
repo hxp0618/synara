@@ -68,11 +68,15 @@ describe("agent gateway MCP injection", () => {
     assert.include(gained, `exclude = ["${SYNARA_AGENT_GATEWAY_TOKEN_ENV}"]`);
     assert.include(gained, 'inherit = "core"');
 
-    // No policy table: unchanged (the managed section appends its own).
-    assert.equal(
-      mergeShellEnvPolicyExclude('[model]\nname = "gpt-5.5"', SYNARA_AGENT_GATEWAY_TOKEN_ENV),
+    // No policy table: create one immediately so callers cannot accidentally
+    // expose the token while assembling a later managed section.
+    const withoutPolicy = mergeShellEnvPolicyExclude(
       '[model]\nname = "gpt-5.5"',
+      SYNARA_AGENT_GATEWAY_TOKEN_ENV,
     );
+    assert.include(withoutPolicy, '[model]\nname = "gpt-5.5"');
+    assert.include(withoutPolicy, "[shell_environment_policy]");
+    assert.include(withoutPolicy, `exclude = ["${SYNARA_AGENT_GATEWAY_TOKEN_ENV}"]`);
   });
 
   it("ignores commented and unrelated token references when merging shell exclusions", () => {

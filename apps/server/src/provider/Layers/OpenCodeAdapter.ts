@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EventId,
+  type ProviderApprovalDecision,
   type ProviderKind,
   type ProviderComposerCapabilities,
   type ProviderListCommandsResult,
@@ -16,6 +17,10 @@ import {
   TurnId,
   type UserInputQuestion,
 } from "@synara/contracts";
+import {
+  classifySensitiveAction,
+  type SensitiveActionAssessment,
+} from "@synara/shared/sensitiveActionPolicy";
 import { Cause, Deferred, Effect, Exit, Layer, Option, Queue, Ref, Scope, Stream } from "effect";
 import type {
   AssistantMessage,
@@ -146,6 +151,12 @@ interface OpenCodeTurnSnapshot {
   readonly items: Array<unknown>;
 }
 
+interface PendingOpenCodePermission {
+  readonly request: PermissionRequest;
+  readonly sensitiveAction: SensitiveActionAssessment;
+  requestedDecision?: ProviderApprovalDecision;
+}
+
 interface OpenCodeSessionContext {
   harnessPolicyDelivered?: boolean;
   readonly gatewayControlAvailable: boolean;
@@ -156,7 +167,7 @@ interface OpenCodeSessionContext {
   readonly server: OpenCodeServerConnection;
   readonly directory: string;
   readonly openCodeSessionId: string;
-  readonly pendingPermissions: Map<string, PermissionRequest>;
+  readonly pendingPermissions: Map<string, PendingOpenCodePermission>;
   /** Permission request ids resolved by Synara policy and never surfaced to the UI. */
   readonly policyResolvedPermissionIds: Set<string>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
@@ -335,6 +346,43 @@ function mapPermissionDecision(reply: "once" | "always" | "reject"): string {
     default:
       return "decline";
   }
+}
+
+function assessOpenCodePermission(request: PermissionRequest): SensitiveActionAssessment {
+  const metadata = openCodeRecord(request.metadata);
+  const patterns = request.patterns.map((pattern) => pattern.trim()).filter(Boolean);
+  const command = request.permission === "bash" ? patterns.join("\n") : undefined;
+  const paths =
+    request.permission === "edit" ||
+    request.permission === "read" ||
+    request.permission === "glob" ||
+    request.permission === "grep" ||
+    request.permission === "list" ||
+    request.permission === "external_directory"
+      ? patterns
+      : [];
+  return classifySensitiveAction({
+    toolName: request.permission,
+    toolInput: {
+      ...(metadata ?? {}),
+      patterns,
+    },
+    ...(command ? { command } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+  });
+}
+
+function openCodePlanPermissionCanRunWithoutHuman(request: PermissionRequest): boolean {
+  return ["read", "glob", "grep", "list", "lsp"].includes(request.permission);
+}
+
+function effectiveOpenCodeApprovalDecision(
+  pending: PendingOpenCodePermission,
+  decision: ProviderApprovalDecision,
+): ProviderApprovalDecision {
+  return decision === "acceptForSession" && pending.sensitiveAction.requiresFreshApproval
+    ? "accept"
+    : decision;
 }
 
 function resolveTurnSnapshot(
@@ -2371,16 +2419,23 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
             ) {
               break;
             }
+            const sensitiveAction = assessOpenCodePermission(event.properties);
             // A permission recovered without an active turn has no trustworthy interaction
             // mode. Fail closed so a request left by an interrupted Plan turn can never be
             // reinterpreted as Full Access after a process restart or reconnect.
             const policyReply =
-              context.activeInteractionMode === undefined ||
-              context.activeInteractionMode === "plan"
+              context.activeInteractionMode === undefined
                 ? "reject"
-                : context.session.runtimeMode === "full-access"
-                  ? "once"
-                  : undefined;
+                : context.activeInteractionMode === "plan"
+                  ? openCodePlanPermissionCanRunWithoutHuman(event.properties) &&
+                    !sensitiveAction.requiresFreshApproval
+                    ? "once"
+                    : "reject"
+                  : context.session.runtimeMode === "full-access"
+                    ? sensitiveAction.requiresFreshApproval
+                      ? undefined
+                      : "once"
+                    : undefined;
             if (policyReply !== undefined) {
               context.policyResolvedPermissionIds.add(event.properties.id);
               const replyExit = yield* Effect.exit(
@@ -2423,7 +2478,11 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
               }
               break;
             }
-            context.pendingPermissions.set(event.properties.id, event.properties);
+            context.pendingPermissions.set(event.properties.id, {
+              request: event.properties,
+              sensitiveAction,
+            });
+            const metadata = openCodeRecord(event.properties.metadata) ?? {};
             yield* emit(context, {
               ...buildEventBase({
                 threadId: context.session.threadId,
@@ -2438,7 +2497,14 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   event.properties.patterns.length > 0
                     ? event.properties.patterns.join("\n")
                     : event.properties.permission,
-                args: event.properties.metadata,
+                ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
+                args: {
+                  ...metadata,
+                  permission: event.properties.permission,
+                  patterns: event.properties.patterns,
+                  sessionApprovalAvailable: !sensitiveAction.requiresFreshApproval,
+                  ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
+                },
               },
             });
             break;
@@ -2449,7 +2515,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
               // Synara policy resolved this request; nothing was surfaced to the UI.
               break;
             }
-            const request = context.pendingPermissions.get(event.properties.requestID);
+            const pending = context.pendingPermissions.get(event.properties.requestID);
             context.pendingPermissions.delete(event.properties.requestID);
             yield* emit(context, {
               ...buildEventBase({
@@ -2460,8 +2526,16 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
               }),
               type: "request.resolved",
               payload: {
-                requestType: request ? mapPermissionToRequestType(request.permission) : "unknown",
+                requestType: pending
+                  ? mapPermissionToRequestType(pending.request.permission)
+                  : "unknown",
                 decision: mapPermissionDecision(event.properties.reply),
+                ...(pending?.sensitiveAction.requiresFreshApproval
+                  ? { sensitiveAction: pending.sensitiveAction }
+                  : {}),
+                ...(pending?.requestedDecision
+                  ? { requestedDecision: pending.requestedDecision }
+                  : {}),
               },
             });
             break;
@@ -3865,18 +3939,23 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
         "respondToRequest",
       )(function* (threadId, requestId, decision) {
         const context = ensureAdapterSessionContext(threadId);
-        if (!context.pendingPermissions.has(requestId)) {
+        const pending = context.pendingPermissions.get(requestId);
+        if (!pending) {
           return yield* new ProviderAdapterRequestError({
             provider,
             method: "permission.reply",
             detail: `Unknown pending permission request: ${requestId}`,
           });
         }
+        const effectiveDecision = effectiveOpenCodeApprovalDecision(pending, decision);
+        if (effectiveDecision !== decision) {
+          pending.requestedDecision = decision;
+        }
 
         yield* runOpenCodeSdk("permission.reply", () =>
           context.client.permission.reply({
             requestID: requestId,
-            reply: toOpenCodePermissionReply(decision),
+            reply: toOpenCodePermissionReply(effectiveDecision),
           }),
         ).pipe(Effect.mapError(toAdapterRequestError));
       });

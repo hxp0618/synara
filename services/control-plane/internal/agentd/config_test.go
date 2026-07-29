@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 )
 
 func TestLoadConfigDefaultsExperimentalProvidersToDisabled(t *testing.T) {
@@ -365,6 +367,9 @@ func TestLoadConfigDefaultsGitCacheRootBesideWorkspaceRoot(t *testing.T) {
 	if cfg.WorkspaceRoot != workspaceRoot || cfg.GitCacheRoot != expected {
 		t.Fatalf("unexpected workspace storage roots: workspace=%q gitCache=%q", cfg.WorkspaceRoot, cfg.GitCacheRoot)
 	}
+	if cfg.ProviderOuterSandboxProfile != providerOuterSandboxSingleTenantTrusted {
+		t.Fatalf("local Provider outer sandbox profile = %q", cfg.ProviderOuterSandboxProfile)
+	}
 }
 
 func TestLoadConfigUsesExplicitGitCacheRoot(t *testing.T) {
@@ -379,6 +384,29 @@ func TestLoadConfigUsesExplicitGitCacheRoot(t *testing.T) {
 	}
 	if cfg.GitCacheRoot != gitCacheRoot {
 		t.Fatalf("unexpected explicit Git cache root %q", cfg.GitCacheRoot)
+	}
+}
+
+func TestLoadConfigUsesDedicatedWorkerPrivateTempRoot(t *testing.T) {
+	root := t.TempDir()
+	workspaceRoot := filepath.Join(root, "workspaces")
+	gitCacheRoot := filepath.Join(root, "git-cache")
+	privateTempRoot := filepath.Join(root, "private-tmp")
+	setAgentdConfigEnvironment(t, workspaceRoot, gitCacheRoot)
+	t.Setenv("SYNARA_AGENTD_PRIVATE_TMP_ROOT", privateTempRoot)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PrivateTempRoot != privateTempRoot {
+		t.Fatalf("Worker-private temporary root = %q", cfg.PrivateTempRoot)
+	}
+	for _, unsafe := range []string{workspaceRoot, filepath.Join(workspaceRoot, "tmp"), gitCacheRoot, string(filepath.Separator)} {
+		t.Setenv("SYNARA_AGENTD_PRIVATE_TMP_ROOT", unsafe)
+		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SYNARA_AGENTD_PRIVATE_TMP_ROOT") {
+			t.Fatalf("unsafe Worker-private temporary root %q accepted: %v", unsafe, err)
+		}
 	}
 }
 
@@ -429,6 +457,14 @@ func TestLoadConfigRequiresKubernetesInstanceUID(t *testing.T) {
 	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")
 	setAgentdConfigEnvironment(t, workspaceRoot, "")
 	t.Setenv("SYNARA_EXECUTION_TARGET_KIND", "kubernetes")
+	t.Setenv(platform.KubernetesPIDsLimitEnvironment, "512")
+	t.Setenv("SYNARA_AGENTD_PRIVATE_TMP_ROOT", t.TempDir())
+	t.Setenv("SYNARA_WORKER_REGISTRATION_TOKEN", "")
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("pod-bound-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNARA_WORKER_REGISTRATION_TOKEN_FILE", tokenPath)
 
 	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SYNARA_AGENTD_INSTANCE_UID is required") {
 		t.Fatalf("expected Kubernetes instance UID requirement, got %v", err)
@@ -545,7 +581,9 @@ func TestLoadConfigReadsKubernetesPodBoundRegistrationTokenFile(t *testing.T) {
 	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")
 	setAgentdConfigEnvironment(t, workspaceRoot, "")
 	t.Setenv("SYNARA_EXECUTION_TARGET_KIND", "kubernetes")
+	t.Setenv(platform.KubernetesPIDsLimitEnvironment, "512")
 	t.Setenv("SYNARA_AGENTD_INSTANCE_UID", uuid.NewString())
+	t.Setenv("SYNARA_AGENTD_PRIVATE_TMP_ROOT", t.TempDir())
 	t.Setenv("SYNARA_WORKER_REGISTRATION_TOKEN", "")
 	tokenPath := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenPath, []byte("pod-bound-token\n"), 0o600); err != nil {
@@ -559,6 +597,12 @@ func TestLoadConfigReadsKubernetesPodBoundRegistrationTokenFile(t *testing.T) {
 	}
 	if cfg.RegistrationToken != "pod-bound-token" || cfg.RegistrationTokenFile != tokenPath {
 		t.Fatalf("Pod-bound registration token file was not loaded: %#v", cfg)
+	}
+	if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("consumed Pod-bound registration token remains readable: %v", err)
+	}
+	if cfg.ProviderOuterSandboxProfile != providerOuterSandboxKubernetesRestricted {
+		t.Fatalf("Kubernetes Provider outer sandbox profile = %q", cfg.ProviderOuterSandboxProfile)
 	}
 }
 
@@ -666,10 +710,12 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",
 		"SYNARA_AGENTD_WORKSPACE_FETCH_FRESHNESS_WINDOW",
+		"SYNARA_AGENTD_PRIVATE_TMP_ROOT",
 		"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE",
 		"SYNARA_AGENTD_WORKER_MODE",
 		"SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", "SYNARA_AGENTD_VERSION",
 		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE",
+		platform.KubernetesPIDsLimitEnvironment,
 		workerImageManifestEnvironment,
 	} {
 		t.Setenv(name, "")

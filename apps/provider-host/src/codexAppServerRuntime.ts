@@ -2,6 +2,19 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { codexDeveloperInstructionsForMode } from "@synara/shared/codexCollaborationMode";
+import {
+  codexAppServerArgumentsWithToolPolicyHook,
+  codexExecutableConfigIsolationArguments,
+  CODEX_TOOL_POLICY_THREAD_CONFIG,
+  isCodexRuntimeIsolationConfigAttested,
+  isCodexToolPolicyHookAttested,
+} from "@synara/shared/codexRuntimeIsolation";
+import {
+  classifySensitiveAction,
+  mergeSensitiveActionAssessments,
+  readCodexFileChangePaths,
+  type SensitiveActionAssessment,
+} from "@synara/shared/sensitiveActionPolicy";
 
 import {
   hasAuthoritativeResumeData,
@@ -74,6 +87,7 @@ type CodexRunOptions = {
   authoritativePrompt: string;
   nativeResumePrompt: string;
   interactive: boolean;
+  toolPolicyHookCommand?: string;
   operation?: ProviderPrimaryOperation;
 };
 
@@ -82,6 +96,24 @@ const INTERRUPT_GRACE_MS = 2_000;
 const COMMAND_TERMINAL_DRAIN_MS = 10_000;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_WIRE_LINE_BYTES = 4 * 1024 * 1024;
+export const MANAGED_CODEX_APP_SERVER_ARGUMENTS = codexExecutableConfigIsolationArguments();
+
+export function managedCodexAppServerArguments(toolPolicyHookCommand?: string): readonly string[] {
+  if (!toolPolicyHookCommand) {
+    return [...MANAGED_CODEX_APP_SERVER_ARGUMENTS];
+  }
+  return codexAppServerArgumentsWithToolPolicyHook(
+    MANAGED_CODEX_APP_SERVER_ARGUMENTS,
+    toolPolicyHookCommand,
+  );
+}
+
+export function isManagedCodexToolPolicyHookAttested(
+  response: unknown,
+  expectedCommand: string,
+): boolean {
+  return isCodexToolPolicyHookAttested(response, expectedCommand);
+}
 
 export function codexThreadOpenPermissions(
   runtimeMode: RunnerInput["workload"]["runtimeMode"],
@@ -109,7 +141,9 @@ class CodexAppServerRuntime {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly pendingApprovals = new Map<string, PendingInteraction>();
   private readonly pendingUserInputs = new Map<string, PendingInteraction>();
+  private readonly fileChangeAssessments = new Map<string, SensitiveActionAssessment>();
   private readonly commandTerminals = new Map<string, CodexTerminalState>();
+  private readonly completedCommandItems = new Set<string>();
   private readonly generatedFiles: WorkspaceGeneratedFileCollector;
   private readonly turnDiffs: TurnDiffCollector;
   private readonly outputText: string[] = [];
@@ -141,11 +175,15 @@ class CodexAppServerRuntime {
       provider: "codex",
       emit: options.emit,
     });
-    this.child = spawn("codex", ["app-server"], {
-      cwd: options.input.workspaceDirectory,
-      env: options.environment,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    this.child = spawn(
+      "codex",
+      [...managedCodexAppServerArguments(options.toolPolicyHookCommand)],
+      {
+        cwd: options.input.workspaceDirectory,
+        env: options.environment,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     this.turnCompletion = new Promise<Record<string, unknown>>((resolve, reject) => {
       this.resolveTurn = resolve;
       this.rejectTurn = reject;
@@ -181,6 +219,7 @@ class CodexAppServerRuntime {
         },
       });
       this.writeMessage({ method: "initialized", params: {} });
+      await this.verifyManagedRuntimeIsolation();
 
       const operation = this.options.operation?.commandType;
       const resumed = await this.openThread(
@@ -231,6 +270,23 @@ class CodexAppServerRuntime {
       };
     } finally {
       this.terminateProcess();
+    }
+  }
+
+  private async verifyManagedRuntimeIsolation(): Promise<void> {
+    const expectedCommand = this.options.toolPolicyHookCommand;
+    if (!expectedCommand) return;
+
+    const hookResponse = await this.sendRequest("hooks/list", {});
+    if (!isManagedCodexToolPolicyHookAttested(hookResponse, expectedCommand)) {
+      throw new Error("Codex managed tool-policy hook attestation failed.");
+    }
+    const configResponse = await this.sendRequest("config/read", {
+      includeLayers: false,
+      cwd: this.options.input.workspaceDirectory,
+    });
+    if (!isCodexRuntimeIsolationConfigAttested(configResponse, [])) {
+      throw new Error("Codex managed runtime-isolation configuration attestation failed.");
     }
   }
 
@@ -310,6 +366,7 @@ class CodexAppServerRuntime {
         ? { model: trimmedString(this.options.input.workload.model) }
         : {}),
       cwd: this.options.input.workspaceDirectory,
+      ...(this.options.toolPolicyHookCommand ? { config: CODEX_TOOL_POLICY_THREAD_CONFIG } : {}),
       ...permissions,
     } as const;
 
@@ -477,6 +534,17 @@ class CodexAppServerRuntime {
       request.method === "item/fileChange/requestApproval" ||
       request.method === "item/fileRead/requestApproval"
     ) {
+      const itemId = readString(params, "itemId");
+      const fileChangeAssessment = itemId ? this.fileChangeAssessments.get(itemId) : undefined;
+      if (request.method === "item/fileChange/requestApproval" && !fileChangeAssessment) {
+        this.writeMessage({ id: request.id, result: { decision: "decline" } });
+        this.failRuntime(
+          new Error(
+            "Codex file-change approval arrived without a preceding Host-classified item/started notification.",
+          ),
+        );
+        return;
+      }
       if (this.pendingApprovals.has(requestId)) {
         this.failRuntime(new Error(`Codex app-server reused approval request ${requestId}.`));
         return;
@@ -485,7 +553,7 @@ class CodexAppServerRuntime {
       this.options.emit({
         type: "interaction",
         interactionType: "approval",
-        payload: approvalPayload(request.method, requestId, params),
+        payload: approvalPayload(request.method, requestId, params, fileChangeAssessment),
       });
       return;
     }
@@ -550,6 +618,12 @@ class CodexAppServerRuntime {
         ) {
           return;
         }
+        if (this.completedCommandItems.has(itemId)) {
+          this.failRuntime(
+            new Error("Codex app-server emitted command output after item completion."),
+          );
+          return;
+        }
         const terminal = this.commandTerminalState(undefined, itemId);
         terminal.sawOutputDelta = true;
         terminal.output.write(delta);
@@ -561,7 +635,22 @@ class CodexAppServerRuntime {
         const itemType = readString(item, "type");
         if (!itemType || itemType === "agentMessage" || itemType === "userMessage") return;
         const itemId = readString(item, "id");
+        if (itemType === "fileChange" && itemId && item) {
+          if (notification.method === "item/started") {
+            const paths = readCodexFileChangePaths(item);
+            if (paths) {
+              this.fileChangeAssessments.set(itemId, classifySensitiveAction({ paths }));
+            } else {
+              this.fileChangeAssessments.delete(itemId);
+            }
+          }
+        }
         const isCommand = isCommandExecutionItem(itemType);
+        if (isCommand && itemId && this.completedCommandItems.has(itemId)) {
+          if (notification.method === "item/completed") return;
+          this.failRuntime(new Error("Codex app-server reused a completed command item id."));
+          return;
+        }
         const terminal = isCommand ? this.commandTerminalState(item, itemId) : undefined;
         const exitCode = readSafeInteger(item, "exitCode");
         const signal = readString(item, "signal");
@@ -627,6 +716,7 @@ class CodexAppServerRuntime {
           },
         });
         if (terminal && notification.method === "item/completed" && itemId) {
+          this.completedCommandItems.add(itemId);
           this.commandTerminals.delete(itemId);
           this.finishCompletedTurnAfterTerminalDrain();
         }
@@ -637,6 +727,9 @@ class CodexAppServerRuntime {
           !declined
         ) {
           this.observeFileChanges(item);
+        }
+        if (notification.method === "item/completed" && itemType === "fileChange" && itemId) {
+          this.fileChangeAssessments.delete(itemId);
         }
         if (
           notification.method === "item/completed" &&
@@ -953,6 +1046,7 @@ class CodexAppServerRuntime {
     if (this.commandTerminalDrainTimer) clearTimeout(this.commandTerminalDrainTimer);
     this.commandTerminalDrainTimer = undefined;
     this.completedTurnPendingTerminalDrain = undefined;
+    this.fileChangeAssessments.clear();
     if (error) this.rejectTurn(error);
     else this.resolveTurn(turn);
   }
@@ -1056,6 +1150,7 @@ function approvalPayload(
   method: string,
   requestId: string,
   params: Record<string, unknown>,
+  fileChangeAssessment?: SensitiveActionAssessment,
 ): Record<string, unknown> {
   const requestKind = method.includes("commandExecution")
     ? "command"
@@ -1067,6 +1162,15 @@ function approvalPayload(
   const cwd = boundedString(params.cwd, 2_000);
   const grantRoot = boundedString(params.grantRoot, 2_000);
   const network = asRecord(params.networkApprovalContext);
+  const networkHost = boundedString(network?.host, 512);
+  const sensitiveAction = mergeSensitiveActionAssessments(
+    classifySensitiveAction({
+      ...(command ? { command } : {}),
+      paths: grantRoot ? [grantRoot] : [],
+      ...(networkHost ? { networkHost } : {}),
+    }),
+    fileChangeAssessment,
+  );
   return {
     requestId,
     provider: "codex",
@@ -1087,6 +1191,7 @@ function approvalPayload(
           },
         }
       : {}),
+    ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
   };
 }
 

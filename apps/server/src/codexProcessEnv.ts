@@ -4,6 +4,7 @@
 // Exports: Codex process env builder and browser-plugin overlay helpers.
 // Depends on: Codex home path helpers, shared Codex config parsing, login-shell env reader.
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 
@@ -15,15 +16,41 @@ import {
 } from "@synara/shared/shell";
 
 import { resolveBaseCodexHomePath, resolveSynaraCodexHomeOverlayPath } from "./codexHomePaths.ts";
+import {
+  importCodexSessionFiles,
+  ISOLATED_CODEX_HOME_SHARED_SOURCE_ENTRIES,
+  prepareIsolatedCodexHomeDirectories,
+} from "./codexIsolatedHome.ts";
 import { buildProviderChildEnvironment } from "./providerChildEnvironment.ts";
 
 const CODEX_PROCESS_SHELL_ENV_NAMES = ["PATH", "SSH_AUTH_SOCK"] as const;
+const SYNARA_CODEX_MODEL_PROVIDER_TOKEN_ENV_PREFIX = "SYNARA_CODEX_MODEL_PROVIDER_TOKEN_";
 const NODE_REPL_SANDBOX_ALLOWED_UNIX_SOCKETS = "NODE_REPL_SANDBOX_ALLOWED_UNIX_SOCKETS";
 const NODE_REPL_MCP_SERVER_HEADER = "[mcp_servers.node_repl]";
 const CODEX_OVERLAY_SHARED_STATE_FILES = new Set(["auth.json"]);
 const SYNARA_CONFIG_SUPPRESSIONS_FILE = "synara-config-suppressions-v1.json";
 const MAX_CONFIG_SUPPRESSION_SECTIONS = 32;
 const MAX_CONFIG_SUPPRESSION_HEADER_LENGTH = 256;
+const ISOLATED_CODEX_TOP_LEVEL_MODEL_PROVIDER_KEYS = new Set([
+  "chatgpt_base_url",
+  "model_provider",
+  "openai_base_url",
+]);
+const ISOLATED_CODEX_MODEL_PROVIDER_KEYS = new Set([
+  "base_url",
+  "env_http_headers",
+  "env_key",
+  "env_key_instructions",
+  "name",
+  "request_max_retries",
+  "requires_openai_auth",
+  "stream_idle_timeout_ms",
+  "stream_max_retries",
+  "supports_standalone_web_search",
+  "supports_websockets",
+  "websocket_connect_timeout_ms",
+  "wire_api",
+]);
 const codexOverlayPreparationQueues = new Map<string, Promise<void>>();
 // Retired local browser integrations used a stable six-character namespace.
 // Match the structural conflict without retaining any previous product name.
@@ -151,6 +178,12 @@ async function writeSynaraConfigSuppressions(
     { encoding: "utf8", mode: 0o600 },
   );
   await fs.rename(temporaryPath, markerPath);
+}
+
+async function writeCodexOverlayConfig(configPath: string, config: string): Promise<void> {
+  const temporaryPath = `${configPath}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryPath, config, { encoding: "utf8", mode: 0o600 });
+  await fs.rename(temporaryPath, configPath);
 }
 
 export async function linkOrCopyCodexOverlayEntry(
@@ -370,6 +403,246 @@ export function configHasTomlTableHeader(config: string, header: string): boolea
   return findTomlTableHeader(config, header) !== undefined;
 }
 
+function readSingleLineTomlStringAssignment(line: string): string | undefined {
+  const value = line.slice(line.indexOf("=") + 1).trim();
+  const match = /^("(?:[^"\\]|\\.)*"|'[^']*')/u.exec(value)?.[1];
+  if (!match) return undefined;
+  if (match.startsWith("'")) return match.slice(1, -1);
+  try {
+    return JSON.parse(match) as string;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizedCodexModelProviderTokenEnvName(providerName: string): string {
+  const digest = createHash("sha256").update(providerName, "utf8").digest("hex").slice(0, 16);
+  return `${SYNARA_CODEX_MODEL_PROVIDER_TOKEN_ENV_PREFIX}${digest.toUpperCase()}`;
+}
+
+function assertSafeIsolatedCodexProviderBaseUrl(value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      "Codex model provider base URL must be an absolute HTTP(S) URL in isolated mode.",
+    );
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+    throw new Error(
+      "Codex model provider base URL must be an absolute HTTP(S) URL in isolated mode.",
+    );
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    throw new Error(
+      "Codex model provider base URL cannot contain credentials, query parameters, or fragments in isolated mode.",
+    );
+  }
+}
+
+function assertSafeIsolatedCodexProviderQueryParam(line: string): void {
+  if (!/^(?:api-version|"api-version"|'api-version')\s*=/u.test(line)) {
+    throw new Error(
+      "Codex model provider query_params may contain only an explicit api-version in isolated mode.",
+    );
+  }
+  const value = readSingleLineTomlStringAssignment(line);
+  if (!value || !/^\d{4}-\d{2}-\d{2}(?:-preview)?$/u.test(value)) {
+    throw new Error(
+      "Codex model provider api-version must be a date or date-preview value in isolated mode.",
+    );
+  }
+}
+
+/**
+ * Retains model transport configuration without carrying executable provider
+ * auth commands, hooks, MCP servers, plugins, profiles, or project trust.
+ */
+function sanitizeCodexModelProviderConfigAndSecrets(config: string): {
+  readonly config: string;
+  readonly secretEnvironment: Readonly<Record<string, string>>;
+  readonly credentialEnvironmentNames: ReadonlyArray<string>;
+} {
+  type Section =
+    | "top-level"
+    | "model-provider"
+    | "model-provider-env-headers"
+    | "model-provider-query-params"
+    | "ignored";
+  const lines = config.split(/\r?\n/u);
+  const providersWithEnvKey = new Set<string>();
+  let scannedProviderName: string | undefined;
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const normalized = normalizeTomlTableHeaderName(trimmed);
+      const parts = normalized ? (JSON.parse(normalized) as string[]) : [];
+      scannedProviderName =
+        parts[0] === "model_providers" && parts.length === 2 ? parts[1] : undefined;
+      continue;
+    }
+    if (scannedProviderName && /^env_key\s*=/u.test(trimmed)) {
+      providersWithEnvKey.add(scannedProviderName);
+    }
+  }
+
+  let section: Section = "top-level";
+  let providerName: string | undefined;
+  const output: string[] = [];
+  const secretEnvironment: Record<string, string> = {};
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const normalized = normalizeTomlTableHeaderName(trimmed);
+      const parts = normalized ? (JSON.parse(normalized) as string[]) : [];
+      if (parts[0] === "model_providers" && parts.length === 2) {
+        section = "model-provider";
+        providerName = parts[1];
+        output.push(trimmed);
+      } else if (
+        parts[0] === "model_providers" &&
+        parts.length === 3 &&
+        parts[2] === "env_http_headers"
+      ) {
+        section = "model-provider-env-headers";
+        providerName = parts[1];
+        output.push(trimmed);
+      } else if (
+        parts[0] === "model_providers" &&
+        parts.length === 3 &&
+        parts[2] === "query_params"
+      ) {
+        section = "model-provider-query-params";
+        providerName = parts[1];
+        output.push(trimmed);
+      } else {
+        section = "ignored";
+        providerName = undefined;
+      }
+      continue;
+    }
+
+    if (section === "model-provider-env-headers") {
+      output.push(trimmed);
+      continue;
+    }
+    if (section === "model-provider-query-params") {
+      assertSafeIsolatedCodexProviderQueryParam(trimmed);
+      output.push(trimmed);
+      continue;
+    }
+
+    const assignment = /^([A-Za-z0-9_-]+)\s*=/u.exec(trimmed);
+    const key = assignment?.[1];
+    if (section === "model-provider" && key === "query_params") {
+      throw new Error(
+        "Codex model provider query_params must use a dedicated TOML table in isolated mode.",
+      );
+    }
+    if (
+      (section === "top-level" && (key === "chatgpt_base_url" || key === "openai_base_url")) ||
+      (section === "model-provider" && key === "base_url")
+    ) {
+      const baseUrl = readSingleLineTomlStringAssignment(trimmed);
+      if (!baseUrl) {
+        throw new Error(
+          "Codex model provider base URL must be a single-line TOML string in isolated mode.",
+        );
+      }
+      assertSafeIsolatedCodexProviderBaseUrl(baseUrl);
+    }
+    if (
+      section === "model-provider" &&
+      key === "experimental_bearer_token" &&
+      providerName &&
+      !providersWithEnvKey.has(providerName)
+    ) {
+      const token = readSingleLineTomlStringAssignment(trimmed);
+      if (!token) {
+        throw new Error(
+          "Codex model provider bearer token must be a single-line TOML string in isolated mode.",
+        );
+      }
+      const envName = sanitizedCodexModelProviderTokenEnvName(providerName);
+      secretEnvironment[envName] = token;
+      output.push(`env_key = ${JSON.stringify(envName)}`);
+      continue;
+    }
+    if (
+      (section === "top-level" &&
+        key !== undefined &&
+        ISOLATED_CODEX_TOP_LEVEL_MODEL_PROVIDER_KEYS.has(key)) ||
+      (section === "model-provider" &&
+        key !== undefined &&
+        ISOLATED_CODEX_MODEL_PROVIDER_KEYS.has(key))
+    ) {
+      output.push(trimmed);
+    }
+  }
+
+  const sanitizedConfig = output.length > 0 ? `${output.join("\n")}\n` : "";
+  return {
+    config: sanitizedConfig,
+    secretEnvironment,
+    credentialEnvironmentNames: codexModelProviderCredentialEnvNames(sanitizedConfig),
+  };
+}
+
+export function sanitizeCodexModelProviderConfig(config: string): string {
+  return sanitizeCodexModelProviderConfigAndSecrets(config).config;
+}
+
+export function codexModelProviderCredentialEnvNames(config: string): ReadonlyArray<string> {
+  let section: "model-provider" | "env-http-headers" | undefined;
+  const names = new Set<string>();
+  for (const rawLine of config.split(/\r?\n/u)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const normalized = normalizeTomlTableHeaderName(trimmed);
+      const parts = normalized ? (JSON.parse(normalized) as string[]) : [];
+      section =
+        parts[0] === "model_providers" && parts.length === 2
+          ? "model-provider"
+          : parts[0] === "model_providers" && parts.length === 3 && parts[2] === "env_http_headers"
+            ? "env-http-headers"
+            : undefined;
+      continue;
+    }
+    if (section === "model-provider" && /^env_http_headers\s*=/u.test(trimmed)) {
+      throw new Error(
+        "Codex model provider env_http_headers must use a dedicated TOML table in isolated mode.",
+      );
+    }
+    if (
+      (section === "model-provider" && /^env_key\s*=/u.test(trimmed)) ||
+      (section === "env-http-headers" && trimmed.includes("="))
+    ) {
+      const name = readSingleLineTomlStringAssignment(trimmed);
+      if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+        throw new Error(
+          section === "model-provider"
+            ? "Codex model provider env_key must be a portable environment variable name in isolated mode."
+            : "Codex model provider env_http_headers values must be portable environment variable names in isolated mode.",
+        );
+      }
+      names.add(name);
+    }
+  }
+  return [...names].sort();
+}
+
 function splitTomlTables(snippet: string): string[] {
   const tables: string[] = [];
   let current: string[] = [];
@@ -508,6 +781,12 @@ function mergeTomlStringArrayValues(
 }
 
 export function mergeShellEnvPolicyExclude(config: string, envVarName: string): string {
+  if (envVarName && !configHasTomlTableHeader(config, "[shell_environment_policy]")) {
+    return appendCodexConfigSection(
+      config,
+      `[shell_environment_policy]\nexclude = [${JSON.stringify(envVarName)}]`,
+    );
+  }
   return mergeTomlStringArrayValues(
     config,
     "[shell_environment_policy]",
@@ -554,20 +833,40 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homePath?: string;
   readonly appendConfigToml?: string;
-}): Promise<string | undefined> {
+  readonly isolateExecutableConfig?: boolean;
+  readonly importSessionThreadIds?: ReadonlyArray<string>;
+}): Promise<{
+  readonly overlayHomePath?: string;
+  readonly inheritedSynaraKeys: ReadonlyArray<string>;
+}> {
   const sourceHomePath = resolveBaseCodexHomePath(input.env, input.homePath);
-  const overlayHomePath = resolveSynaraCodexHomeOverlayPath(input.env, sourceHomePath);
+  const overlayHomePath = resolveSynaraCodexHomeOverlayPath(
+    input.env,
+    sourceHomePath,
+    input.isolateExecutableConfig === undefined
+      ? undefined
+      : { isolateExecutableConfig: input.isolateExecutableConfig },
+  );
   if (path.resolve(sourceHomePath) === path.resolve(overlayHomePath)) {
-    return undefined;
+    if (input.isolateExecutableConfig) {
+      throw new Error("Codex executable-config isolation requires a distinct source home.");
+    }
+    return { inheritedSynaraKeys: [] };
   }
 
   await fs.mkdir(overlayHomePath, { recursive: true });
+  if (input.isolateExecutableConfig) {
+    await prepareIsolatedCodexHomeDirectories(overlayHomePath);
+  }
 
   try {
     // Auth must get a best-effort link/copy before optional entries whose
     // symlinks may fail on restricted Windows installs.
     for (const entry of prioritizeCodexOverlayEntries(await fs.readdir(sourceHomePath))) {
-      if (entry === "config.toml") {
+      if (
+        entry === "config.toml" ||
+        (input.isolateExecutableConfig && !ISOLATED_CODEX_HOME_SHARED_SOURCE_ENTRIES.has(entry))
+      ) {
         continue;
       }
       const sourcePath = path.join(sourceHomePath, entry);
@@ -585,39 +884,64 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
     // overlay config and create any required state lazily.
   }
 
-  const sourceConfigPath = path.join(sourceHomePath, "config.toml");
-  const sourceConfig = await fs.readFile(sourceConfigPath, "utf8").catch((cause: unknown) => {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-      return "";
-    }
-    throw cause;
-  });
+  if (input.isolateExecutableConfig && input.importSessionThreadIds?.length) {
+    await importCodexSessionFiles({
+      sourceHomePath,
+      overlayHomePath,
+      threadIds: input.importSessionThreadIds,
+    });
+  }
+
+  const rawSourceConfig = await fs
+    .readFile(path.join(sourceHomePath, "config.toml"), "utf8")
+    .catch((cause: unknown) => {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+        return "";
+      }
+      throw cause;
+    });
+  const sanitizedModelProviderConfig = input.isolateExecutableConfig
+    ? sanitizeCodexModelProviderConfigAndSecrets(rawSourceConfig)
+    : undefined;
+  const sourceConfig = sanitizedModelProviderConfig?.config ?? rawSourceConfig;
+  for (const [name, value] of Object.entries(
+    sanitizedModelProviderConfig?.secretEnvironment ?? {},
+  )) {
+    input.env[name] = value;
+  }
   const suppressionMarkerPath = path.join(overlayHomePath, SYNARA_CONFIG_SUPPRESSIONS_FILE);
-  const suppressedSections = [
-    ...new Set([
-      ...findConflictingLocalBrowserPluginSections(sourceConfig),
-      ...(await readSynaraConfigSuppressions(suppressionMarkerPath)),
-    ]),
-  ].slice(0, MAX_CONFIG_SUPPRESSION_SECTIONS);
+  const suppressedSections = input.isolateExecutableConfig
+    ? []
+    : [
+        ...new Set([
+          ...findConflictingLocalBrowserPluginSections(sourceConfig),
+          ...(await readSynaraConfigSuppressions(suppressionMarkerPath)),
+        ]),
+      ].slice(0, MAX_CONFIG_SUPPRESSION_SECTIONS);
   const overlayConfigPath = path.join(overlayHomePath, "config.toml");
   let overlayConfig = disableCodexConfigSections(sourceConfig, suppressedSections, true);
   const managedSection =
     input.appendConfigToml ??
-    (await fs
-      .readFile(overlayConfigPath, "utf8")
-      .then(extractManagedCodexConfigSection)
-      .catch((cause: unknown) => {
-        if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-          return undefined;
-        }
-        throw cause;
-      }));
+    (input.isolateExecutableConfig
+      ? undefined
+      : await fs
+          .readFile(overlayConfigPath, "utf8")
+          .then(extractManagedCodexConfigSection)
+          .catch((cause: unknown) => {
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+              return undefined;
+            }
+            throw cause;
+          }));
   if (managedSection) {
     overlayConfig = appendManagedCodexConfigSection(overlayConfig, managedSection);
     const tokenEnvVar = /bearer_token_env_var\s*=\s*"([^"]+)"/.exec(managedSection)?.[1];
     if (tokenEnvVar) {
       overlayConfig = mergeShellEnvPolicyExclude(overlayConfig, tokenEnvVar);
     }
+  }
+  for (const tokenEnvVar of sanitizedModelProviderConfig?.credentialEnvironmentNames ?? []) {
+    overlayConfig = mergeShellEnvPolicyExclude(overlayConfig, tokenEnvVar);
   }
   // Codex launches stdio MCP helpers with an environment allowlist, so the
   // Browser helper must opt in to the socket capability set on its parent.
@@ -627,21 +951,38 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
     "env_vars",
     [NODE_REPL_SANDBOX_ALLOWED_UNIX_SOCKETS],
   );
-  await fs.writeFile(overlayConfigPath, overlayConfig, "utf8");
+  await writeCodexOverlayConfig(overlayConfigPath, overlayConfig);
   await writeSynaraConfigSuppressions(suppressionMarkerPath, suppressedSections);
 
-  return overlayHomePath;
+  return {
+    overlayHomePath,
+    inheritedSynaraKeys: Object.keys(sanitizedModelProviderConfig?.secretEnvironment ?? {}),
+  };
 }
 
 async function prepareSynaraCodexHomeOverlay(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homePath?: string;
   readonly appendConfigToml?: string;
-}): Promise<string | undefined> {
+  readonly isolateExecutableConfig?: boolean;
+  readonly importSessionThreadIds?: ReadonlyArray<string>;
+}): Promise<{
+  readonly overlayHomePath?: string;
+  readonly inheritedSynaraKeys: ReadonlyArray<string>;
+}> {
   const sourceHomePath = resolveBaseCodexHomePath(input.env, input.homePath);
-  const overlayHomePath = resolveSynaraCodexHomeOverlayPath(input.env, sourceHomePath);
+  const overlayHomePath = resolveSynaraCodexHomeOverlayPath(
+    input.env,
+    sourceHomePath,
+    input.isolateExecutableConfig === undefined
+      ? undefined
+      : { isolateExecutableConfig: input.isolateExecutableConfig },
+  );
   if (path.resolve(sourceHomePath) === path.resolve(overlayHomePath)) {
-    return undefined;
+    if (input.isolateExecutableConfig) {
+      throw new Error("Codex executable-config isolation requires a distinct source home.");
+    }
+    return { inheritedSynaraKeys: [] };
   }
   return serializeCodexOverlayPreparation(overlayHomePath, () =>
     prepareSynaraCodexHomeOverlayUnlocked(input),
@@ -655,14 +996,21 @@ export async function buildCodexProcessEnv(
     readonly platform?: NodeJS.Platform;
     readonly readEnvironment?: ShellEnvironmentReader;
     readonly appendConfigToml?: string;
+    readonly isolateExecutableConfig?: boolean;
+    readonly importSessionThreadIds?: ReadonlyArray<string>;
   } = {},
 ): Promise<NodeJS.ProcessEnv> {
   const baseEnv = { ...(input.env ?? process.env) };
-  const overlayHomePath = await prepareSynaraCodexHomeOverlay({
+  const preparedOverlay = await prepareSynaraCodexHomeOverlay({
     env: baseEnv,
     ...(input.homePath ? { homePath: input.homePath } : {}),
     ...(input.appendConfigToml ? { appendConfigToml: input.appendConfigToml } : {}),
+    ...(input.isolateExecutableConfig ? { isolateExecutableConfig: true } : {}),
+    ...(input.importSessionThreadIds?.length
+      ? { importSessionThreadIds: input.importSessionThreadIds }
+      : {}),
   });
+  const overlayHomePath = preparedOverlay.overlayHomePath;
   const configuredEnv =
     overlayHomePath || input.homePath
       ? { ...baseEnv, CODEX_HOME: overlayHomePath ?? input.homePath }
@@ -675,6 +1023,7 @@ export async function buildCodexProcessEnv(
   const effectiveEnv = buildProviderChildEnvironment({
     provider: "codex",
     baseEnv: configuredEnv,
+    inheritedSynaraKeys: preparedOverlay.inheritedSynaraKeys,
   });
 
   if (platform === "darwin" || platform === "linux") {

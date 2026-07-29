@@ -1,14 +1,38 @@
 import type { ProviderKind } from "@synara/contracts";
+import { PROVIDER_CONTENT_TRUST_POLICY } from "@synara/shared/providerContentTrustPolicy";
 
 import { AUTOMATION_AUTHORING_GUIDANCE } from "./automationAuthoringGuidance.ts";
 
+export {
+  PROVIDER_NATIVE_RESULT_PROVENANCE,
+  type ProviderNativeResultProvenanceCapability,
+} from "../security/providerResultProvenance.ts";
+
 /** Canonical, versioned host policy delivered to every supported provider. */
-export const SYNARA_HARNESS_POLICY_VERSION = "2026-07-25.2";
+export const SYNARA_HARNESS_POLICY_VERSION = "2026-07-28.1";
 export const SYNARA_HARNESS_POLICY_MARKER = `[Synara harness policy ${SYNARA_HARNESS_POLICY_VERSION}]`;
 
 export interface SynaraHarnessCapabilities {
   readonly gatewayControlAvailable: boolean;
 }
+
+export type ProviderContentTrustDelivery =
+  | "session-instructions"
+  | "system-prompt"
+  | "first-user-content"
+  | "every-turn-user-content";
+
+export const PROVIDER_CONTENT_TRUST_DELIVERY = {
+  codex: "session-instructions",
+  claudeAgent: "system-prompt",
+  cursor: "first-user-content",
+  antigravity: "every-turn-user-content",
+  grok: "first-user-content",
+  droid: "first-user-content",
+  kilo: "first-user-content",
+  opencode: "first-user-content",
+  pi: "first-user-content",
+} as const satisfies Record<ProviderKind, ProviderContentTrustDelivery>;
 
 /**
  * Render one truthful policy. Providers without a safely thread-scoped MCP
@@ -46,6 +70,7 @@ export function renderSynaraHarnessPolicy(capabilities: SynaraHarnessCapabilitie
   return [
     SYNARA_HARNESS_POLICY_MARKER,
     "You are running inside Synara. Synara is the host and harness for this session.",
+    PROVIDER_CONTENT_TRUST_POLICY,
     ...controlPolicy,
   ].join("\n");
 }

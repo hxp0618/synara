@@ -16,6 +16,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
@@ -524,7 +525,10 @@ func (s *Service) AddMember(ctx context.Context, input AddMemberInput) (persiste
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		var target persistence.ExecutionTarget
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Where("id = ? AND status <> ? AND (tenant_id IS NULL OR tenant_id = ?)", input.ExecutionTargetID, "disabled", input.TenantID).
+			Where(
+				"id = ? AND status <> ? AND (tenant_id = ? OR (tenant_id IS NULL AND kind = ?))",
+				input.ExecutionTargetID, "disabled", input.TenantID, platform.TargetKubernetes,
+			).
 			Take(&target).Error; err != nil {
 			return problem.Wrap(404, "target_group_member_target_not_found", "Execution Target is not available to this tenant.", err)
 		}
@@ -1281,6 +1285,10 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "target-inactive"))
 			continue
 		}
+		if !targetWithinMultiTenantProductBoundary(target) {
+			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "target-isolation-boundary"))
+			continue
+		}
 		if target.TenantID != nil && *target.TenantID != request.TenantID {
 			evaluations = append(evaluations, rejectCandidateEvaluation(evaluation, "tenant-scope-mismatch"))
 			continue
@@ -1482,7 +1490,8 @@ func (s *Service) LockSelectionForCommit(
 		Take(&target).Error; err != nil {
 		return Selection{}, routingCommitLoadError(err, "target", selection)
 	}
-	if target.Status != "active" || !sameExecutionTargetAuthority(target, selection.Target) ||
+	if target.Status != "active" || !targetWithinMultiTenantProductBoundary(target) ||
+		!sameExecutionTargetAuthority(target, selection.Target) ||
 		(target.TenantID != nil && *target.TenantID != request.TenantID) ||
 		(target.OrganizationID != nil && *target.OrganizationID != request.OrganizationID) {
 		return Selection{}, staleSelectionProblem("target-changed", selection)
@@ -1667,6 +1676,14 @@ func sameExecutionTargetAuthority(current, selected persistence.ExecutionTarget)
 		current.Status == selected.Status && current.UpdatedAt.Equal(selected.UpdatedAt) &&
 		reflect.DeepEqual(current.ConfigurationEncrypted, selected.ConfigurationEncrypted) &&
 		reflect.DeepEqual(current.Capabilities, selected.Capabilities)
+}
+
+func targetWithinMultiTenantProductBoundary(target persistence.ExecutionTarget) bool {
+	if target.TenantID != nil {
+		return true
+	}
+	kind, err := platform.ParseExecutionTargetKind(target.Kind)
+	return err == nil && platform.IsPlatformSharedTargetEligible(kind)
 }
 
 func sameTargetGroupAuthority(current, selected persistence.ExecutionTargetGroup) bool {

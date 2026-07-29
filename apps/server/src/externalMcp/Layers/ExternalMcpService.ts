@@ -183,6 +183,13 @@ export const makeExternalMcpService = Effect.gen(function* () {
           400,
         );
       }
+      if (capabilities.includes("runtime:local") || capabilities.includes("runtime:full-access")) {
+        return yield* toExternalMcpError(
+          "invalid_scope",
+          "External MCP integrations cannot be granted local-checkout or full-access execution.",
+          400,
+        );
+      }
       const now = new Date();
       const createdAt = now.toISOString();
       const expiresAt = new Date(
@@ -492,6 +499,14 @@ export const makeExternalMcpService = Effect.gen(function* () {
       const auditId = `mcp_audit_${randomUUID()}`;
       const nowDate = new Date();
       const windowId = Math.floor(nowDate.getTime() / 60_000);
+      const contentProvenance = metadata.contentProvenance;
+      const contentIndicatorIds = (contentProvenance?.indicators ?? [])
+        .filter((value) => /^[a-z0-9-]{1,80}$/u.test(value))
+        .slice(0, 16);
+      const contentSha256 =
+        contentProvenance && /^[a-f0-9]{64}$/u.test(contentProvenance.sha256)
+          ? contentProvenance.sha256
+          : null;
       const admitted = yield* repository
         .beginAudit({
           auditId,
@@ -501,6 +516,13 @@ export const makeExternalMcpService = Effect.gen(function* () {
           projectId: metadata.projectId ?? null,
           runtimeMode: metadata.runtimeMode ?? null,
           environment: metadata.environment ?? null,
+          contentSource: contentProvenance?.source ?? null,
+          contentTrust: contentProvenance?.trust ?? null,
+          contentSha256,
+          contentRisk: contentProvenance?.risk ?? null,
+          contentIndicatorIds,
+          securityAlertKind:
+            contentProvenance?.risk === "suspicious" ? "prompt_injection_suspected" : null,
           now: nowDate.toISOString(),
           windowId,
           rateLimitAuditId: `mcp_rate_${client.integration.integrationId}_${windowId}`,

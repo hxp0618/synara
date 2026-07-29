@@ -7,6 +7,7 @@ import {
 } from "@synara/contracts";
 import { Schema } from "effect";
 
+import { providerSupportsUntrustedContentDispatch } from "../security/untrustedContent.ts";
 import { AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION } from "./targetResolver.ts";
 
 export const PROVIDER_KINDS: ReadonlyArray<ProviderKind> = [
@@ -21,11 +22,15 @@ export const PROVIDER_KINDS: ReadonlyArray<ProviderKind> = [
   "pi",
 ];
 
+export const UNTRUSTED_TASK_PROVIDER_KINDS: ReadonlyArray<ProviderKind> = PROVIDER_KINDS.filter(
+  (provider) => providerSupportsUntrustedContentDispatch(provider),
+);
+
 export const MODEL_SELECTION_INPUT_SCHEMA = {
   type: "object",
   description: AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION,
   properties: {
-    provider: { type: "string", enum: [...PROVIDER_KINDS] },
+    provider: { type: "string", enum: [...UNTRUSTED_TASK_PROVIDER_KINDS] },
     model: {
       type: "string",
       description: "Exact model slug from synara_capabilities providers[].models[].slug.",

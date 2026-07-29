@@ -25,6 +25,7 @@ import type { GitCoreShape } from "../git/Services/GitCore.ts";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { ProviderDiscoveryServiceShape } from "../provider/Services/ProviderDiscoveryService.ts";
+import { untrustedProviderAdmissionIssue } from "../security/untrustedContent.ts";
 import { runWorktreeSetupScript } from "../worktreeSetup.ts";
 import type {
   AgentGatewayOperationRecord,
@@ -497,6 +498,15 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
             ...(providerAvailability !== undefined ? { availability: providerAvailability } : {}),
             cwd: project.workspaceRoot,
           });
+          const untrustedSource =
+            context.kind === "external-client" ? "external-mcp" : "synara-mcp";
+          const providerAdmissionIssue = untrustedProviderAdmissionIssue({
+            provider: target.provider,
+            source: untrustedSource,
+          });
+          if (providerAdmissionIssue !== null) {
+            return yield* Effect.fail(new ToolInputError(providerAdmissionIssue));
+          }
           const externalPolicy =
             context.kind === "external-client"
               ? resolveExternalMcpRuntimePolicy({
@@ -1097,6 +1107,7 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
                       role: "user",
                       text: entry.spec.prompt,
                       attachments: [],
+                      source: context.kind === "external-client" ? "external-mcp" : "synara-mcp",
                     },
                     modelSelection: entry.target,
                     dispatchMode: "queue",

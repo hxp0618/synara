@@ -9,12 +9,14 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
+  readFileSync,
   readSync,
   realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
@@ -50,6 +52,8 @@ export const STAGE3_FIXTURE_SCENARIOS = [
   "provider-oversized",
   "provider-crash",
   "steer",
+  "stage5-residue-seed",
+  "stage5-residue-verify",
 ] as const;
 
 export type Stage3FixtureScenario = (typeof STAGE3_FIXTURE_SCENARIOS)[number];
@@ -72,6 +76,8 @@ type CommandRecord = {
 type FixtureSession = {
   readonly provider: "codex" | "claudeAgent";
   readonly workspaceDirectory?: string;
+  readonly executionTargetId?: string;
+  readonly tenantId?: string;
   recoveredInteraction?: RecoveredInteraction;
 };
 
@@ -108,6 +114,15 @@ type CredentialEvidence = {
 type WorkspaceEvidence = {
   readonly artifactRelativePath: string;
   readonly artifactContentVerified: true;
+};
+
+type Stage5TenantIsolationEvidence = {
+  readonly stage: "seeded" | "verified";
+  readonly marker: string;
+  readonly seededPathCount?: number;
+  readonly scannedPathCount?: number;
+  readonly residualPathCount?: number;
+  readonly residualMarkerReadable?: boolean;
 };
 
 type CredentialReadResult =
@@ -525,9 +540,14 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     const workspaceDirectory = optionalString(runnerInput.workspaceDirectory);
+    const execution = asRecord(runnerInput.execution);
+    const executionTargetId = optionalString(execution?.executionTargetId);
+    const tenantId = optionalString(workload.tenantId);
     this.#session = {
       provider,
       ...(workspaceDirectory ? { workspaceDirectory } : {}),
+      ...(executionTargetId ? { executionTargetId } : {}),
+      ...(tenantId ? { tenantId } : {}),
       ...(recoveredInteraction ? { recoveredInteraction } : {}),
     };
     this.#terminalResult(command, {
@@ -581,6 +601,18 @@ export class Stage3ProviderAcceptanceHost {
       this.#terminalError(
         command,
         protocolError("SendTurn may request only one blocking fixture scenario."),
+      );
+      return;
+    }
+    if (
+      blocking.length > 0 &&
+      (scenarios.includes("stage5-residue-seed") || scenarios.includes("stage5-residue-verify"))
+    ) {
+      this.#terminalError(
+        command,
+        protocolError(
+          "Stage 5 residue scenarios cannot be combined with a blocking fixture scenario.",
+        ),
       );
       return;
     }
@@ -687,6 +719,50 @@ export class Stage3ProviderAcceptanceHost {
           errorDetail(
             "workspace_invalid",
             "The deterministic fixture artifact was not preserved inside the Workspace.",
+            false,
+            false,
+            true,
+            true,
+            true,
+          ),
+        );
+        return;
+      }
+    }
+    let stage5TenantIsolationEvidence: Stage5TenantIsolationEvidence | undefined;
+    if (scenarios.includes("stage5-residue-seed")) {
+      stage5TenantIsolationEvidence = this.#seedStage5TenantResidue(inputText);
+      if (!stage5TenantIsolationEvidence) {
+        this.#terminalError(
+          command,
+          errorDetail(
+            "workspace_invalid",
+            "The Stage 5 fixture could not seed the Tenant residue set.",
+            false,
+            false,
+            true,
+            true,
+            true,
+          ),
+        );
+        return;
+      }
+    }
+    if (scenarios.includes("stage5-residue-verify")) {
+      if (stage5TenantIsolationEvidence) {
+        this.#terminalError(
+          command,
+          protocolError("Stage 5 residue seed and verify scenarios are mutually exclusive."),
+        );
+        return;
+      }
+      stage5TenantIsolationEvidence = this.#verifyStage5TenantResidue(inputText);
+      if (!stage5TenantIsolationEvidence) {
+        this.#terminalError(
+          command,
+          errorDetail(
+            "workspace_invalid",
+            "The Stage 5 fixture could not verify the shared Worker storage roots.",
             false,
             false,
             true,
@@ -813,7 +889,13 @@ export class Stage3ProviderAcceptanceHost {
 
     this.#terminalResult(
       command,
-      this.#turnResult(outputText, credentialEvidence, workspaceEvidence),
+      this.#turnResult(
+        outputText,
+        credentialEvidence,
+        workspaceEvidence,
+        undefined,
+        stage5TenantIsolationEvidence,
+      ),
     );
   }
 
@@ -989,6 +1071,7 @@ export class Stage3ProviderAcceptanceHost {
     credentialEvidence?: CredentialEvidence,
     workspaceEvidence?: WorkspaceEvidence,
     recoveryEvidence?: RecoveryEvidence,
+    stage5TenantIsolationEvidence?: Stage5TenantIsolationEvidence,
   ): Record<string, unknown> {
     return {
       output: {
@@ -996,6 +1079,7 @@ export class Stage3ProviderAcceptanceHost {
         ...(credentialEvidence ? { credentialEvidence } : {}),
         ...(workspaceEvidence ? { workspaceEvidence } : {}),
         ...(recoveryEvidence ? { recoveryEvidence } : {}),
+        ...(stage5TenantIsolationEvidence ? { stage5TenantIsolationEvidence } : {}),
       },
       providerResumeCursor: this.#resumeCursor(),
     };
@@ -1003,6 +1087,52 @@ export class Stage3ProviderAcceptanceHost {
 
   #resumeCursor(): string {
     return `fixture-cursor-${this.#turnSequence}`;
+  }
+
+  #seedStage5TenantResidue(inputText: string): Stage5TenantIsolationEvidence | undefined {
+    const marker = stage5TenantIsolationMarker(inputText);
+    const roots = this.#session ? stage5TenantIsolationRoots(this.#session) : undefined;
+    if (!marker || !roots || !this.#session?.workspaceDirectory) return undefined;
+
+    const targetId = this.#session.executionTargetId;
+    const tenantId = this.#session.tenantId;
+    if (!targetId || !tenantId) return undefined;
+    const markerPaths = [
+      resolve(this.#session.workspaceDirectory, ".stage5-residue", `${marker}.txt`),
+      resolve(roots.workspaceRoot, "v3", targetId, tenantId, ".stage5-residue", `${marker}.txt`),
+      resolve(roots.workspaceRoot, tenantId, ".stage5-residue", `${marker}.txt`),
+      resolve(roots.workspaceRoot, ".quarantine", `stage5-residue-${marker}.txt`),
+      resolve(roots.gitCacheRoot, "v1", targetId, tenantId, ".stage5-residue", `${marker}.txt`),
+      resolve(roots.privateTempRoot, `stage5-residue-${marker}.txt`),
+    ];
+    try {
+      for (const markerPath of markerPaths) {
+        if (!isPathWithin(roots.acceptanceRoot, markerPath)) return undefined;
+        mkdirSync(dirname(markerPath), { recursive: true, mode: 0o700 });
+        writeFileSync(markerPath, `${marker}\n`, { encoding: "utf8", mode: 0o600 });
+      }
+      return { stage: "seeded", marker, seededPathCount: markerPaths.length };
+    } catch {
+      return undefined;
+    }
+  }
+
+  #verifyStage5TenantResidue(inputText: string): Stage5TenantIsolationEvidence | undefined {
+    const marker = stage5TenantIsolationMarker(inputText);
+    const roots = this.#session ? stage5TenantIsolationRoots(this.#session) : undefined;
+    if (!marker || !roots) return undefined;
+    try {
+      const scan = scanStage5TenantIsolationRoot(roots.acceptanceRoot, marker);
+      return {
+        stage: "verified",
+        marker,
+        scannedPathCount: scan.scannedPathCount,
+        residualPathCount: scan.residualPathCount,
+        residualMarkerReadable: scan.residualMarkerReadable,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   #writeArtifact(): {
@@ -1206,6 +1336,93 @@ export class Stage3ProviderAcceptanceHost {
     this.#messageSequence += 1;
     return occurredAt;
   }
+}
+
+type Stage5TenantIsolationRoots = {
+  readonly acceptanceRoot: string;
+  readonly workspaceRoot: string;
+  readonly gitCacheRoot: string;
+  readonly privateTempRoot: string;
+};
+
+function stage5TenantIsolationMarker(inputText: string): string | undefined {
+  return /(?:\[stage5-marker:|fixture:stage5-marker=)([a-z0-9._-]{8,96})\]?/i.exec(inputText)?.[1];
+}
+
+function stage5TenantIsolationRoots(
+  session: FixtureSession,
+): Stage5TenantIsolationRoots | undefined {
+  const workspaceDirectory = session.workspaceDirectory;
+  const executionTargetId = session.executionTargetId;
+  const tenantId = session.tenantId;
+  const privateTemp = optionalString(process.env.TMPDIR);
+  if (!workspaceDirectory || !executionTargetId || !tenantId || !privateTemp) return undefined;
+
+  const normalizedWorkspace = resolve(workspaceDirectory);
+  let workspaceRoot: string | undefined;
+  for (const version of ["v2", "v3"]) {
+    const boundary = `${sep}${version}${sep}${executionTargetId}${sep}${tenantId}${sep}`;
+    const boundaryIndex = normalizedWorkspace.indexOf(boundary);
+    if (boundaryIndex > 0) {
+      workspaceRoot = normalizedWorkspace.slice(0, boundaryIndex);
+      break;
+    }
+  }
+  if (!workspaceRoot) return undefined;
+  const acceptanceRoot = dirname(workspaceRoot);
+  const gitCacheRoot = resolve(acceptanceRoot, "git-cache");
+  const privateTempRoot = resolve(privateTemp);
+  if (
+    acceptanceRoot === dirname(acceptanceRoot) ||
+    !isPathWithin(acceptanceRoot, workspaceRoot) ||
+    !isPathWithin(acceptanceRoot, gitCacheRoot) ||
+    !isPathWithin(acceptanceRoot, privateTempRoot)
+  ) {
+    return undefined;
+  }
+  return { acceptanceRoot, workspaceRoot, gitCacheRoot, privateTempRoot };
+}
+
+function scanStage5TenantIsolationRoot(
+  acceptanceRoot: string,
+  marker: string,
+): {
+  readonly scannedPathCount: number;
+  readonly residualPathCount: number;
+  readonly residualMarkerReadable: boolean;
+} {
+  let scannedPathCount = 0;
+  let residualPathCount = 0;
+  let residualMarkerReadable = false;
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      scannedPathCount += 1;
+      if (scannedPathCount > 20_000)
+        throw new Error("Stage 5 residue scan exceeded its path bound");
+      const candidate = resolve(directory, entry.name);
+      if (!isPathWithin(acceptanceRoot, candidate) || entry.isSymbolicLink()) continue;
+      let matched = entry.name.includes(marker);
+      if (entry.isDirectory()) {
+        visit(candidate);
+      } else if (entry.isFile()) {
+        const info = statSync(candidate);
+        if (info.size <= 64 * 1024) {
+          const contents = readFileSync(candidate);
+          try {
+            if (contents.includes(Buffer.from(marker, "utf8"))) {
+              matched = true;
+              residualMarkerReadable = true;
+            }
+          } finally {
+            contents.fill(0);
+          }
+        }
+      }
+      if (matched) residualPathCount += 1;
+    }
+  };
+  visit(acceptanceRoot);
+  return { scannedPathCount, residualPathCount, residualMarkerReadable };
 }
 
 export async function runStage3ProviderAcceptanceFixture(input: {

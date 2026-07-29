@@ -1751,6 +1751,9 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	if platform.IsRemoteTarget(kind) && (!worker.LeaseSupported || !worker.FencingSupported) {
 		return persistence.WorkerInstance{}, problem.New(409, "remote_worker_protocol_required", "Remote workers must support execution leases and generation fencing.")
 	}
+	if err := requireWorkerStorageScrubClearLocked(ctx, tx, worker); err != nil {
+		return persistence.WorkerInstance{}, err
+	}
 	if worker.LastHeartbeatAt.Before(s.now().Add(-s.heartbeatTimeout)) {
 		now := s.now()
 		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).Update("status", "offline").Error; err != nil {

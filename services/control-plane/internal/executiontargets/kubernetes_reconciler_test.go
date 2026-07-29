@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -133,11 +134,15 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		t.Fatalf("Kubernetes Pod runtime policy is unsafe: %#v", spec)
 	}
 	container := spec["containers"].([]any)[0].(map[string]any)
+	assertKubernetesContainerResourceLimits(t, container)
 	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_WORKSPACE_ROOT"); !found || value != "/data/workspaces" {
 		t.Fatalf("Kubernetes workspace root environment is %q", value)
 	}
 	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_GIT_CACHE_ROOT"); !found || value != "/data/git-cache" {
 		t.Fatalf("Kubernetes default Git cache root environment is %q", value)
+	}
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_PRIVATE_TMP_ROOT"); !found || value != "/tmp" {
+		t.Fatalf("Kubernetes Worker-private temporary root environment is %q", value)
 	}
 	if fieldPath, found := kubernetesEnvironmentFieldPath(container, "SYNARA_AGENTD_INSTANCE_UID"); !found || fieldPath != "metadata.uid" {
 		t.Fatalf("Kubernetes Pod UID environment uses %q", fieldPath)
@@ -159,6 +164,10 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		!bytes.Contains(identityJSON, []byte(`"expirationSeconds":600`)) {
 		t.Fatalf("Kubernetes Pod-bound identity projection is invalid: %s", identityJSON)
 	}
+	stagedTokenVolume := kubernetesNamedObject(volumes, kubernetesRegistrationTokenVolume)
+	if stagedTokenVolume == nil || stagedTokenVolume["emptyDir"] == nil {
+		t.Fatalf("Kubernetes one-shot registration token volume is invalid: %#v", stagedTokenVolume)
+	}
 	volumeMounts := container["volumeMounts"].([]any)
 	workspaceMount := kubernetesNamedObject(volumeMounts, "workspace")
 	if workspaceMount == nil || workspaceMount["mountPath"] != "/data" {
@@ -167,9 +176,35 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if kubernetesNamedObject(volumeMounts, "git-cache") != nil {
 		t.Fatalf("Kubernetes default Pod created a redundant Git cache mount: %#v", volumeMounts)
 	}
-	identityMount := kubernetesNamedObject(volumeMounts, kubernetesWorkloadIdentityVolume)
+	if identityMount := kubernetesNamedObject(volumeMounts, kubernetesWorkloadIdentityVolume); identityMount != nil {
+		t.Fatalf("Kubernetes main container exposes the projected Pod identity: %#v", identityMount)
+	}
+	stagedTokenMount := kubernetesNamedObject(volumeMounts, kubernetesRegistrationTokenVolume)
+	if stagedTokenMount == nil || stagedTokenMount["mountPath"] != "/var/run/secrets/synara.io/registration" {
+		t.Fatalf("Kubernetes staged registration token mount is invalid: %#v", stagedTokenMount)
+	}
+	initContainers := spec["initContainers"].([]any)
+	if len(initContainers) != 2 {
+		t.Fatalf("Kubernetes Pod boundary init containers = %#v", initContainers)
+	}
+	networkInit := initContainers[0].(map[string]any)
+	if networkInit["name"] != kubernetesNetworkBoundaryInitName ||
+		!reflect.DeepEqual(networkInit["command"], []any{
+			"/usr/local/bin/synara-agentd", platform.KubernetesNetworkBoundaryVerifyArgument,
+		}) {
+		t.Fatalf("Kubernetes network boundary init container is invalid: %#v", networkInit)
+	}
+	initContainer := initContainers[1].(map[string]any)
+	if initContainer["name"] != kubernetesRegistrationTokenInitName {
+		t.Fatalf("Kubernetes registration token init container is invalid: %#v", initContainer)
+	}
+	if !reflect.DeepEqual(networkInit["securityContext"], initContainer["securityContext"]) {
+		t.Fatalf("Kubernetes network boundary init security is invalid: %#v", networkInit)
+	}
+	initMounts := initContainer["volumeMounts"].([]any)
+	identityMount := kubernetesNamedObject(initMounts, kubernetesWorkloadIdentityVolume)
 	if identityMount == nil || identityMount["readOnly"] != true {
-		t.Fatalf("Kubernetes Pod-bound identity mount is invalid: %#v", identityMount)
+		t.Fatalf("Kubernetes init Pod-bound identity mount is invalid: %#v", identityMount)
 	}
 	securityContext := container["securityContext"].(map[string]any)
 	if securityContext["runAsNonRoot"] != true || securityContext["readOnlyRootFilesystem"] != true ||
@@ -187,7 +222,7 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if bytes.Contains(environment, []byte("kubernetes-registration-secret")) ||
 		bytes.Contains(environment, []byte("secretKeyRef")) ||
 		!bytes.Contains(environment, []byte("SYNARA_WORKER_REGISTRATION_TOKEN_FILE")) ||
-		!bytes.Contains(environment, []byte(kubernetesWorkloadIdentityTokenPath)) ||
+		!bytes.Contains(environment, []byte(kubernetesStagedRegistrationTokenPath)) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) ||
 		!bytes.Contains(environment, []byte(`"name":"SYNARA_AGENTD_LEASE_RENEW_INTERVAL","value":"2s"`)) ||
@@ -649,6 +684,72 @@ func TestKubernetesNetworkConfigurationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestKubernetesResourceLimitsFailClosedBeforeClusterMutation(t *testing.T) {
+	for _, field := range []string{"cpuLimit", "memoryLimit", "ephemeralStorageLimit"} {
+		for _, value := range []any{nil, "   "} {
+			name := field + "-missing"
+			if value != nil {
+				name = field + "-blank"
+			}
+			t.Run(name, func(t *testing.T) {
+				fixture := newKubernetesReconcileFixture(t, "")
+				configuration := kubernetesTestConfiguration("")
+				if value == nil {
+					delete(configuration, field)
+				} else {
+					configuration[field] = value
+				}
+				fixture.updateConfiguration(t, configuration)
+				client := newFakeKubernetesClient()
+				fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+				err := fixture.reconciler.ReconcileOnce(context.Background())
+				assertProblemCode(t, err, 400, "kubernetes_resource_limits_required")
+				if len(client.applied) != 0 {
+					t.Fatalf("resource-limit-invalid configuration mutated Kubernetes: %#v", client.applied)
+				}
+			})
+		}
+	}
+	for _, value := range []any{nil, 0} {
+		name := "pidsLimit-missing"
+		if value != nil {
+			name = "pidsLimit-zero"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newKubernetesReconcileFixture(t, "")
+			configuration := kubernetesTestConfiguration("")
+			if value == nil {
+				delete(configuration, "pidsLimit")
+			} else {
+				configuration["pidsLimit"] = value
+			}
+			fixture.updateConfiguration(t, configuration)
+			client := newFakeKubernetesClient()
+			fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+			err := fixture.reconciler.ReconcileOnce(context.Background())
+			assertProblemCode(t, err, 400, "kubernetes_resource_limits_required")
+			if len(client.applied) != 0 {
+				t.Fatalf("PID-limit-invalid configuration mutated Kubernetes: %#v", client.applied)
+			}
+		})
+	}
+}
+
+func TestKubernetesNodePIDLimitAttestationFailsClosedBeforeClusterMutation(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	client.pidsLimitAttestationErr = errors.New("node worker-a podPidsLimit=-1")
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertProblemCode(t, err, 503, "kubernetes_pids_limit_unverified")
+	if len(client.applied) != 0 {
+		t.Fatalf("PID-limit-unverified cluster was mutated: %#v", client.applied)
+	}
+}
+
 func TestKubernetesSandboxTenantAllowlistFailsClosedBeforeClusterMutation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -872,11 +973,15 @@ func TestKubernetesReconcilerCreatesWarmPoolPodForActiveWarmPool(t *testing.T) {
 		t.Fatalf("warm-pool pod unexpectedly carried execution label: %#v", labels)
 	}
 	container := pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	assertKubernetesContainerResourceLimits(t, container)
 	if container["image"] != "ghcr.io/synara/worker@"+promotedDigest {
 		t.Fatalf("warm-pool image = %q", container["image"])
 	}
 	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_WORKER_MODE"); !found || value != kubernetesWorkerModeWarmPool {
 		t.Fatalf("warm-pool worker mode env = %q", value)
+	}
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_PRIVATE_TMP_ROOT"); !found || value != "/tmp" {
+		t.Fatalf("warm-pool Worker-private temporary root env = %q", value)
 	}
 	if _, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID"); found {
 		t.Fatal("warm-pool pod unexpectedly carried an assigned execution environment")
@@ -2395,8 +2500,9 @@ func kubernetesTestConfiguration(gitCachePersistentVolumeClaim string) map[strin
 		"image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
 		"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
 		"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": 1,
-		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
-		"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1", "pidsLimit": 512,
+		"memoryRequest": "256Mi", "memoryLimit": "1Gi",
+		"ephemeralStorageRequest": "512Mi", "ephemeralStorageLimit": "2Gi", "workspaceSizeLimit": "2Gi",
 		"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
 	}
 	if gitCachePersistentVolumeClaim != "" {
@@ -2412,6 +2518,18 @@ func containsAnyString(values []any, expected string) bool {
 		}
 	}
 	return false
+}
+
+func assertKubernetesContainerResourceLimits(t *testing.T, container map[string]any) {
+	t.Helper()
+	resources, ok := container["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("Kubernetes container resources = %#v", container["resources"])
+	}
+	limits, ok := resources["limits"].(map[string]any)
+	if !ok || limits["cpu"] != "1" || limits["memory"] != "1Gi" || limits["ephemeral-storage"] != "2Gi" {
+		t.Fatalf("Kubernetes container resource limits = %#v", resources["limits"])
+	}
 }
 
 func (f kubernetesReconcileFixture) updateConfiguration(t *testing.T, configuration map[string]any) {
@@ -2660,18 +2778,19 @@ func (f *fakeKubernetesFactory) Open(kubernetesTargetConfiguration) (kubernetesC
 }
 
 type fakeKubernetesClient struct {
-	applied                []map[string]any
-	pods                   map[string]kubernetesPod
-	priorityClasses        map[string]kubernetesPriorityClass
-	priorityClassReadErr   error
-	priorityClassReadCount map[string]int
-	resourceQuota          kubernetesResourceQuota
-	resourceQuotaReadErr   error
-	deletedPods            []string
-	podApplyErr            error
-	podApplyErrFor         map[string]error
-	listPodUIDsErr         error
-	deletePodErr           error
+	applied                 []map[string]any
+	pods                    map[string]kubernetesPod
+	priorityClasses         map[string]kubernetesPriorityClass
+	priorityClassReadErr    error
+	priorityClassReadCount  map[string]int
+	resourceQuota           kubernetesResourceQuota
+	resourceQuotaReadErr    error
+	deletedPods             []string
+	podApplyErr             error
+	podApplyErrFor          map[string]error
+	listPodUIDsErr          error
+	deletePodErr            error
+	pidsLimitAttestationErr error
 }
 
 func newFakeKubernetesClient() *fakeKubernetesClient {
@@ -2684,6 +2803,14 @@ func newFakeKubernetesClient() *fakeKubernetesClient {
 		},
 		priorityClassReadCount: map[string]int{},
 	}
+}
+
+func (c *fakeKubernetesClient) AttestPodPIDsLimit(
+	_ context.Context,
+	_ map[string]string,
+	_ uint64,
+) error {
+	return c.pidsLimitAttestationErr
 }
 
 func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[string]any) error {

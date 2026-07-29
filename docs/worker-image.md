@@ -432,9 +432,16 @@ SYNARA_PROVIDER_ALL_PROXY
 SYNARA_PROVIDER_NO_PROXY
 ```
 
-Provider Host validates these values, maps them to the standard proxy names only in the Provider child
-environment, and redacts authenticated proxy URLs and credentials from Provider diagnostics. Do not use this
-channel for Control Plane, Git Workspace, database, or object-store proxy configuration; those processes retain
-their own separately scoped network settings. Managed SSH, Docker, or Kubernetes Targets must expose these values
-through their target-specific encrypted configuration/Secret plumbing before use; host-level ambient proxy values
-are intentionally not treated as that plumbing.
+Agentd and Provider Host independently validate these values before mapping them to the standard proxy names in the
+Provider child environment. HTTP/HTTPS aliases accept only credential-free HTTP(S) authorities; `ALL_PROXY` also
+accepts SOCKS5 with an explicit port. URL userinfo, paths, query strings, fragments, unsupported schemes, invalid
+hosts/ports, wildcard `NO_PROXY`, more than 64 no-proxy entries, and control-character injection fail closed. Proxy
+endpoints are therefore ordinary diagnostics rather than secrets that redaction is expected to protect.
+
+Authenticated proxy URLs are deliberately unsupported: a Provider or model-authored tool can read its own
+environment, so embedding a username/password would disclose the upstream proxy Credential. Terminate authenticated
+proxy access in an Execution-local credential-hiding gateway and pass only that gateway's credential-free authority.
+Do not use this channel for Control Plane, Git Workspace, database, or object-store proxy configuration; those
+processes retain their own separately scoped network settings. Managed SSH, Docker, or Kubernetes Targets must expose
+these values through their target-specific encrypted configuration/Secret plumbing before use; host-level ambient
+proxy values are intentionally not treated as that plumbing.

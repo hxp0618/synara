@@ -20,22 +20,27 @@ import (
 )
 
 type Runner struct {
-	command                  []string
-	maxMessageBytes          int
-	protocol                 RunnerProtocol
-	experimentalProviders    map[string]struct{}
-	cgroupV2Root             string
-	cgroupV2ProviderIdentity *ProtectedCgroupIdentity
-	cgroupV2ProviderLimits   *ProtectedCgroupResourceLimits
-	instanceUID              uuid.UUID
-	supervisorInstance       uuid.UUID
-	protectedRootLease       *ProtectedCgroupRootLease
-	logger                   *slog.Logger
-	prestartMu               sync.Mutex
-	providerHostPrestart     *providerHostV2PrestartManager
+	command                     []string
+	maxMessageBytes             int
+	protocol                    RunnerProtocol
+	experimentalProviders       map[string]struct{}
+	cgroupV2Root                string
+	cgroupV2ProviderIdentity    *ProtectedCgroupIdentity
+	cgroupV2ProviderLimits      *ProtectedCgroupResourceLimits
+	instanceUID                 uuid.UUID
+	supervisorInstance          uuid.UUID
+	protectedRootLease          *ProtectedCgroupRootLease
+	logger                      *slog.Logger
+	prestartMu                  sync.Mutex
+	providerHostPrestart        *providerHostV2PrestartManager
+	providerOuterSandboxProfile string
 }
 
 func NewRunner(cfg Config) *Runner {
+	outerSandboxProfile := cfg.ProviderOuterSandboxProfile
+	if outerSandboxProfile == "" {
+		outerSandboxProfile, _ = resolveProviderOuterSandboxProfile(cfg)
+	}
 	experimentalProviders := make(map[string]struct{}, len(cfg.ExperimentalProviders))
 	for _, provider := range cfg.ExperimentalProviders {
 		experimentalProviders[provider] = struct{}{}
@@ -57,11 +62,12 @@ func NewRunner(cfg Config) *Runner {
 	return &Runner{
 		command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes,
 		protocol: cfg.RunnerProtocol, experimentalProviders: experimentalProviders,
-		cgroupV2Root:             cfg.CgroupV2Root,
-		cgroupV2ProviderIdentity: providerIdentity,
-		cgroupV2ProviderLimits:   providerLimits,
-		instanceUID:              instanceUID,
-		supervisorInstance:       uuid.New(),
+		cgroupV2Root:                cfg.CgroupV2Root,
+		cgroupV2ProviderIdentity:    providerIdentity,
+		cgroupV2ProviderLimits:      providerLimits,
+		instanceUID:                 instanceUID,
+		supervisorInstance:          uuid.New(),
+		providerOuterSandboxProfile: outerSandboxProfile,
 	}
 }
 
@@ -173,7 +179,7 @@ func (r *Runner) runLegacy(
 		err = errors.Join(err, releaseProcessTree())
 	}()
 	command.Dir = input.WorkspaceDirectory
-	command.Env = runnerEnvironment(os.Environ())
+	command.Env = providerProcessEnvironment(runnerEnvironment(os.Environ()), r.providerOuterSandboxProfile)
 	for _, name := range providerHostPackageEnvironmentAllowlist {
 		if value, found := input.ProviderEnvironment[name]; found {
 			if !filepath.IsAbs(value) || strings.ContainsAny(value, "\r\n\x00") {
@@ -404,6 +410,12 @@ var runnerEnvironmentAllowlist = []string{
 	"SSL_CERT_FILE",
 	"SSL_CERT_DIR",
 	"NODE_EXTRA_CA_CERTS",
+}
+
+const providerOuterSandboxProfileEnvironment = "SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE"
+
+func providerProcessEnvironment(environment []string, profile string) []string {
+	return replaceEnvironmentValue(environment, providerOuterSandboxProfileEnvironment, profile)
 }
 
 func selectProcessEnvironment(source []string, allowlist []string) []string {

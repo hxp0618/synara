@@ -3,15 +3,28 @@ import * as AcpErrors from "./AcpErrors.ts";
 
 import {
   acpPermissionOutcome,
+  assessAcpPermissionRequest,
   canonicalItemTypeFromAcpToolKind,
   classifyAcpPromptTurnCompletion,
+  effectiveAcpApprovalDecision,
   mapAcpToAdapterError,
   readAcpFailedToolDetail,
+  resolveAcpHumanApprovalOutcome,
   resolveAcpFullAccessPermissionOutcome,
   resolveAcpPermissionPolicy,
   selectAcpFullAccessPermissionOptionId,
   selectAcpPermissionOptionId,
 } from "./AcpAdapterSupport.ts";
+
+const ordinaryPermissionRequest = {
+  kind: "execute",
+  detail: "npm test",
+  toolCall: {
+    kind: "execute",
+    command: "npm test",
+    data: { toolCallId: "tool-test", rawInput: { command: "npm test" } },
+  },
+} as const;
 
 describe("AcpAdapterSupport", () => {
   it("maps every ACP tool kind to its canonical runtime item type", () => {
@@ -49,6 +62,9 @@ describe("AcpAdapterSupport", () => {
     expect(selectAcpPermissionOptionId("acceptForSession", options)).toBe("allow-session");
     expect(selectAcpPermissionOptionId("decline", options)).toBe("deny-now");
     expect(selectAcpPermissionOptionId("cancel", options)).toBeUndefined();
+    expect(
+      selectAcpPermissionOptionId("accept", [{ kind: "allow_always", optionId: "allow-session" }]),
+    ).toBeUndefined();
   });
 
   it("prefers request-scoped Full Access approvals and falls back to persistent grants", () => {
@@ -84,6 +100,7 @@ describe("AcpAdapterSupport", () => {
         runtimeMode: "full-access",
         interactionMode: "plan",
         options,
+        permissionRequest: ordinaryPermissionRequest,
       }),
     ).toEqual({ outcome: "selected", optionId: "stay-in-plan" });
     expect(
@@ -91,6 +108,7 @@ describe("AcpAdapterSupport", () => {
         runtimeMode: "full-access",
         interactionMode: "plan",
         options: [{ kind: "allow_always", optionId: "implement" }],
+        permissionRequest: ordinaryPermissionRequest,
       }),
     ).toEqual({ outcome: "cancelled" });
     expect(
@@ -98,6 +116,7 @@ describe("AcpAdapterSupport", () => {
         runtimeMode: "full-access",
         interactionMode: "default",
         options,
+        permissionRequest: ordinaryPermissionRequest,
       }),
     ).toEqual({ outcome: "selected", optionId: "implement-once" });
   });
@@ -110,6 +129,7 @@ describe("AcpAdapterSupport", () => {
         runtimeMode: "approval-required",
         interactionMode: "default",
         options,
+        permissionRequest: ordinaryPermissionRequest,
       }),
     ).toBeUndefined();
     expect(
@@ -117,8 +137,58 @@ describe("AcpAdapterSupport", () => {
         runtimeMode: "full-access",
         interactionMode: undefined,
         options,
+        permissionRequest: ordinaryPermissionRequest,
       }),
     ).toEqual({ outcome: "cancelled" });
+  });
+
+  it("requires a visible one-shot approval for sensitive ACP requests even in Full Access", () => {
+    const sensitivePermissionRequest = {
+      kind: "execute",
+      detail: "git -C /workspace push origin main",
+      toolCall: {
+        kind: "execute",
+        title: "Run shell command",
+        command: "git -C /workspace push origin main",
+        data: {
+          toolCallId: "tool-push",
+          rawInput: { command: "git -C /workspace push origin main" },
+        },
+      },
+    } as const;
+    const assessment = assessAcpPermissionRequest(sensitivePermissionRequest);
+    expect(assessment.categories).toEqual(["protected-branch-publish"]);
+    expect(
+      resolveAcpPermissionPolicy({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        options: [{ kind: "allow_always", optionId: "allow-session" }],
+        permissionRequest: sensitivePermissionRequest,
+      }),
+    ).toBeUndefined();
+    expect(effectiveAcpApprovalDecision(sensitivePermissionRequest, "acceptForSession")).toBe(
+      "accept",
+    );
+    expect(effectiveAcpApprovalDecision(ordinaryPermissionRequest, "acceptForSession")).toBe(
+      "acceptForSession",
+    );
+    expect(
+      resolveAcpHumanApprovalOutcome({
+        permissionRequest: sensitivePermissionRequest,
+        requestedDecision: "acceptForSession",
+        options: [{ kind: "allow_always", optionId: "allow-session" }],
+      }),
+    ).toEqual({ appliedDecision: "cancel", outcome: { outcome: "cancelled" } });
+    expect(
+      resolveAcpHumanApprovalOutcome({
+        permissionRequest: sensitivePermissionRequest,
+        requestedDecision: "acceptForSession",
+        options: [{ kind: "allow_once", optionId: "allow-once" }],
+      }),
+    ).toEqual({
+      appliedDecision: "accept",
+      outcome: { outcome: "selected", optionId: "allow-once" },
+    });
   });
 
   it("reads failed ACP tool details without treating successful tools as failures", () => {

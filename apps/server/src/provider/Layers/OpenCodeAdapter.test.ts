@@ -1,4 +1,5 @@
-import { ThreadId } from "@synara/contracts";
+import { ApprovalRequestId, ThreadId } from "@synara/contracts";
+import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "@synara/shared/providerContentTrustPolicy";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   Agent,
@@ -33,19 +34,12 @@ import {
 
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 const OPEN_CODE_PLAN_PERMISSION_RULES = [
-  { permission: "*", pattern: "*", action: "deny" },
-  { permission: "read", pattern: "*", action: "allow" },
-  { permission: "glob", pattern: "*", action: "allow" },
-  { permission: "grep", pattern: "*", action: "allow" },
-  { permission: "list", pattern: "*", action: "allow" },
-  { permission: "lsp", pattern: "*", action: "allow" },
-  { permission: "webfetch", pattern: "*", action: "allow" },
-  { permission: "websearch", pattern: "*", action: "allow" },
-  { permission: "codesearch", pattern: "*", action: "allow" },
+  { permission: "*", pattern: "*", action: "ask" },
   { permission: "todoread", pattern: "*", action: "allow" },
   { permission: "todowrite", pattern: "*", action: "allow" },
   { permission: "question", pattern: "*", action: "allow" },
 ] as const;
+const OPEN_CODE_FULL_ACCESS_PERMISSION_RULES = OPEN_CODE_PLAN_PERMISSION_RULES;
 
 function createMockOpenCodeRuntime(options?: {
   readonly inventory?: OpenCodeInventory;
@@ -959,6 +953,12 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
           runtimeMode: "full-access",
           cwd: "/repo",
         });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "inspect the repository",
+          attachments: [],
+          modelSelection: { provider: "kilo", model: "openai/gpt-5" },
+        });
         yield* adapter.stopSession(threadId);
       }).pipe(
         Effect.provide(
@@ -977,6 +977,8 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
     expect(runtime.mcpAddCalls[0]?.config).toMatchObject({
       headers: { Authorization: "Bearer gateway-token-1" },
     });
+    expect(JSON.stringify(runtime.promptCalls[0])).toContain(SYNARA_HARNESS_POLICY_MARKER);
+    expect(JSON.stringify(runtime.promptCalls[0])).toContain(PROVIDER_CONTENT_TRUST_POLICY_MARKER);
     expect(gateway.revoked).toEqual(["gateway-token-1"]);
   });
 
@@ -1220,7 +1222,7 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
       },
       {
         sessionID: "existing-session-1",
-        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        permission: OPEN_CODE_FULL_ACCESS_PERMISSION_RULES,
       },
     ]);
   });
@@ -2760,7 +2762,7 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
       },
       {
         sessionID: "opencode-session-1",
-        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        permission: OPEN_CODE_FULL_ACCESS_PERMISSION_RULES,
       },
     ]);
   });
@@ -3137,6 +3139,134 @@ describe("OpenCodeAdapter runtime lifecycle", () => {
       "turn.completed",
     ]);
     expect(runtime.permissionReplyCalls).toEqual([{ requestID: "permission-1", reply: "once" }]);
+  });
+
+  it("requires a fresh approval for sensitive full-access asks and downgrades session approval", async () => {
+    const eventQueue = createSubscribedEventQueue();
+    const runtime = createMockOpenCodeRuntime();
+    const client = runtime.runtime.createOpenCodeSdkClient({
+      baseUrl: "http://127.0.0.1:4099",
+      directory: process.cwd(),
+    }) as unknown as {
+      event: {
+        subscribe: () => Promise<{ stream: AsyncIterable<unknown> }>;
+      };
+    };
+    client.event.subscribe = async () => ({ stream: eventQueue.stream });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-full-access-sensitive-permission");
+        const openedEventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, 4),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          provider: "opencode",
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Publish the branch",
+          attachments: [],
+          modelSelection: {
+            provider: "opencode",
+            model: "openai/gpt-5.4",
+          },
+        });
+
+        eventQueue.push({
+          id: "evt-sensitive-permission-asked",
+          type: "permission.asked",
+          properties: {
+            id: "permission-sensitive-1",
+            sessionID: "opencode-session-1",
+            permission: "bash",
+            patterns: ["git -C /workspace push origin main"],
+            metadata: {},
+            always: [],
+          },
+        });
+
+        const openedEvents = Array.from(yield* Fiber.join(openedEventsFiber));
+        const resolvedEventFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, 1),
+        ).pipe(Effect.forkChild);
+        yield* adapter.respondToRequest(
+          threadId,
+          ApprovalRequestId.makeUnsafe("permission-sensitive-1"),
+          "acceptForSession",
+        );
+        eventQueue.push({
+          id: "evt-sensitive-permission-replied",
+          type: "permission.replied",
+          properties: {
+            sessionID: "opencode-session-1",
+            requestID: "permission-sensitive-1",
+            reply: "once",
+          },
+        });
+        const resolvedEvents = Array.from(yield* Fiber.join(resolvedEventFiber));
+        eventQueue.close();
+        return { openedEvents, resolvedEvents };
+      }).pipe(
+        Effect.provide(
+          makeOpenCodeAdapterLive({ runtime: runtime.runtime }).pipe(
+            Layer.provideMerge(
+              ServerConfig.layerTest(process.cwd(), { prefix: "opencode-adapter-test-" }),
+            ),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+    );
+
+    expect(result.openedEvents.map((event) => event.type)).toEqual([
+      "session.started",
+      "thread.started",
+      "turn.started",
+      "request.opened",
+    ]);
+    expect(result.openedEvents[3]).toMatchObject({
+      type: "request.opened",
+      payload: {
+        requestType: "command_execution_approval",
+        detail: "git -C /workspace push origin main",
+        sensitiveAction: {
+          requiresFreshApproval: true,
+          categories: ["protected-branch-publish"],
+        },
+        args: {
+          permission: "bash",
+          patterns: ["git -C /workspace push origin main"],
+          sessionApprovalAvailable: false,
+          sensitiveAction: {
+            requiresFreshApproval: true,
+            categories: ["protected-branch-publish"],
+          },
+        },
+      },
+    });
+    expect(runtime.permissionReplyCalls).toEqual([
+      { requestID: "permission-sensitive-1", reply: "once" },
+    ]);
+    expect(result.resolvedEvents).toHaveLength(1);
+    expect(result.resolvedEvents[0]).toMatchObject({
+      type: "request.resolved",
+      requestId: "permission-sensitive-1",
+      payload: {
+        requestType: "command_execution_approval",
+        decision: "accept",
+        requestedDecision: "acceptForSession",
+        sensitiveAction: {
+          requiresFreshApproval: true,
+          categories: ["protected-branch-publish"],
+        },
+      },
+    });
   });
 
   it("suppresses a permission.replied echo that arrives after turn teardown", async () => {

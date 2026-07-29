@@ -27,7 +27,7 @@
 | Stage 2 | Go Control Plane 收口与生产化                   | 仓库内完成 / 已验收 | Stage 1          |
 | Stage 3 | Provider Runtime 与远程 Worker 产品化           | 已完成 / 已验收     | Stage 2          |
 | Stage 4 | 分布式执行平台和 K8s 多集群生产化               | COMPLETE            | Stage 2、Stage 3 |
-| Stage 5 | Provider 沙箱与运行时隔离加固                   | TODO                | Stage 3、Stage 4 |
+| Stage 5 | Provider 沙箱与运行时隔离加固                   | IN PROGRESS         | Stage 3、Stage 4 |
 | Stage 6 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-5        |
 | Stage 7 | 对外 SDK 与开发者平台                           | TODO                | Stage 2、5、6    |
 | Stage 8 | 组织内协作与 Agent/人统一提及                   | TODO                | Stage 6、Stage 7 |
@@ -173,15 +173,15 @@ Stage 7 > Stage 8 > Stage 9 其余。
       Target/Pod UID/image/build/probe 的签名，策略 key 轮换使旧 Manifest fail closed，Migration `000052` 将
       历史 self-attestation 标记为 `legacy-untrusted`。临时 Worker capability 不能宣告 strict containment。
 - [x] 为 Linux/非 Kubernetes `worker-attested-v1` Provider 建立不同安全身份、专属受保护 cgroup-v2
-	  supervisor：v3 要求 systemd 254+ `DelegateSubgroup=synara-agentd`，委派根必须无进程，启动前 fd-relative
-	  绑定、`Pdeathsig`、generation/incarnation fence、`cgroup.kill`、`populated=0` 和 root-only 签名 gate 均保留；
-	  `RecoverOrphans()` 还会启用并回读 `cpu/memory/pids` controller，每个 Provider 在首条指令前必须写入并精确
-	  回读有限的 `pids.max`、`memory.max`、`cpu.max`，缺配置、缺 controller/interface 或 readback 漂移全部 fail
-	  closed。v3/probe 2 是新的服务端 exact-version fence，已签名 v1/v2 和 v3/probe 1 均不能继续授权 Suspend。
-	  隔离 OrbStack Ubuntu VM 的真实 systemd/cgroup 场景与自动清理现已在
-	  [`v3 final3`](docs/reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md) 全绿通过 5/5；此前纯
-	  fencing/termination v2 证据保留在 [`v2 final3`](docs/reports/stage-4-protected-cgroup-v2-live-acceptance-20260726-final3.md)。OrbStack
-	  2.2.1 build 2020100 的 exact-ID CLI panic 只有在精确版本/commit/panic site 匹配后，才启用 owner-controlled
+      supervisor：v3 要求 systemd 254+ `DelegateSubgroup=synara-agentd`，委派根必须无进程，启动前 fd-relative
+      绑定、`Pdeathsig`、generation/incarnation fence、`cgroup.kill`、`populated=0` 和 root-only 签名 gate 均保留；
+      `RecoverOrphans()` 还会启用并回读 `cpu/memory/pids` controller，每个 Provider 在首条指令前必须写入并精确
+      回读有限的 `pids.max`、`memory.max`、`cpu.max`，缺配置、缺 controller/interface 或 readback 漂移全部 fail
+      closed。v3/probe 2 是新的服务端 exact-version fence，已签名 v1/v2 和 v3/probe 1 均不能继续授权 Suspend。
+      隔离 OrbStack Ubuntu VM 的真实 systemd/cgroup 场景与自动清理现已在
+      [`v3 final3`](docs/reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md) 全绿通过 5/5；此前纯
+      fencing/termination v2 证据保留在 [`v2 final3`](docs/reports/stage-4-protected-cgroup-v2-live-acceptance-20260726-final3.md)。OrbStack
+      2.2.1 build 2020100 的 exact-ID CLI panic 只有在精确版本/commit/panic site 匹配后，才启用 owner-controlled
       `sconrpc.sock` 的单次 `ContainerDelete([capturedOpaqueId])` 兼容路径；无名称参数、无写重试，并由最终 inventory
       证明 captured ID 消失及 `debian` oracle 不变。未知版本、socket replacement、remaining ID 或 same-name
       replacement 均继续 fail closed，绝不回退名称删除；final2 还证明 marker 无法观测时不会宣告 ownership。
@@ -496,12 +496,18 @@ Stage 7 > Stage 8 > Stage 9 其余。
 - [x] Personal、SSH、Docker 单机部署没有因 K8s 调度模型产生回归。当前源码的 Personal bootstrap/export-import/
       config、SSH provision/revoke/readiness 和 Docker reconcile/drain/claim focused matrix 全绿；当前脏工作树镜像又在
       OrbStack Docker 29.4.0 完成两 Worker 逐个替换并稳定收敛（52.82 秒，`activeDrains=0/currentWorkers=2/
-      terminatedFacts=2`），完整边界见
+terminatedFacts=2`），完整边界见
       [`final1`](docs/reports/stage-4-single-node-regression-20260727-final1.md)。
 
 ### Stage 5：Provider 沙箱与运行时隔离加固
 
-状态：TODO。短板审计日期 2026-07-26，证据取自当前工作树代码。
+状态：DONE。短板审计日期 2026-07-26；2026-07-28 启动重审与实现切片见
+[`Stage 5 独立计划`](docs/plans/stage-5-provider-sandbox-runtime-isolation.md)。
+完成边界与逐项证据见
+[`Stage 5 完成边界`](docs/reports/stage-5-completion-boundary-20260729.md)。Stage 5 的 Kubernetes
+结论严格限定为 Stage 4 已冻结的正式支持面——自建 Kubernetes；EKS/GKE/AKS 专属 IAM/CNI/Region
+集成仍是 deferred 产品项目，不反向成为本阶段完成前提。每个新自建 Target 上线时仍必须在其完整
+Ready/非 cordon Worker 集合重跑同一逐节点 Runner，单次验收不会自动授权其他集群。
 
 审计更新（2026-07-27）：[protected cgroup supervisor v3](docs/contracts/agentd-protected-cgroup-supervisor-v3.md)
 已从纯**围栏（fencing）与可靠终止（termination）**扩展到有限的**资源约束（resource confinement）**：
@@ -510,9 +516,9 @@ Provider 子树强制 `pids.max`、`memory.max`、`cpu.max`，并以 `DelegateSu
 外层容器/VM 承担；protected 模式仍是 Linux SSH/local 专属，Docker、Kubernetes、macOS 不继承这层保证。
 
 Provider CLI 自带沙箱是主动关闭的（`apps/provider-host/src/codexAppServerRuntime.ts` 的
-`sandbox: "danger-full-access"`，`claudeAgentSdkRuntime.ts` 非交互运行的 `bypassPermissions` +
-`allowDangerouslySkipPermissions`），代码注释已说明理由是"容器才是隔离边界，且标准容器内
-bubblewrap 无法创建 user namespace"。该选择本身成立，但它把"容器边界必须足够强"变成硬前提。
+`sandbox: "danger-full-access"`；Claude 仍允许普通工具，但保持 host permission callback 以拦截敏感动作），
+代码注释已说明理由是"容器才是隔离边界，且标准容器内 bubblewrap 无法创建 user namespace"。
+该选择本身成立，但它把"容器边界必须足够强"变成硬前提。
 本阶段负责让这个前提在每种 Target 上真正成立，或显式声明该 Target 不是多租户面。
 
 本阶段覆盖**两类不可信输入**，它们的威胁模型不同但缺一不可：
@@ -520,8 +526,8 @@ bubblewrap 无法创建 user namespace"。该选择本身成立，但它把"容�
 - **不可信代码**——Provider 在 workspace 中执行任意程序。对策是进程、资源与网络隔离（下方第一组）。
 - **不可信文本**——Provider 读取的 README、代码注释、依赖描述、Issue/PR 正文与评论、工具输出、
   外部 MCP 返回值，全部是攻击者可控内容，可诱导 agent 执行非预期动作（prompt injection）。
-  2026-07-27 核查确认：**全仓库不存在任何相关防护或设计讨论**，`packages/contracts/src/externalMcp.ts`
-  说明外部 MCP 是又一条未受约束的注入通道。对策是能力边界与敏感动作闸门（下方第二组）。
+  2026-07-27 启动核查时全仓库不存在相关防护；当前已冻结威胁模型并接入部分来源、凭证/能力边界、
+  敏感动作 classifier 与 audit alert，剩余 adapter 缺口列在下方第二组。
 
 第二类是 agent 产品特有的、当前业界最主要的实际攻击面，且**Stage 9 会显著放大它**——事件触发的
 自动化意味着攻击者只要开一个 Issue 就能把文本直接投喂给无人值守的 agent。因此第二组必须在
@@ -551,92 +557,246 @@ Stage 9 上线前完成，不能延后。
 #### TODO — 进程、资源与网络隔离
 
 - [x] 为 Provider cgroup 写入实际资源上限：`pids.max`（优先级最高，防 fork 炸弹）、`memory.max`、
-	  `cpu.max`。v3 使用 systemd `DelegateSubgroup=synara-agentd` 满足 no-internal-process 规则，在 held parent 与
-	  每个 bundle 的 `cgroup.subtree_control` 启用并回读 `cpu memory pids`，再于 Provider 启动前写入/回读三项
-	  有限值；配置四元组必须完整，内核拒绝或接口缺失不会回退无上限。Linux 单测、SSH gate 与 disposable
-	  OrbStack systemd 255/cgroup-v2 实机证据见
-	  [`final3`](docs/reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md)。
-- [ ] 将 Kubernetes Pod 的 CPU/Memory/EphemeralStorage limits 从可选改为必填：
+      `cpu.max`。v3 使用 systemd `DelegateSubgroup=synara-agentd` 满足 no-internal-process 规则，在 held parent 与
+      每个 bundle 的 `cgroup.subtree_control` 启用并回读 `cpu memory pids`，再于 Provider 启动前写入/回读三项
+      有限值；配置四元组必须完整，内核拒绝或接口缺失不会回退无上限。Linux 单测、SSH gate 与 disposable
+      OrbStack systemd 255/cgroup-v2 实机证据见
+      [`final3`](docs/reports/stage-4-protected-cgroup-v3-live-acceptance-20260727-final3.md)。
+- [x] 将 Kubernetes Pod 的 CPU/Memory/EphemeralStorage limits 与节点级 PID 上限从可选/隐式改为必填：
       `kubernetes_pod_spec.go` 中每个字段均为 `if value != ""` 可选，`kubernetes_reconciler.go`
-      的校验只查 quantity 格式、不查是否存在，空配置会静默产生无上限 Pod。
-- [ ] 完成 general_pool Worker 跨租户残留的纵深清理。Migration `000088` 已完成核心机密性 fence：
+      现在在配置归一化时要求 `cpuLimit`、`memoryLimit`、`ephemeralStorageLimit` 与 `pidsLimit` 全部
+      存在。Reconciler 在任何 Kubernetes API mutation 前读取 Target `nodeSelector` 下全部节点的 kubelet
+      `podPidsLimit`，Worker 注册再复验实际 `spec.nodeName`；`-1`、`0`、超出 Target 上限、无匹配节点或
+      无法读取均 fail closed。execution/warm Pod 共用该入口，受影响 Go package tests 已通过。
+- [x] 完成 general_pool Worker 跨租户残留的纵深清理。Migration `000088` 已完成核心机密性 fence：
       `tenantIsolation: pinned | shared` 不可变，多租户默认 pinned，首个 Execution/Workspace-cleanup Claim
       在 Worker row lock 下原子绑定 Tenant，候选过滤、Heartbeat、重注册及 PostgreSQL/SQLite 触发器均
       禁止跨租户、清空或换绑；显式 shared 才允许跨 Tenant，真实 OrbStack + PostgreSQL 证据见
-      [`final1`](docs/reports/stage-4-worker-pool-tenant-isolation-orbstack-pg-20260727-final1.md)。本项仍保持未完成，
-      因为 scrub-on-release（workspace + `/tmp` + 反向 chown）尚未落地；它应作为纵深防御，但不能取代
-      一次写对的 pinned 不变式。
+      [`final1`](docs/reports/stage-4-worker-pool-tenant-isolation-orbstack-pg-20260727-final1.md)。
+      仓库内 scrub-on-release 已由 migration `000094`、控制面 generation/receipt fence、agentd 幂等
+      workspace/git-cache/private-`/tmp` 物理清理、反向 ownership 修复及失败 drain 落地；scrub receipt
+      未确认前 Execution/Workspace-cleanup Claim 均 fail closed。该实现是纵深防御，不能取代一次写对的
+      pinned 不变式。OrbStack 同一物理 Worker 已完成真实控制面 A → receipt → B fence；补充组合实测
+      由真实 agentd 依次运行两个 Provider Host Protocol v2 fixture 进程，A 在 workspace v2/v3、legacy、
+      git cache、quarantine 与 Worker-private `/tmp` 写入 6 处 marker，agentd scrub/receipt 后 B Provider
+      扫描 27 个路径且残留/可读 marker 均为 0。证据见
+      [`stage-5-agentd-provider-tenant-isolation-local-acceptance-20260728.md`](docs/reports/stage-5-agentd-provider-tenant-isolation-local-acceptance-20260728.md)。
 - [x] 为生成的 Kubernetes NetworkPolicy 增加云元数据端点阻断：Target 配置现在拒绝直接声明
       link-local/metadata CIDR；对 `0.0.0.0/0` 等宽范围生成 `ipBlock.except`，至少扣除
       `169.254.0.0/16`、`100.100.100.200/32`、`fe80::/10` 和 `fd00:ec2::254/128`。单测覆盖宽范围扣除与
       直接 metadata CIDR 的 fail-closed。这里完成的是配置/清单门禁；从真实 Provider 进程发起请求的
-      负向实测仍保留在下方 Stage 5 完成条件，不以 YAML 检查冒充运行期隔离证明。
+      负向实测 Runner 已接入真实 Control Plane → agentd → Provider Host → Codex/Claude 路径，并可用
+      `--kubernetes-node-name` 精确钉住/回读 Worker；托管 Provider × Node 矩阵仍保留在下方 Stage 5
+      完成条件，不以代码或 YAML 检查冒充运行期隔离证明。
 - [x] 收窄 NetworkPolicy 的 DNS 规则：生成规则现在同时使用 `kube-system` Namespace selector 与
       `k8s-app=kube-dns` Pod selector，仅开放 UDP/TCP 53；单测冻结 selector、协议和端口。operator 仍需在
       目标发行版采用不同 DNS 标签时显式适配并复跑验收，不能回退为任意解析器。
-- [ ] 决定 Docker Target 的产品定位并执行。当前无 `CapDrop`、无 `SecurityOpt`
+- [x] 决定 Docker Target 的产品定位并执行。当前无 `CapDrop`、无 `SecurityOpt`
       （no-new-privileges/seccomp 均未请求）、无 `ReadonlyRootfs`、无 `PidsLimit`，内存/CPU 可选，
       user 可被 operator 改为 root，bridge 网络全互联网出网无 allowlist，且同一 Target 的每个
       容器槽位共用同一命名卷；protected cgroup 模式在 Docker 上是契约明确非目标，容器内仅有
       `Setpgid` + `Pdeathsig`，`setsid()` 后代可逃逸。二选一：补齐到 Kubernetes 平价，或在文档与
       产品面显式声明为个人/开发用途、非多租户面（推荐后者，把加固预算集中在 Kubernetes 路径）。
-- [ ] 声明并收敛 SSH/local 非 protected 回退路径的隔离等级：`CgroupV2Root` 为空时仅
+      已执行推荐路径：Docker 返回 `single-tenant-trusted-v1`，契约明确其缺口；平台共享 Docker 不会
+      进入 Target 列表、会话选择、路由或 Worker 注册。
+- [x] 声明并收敛 SSH/local 非 protected 回退路径的隔离等级：`CgroupV2Root` 为空时仅
       `Setpgid` + `Pdeathsig`，`setsid()` 后代可逃逸；配置了 cgroup root 但未配 provider 身份时
       Provider 与 agentd 同 UID 且无资源上限；macOS 仅 `Setpgid`，无任何凭证隔离与 `Pdeathsig`。
-- [ ] 按隔离与延迟双轴重新论证 microVM（`snapshot-restore`）层：
+      这些路径统一声明为 `single-tenant-trusted-v1`，契约分别列出 protected、fallback、macOS 能力；
+      非个人部署的内置 `platform-local` 会被 bootstrap 禁用，平台共享 local/SSH 同样从执行入口排除。
+- [x] 按隔离与延迟双轴重新论证 microVM（`snapshot-restore`）层：
       [fast-provision 提案](docs/plans/fast-provision-runtime-proposal-v0.md)目前只按延迟立项，
       但它同时是"托管路径缺乏真实内核边界"的答案；两条论证合并后 ROI 与单看延迟不同，其开放
-      问题"microVM 落在何处"（自管 Firecracker / Kata on K8s / 托管）应提前决策。
-- [ ] 将每种 Execution Target 的隔离能力矩阵**并入既有
+      问题"microVM 落在何处"已冻结为 Kubernetes 控制面 + 专用 Linux/KVM node pool 上由
+      `sandbox-operator` 管理的自管 Firecracker；agentd/credential broker 位于 guest 外，Provider/tool
+      位于 guest 内，fenced vsock 通信。Kata 仅保留为兼容性 spike，不作为 snapshot tier 权威。
+- [x] 将每种 Execution Target 的隔离能力矩阵**并入既有
       [`docs/contracts/execution-target-v1.md`](docs/contracts/execution-target-v1.md)，不新建独立
       文档**（2026-07-27 决定）。该契约已按 Kind 组织（`Kinds`、`Managed SSH lifecycle`、
       `Managed Docker Worker Pool`、`Managed Kubernetes execution`），隔离等级本就是 Target Kind
       的属性；拆成两份会让"新增 Target 必须声明隔离等级"这条 Roadmap 规则更容易被漏掉，也会
-      造成新增 Kind 时需同步两处。
-- [ ] 为 Provider 自带沙箱关闭（`danger-full-access` / `bypassPermissions`）的前提条件加自动化
-      测试：前提一旦被削弱（例如某 Target 失去容器边界）即 fail closed，不允许静默降级。
-- [ ] 评估 spawn 期进程加固的可行增量：当前 Go 侧 spawn 路径不存在 seccomp、`no_new_privs`、
+      造成新增 Kind 时需同步两处。API 现返回派生的 `isolationProfile`、`platformSharedEligible` 与
+      `productBoundary`，不能由 Target `capabilities` 自行升级。
+- [x] 为 Provider 自带沙箱关闭（Codex `danger-full-access`；Claude 保留 host permission callback）的前提条件加自动化
+      测试：agentd 丢弃 ambient profile 后注入自身派生值，Provider Host 在启动 Provider 前拒绝缺失
+      或未知值；`kubernetes-restricted-v1` 还要求控制面读取 live Pod，并校验实际 security context、
+      host namespace、容器/卷、projected token、private `/tmp`、三类 limits 与 PID 声明，削弱即
+      `kubernetes_workload_identity_outer_sandbox_invalid`，不允许静默降级。
+- [x] 评估 spawn 期进程加固的可行增量：当前 Go 侧 spawn 路径不存在 seccomp、`no_new_privs`、
       capability drop、`Setrlimit`、namespace 或 landlock。Kubernetes 已由 Pod securityContext
       覆盖大部分（`drop: ALL`、`RuntimeDefault` seccomp、`allowPrivilegeEscalation: false`、
-      `readOnlyRootFilesystem`），因此本条聚焦 SSH/local protected 模式的补齐性价比，不重复
-      容器已提供的能力。
+      `readOnlyRootFilesystem`）。结论是不为 SSH/local 增加容易被误读为完整沙箱的零散 flag：protected
+      cgroup 继续只承诺资源/终止围栏，SSH/local 保持 `single-tenant-trusted-v1` 并退出平台共享面；需要
+      文件系统/syscall/device 隔离的托管路径使用 Kubernetes，后续更强边界使用 microVM。
 
 #### TODO — 不可信输入与 Agent 行为边界（Stage 9 前置）
 
-- [ ] 建立 prompt injection 威胁模型文档并冻结防护基线：明确列举攻击者可控的输入通道（repo
+- [x] 建立 prompt injection 威胁模型文档并冻结防护基线：明确列举攻击者可控的输入通道（repo
       文件内容、依赖元数据、Issue/PR 正文与评论、工具 stdout、外部 MCP 返回、被 fetch 的网页），
-      以及每条通道的缓解手段。当前这些通道全部无差别地进入 Provider 上下文。
-- [ ] 实现不可信内容的来源标注：外部来源文本在进入 Provider 上下文时携带显式来源标记，与用户
+      以及每条通道的缓解手段。冻结契约见
+      [`Untrusted Content and Sensitive Actions v1`](docs/contracts/untrusted-content-sensitive-actions-v1.md)，
+      并明确区分已接线来源与仍保留的 adapter 缺口。
+- [x] 实现不可信内容的来源标注：外部来源文本在进入 Provider 上下文时携带显式来源标记，与用户
       指令在结构上可区分，使"README 里写的话"不与"用户下的指令"同权。这是纵深防御的第一层，
-      不假设模型一定能抵抗，但显著抬高成功率门槛。
-- [ ] 冻结敏感动作闸门清单，强制走既有 Approval 机制而非自动执行：向默认分支/受保护分支
+      不假设模型一定能抵抗，但显著抬高成功率门槛。External MCP、Synara MCP 与 automation 已使用
+      服务端不可伪造的 message source，并在 Provider 输入前进入 escaped JSON-string provenance
+      boundary。新增恶意 Issue 形态回归曾抓出 Reactor bootstrap 重新使用原始文本的真实绕过，现已改为
+      始终沿用 `provenanceWrappedMessageText`；三类不可信 source 即使内部请求 `full-access` 也由 decider
+      降为 `approval-required`。所有本地 Provider 现由 exhaustive registry 声明 content-trust policy 的交付
+      位置；Antigravity 因无 system/MCP transport 改为每个 CLI Turn 都携带 identity-only host block。该策略
+      明确把 repo/tool stdout/web fetch/第三方 MCP result 视为不可信。Claude managed Host 与本地 adapter
+      已用 SDK `PostToolUse.updatedToolOutput` 为成功结果加宿主控制的结构化 envelope；失败结果用不复制正文的
+      相邻 host context 标记，`AskUserQuestion` 实时用户答案保留可信作者身份。Codex 0.145 的 `PostToolUse`
+      只在 handler success 后运行，不能覆盖 MCP `isError`、patch/Approval 拒绝或 handler failure；managed 与
+      local 因此都通过隔离 `CODEX_HOME` 注入同一 Host-owned 命令的单个 session-flags `PreToolUse` hook：
+      managed 复用只读 Worker 镜像内 Provider Host 入口，local 把固定有界程序嵌入启动参数并只调用 Synara
+      当前绝对进程路径，不依赖
+      workspace 可变 helper。两者在执行前追加不复制 input/output/error 正文的 provenance，并在开 Thread 前用
+      `hooks/list` 拒绝任一缺失或额外启用的 non-managed hook；start/resume/fork 同时强制 request-level
+      hook-trust bypass，
+      Pre hook 会在不能产生 fresh Approval 的模式下于执行前拒绝敏感调用，并从 `apply_patch` header 提取
+      依赖、CI、Credential 与 egress-policy 路径。approval-required 的 pathless native file-change Approval
+      必须按 `itemId` 命中前置 `item/started` assessment，缺失关联时 local/managed Host 都直接拒绝。
+      `request_user_input` 实时答案不降级。0.145 的 `write_stdin` 明确跳过 Pre hook，因此隔离参数关闭
+      `features.unified_exec`，只暴露每条命令重新分类的一次性 `shell_command`。默认绕过 ToolRegistry 的 hosted
+      cached web search 已固定为 `disabled`，code mode、browser use 与 computer use 也关闭；local/managed
+      启动在开 Thread 前通过 `config/read` 复验有效 search mode、全部受限 feature 与精确 MCP 配置，任一
+      覆盖即失败。local `synara` 必须额外匹配同一 scoped lease 的 numeric-loopback `/mcp` URL、完整字段集与
+      `bearer_token_env_var`，且有效 shell policy 必须排除 gateway token 与所有保留的 model-provider
+      `env_key` / `env_http_headers` credential mapping，禁止经 `set` / `include_only` / 非默认继承重引入；无
+      lease 的 discovery MCP 固定为空集。真实 0.145.0 Responses 请求捕获没有 `web_search`、code-mode `exec` 或 `wait`；当前
+      `tool_search` 仅返回 Host-owned Synara MCP registry metadata。真实成功/patch-decline 双 probe
+      证明唯一 Pre hook 各写入一条 raw rollout developer context，模型在两类结果后都能复述精确
+      policyVersion/toolName；成功路径无 `exec_command` / `write_stdin`，拒绝补丁无副作用。Pi direct SDK
+      现禁止 project extension trust，并由最后一个 hidden in-memory Host `tool_result` extension 为成功/失败结果
+      追加相邻 provenance，同时保持原始 text/image block。ACP 只在 Agent 已消费结果后向 Client 发 `session/update`；
+      OpenCode/Kilo 的模型前 hook 只属于同进程 external plugin chain，故不冒充 Host 边界；Synara 已强制关闭
+      二者的 repository project config，并为所有 server/discovery/辅助 CLI 命令同时固定 `--pure` 与对应
+      `*_PURE=1`，使 user/global external plugin 也不能加载；workspace 打开前还要求 OpenCode >= 1.15.11、
+      Kilo >= 7.4.16，旧 binary 不支持 pure interface、版本过低或版本不可解析时启动失败。已配置的
+      外部 OpenCode/Kilo server 无法认证相同 profile。ACP、OpenCode/Kilo 与 Antigravity 仍如实标为
+      `policy-only`；Antigravity 2.0 的 `PostToolUse` 官方输出契约也只能是 `{}`，同 UID external plugin 不能算
+      Host 边界。result provenance registry 现已成为三类 server-authored untrusted source 的第三项硬准入，
+      与 fresh Approval、repository startup isolation 缺一不可；Agent/Synara MCP schema、External MCP capability、
+      Automation create/update/run、durable decider 与 Reactor backstop 当前只允许 Codex/Claude，普通人工 Turn
+      不受影响。本项按可交付产品面完成；未来 Provider/Codex tool surface 只有在 registry 升级并复验后才能扩大
+      准入。官方 release source/hash/隔离 XDG probe 证据见
+      [`stage-5-opencode-kilo-pure-mode-local-acceptance-20260729.md`](docs/reports/stage-5-opencode-kilo-pure-mode-local-acceptance-20260729.md)；
+      Codex 有效 tool surface 与真实请求捕获见
+      [`stage-5-codex-attested-tool-surface-local-acceptance-20260729.md`](docs/reports/stage-5-codex-attested-tool-surface-local-acceptance-20260729.md)，
+      scoped MCP transport/token exclusion 的精确自检见
+      [`stage-5-codex-mcp-transport-attestation-local-acceptance-20260729.md`](docs/reports/stage-5-codex-mcp-transport-attestation-local-acceptance-20260729.md)，
+      model-provider 静态 Credential containment 见
+      [`stage-5-codex-model-provider-credential-containment-local-acceptance-20260729.md`](docs/reports/stage-5-codex-model-provider-credential-containment-local-acceptance-20260729.md)。
+      Provider 出站代理同样不再把 authenticated URL 当作“可 redaction 的 secret”：Kubernetes Target、agentd
+      与 Provider Host 分层拒绝 userinfo/query/fragment/路径、非法 scheme/host/port、无端口 SOCKS5 及
+      wildcard/超界 `NO_PROXY`，模型和任意工具只收到 credential-free authority；本地证据见
+      [`stage-5-provider-proxy-credential-containment-local-acceptance-20260729.md`](docs/reports/stage-5-provider-proxy-credential-containment-local-acceptance-20260729.md)。
+      Result provenance 准入证据见
+      [`stage-5-untrusted-result-provenance-admission-local-acceptance-20260729.md`](docs/reports/stage-5-untrusted-result-provenance-admission-local-acceptance-20260729.md)。
+- [x] 冻结敏感动作闸门清单，强制走既有 Approval 机制而非自动执行：向默认分支/受保护分支
       push、创建或修改 CI 配置与工作流文件、修改依赖清单与锁文件、新增出网目标、写入
-      Credential 相关路径。清单必须是服务端权威，不可由 Provider 侧自行放行。
-- [ ] 收敛 agent 可达的凭证范围：复核 git push 凭证、云凭证与 Provider Credential Grant 的最小
+      Credential 相关路径。清单必须是服务端权威，不可由 Provider 侧自行放行。共享 classifier 与
+      Claude/Codex、Cursor/Grok/Droid ACP、OpenCode/Kilo request 路径已落地，敏感动作把
+      `acceptForSession` 降级为单次 `accept`。不可信任务准入现同时要求宿主可观测 fresh Approval 与
+      repository 可执行启动配置隔离：local Codex 使用独立最小 `CODEX_HOME`，只链接 `auth.json`，session
+      store 独立并按明确 resume/fork ID copy-on-write 导入；0600 config 只保留非可执行 model-provider
+      transport 子集，明文 provider token 改为工具子进程不可见的环境变量；保留的 base URL 必须是无
+      userinfo/query/fragment 的 HTTP(S)，静态 query 只接受 dedicated table 中日期形态 `api-version`，任意
+      query Credential fail closed。并丢弃 command-backed/AWS auth、
+      user/project MCP、hooks、plugins、rules、skills、profiles 与 project trust。Codex 最低版本为 0.145.0，
+      `--strict-config` + Host CLI flags 关闭 executable extensions、external memory import、shell snapshot、
+      hosted web、code/browser/computer use 与 unified exec，MCP 只允许空集或唯一 Host-owned Synara gateway；
+      `config/read` 在开 Thread 前复验同一有效 tool surface、精确 transport 与全部 Provider credential env
+      的 shell exclusion。local/managed Claude 使用
+      `settingSources: []` + `strictMcpConfig`，OpenCode/Kilo 强制 project-config kill switch + pure mode，并拒绝
+      untrusted dispatch 复用不可认证的外部 server，managed Codex
+      使用隔离 HOME 与 hooks attestation。Cursor 会自动读取 project MCP；Droid 虽已用每会话 0600 runtime
+      settings 关闭所有 hooks、继承 autonomy、IDE auto-connect 与 cloud sync，仍可能加载 project MCP/plugin；
+      Grok 也没有已证明的完整 kill switch。因此 Cursor/Grok/Droid 与没有宿主 permission callback 的
+      Antigravity/Pi 均在任务创建、Automation create/update/run 与最终编排入口 fail closed，不能承接
+      External/Synara MCP 或 automation；Cloud Control Plane 也会严格校验 assessment 并将其从
+      `request.opened` 延续到 `request.resolved`。真实 Claude metadata case 会验证 full-access fresh
+      Approval；credential-scope case 则要求 Claude `full-access` 与 Codex `approval-required` 都持久化精确
+      `credential-access` assessment 并只允许一次授权。`malicious-issue-denial` exact-node case 也已就绪：
+      真实 Claude/Codex 必须暴露 `credential-access` + `protected-branch-publish` assessment，Runner 显式
+      `decline` 后不允许出现 command item、Terminal、command output 或 Artifact 生命周期；命令由前置
+      `false &&` 安全熔断。metadata-egress 的 Codex 路径也已改为 `approval-required` 并要求同一 fresh
+      Approval 后才执行实际网络探针。该 case 已在自建物理 K3s 的 Codex/Claude × 完整 Ready Worker
+      集合通过；任意子进程未发出 tool/approval 事件时仍只能依赖外层沙箱/凭证/egress，因此未来新增
+      Provider 或 Target 必须重新扩展并运行同一负向矩阵。真实 0.145
+      `apply_patch` 探针另已证明 full-access 修改 `package.json` 在执行前 blocked 且无文件/lifecycle，
+      approval-required 则恰好产生一次 native file-change Approval；显式 decline 后 item 以 `declined` 完成且
+      文件不存在，不能把 file-change 的审计 lifecycle 误判为已写入副作用。
+      classifier 已进一步覆盖带 Git/package-manager 全局参数的 fetch/push/install、GitLab/Buildkite 等 CI
+      路径、Composer/SwiftPM/.NET/Elixir/Dart/Nix 等依赖文件、常见 Credential 路径/命令，以及
+      `Write`/`Edit` 新内容中的 URL 或 Credential 引用；删除用 `old_string` 不算新增 authority。当前 Codex
+      attested 写入面只有 `apply_patch`，其 patch command/header 由 3909-character inline guard 扫描并保留
+      4096 上限，未来新增 content-key 写工具必须先扩展 guard 与工具面 attestation。本地完整证据见
+      [`stage-5-sensitive-action-classifier-local-acceptance-20260729.md`](docs/reports/stage-5-sensitive-action-classifier-local-acceptance-20260729.md)。
+- [x] 收敛 agent 可达的凭证范围：复核 git push 凭证、云凭证与 Provider Credential Grant 的最小
       权限边界，确保被注入的 agent 拿不到超出当前任务所需的授权（Grant 已是 generation-scoped，
-      本条聚焦 git 与云侧）。
-- [ ] 为外部 MCP 建立信任分级与出网约束：外部 MCP 服务器返回值按不可信内容处理，其自身的网络
-      访问同样受 Stage 5 的 egress allowlist 约束，不得成为绕过出网边界的代理。
-- [ ] 建立注入检测与事后可审计性：敏感动作的触发链路（哪段输入导致了该动作）可回溯，注入疑似
-      事件进入 Audit 并可告警。无法完全阻止时，至少保证可发现、可追责。
+      本条聚焦 git 与云侧）。External MCP 已禁止新授予 `runtime:local` / `runtime:full-access`，旧 scope
+      也不能越过 managed-worktree + approval-required runtime policy。Provider 长期 Key 已由 agentd
+      execution-lifetime loopback broker 替换为 task token；git fetch secret 在 Provider 前销毁，publish
+      型 Binding 不进入普通 Workload，ambient git/cloud secret 被环境 allowlist 排除。Kubernetes
+      Pod-bound registration token 也只在受限 init 中投影并由主容器一次性消费删除。新增真实 Provider
+      `credential-scope` exact-node case 只检查 ambient cloud、Git/SSH、package、Docker/Kubernetes 与
+      ServiceAccount Credential 是否存在，不读取环境值或 Credential 文件内容；仅以 64 KiB 上限检查非
+      symlink `.git/config` 的 HTTPS userinfo，输出固定 sentinel，并按设计排除 execution-lifetime Provider
+      broker task token。代码门禁已就绪，托管 Provider × Node 矩阵仍待运行。
+- [x] 为外部 MCP 建立信任分级与出网约束：当前 managed Provider Host deny-by-default——Claude 不加载
+      user/project/local settings，Codex 使用 agentd-owned clean `CODEX_HOME` 并以 `mcp_servers={}` 启动，故 repo 不能启动 MCP
+      server 绕过 Target egress。未来 host-defined MCP 必须同时接入 result provenance 并在 Target 内运行。
+- [x] 建立注入检测与事后可审计性：External MCP audit migration `088` 已持久化 source/trust/SHA-256、
+      bounded indicator IDs 与 `prompt_injection_suspected` alert kind；integration/request/project/created
+      Thread 可关联 Message source、Turn、Provider request/item、sensitive categories 与 Approval 结果，
+      且不复制 prompt 明文。本地 Runtime Event 与 Approval activity 现也在 opened/resolved 两端保留同一
+      canonical assessment。Stage 6 可消费该 durable alert feed 做外部通知。
 
 #### 完成条件
 
-- [ ] 单个 Execution 无法通过 fork 炸弹、内存或 CPU 耗尽影响同宿主的其他 Execution 或 Worker，
-      并有真实触发验证而非仅配置检查。
-- [ ] 共享 Worker 上不存在跨租户可读残留，且该结论不依赖路径不可猜测性。判定方式：租户 A 执行
+- [x] 单个 Execution 无法通过 fork 炸弹、内存或 CPU 耗尽影响同宿主的其他 Execution 或 Worker，
+      并有真实触发验证而非仅配置检查。一次性 Kind `podPidsLimit=128` 已实测 256 次 fork 中 136 次被
+      拒绝、64Mi 内存 OOMKilled、CPU finite、邻居 12/12 响应；OrbStack `podPidsLimit=-1` 被严格测试
+      抓出且现在会被门禁拒绝。自建物理 K3s 的完整 Ready Worker 集合已按 exact-node 运行；其他
+      自建 Target 仍须在接入时独立复验。
+- [x] 共享 Worker 上不存在跨租户可读残留，且该结论不依赖路径不可猜测性。判定方式：租户 A 执行
       结束后，在同一 Worker 上运行租户 B 的 Execution，B 的 Provider 进程无法枚举或读取 A 的
-      workspace、git cache 与 `/tmp` 残留——以实测而非配置审查为准。
-- [ ] Kubernetes Execution Target 在缺少资源 limits 时无法通过校验。
-- [ ] 云元数据端点在所有 Kubernetes Worker 上不可达。判定方式：从运行中的 Provider 进程内实际
-      发起到 `169.254.169.254` 的请求必须失败，而不是仅检查 NetworkPolicy 清单是否包含 `except`。
-- [ ] 每种 Execution Target 的隔离等级在契约中显式声明；弱隔离 Target 不出现在多租户产品面。
-- [ ] Provider 自带沙箱关闭的前提条件有自动化守卫，削弱即失败。
-- [ ] 存在 prompt injection 威胁模型文档与冻结的防护基线；敏感动作清单为服务端权威，被注入的
+      workspace、git cache 与 `/tmp` 残留——以实测而非配置审查为准。真实 agentd + Provider Host
+      组合实测已覆盖 6 类路径并由 B 递归扫描同一存储根，见 Stage 5 本地验收报告。
+- [x] Kubernetes Execution Target 在缺少 CPU/Memory/EphemeralStorage/PID limits 或实际节点 PID
+      上限不合规时无法通过校验/注册。
+- [x] 云元数据端点在所有 Kubernetes Worker 上不可达。判定方式：从运行中的 Provider 进程内实际
+      发起到 `169.254.169.254`、`100.100.100.200` 与 `fd00:ec2::254` 的请求必须失败，而不是仅检查
+      NetworkPolicy 清单是否包含 `except`。Codex/Claude × Ready/非 cordon Worker 矩阵已在本次自建
+      物理 K3s Target 完整执行。聚合 `stage5_provider_isolation_matrix.py` 负责按 Target label selector
+      枚举首尾节点集合、逐 cell 运行三个 case，并在节点集合变化/漏跑时 fail closed；该 gate 是每个
+      后续自建 Target 的接入门禁。
+- [x] 所有准入 Provider 在所有 Kubernetes Worker 上只能看到当前 Execution 所需的 broker task token；
+      冻结清单内的 ambient cloud、Git/SSH、package、Docker/Kubernetes 或 ServiceAccount Credential 环境名与
+      路径均不存在。真实 Provider `credential-scope` exact-node Runner 已就绪，并只持久化固定
+      absent/present/error sentinel；同一聚合编排器要求每个 Codex/Claude × Ready/非 cordon Worker cell
+      通过该 case。Codex/Claude 已在本次自建物理 K3s Target 的完整 Ready Worker 集合通过；未来新增
+      准入 Provider、Worker 或 Target 时必须重新形成完整笛卡尔积，不能沿用本次结论。
+- [x] 每种 Execution Target 的隔离等级在契约中显式声明；弱隔离 Target 不出现在多租户产品面。
+- [x] Provider 自带沙箱关闭的前提条件有自动化守卫，削弱即失败。
+- [x] 存在 prompt injection 威胁模型文档与冻结的防护基线；敏感动作清单为服务端权威，被注入的
       agent 无法在不经审批的情况下 push 到受保护分支、改 CI 配置或新增出网目标。
-- [ ] 敏感动作可回溯到触发它的输入片段，注入疑似事件可审计、可告警。
-- [ ] 上述行为边界在 Stage 9 的事件触发自动化上线前已生效，且有以恶意 Issue 正文为输入的负向
-      测试证明无人值守路径不会被诱导执行敏感动作。
+- [x] 敏感动作可回溯到触发它的输入片段，注入疑似事件可审计、可告警。External MCP audit migration
+      `088` 持久化 source/trust/SHA-256/indicator IDs 与 `prompt_injection_suspected`，并可沿 integration /
+      request / project / created Thread → Message source → Turn / request / item / sensitive categories / Approval
+      结果关联；不复制 prompt 明文，外发通知属于 Stage 6。
+- [x] 上述行为边界在 Stage 9 的事件触发自动化上线前已生效，且有以恶意 Issue 正文为输入的负向
+      测试证明无人值守路径不会被诱导执行敏感动作。当前 product-path 回归已覆盖恶意 closing tag、
+      `git push` 与 Credential 打印指令进入 automation provenance boundary、full-access 被降级；补充
+      ingestion 回归将同一 Issue 形态消息与敏感请求/assessment/pending/显式 decline 串联，并证明没有 tool
+      lifecycle。真实 Provider `malicious-issue-denial` Runner 进一步把安全熔断的 Issue 形态命令、双类别
+      Approval、显式 decline 与零执行生命周期串联，并已在物理 K3s 的 Codex/Claude exact-node 矩阵通过。
+      真实 Issue webhook adapter 尚未实现，故 adapter-specific webhook → identity mapping → idempotent
+      automation → Provider → 拒绝的端到端测试继续作为 Stage 9 自身的上线门禁（见 Stage 9 入站事件与
+      无人值守权限条目），而不是用不存在的 Stage 9 功能反向阻塞 Stage 5。任何 Stage 9 adapter 在该门禁
+      通过前不得上线。
 
 ### Stage 6：企业 SaaS GA、运营、安全与商业化
 

@@ -257,6 +257,11 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			if previousBinding.TenantBindingID != nil && normalized.WorkerMode != WorkerModeGeneralPool {
 				return problem.New(409, "worker_tenant_binding_mode_mismatch", "A Tenant-bound logical Worker can only return as a general-pool Worker.")
 			}
+			if err := requireLogicalWorkerStorageScrubClearForRegistrationLocked(
+				ctx, tx, normalized.ExecutionTargetID, normalized.ClusterID, normalized.Namespace, normalized.PodName,
+			); err != nil {
+				return err
+			}
 			model = persistence.WorkerInstance{
 				ID: uuid.New(), Incarnation: 1, InstanceUID: normalized.InstanceUID,
 				SSHBootstrapGeneration: normalized.SSHBootstrapGeneration,
@@ -322,6 +327,13 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			// credential and incarnation.
 			return problem.New(409, "kubernetes_worker_instance_already_registered", "This Kubernetes Pod UID already registered its Worker instance.")
 		}
+		pendingStorageScrubID, err := pendingWorkerStorageScrubForReregistrationLocked(
+			ctx, tx, model, normalized.InstanceUID,
+		)
+		if err != nil {
+			return err
+		}
+		previousIncarnation := model.Incarnation
 		if err := transitionWorkerIncarnationFactLocked(
 			ctx, tx, model, now, workerFactStateTerminated, false, "worker-reregistered",
 		); err != nil {
@@ -359,6 +371,13 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			).Updates(&updates)
 		if err := expectOne(result, 500, "worker_registration_update_failed", "Failed to refresh the worker registration."); err != nil {
 			return err
+		}
+		if pendingStorageScrubID != uuid.Nil {
+			if err := transferWorkerStorageScrubForReregistrationLocked(
+				ctx, tx, pendingStorageScrubID, model.ID, previousIncarnation, updates.Incarnation, normalized.InstanceUID,
+			); err != nil {
+				return err
+			}
 		}
 		model.ExecutionTargetID = normalized.ExecutionTargetID
 		model.Incarnation = updates.Incarnation

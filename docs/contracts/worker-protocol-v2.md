@@ -28,6 +28,9 @@ deletion timestamp. Once the Reconciler durably fences the exact target/namespac
 registration, authentication, Heartbeat, Claim, and reactivation of that UID fail with
 `kubernetes_pod_deletion_fenced`; agentd must terminate instead of retrying indefinitely. The fence is exact-UID scoped,
 so a Kubernetes replacement that reuses the Pod name with a new UID can register as a new physical incarnation.
+The Worker's environment must also carry the Target's finite Kubernetes `pidsLimit`; the Control Plane validates the
+same value in the live Pod and reads kubelet `podPidsLimit` for the Pod's actual node before registration. A missing,
+unbounded, excessive, or unverifiable node limit rejects Worker authority before Claim.
 
 ## Required Workspace layout v3
 
@@ -92,9 +95,10 @@ revocation makes it unavailable. The response is `Cache-Control: no-store`, carr
 only for the controlled stage named by `bindingKind`. Workers must not resolve every descriptor eagerly.
 
 Agentd selects at most one descriptor for the exact stage and rejects duplicate active descriptors as ambiguous
-before any plaintext request. The Workspace preparation path requests only `git_fetch`; `git_push`, Registry and
-Package descriptors remain unresolved unless a distinct controlled operation explicitly requests their matching
-stage. Descriptors and plaintext are never forwarded to Provider Host or Provider Runner input.
+before any plaintext request. A normal Provider Execution Workload now contains only `git_fetch` and
+`package_read` descriptors. `git_push`, `registry_pull`, `registry_push`, `package_publish`, and
+`worker_image_pull` do not enter the Provider Workload; publish authority requires a future dedicated operation with
+fresh approval. Descriptors and Git plaintext are never forwarded to Provider Host or Provider Runner input.
 
 For Git HTTPS, agentd uses the execution-scoped Unix-socket AskPass channel and clears it before Provider start. For
 Git SSH, agentd requires an `ssh://user@host[:port]/path` repository that matches the Grant, rejects non-public DNS
@@ -103,6 +107,17 @@ agent socket. Only the public identity and Host Key are written to a private tem
 passphrase are not written to the Workspace, command line, normal environment, Git config or Provider input, and the
 temporary agent is removed immediately after Clone/Fetch. Ambient `SSH_AUTH_SOCK`, SSH config, ProxyCommand and host
 Credential stores are not inherited.
+
+Provider API Credentials are also not forwarded as long-lived plaintext. Agentd resolves the generation-scoped
+Grant, starts an Execution-lifetime loopback broker, and gives Provider Host only a random `synara_task_*` token plus
+the broker URL. The broker fixes the upstream origin, replaces the task token with the real Codex/Claude Credential
+in memory, and closes with Execution cancellation or Grant expiry. The Provider subprocess may use the task token
+during that Execution but cannot read or export the long-lived Provider key.
+
+For Kubernetes, the Pod-bound registration token is projected only into the restricted
+`registration-token-init` container. That init copies it to a private one-shot `emptyDir`; the main agentd container
+mounts only the one-shot volume, consumes and durably removes the file during configuration, and fails before
+Provider start if removal fails. Provider processes never mount the original projected token.
 
 ## Idempotent Worker Artifact upload
 

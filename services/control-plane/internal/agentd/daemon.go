@@ -200,6 +200,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return nil
 		}
+		claimedStorageScrub, storageScrubErr := d.claimAndRunWorkerStorageScrub(runContext)
+		if storageScrubErr != nil {
+			if isWorkerRevocationError(storageScrubErr) {
+				cancelRun()
+			}
+			return storageScrubErr
+		}
+		if claimedStorageScrub {
+			continue
+		}
 		probedWorkspaceCleanup := false
 		if canClaimWorkspaceCleanup && cleanupSchedule.due(time.Now()) {
 			claimedCleanup, enteredDrain, cleanupErr := d.claimAndRunWorkspaceCleanup(runContext)
@@ -325,6 +335,62 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (d *Daemon) claimAndRunWorkerStorageScrub(ctx context.Context) (bool, error) {
+	result, err := d.client.ClaimWorkerStorageScrub(ctx)
+	if err != nil {
+		return false, fmt.Errorf("claim Worker storage scrub: %w", err)
+	}
+	if result.Scrub == nil {
+		return false, nil
+	}
+	scrub := *result.Scrub
+	if scrub.Status == "failed" {
+		return true, newContainmentError("storage scrub", errors.New("the Control Plane retained a failed storage scrub fence"))
+	}
+	cleaner, ok := d.workspace.(workerStorageScrubber)
+	if !ok {
+		err := errors.New("the configured Workspace engine does not implement Tenant storage scrubbing")
+		reportErr := d.client.FailWorkerStorageScrub(
+			ctx, scrub, "worker_storage_scrub_unsupported", err.Error(),
+		)
+		return true, newContainmentError("storage scrub", errors.Join(err, reportErr))
+	}
+	if err := cleaner.ScrubTenantStorage(ctx, scrub); err != nil {
+		reportErr := d.client.FailWorkerStorageScrub(
+			ctx, scrub, "worker_storage_scrub_workspace_failed", boundedStorageScrubFailure(err),
+		)
+		return true, newContainmentError("storage scrub", errors.Join(err, reportErr))
+	}
+	if err := scrubWorkerPrivateTempStorage(ctx, d.config.TargetKind, d.config.PrivateTempRoot); err != nil {
+		reportErr := d.client.FailWorkerStorageScrub(
+			ctx, scrub, "worker_storage_scrub_temporary_failed", boundedStorageScrubFailure(err),
+		)
+		return true, newContainmentError("storage scrub", errors.Join(err, reportErr))
+	}
+	if err := d.client.AcknowledgeWorkerStorageScrub(ctx, scrub); err != nil {
+		return true, fmt.Errorf("acknowledge Worker storage scrub: %w", err)
+	}
+	d.logger.Info(
+		"Worker storage scrub acknowledged",
+		"scrubId", scrub.ID,
+		"scrubGeneration", scrub.ScrubGeneration,
+		"scopeKind", scrub.ScopeKind,
+		"scopeId", scrub.ScopeID,
+	)
+	return true, nil
+}
+
+func boundedStorageScrubFailure(err error) string {
+	if err == nil {
+		return "Worker storage scrub failed."
+	}
+	message := err.Error()
+	if len(message) > 10_000 {
+		message = message[:10_000]
+	}
+	return message
 }
 
 func registerWorkerAfterSandboxAllocationBound(
@@ -867,6 +933,38 @@ func (d *Daemon) runExecution(
 			// renewal could replay an intentionally absent access block.
 			providerCredentialAccessRenewalsReady.Store(true)
 		}
+		brokeredCredential, credentialBroker, brokerErr := startProviderCredentialBroker(
+			executionContext,
+			workload.Provider,
+			credential,
+		)
+		if brokerErr != nil {
+			clearRunnerCredential(credential)
+			return d.failExecutionGuarded(
+				executionContext,
+				execution.ID,
+				lease,
+				executionGuard,
+				fmt.Errorf("start Provider Credential broker: %w", brokerErr),
+			)
+		}
+		clearRunnerCredential(credential)
+		credential = brokeredCredential
+		if guardErr := executionGuard.AddProviderCredential(credential); guardErr != nil {
+			_ = credentialBroker.Close()
+			clearRunnerCredential(credential)
+			return d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, guardErr)
+		}
+		defer func() {
+			if closeErr := credentialBroker.Close(); closeErr != nil {
+				d.logger.Warn(
+					"Provider Credential broker cleanup failed",
+					"executionId", execution.ID,
+					"generation", lease.Generation,
+					"error", closeErr,
+				)
+			}
+		}()
 		defer clearRunnerCredential(credential)
 	}
 	providerStateDirectory := ""

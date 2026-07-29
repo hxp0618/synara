@@ -12,6 +12,27 @@ import (
 )
 
 func main() {
+	if handled, err := agentd.RunKubernetesNetworkBoundaryVerifier(os.Args); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "Kubernetes network boundary verification failed")
+			os.Exit(1)
+		}
+		return
+	}
+	if handled, err := agentd.RunProviderCredentialScopeVerifier(os.Args); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "Provider credential scope verification failed")
+			os.Exit(1)
+		}
+		return
+	}
+	if handled, err := agentd.RunKubernetesRegistrationTokenStager(os.Args); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "Kubernetes registration token staging failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := agentd.RunGitAskPassHelperFromEnvironment(context.Background(), os.Args, os.Stdout); handled {
 		if err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "Git Credential helper failed")

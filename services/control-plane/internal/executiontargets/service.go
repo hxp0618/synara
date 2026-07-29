@@ -22,15 +22,18 @@ import (
 )
 
 type Target struct {
-	ID             uuid.UUID      `json:"id"`
-	TenantID       *uuid.UUID     `json:"tenantId"`
-	OrganizationID *uuid.UUID     `json:"organizationId"`
-	Kind           string         `json:"kind"`
-	Name           string         `json:"name"`
-	Status         string         `json:"status"`
-	Capabilities   map[string]any `json:"capabilities"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	ID                     uuid.UUID                                `json:"id"`
+	TenantID               *uuid.UUID                               `json:"tenantId"`
+	OrganizationID         *uuid.UUID                               `json:"organizationId"`
+	Kind                   string                                   `json:"kind"`
+	Name                   string                                   `json:"name"`
+	Status                 string                                   `json:"status"`
+	Capabilities           map[string]any                           `json:"capabilities"`
+	IsolationProfile       platform.ExecutionTargetIsolationProfile `json:"isolationProfile"`
+	PlatformSharedEligible bool                                     `json:"platformSharedEligible"`
+	ProductBoundary        string                                   `json:"productBoundary"`
+	CreatedAt              time.Time                                `json:"createdAt"`
+	UpdatedAt              time.Time                                `json:"updatedAt"`
 }
 
 type CreateInput struct {
@@ -67,7 +70,7 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 	}
 	models := make([]persistence.ExecutionTarget, 0)
 	err := s.db.WithContext(ctx).
-		Where("status <> ? AND (tenant_id = ? OR tenant_id IS NULL)", "disabled", tenantID).
+		Where("status <> ? AND (tenant_id = ? OR (tenant_id IS NULL AND kind = ?))", "disabled", tenantID, platform.TargetKubernetes).
 		Order("CASE WHEN tenant_id IS NULL THEN 1 ELSE 0 END, LOWER(name), id").
 		Find(&models).Error
 	if err != nil {
@@ -301,7 +304,7 @@ func (s *Service) ResolveForSession(ctx context.Context, tenantID, organizationI
 	var model persistence.ExecutionTarget
 	query := s.db.WithContext(ctx).
 		Where("status = ?", "active").
-		Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, organizationID)
+		Where("(tenant_id = ? OR (tenant_id IS NULL AND kind = ?)) AND (organization_id IS NULL OR organization_id = ?)", tenantID, platform.TargetKubernetes, organizationID)
 	if requested != nil && *requested != uuid.Nil {
 		query = query.Where("id = ?", *requested)
 	} else {
@@ -394,6 +397,9 @@ func resolveWorkerBootstrapTargetLocked(
 	if model.Kind != string(kind) {
 		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
 	}
+	if model.TenantID == nil && !platform.IsPlatformSharedTargetEligible(kind) {
+		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+	}
 	if kind != platform.TargetSSH {
 		if model.Status != "active" && !(allowOfflineKubernetes && kind == platform.TargetKubernetes && model.Status == "offline") {
 			return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
@@ -436,6 +442,9 @@ func resolveWorkerTarget(
 	if model.Kind != string(kind) {
 		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
 	}
+	if model.TenantID == nil && !platform.IsPlatformSharedTargetEligible(kind) {
+		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+	}
 	return model, kind, nil
 }
 
@@ -460,12 +469,18 @@ func resolveWorkerTargetLocked(
 	if model.Kind != string(kind) {
 		return persistence.ExecutionTarget{}, "", problem.New(409, "execution_target_kind_mismatch", "targetKind does not match the persisted execution target.")
 	}
+	if model.TenantID == nil && !platform.IsPlatformSharedTargetEligible(kind) {
+		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
+	}
 	return model, kind, nil
 }
 
 func (s *Service) loadAccessible(ctx context.Context, tenantID, targetID uuid.UUID, activeOnly bool) (persistence.ExecutionTarget, error) {
 	var model persistence.ExecutionTarget
-	query := s.db.WithContext(ctx).Where("id = ? AND (tenant_id = ? OR tenant_id IS NULL)", targetID, tenantID)
+	query := s.db.WithContext(ctx).Where(
+		"id = ? AND (tenant_id = ? OR (tenant_id IS NULL AND kind = ?))",
+		targetID, tenantID, platform.TargetKubernetes,
+	)
 	if activeOnly {
 		query = query.Where("status = ?", "active")
 	}
@@ -500,10 +515,14 @@ func toTarget(model persistence.ExecutionTarget) Target {
 	if capabilities == nil {
 		capabilities = map[string]any{}
 	}
+	kind, _ := platform.ParseExecutionTargetKind(model.Kind)
+	isolation := platform.IsolationDeclaration(kind)
 	return Target{
 		ID: model.ID, TenantID: model.TenantID, OrganizationID: model.OrganizationID,
 		Kind: model.Kind, Name: model.Name, Status: model.Status, Capabilities: capabilities,
-		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+		IsolationProfile: isolation.Profile, PlatformSharedEligible: isolation.PlatformSharedEligible,
+		ProductBoundary: isolation.ProductBoundary,
+		CreatedAt:       model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
 }
 

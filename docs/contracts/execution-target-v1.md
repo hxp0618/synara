@@ -15,6 +15,57 @@ control plane's Deployment Profile and to workspace mode.
 All kinds use `RegisterWorker`, `Heartbeat`, `ClaimExecution`, leases, generation fencing, runtime
 events, idempotent receipts, and provider resume cursors. Drivers must not write Session state directly.
 
+### Isolation and product-boundary matrix
+
+The isolation declaration is a Target Kind contract, not an operator-supplied capability. The API derives and returns
+`isolationProfile`, `platformSharedEligible`, and `productBoundary`; persisted `capabilities` cannot upgrade them.
+
+| Target/runtime path                      | Outer profile              | Process and resource boundary                                                                                                    | Filesystem, syscall, device boundary                                                                                                                                     | Network boundary                                                                                               | Product boundary                                                                                                                                       |
+| ---------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Kubernetes Worker Pod                    | `kubernetes-restricted-v1` | Pod PID namespace, mandatory CPU/memory/ephemeral-storage limits, and a finite kubelet per-Pod PID ceiling                       | UID/GID 10001, non-root, read-only rootfs, `drop: ALL`, no privilege escalation, RuntimeDefault seccomp, bounded approved volumes                                        | Default-deny ingress/egress policy, narrowed cluster DNS, explicit egress CIDRs with cloud-metadata exclusions | The only current Kind eligible for restricted multi-tenant use; registration still fails unless the live Pod and its actual node pass the checks below |
+| Linux SSH/local with protected cgroup v3 | `single-tenant-trusted-v1` | Exact Provider cgroup subtree with finite `pids.max`, `memory.max`, and `cpu.max`; termination/fencing is attested               | Provider UID/GID separation only; no mount namespace, rootfs, syscall or device sandbox                                                                                  | No Target-enforced egress allowlist                                                                            | Trusted single-Tenant/operator use; never a platform-shared multi-Tenant Target                                                                        |
+| SSH/local Linux fallback                 | `single-tenant-trusted-v1` | Process group plus `Pdeathsig`; `setsid()` descendants may escape; no authoritative resource ceiling                             | Provider and agentd may share a UID; no filesystem, syscall or device sandbox                                                                                            | No Target-enforced egress allowlist                                                                            | Development or trusted single-Tenant use only                                                                                                          |
+| local on macOS                           | `single-tenant-trusted-v1` | Process group only; no Linux `Pdeathsig` or cgroup boundary                                                                      | No credential, filesystem, syscall or device isolation                                                                                                                   | No Target-enforced egress allowlist                                                                            | Personal development only                                                                                                                              |
+| Managed Docker                           | `single-tenant-trusted-v1` | Container process namespace; current CPU/memory fields are optional and no authoritative per-Provider cgroup profile is attested | Current reconciler does not require non-root, read-only rootfs, capability drop, `no-new-privileges`, seccomp or PID limit; Target slots share a persistent named volume | Bridge networking has no Target egress allowlist                                                               | Personal/development or trusted single-Tenant use only; not a platform-shared multi-Tenant Target                                                      |
+
+`single-tenant-trusted-v1` is deliberately not a sandbox-strength claim. It records that the operator and Target host are
+inside one trust boundary and that Provider code must not be scheduled there for unrelated Tenants. In non-personal
+deployments the built-in `platform-local` Target is disabled. Tenant-facing target lookup, fixed-target launch, routing,
+and Worker registration exclude platform-shared local, SSH, and Docker rows even if stale data marks one active.
+Tenant-owned weak Targets remain available for explicitly trusted BYO/development workloads and expose the boundary in
+their API representation.
+
+Provider CLI built-in sandboxing remains disabled (`danger-full-access` for Codex; Claude ordinary tools are
+host-allowed while its permission callback remains active) only behind an automatic outer-profile guard. agentd removes any ambient
+`SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE` value and injects its derived declaration into both legacy and Provider Host v2
+children. Provider Host refuses a missing or unknown value before starting a Provider runtime. For Kubernetes, agentd
+can derive `kubernetes-restricted-v1` only with the projected Pod-bound registration token and a dedicated `/tmp` root.
+The control plane then loads the live Pod before issuing Worker authority and rejects registration unless it observes:
+
+- `automountServiceAccountToken=false`, no host PID/network/IPC or shared process namespace, exactly one agentd
+  container plus the exact restricted `registration-token-init`, and no ephemeral or sidecar container;
+- the exact non-root UID/GID, RuntimeDefault seccomp, read-only rootfs, no privilege escalation, `drop: ALL`, no host
+  ports or block devices, finite CPU/memory/ephemeral-storage limits, and the exact Target `pidsLimit` declaration;
+- only the approved workspace/tmp/home EmptyDirs, projected audience-bound identity token, one-shot registration-token
+  EmptyDir, and optional dedicated Git cache PVC, mounted at their contract paths without subpaths. The projected token
+  is mounted only into init; the main container mounts only the one-shot volume; and
+- Provider Host v2, Kubernetes Target Kind, staged one-shot registration-token path, private `/tmp`, and finite PID
+  declarations in the agentd environment. LoadConfig removes the staged token before any Provider process starts.
+
+`pidsLimit` is a required Target maximum in `1..1048576`. Kubernetes does not expose a per-Pod PID resource in
+PodSpec, so the reconciler reads every node eligible under the Target `nodeSelector` and requires kubelet
+`podPidsLimit` to be positive and no greater than the Target value before any cluster mutation. Pod-bound Worker
+registration repeats the same `configz` check against the Pod's actual `spec.nodeName`; an unbounded `-1`/`0`, an
+excessive value, an empty eligible-node set, or an unreadable node configuration fails closed. The Target Kubernetes
+credential therefore requires read-only `get nodes` and `get nodes/proxy` authority in addition to its existing
+namespace and PriorityClass permissions. Operators must treat this powerful node-proxy read authority as control-plane
+infrastructure and must not expose it to Provider containers.
+
+Admission mutation or operator drift that weakens any of those fields fails with
+`kubernetes_workload_identity_outer_sandbox_invalid`; it does not silently fall back to
+`single-tenant-trusted-v1`. Pod-object verification is repository-level evidence only: production acceptance still
+requires runtime escape/resource/network tests on every supported cluster and CNI.
+
 Stage 3 adds managed Worker Release and target-scoped image-pull Credential contracts for Docker and
 Kubernetes. The persistence/API/reconciler baseline exists, but the real Codex/Claude four-Target release gate,
 registry-pushed multi-arch reproduction, production multi-node Kubernetes and soak remain open. An implemented
@@ -62,7 +113,8 @@ POST /v1/tenants/{tenantId}/credential-bindings
 POST /v1/tenants/{tenantId}/credential-bindings/{bindingId}/disable
 ```
 
-Responses contain only `id`, ownership, `kind`, `name`, `status`, safe `capabilities`, and timestamps.
+Responses contain only `id`, ownership, `kind`, `name`, `status`, safe `capabilities`, derived `isolationProfile`,
+`platformSharedEligible`, `productBoundary`, and timestamps.
 `configuration_encrypted` is never serialized. Create requests accept a `configuration` object, which
 is encrypted before persistence; plaintext must not enter logs, runtime events, audit metadata, or
 outbox payloads.
@@ -256,6 +308,10 @@ the container environment and never in labels, responses, logs, or Audit metadat
 same target-scoped named volume but remain separate trees. Multiple Workers for one Docker Target therefore share
 the cache and coordinate it with filesystem locks while retaining private Workspace repositories.
 
+This is an operational Worker-pool contract, not a multi-Tenant security sandbox. Until Docker reaches and is verified
+against the Kubernetes restricted profile, it remains `single-tenant-trusted-v1`; the control plane will not expose,
+route, launch, or register a platform-shared Docker Target for a Tenant.
+
 Reconciliation is idempotent: stable pools produce no writes or Audit rows. Configuration changes use
 the digest to replace stale containers. Migration `000086` gives replacement and scale-down a server-authored,
 durable reconciliation Drain before the Docker Engine deletion boundary. The Drain freezes the exact Worker
@@ -309,7 +365,8 @@ the authority for Session, Event, Lease, recovery state, and deletion intent.
 
 Worker Pods run as UID/GID 10001 with a read-only root filesystem, RuntimeDefault seccomp, no Linux
 capabilities, no privilege escalation, no ServiceAccount token, bounded EmptyDir workspace/tmp/home,
-and explicit CPU/memory/ephemeral-storage limits. By default `/data/workspaces` and `/data/git-cache` are
+explicit CPU/memory/ephemeral-storage limits, and a kubelet-enforced finite per-Pod PID limit. By default
+`/data/workspaces` and `/data/git-cache` are
 separate trees on the Pod-local workspace EmptyDir. Optional `gitCachePersistentVolumeClaim` mounts a dedicated
 cache at `/git-cache`; cross-Pod sharing is valid only when the claim supplies RWX-equivalent access and reliable
 POSIX file locking. Optional `requireNodeSpread=true` adds one Pod `topologySpreadConstraints` rule with
@@ -321,13 +378,21 @@ the scheduler sees at least two eligible `kubernetes.io/hostname` domains after 
 and cluster policy are applied; the default `requireNodeSpread=false` emits no spread constraint. Every Worker Pod also
 uses a PriorityClass whose cluster-authoritative `preemptionPolicy` is `Never`; the default
 `synara-worker-nonpreempting-v1` class is shipped in the Kustomize base, and custom Pool classes are read and rejected
-before Pod apply unless they are also non-preempting. The registration token is referenced from a Secret;
-it is not embedded in Pod labels, Audit metadata, responses, or runner arguments.
+before Pod apply unless they are also non-preempting. A Pod-bound, ten-minute audience token is projected only into
+the restricted init container, copied to a mode-0700 `one-shot/` directory on a one-shot EmptyDir, and consumed/deleted by agentd before Provider start;
+it is not embedded in Pod labels, Audit metadata, responses, or runner arguments, and the main container never mounts
+the original projected token.
+
+Those fields are checked against the live Pod returned by the Kubernetes API during Pod-bound Worker registration;
+the generated manifest alone is not authority. A missing limit, extra container, missing or weakened token init,
+projected-token mount in the main container, host namespace/volume, weakened security context, wrong projected-token
+audience, or changed private-temp declaration prevents registration before the Provider outer-sandbox profile can be
+used.
 
 The in-cluster control-plane RBAC and Kustomize base live in `deploy/kubernetes`. The reconciler role is
 cluster-scoped only because managed targets may create dedicated Namespaces; operators that disable
 Namespace management may replace it with equivalent per-Namespace Roles, plus cluster-scoped read-only
-`get priorityclasses.scheduling.k8s.io`. External Target clusters must pre-create the default PriorityClass (or every
+`get priorityclasses.scheduling.k8s.io`, `get nodes`, and `get nodes/proxy`. External Target clusters must pre-create the default PriorityClass (or every
 custom class selected by their Pools); the Target credential never creates, patches, or deletes PriorityClasses.
 
 ## Release and acceptance boundary

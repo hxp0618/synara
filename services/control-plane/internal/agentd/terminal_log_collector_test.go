@@ -524,6 +524,58 @@ func TestTerminalLogCollectorEventIDsAreStable(t *testing.T) {
 	}
 }
 
+func TestTerminalLogCollectorIgnoresIdenticalDuplicateCompletion(t *testing.T) {
+	client, collector := newTerminalCollectorForTest(t, uuid.New(), executions.Lease{Generation: 23})
+	terminalID := "terminal-duplicate-completion"
+	completion := terminalCollectorLifecycleMessage(terminalID, "terminal.failed")
+
+	terminalCollectorMustHandle(t, collector, terminalCollectorLifecycleMessage(terminalID, "terminal.started"))
+	terminalCollectorMustHandle(t, collector, completion)
+	later := terminalCollectorTestTime.Add(time.Second)
+	completion.OccurredAt = &later
+	terminalCollectorMustHandle(t, collector, completion)
+
+	if got := len(terminalCollectorTerminalEvents(client.events, terminalID, "terminal.failed")); got != 1 {
+		t.Fatalf("persisted duplicate completion count = %d, want 1", got)
+	}
+	if collector.HasOpen() {
+		t.Fatal("duplicate completion recreated an open Terminal")
+	}
+}
+
+func TestTerminalLogCollectorKeepsFirstCompletionForConflictingDuplicate(t *testing.T) {
+	client, collector := newTerminalCollectorForTest(t, uuid.New(), executions.Lease{Generation: 24})
+	terminalID := "terminal-conflicting-reuse"
+
+	terminalCollectorMustHandle(t, collector, terminalCollectorLifecycleMessage(terminalID, "terminal.started"))
+	terminalCollectorMustHandle(t, collector, terminalCollectorLifecycleMessage(terminalID, "terminal.failed"))
+	terminalCollectorMustHandle(t, collector, terminalCollectorLifecycleMessage(terminalID, "terminal.exited"))
+	if got := len(terminalCollectorTerminalEvents(client.events, terminalID, "terminal.failed")); got != 1 {
+		t.Fatalf("persisted failed completion count = %d, want 1", got)
+	}
+	if got := len(terminalCollectorTerminalEvents(client.events, terminalID, "terminal.exited")); got != 0 {
+		t.Fatalf("persisted conflicting completion count = %d, want 0", got)
+	}
+	if collector.HasOpen() {
+		t.Fatal("conflicting terminal reuse recreated an open Terminal")
+	}
+
+	err := collector.Handle(
+		context.Background(),
+		terminalCollectorLifecycleMessage(terminalID, "terminal.started"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "reused terminalId after completion") {
+		t.Fatalf("terminal restart after completion error = %v", err)
+	}
+	err = collector.Handle(
+		context.Background(),
+		terminalCollectorOutputMessage(terminalID, "utf-8", 0, []byte("late output")),
+	)
+	if err == nil || !strings.Contains(err.Error(), "terminal output after completion") {
+		t.Fatalf("terminal output after completion error = %v", err)
+	}
+}
+
 func TestTerminalLogCollectorCloseRemovesTemporaryFiles(t *testing.T) {
 	client := &terminalCollectorTestClient{}
 	collector := newTerminalLogCollector(client, uuid.New(), executions.Lease{Generation: 15})

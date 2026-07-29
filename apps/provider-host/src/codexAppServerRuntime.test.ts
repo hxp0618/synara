@@ -5,14 +5,122 @@ import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "@synara/shared/codexCollaborationMode";
+import {
+  CODEX_DISABLED_RUNTIME_FEATURES,
+  CODEX_HOSTED_TOOL_ISOLATION_CONFIG,
+} from "@synara/shared/codexRuntimeIsolation";
+import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "@synara/shared/providerContentTrustPolicy";
 import { describe, expect, it } from "vitest";
 
-import { codexThreadOpenPermissions } from "./codexAppServerRuntime";
+import {
+  codexThreadOpenPermissions,
+  isManagedCodexToolPolicyHookAttested,
+  MANAGED_CODEX_APP_SERVER_ARGUMENTS,
+  managedCodexAppServerArguments,
+} from "./codexAppServerRuntime";
+import { CODEX_TOOL_POLICY_HOOK_ARGUMENT } from "./codexPostToolUseProvenance";
 import { startProviderHostRun, type RunnerMessage } from "./providerHost";
+import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "./providerOuterSandbox";
 
-const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.example.test:8080";
+process.env[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = "single-tenant-trusted-v1";
+
+const CONTROLLED_PROVIDER_PROXY = "http://proxy.example.test:8080";
+const TEST_CODEX_TOOL_POLICY_HOOK_COMMAND = `'/usr/local/bin/node' '/opt/synara/provider-host/index.mjs' ${CODEX_TOOL_POLICY_HOOK_ARGUMENT}`;
 
 describe("Codex app-server runtime", () => {
+  it("disables repository or user configured MCP servers in managed runs", () => {
+    expect(MANAGED_CODEX_APP_SERVER_ARGUMENTS.slice(0, 4)).toEqual([
+      "app-server",
+      "--strict-config",
+      "--config",
+      "mcp_servers={}",
+    ]);
+    for (const config of CODEX_HOSTED_TOOL_ISOLATION_CONFIG) {
+      expect(MANAGED_CODEX_APP_SERVER_ARGUMENTS).toContain(config);
+    }
+    for (const feature of CODEX_DISABLED_RUNTIME_FEATURES) {
+      expect(MANAGED_CODEX_APP_SERVER_ARGUMENTS).toContain(`features.${feature}=false`);
+    }
+  });
+
+  it("activates only the exact Host-owned tool-policy hook for controlled credentials", () => {
+    const hookCommand = TEST_CODEX_TOOL_POLICY_HOOK_COMMAND;
+    const args = managedCodexAppServerArguments(hookCommand);
+    const hookConfigs = args.filter(
+      (argument) =>
+        argument.startsWith("hooks.PreToolUse=") || argument.startsWith("hooks.PostToolUse="),
+    );
+
+    expect(args.slice(0, 5)).toEqual([
+      "--dangerously-bypass-hook-trust",
+      "app-server",
+      "--strict-config",
+      "--config",
+      "mcp_servers={}",
+    ]);
+    expect(hookConfigs).toHaveLength(1);
+    expect(hookConfigs[0]).toContain("hooks.PreToolUse=");
+    for (const hookConfig of hookConfigs) {
+      expect(hookConfig).toContain(JSON.stringify(hookCommand));
+      expect(hookConfig).toContain("additionalContextLimit=512");
+      expect(hookConfig).not.toContain("tool_response");
+    }
+    expect(args.lastIndexOf("features.hooks=false")).toBeLessThan(
+      args.lastIndexOf("features.hooks=true"),
+    );
+    for (const feature of CODEX_DISABLED_RUNTIME_FEATURES) {
+      if (feature !== "hooks") {
+        expect(args).toContain(`features.${feature}=false`);
+        expect(args).not.toContain(`features.${feature}=true`);
+      }
+    }
+
+    const exactHook = () => ({
+      eventName: "preToolUse",
+      handlerType: "command",
+      matcher: ".*",
+      command: hookCommand,
+      timeoutSec: 5,
+      additionalContextLimit: 512,
+      source: "sessionFlags",
+      trustStatus: "untrusted",
+      enabled: true,
+      isManaged: false,
+    });
+    expect(
+      isManagedCodexToolPolicyHookAttested(
+        { data: [{ hooks: [exactHook()], errors: [] }] },
+        hookCommand,
+      ),
+    ).toBe(true);
+    expect(
+      isManagedCodexToolPolicyHookAttested(
+        {
+          data: [
+            {
+              hooks: [
+                exactHook(),
+                {
+                  ...exactHook(),
+                  command: "/workspace/.codex/attacker-hook",
+                },
+              ],
+              errors: [],
+            },
+          ],
+        },
+        hookCommand,
+      ),
+    ).toBe(false);
+  });
+
+  it("includes the fixed content-trust policy in every collaboration mode", () => {
+    expect(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS).toContain(
+      PROVIDER_CONTENT_TRUST_POLICY_MARKER,
+    );
+    expect(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS).toContain(PROVIDER_CONTENT_TRUST_POLICY_MARKER);
+  });
+
   it("uses durable approval without an unavailable nested container sandbox", () => {
     expect(codexThreadOpenPermissions("approval-required", true)).toEqual({
       approvalPolicy: "untrusted",
@@ -38,7 +146,10 @@ describe("Codex app-server runtime", () => {
           },
         },
         () => {},
-        { environment },
+        {
+          environment,
+          codexToolPolicyHookCommand: TEST_CODEX_TOOL_POLICY_HOOK_COMMAND,
+        },
       );
 
       await expect(run.result).resolves.toMatchObject({ output: { text: "credential isolated" } });
@@ -51,6 +162,24 @@ describe("Codex app-server runtime", () => {
       expect(config).toContain('env_key = "OPENAI_API_KEY"');
       expect(config).toContain("requires_openai_auth = false");
       expect(config).not.toContain("provider-secret");
+    });
+  });
+
+  it("keeps the Host tool policy enabled with ambient authentication", async () => {
+    await withFakeCodex("ambient-hook", async (directory, _tracePath, environment) => {
+      const run = startProviderHostRun(
+        codexInput(directory, { runtimeOutputDirectory: directory }),
+        null,
+        () => {},
+        {
+          environment,
+          codexToolPolicyHookCommand: TEST_CODEX_TOOL_POLICY_HOOK_COMMAND,
+        },
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: { text: "ambient hook isolated" },
+      });
     });
   });
 
@@ -129,18 +258,13 @@ describe("Codex app-server runtime", () => {
       );
 
       await expect(run.result).resolves.toMatchObject({ output: { text: "terminal complete" } });
-      expect(messages).toContainEqual({
-        type: "event",
-        eventType: "runtime.command.output",
-        payload: {
-          provider: "codex",
-          terminalId: "command-terminal-1",
-          encoding: "utf-8",
-          text: "tests passed\n",
-          byteOffset: 0,
-          byteLength: 13,
-        },
-      });
+      const output = messages.filter(
+        (message): message is Extract<RunnerMessage, { type: "event" }> =>
+          message.type === "event" && message.eventType === "runtime.command.output",
+      );
+      expect(output.map((message) => message.payload.text).join("")).toBe("tests passed\n");
+      expect(output.map((message) => message.payload.byteOffset)).toEqual([0, 6]);
+      expect(output.map((message) => message.payload.byteLength)).toEqual([6, 7]);
       expect(messages).toContainEqual({
         type: "event",
         eventType: "runtime.provider.activity",
@@ -220,6 +344,40 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it("ignores a duplicate command completion before it can flush late output", async () => {
+    await withFakeCodex(
+      "terminal-duplicate-completion",
+      async (directory, _tracePath, environment) => {
+        const messages: RunnerMessage[] = [];
+        const run = startProviderHostRun(
+          codexInput(directory),
+          null,
+          (message) => messages.push(message),
+          { environment },
+        );
+
+        await expect(run.result).resolves.toMatchObject({ output: { text: "command declined" } });
+        const terminalActivity = messages.filter(
+          (message): message is Extract<RunnerMessage, { type: "event" }> =>
+            message.type === "event" &&
+            message.eventType === "runtime.provider.activity" &&
+            message.payload.itemId === "command-terminal-duplicate",
+        );
+        expect(terminalActivity.map((message) => message.payload.status)).toEqual([
+          "started",
+          "declined",
+        ]);
+        expect(messages).not.toContainEqual(
+          expect.objectContaining({
+            type: "event",
+            eventType: "runtime.command.output",
+            payload: expect.objectContaining({ text: "late duplicate output" }),
+          }),
+        );
+      },
+    );
+  });
+
   it("fails closed when a completed turn never closes its command item", async () => {
     await withFakeCodex(
       "terminal-missing-completion",
@@ -268,7 +426,12 @@ describe("Codex app-server runtime", () => {
       expect(request.payload).toMatchObject({
         requestId: "codex:approval-rpc",
         requestKind: "command",
-        command: "git status --short",
+        command: "git push origin main",
+        sensitiveAction: {
+          categories: ["protected-branch-publish"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
       });
       await run.resolveApproval?.({
         requestId: request.payload.requestId,
@@ -291,6 +454,65 @@ describe("Codex app-server runtime", () => {
           reasoningOutputTokens: 0,
         },
       });
+    });
+  });
+
+  it("correlates file-change item paths into the native approval assessment", async () => {
+    await withFakeCodex("file-change-approval", async (directory, _tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const interaction = waitForInteraction(
+        messages,
+        (message) => message.interactionType === "approval",
+      );
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
+
+      const request = await interaction;
+      expect(request.payload).toMatchObject({
+        requestId: "codex:file-approval-rpc",
+        requestKind: "file-change",
+        itemId: "file-change-1",
+        sensitiveAction: {
+          categories: ["dependency-change"],
+          requiresFreshApproval: true,
+          allowSessionApproval: false,
+        },
+      });
+      await run.resolveApproval?.({
+        requestId: request.payload.requestId,
+        resolution: { decision: "decline" },
+      });
+
+      await expect(run.result).resolves.toMatchObject({
+        output: { text: "patch declined" },
+      });
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemType: "fileChange",
+            itemId: "file-change-1",
+            status: "declined",
+          }),
+        }),
+      );
+    });
+  });
+
+  it("fails closed when file-change approval has no preceding item classification", async () => {
+    await withFakeCodex("file-change-missing-item", async (directory, _tracePath, environment) => {
+      const run = startProviderHostRun(codexInput(directory), null, () => {}, {
+        environment,
+      });
+
+      await expect(run.result).rejects.toThrow(
+        "Codex file-change approval arrived without a preceding Host-classified item/started notification.",
+      );
     });
   });
 
@@ -848,15 +1070,15 @@ describe("Codex app-server runtime", () => {
     });
   });
 
-  it("redacts an authenticated controlled proxy from Provider output", async () => {
+  it("preserves a credential-free controlled proxy in Provider output", async () => {
     await withFakeCodex("proxy-output", async (directory, _tracePath, environment) => {
       const run = startProviderHostRun(codexInput(directory), null, () => {}, { environment });
       const result = await run.result;
 
       expect(result).toMatchObject({
-        output: { provider: "codex", text: "[REDACTED]" },
+        output: { provider: "codex", text: CONTROLLED_PROVIDER_PROXY },
       });
-      expect(JSON.stringify(result)).not.toContain(CONTROLLED_PROVIDER_PROXY);
+      expect(JSON.stringify(result)).toContain(CONTROLLED_PROVIDER_PROXY);
     });
   });
 
@@ -970,6 +1192,7 @@ async function withFakeCodex(
     | "proxy-output"
     | "terminal"
     | "terminal-after-turn"
+    | "terminal-duplicate-completion"
     | "terminal-missing-completion"
     | "generated-file"
     | "large-diff"
@@ -978,6 +1201,9 @@ async function withFakeCodex(
     | "compact-auth-failure"
     | "review"
     | "review-fresh"
+    | "file-change-approval"
+    | "file-change-missing-item"
+    | "ambient-hook"
     | "credential-environment",
   run: (directory: string, tracePath: string, environment: NodeJS.ProcessEnv) => Promise<void>,
 ): Promise<void> {
@@ -1036,6 +1262,7 @@ function fakeCodexSource(
     | "proxy-output"
     | "terminal"
     | "terminal-after-turn"
+    | "terminal-duplicate-completion"
     | "terminal-missing-completion"
     | "generated-file"
     | "large-diff"
@@ -1044,6 +1271,9 @@ function fakeCodexSource(
     | "compact-auth-failure"
     | "review"
     | "review-fresh"
+    | "file-change-approval"
+    | "file-change-missing-item"
+    | "ambient-hook"
     | "credential-environment",
   tracePath: string,
   directory: string,
@@ -1104,6 +1334,24 @@ for (const name of ${JSON.stringify([
     process.exit(92);
   }
 }
+const appServerArguments = process.argv.slice(2);
+const preToolUseHookConfigArgument = appServerArguments.find((value) => value.startsWith("hooks.PreToolUse="));
+const postToolUseHookConfigArgument = appServerArguments.find((value) => value.startsWith("hooks.PostToolUse="));
+const hookCommandStart = preToolUseHookConfigArgument?.indexOf("command=") ?? -1;
+const hookCommandEnd = preToolUseHookConfigArgument?.indexOf(",timeout=", hookCommandStart) ?? -1;
+const configuredHookCommand = hookCommandStart >= 0 && hookCommandEnd > hookCommandStart
+  ? JSON.parse(preToolUseHookConfigArgument.slice(hookCommandStart + "command=".length, hookCommandEnd))
+  : undefined;
+const runtimeIsolationFeatures = Object.fromEntries(
+  ${JSON.stringify(CODEX_DISABLED_RUNTIME_FEATURES)}.map((feature) => [feature, feature === "hooks"]),
+);
+if (scenario === "credential-environment" || scenario === "ambient-hook") {
+  if (appServerArguments[0] !== "--dangerously-bypass-hook-trust" || appServerArguments[1] !== "app-server") process.exit(93);
+  if (!configuredHookCommand?.includes(${JSON.stringify(CODEX_TOOL_POLICY_HOOK_ARGUMENT)})) process.exit(94);
+  if (postToolUseHookConfigArgument !== undefined) process.exit(97);
+} else if (appServerArguments.includes("--dangerously-bypass-hook-trust") || preToolUseHookConfigArgument !== undefined || postToolUseHookConfigArgument !== undefined) {
+  process.exit(95);
+}
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const longApprovalId = "approval-" + "x".repeat(400);
 let resumeAttempt = 0;
@@ -1118,7 +1366,15 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { userAgent: "fake" } });
   } else if (message.method === "initialized") {
     return;
+  } else if (message.method === "hooks/list") {
+    if ((scenario !== "credential-environment" && scenario !== "ambient-hook") || !configuredHookCommand) process.exit(96);
+    const hook = (eventName) => ({ eventName, handlerType: "command", matcher: ".*", command: configuredHookCommand, timeoutSec: 5, additionalContextLimit: 512, source: "sessionFlags", trustStatus: "untrusted", enabled: true, isManaged: false });
+    send({ id: message.id, result: { data: [{ cwd: process.cwd(), hooks: [hook("preToolUse")], warnings: [], errors: [] }] } });
+  } else if (message.method === "config/read") {
+    if ((scenario !== "credential-environment" && scenario !== "ambient-hook") || !configuredHookCommand) process.exit(99);
+    send({ id: message.id, result: { config: { web_search: "disabled", features: runtimeIsolationFeatures, mcp_servers: {} } } });
   } else if (message.method === "thread/resume") {
+    if ((scenario === "credential-environment" || scenario === "ambient-hook") && message.params?.config?.bypass_hook_trust !== true) process.exit(98);
     if (scenario === "compact-rebuild") {
       resumeAttempt += 1;
       if (resumeAttempt === 1) {
@@ -1134,6 +1390,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     else if (scenario === "resume-auth-failure" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId }, model: "gpt-test" } });
   } else if (message.method === "thread/start") {
+    if ((scenario === "credential-environment" || scenario === "ambient-hook") && message.params?.config?.bypass_hook_trust !== true) process.exit(98);
     if (scenario === "resume" || scenario === "resume-with-recovery-metadata" || scenario === "resume-auth-failure" || scenario === "compact-rebuild" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" }, model: "gpt-test" } });
   } else if (message.method === "thread/compact/start") {
@@ -1164,11 +1421,16 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (message.params?.collaborationMode?.settings?.developer_instructions !== expectedDeveloperInstructions) process.exit(8);
     if (scenario === "resume-rebuild") {
       const prompt = message.params?.input?.[0]?.text ?? "";
-			if (!prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed") || !prompt.includes("<current_user>\\ncontinue\\n</current_user>")) process.exit(3);
+      if (!prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed") || !prompt.includes("<current_user>\\ncontinue\\n</current_user>")) process.exit(3);
     }
     send({ id: message.id, result: { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } });
     if (scenario === "approval") {
-      send({ id: "approval-rpc", method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-1", command: "git status --short", cwd: process.cwd(), reason: "Run a status check" } });
+      send({ id: "approval-rpc", method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-1", command: "git push origin main", cwd: process.cwd(), reason: "Publish main" } });
+    } else if (scenario === "file-change-approval") {
+      send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "file-change-1", type: "fileChange", status: "inProgress", changes: [{ path: "package.json", kind: { type: "add" }, diff: "{}" }] } } });
+      send({ id: "file-approval-rpc", method: "item/fileChange/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "file-change-1", reason: "Add package manifest" } });
+    } else if (scenario === "file-change-missing-item") {
+      send({ id: "file-approval-missing-rpc", method: "item/fileChange/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "file-change-missing", reason: "Unclassified patch" } });
     } else if (scenario === "long-approval") {
       send({ id: longApprovalId, method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-long", command: "git status --short", cwd: process.cwd(), reason: "Run a status check" } });
     } else if (scenario === "user-input") {
@@ -1209,6 +1471,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-late", delta: "tests passed\\n" } });
         send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-late", type: "commandExecution", command: "bun run test", cwd: process.cwd(), aggregatedOutput: "tests passed\\n", exitCode: 0, status: "completed" } } });
       }, 2_250);
+    } else if (scenario === "terminal-duplicate-completion") {
+      send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-duplicate", type: "commandExecution", command: "git push origin main", cwd: process.cwd(), status: "inProgress" } } });
+      send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-duplicate", type: "commandExecution", command: "git push origin main", cwd: process.cwd(), aggregatedOutput: "", status: "declined" } } });
+      send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-duplicate", type: "commandExecution", command: "git push origin main", cwd: process.cwd(), aggregatedOutput: "late duplicate output", exitCode: 0, status: "completed" } } });
+      complete("command declined");
     } else if (scenario === "terminal-missing-completion") {
       send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-missing", type: "commandExecution", command: "bun run test", cwd: process.cwd(), status: "inProgress" } } });
       complete("terminal incomplete");
@@ -1226,6 +1493,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       complete("large diff ready");
     } else if (scenario === "credential-environment") {
       complete("credential isolated");
+    } else if (scenario === "ambient-hook") {
+      complete("ambient hook isolated");
     }
   } else if (message.method === "turn/steer") {
     if (message.params?.expectedTurnId !== "turn-1" || message.params?.input?.[0]?.text !== "focus on the failing test") process.exit(2);
@@ -1238,6 +1507,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (message.result?.decision !== "accept") process.exit(2);
     send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-new", turnId: "turn-1", tokenUsage: { total: {}, last: { totalTokens: 8, inputTokens: 5, cachedInputTokens: 1, outputTokens: 3, reasoningOutputTokens: 0 }, modelContextWindow: 100 } } });
     complete("approved");
+  } else if (message.id === "file-approval-rpc") {
+    if (message.result?.decision !== "decline") process.exit(2);
+    send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "file-change-1", type: "fileChange", status: "declined", changes: [{ path: "package.json", kind: { type: "add" }, diff: "{}" }] } } });
+    complete("patch declined");
   } else if (message.id === longApprovalId) {
     if (message.result?.decision !== "accept") process.exit(2);
     complete("approved");

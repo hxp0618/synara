@@ -33,7 +33,23 @@ import {
   type ServerVoiceTranscriptionResult,
   type UserInputQuestion,
 } from "@synara/contracts";
+import { readCodexConfigContent } from "@synara/shared/codexConfig";
 import { getModelSelectionBooleanOptionValue, normalizeModelSlug } from "@synara/shared/model";
+import { buildInlineCodexToolPolicyHookCommand } from "@synara/shared/codexPostToolUseProvenance";
+import {
+  codexAppServerArgumentsWithToolPolicyHook,
+  codexExecutableConfigIsolationArguments,
+  CODEX_TOOL_POLICY_THREAD_CONFIG,
+  isCodexRuntimeIsolationConfigAttested,
+  isCodexToolPolicyHookAttested,
+  type CodexRuntimeIsolationExpectedMcpServer,
+} from "@synara/shared/codexRuntimeIsolation";
+import {
+  classifySensitiveAction,
+  mergeSensitiveActionAssessments,
+  readCodexFileChangePaths,
+  type SensitiveActionAssessment,
+} from "@synara/shared/sensitiveActionPolicy";
 import { decodeSubagentReceiverThreadIds } from "@synara/shared/subagents";
 import { prepareWindowsSafeProcess } from "@synara/shared/windowsProcess";
 import { Effect, ServiceMap } from "effect";
@@ -48,11 +64,12 @@ import {
 import {
   buildCodexMcpConfigToml,
   SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+  SYNARA_MCP_SERVER_NAME,
 } from "./agentGateway/mcpInjection.ts";
 import { SYNARA_GATEWAY_HARNESS_POLICY } from "./agentGateway/harnessPolicy.ts";
 import type { AgentGatewaySessionLease } from "./agentGateway/sessionLease.ts";
 import { isNonFatalCodexErrorMessage } from "./codexErrorClassification.ts";
-import { buildCodexProcessEnv } from "./codexProcessEnv.ts";
+import { buildCodexProcessEnv, codexModelProviderCredentialEnvNames } from "./codexProcessEnv.ts";
 import { assertCodexWorkingDirectoryExists } from "./codexWorkingDirectory.ts";
 import { executableIdentity, resolveExecutable } from "./executableLookup.ts";
 import {
@@ -102,10 +119,15 @@ interface PendingApprovalRequest {
   providerThreadId?: string;
   providerParentThreadId?: string;
   requestedPermissions?: Record<string, unknown>;
+  sensitiveAction?: SensitiveActionAssessment;
 }
 
 function isPermissionApprovalRequest(request: PendingApprovalRequest): boolean {
   return request.method === "item/permissions/requestApproval";
+}
+
+function pendingApprovalRequiresFreshApproval(request: PendingApprovalRequest): boolean {
+  return request.sensitiveAction?.requiresFreshApproval === true;
 }
 
 interface PendingUserInputRequest {
@@ -156,6 +178,7 @@ interface CodexSessionContext {
   pending: Map<PendingRequestKey, PendingRequest>;
   pendingApprovals: Map<ApprovalRequestId, PendingApprovalRequest>;
   pendingUserInputs: Map<ApprovalRequestId, PendingUserInputRequest>;
+  fileChangeAssessments?: Map<ProviderItemId, SensitiveActionAssessment>;
   sessionApprovalOverride?: CodexSessionApprovalOverride;
   collabReceiverTurns: Map<string, TurnId>;
   collabReceiverParents: Map<string, string>;
@@ -643,15 +666,47 @@ export function resolveCodexModelForAccount(
   return CODEX_DEFAULT_MODEL;
 }
 
+/**
+ * Local sessions run from a minimal Synara-owned CODEX_HOME. These CLI
+ * overrides are a second fail-closed layer for executable extension features.
+ */
+export const LOCAL_CODEX_APP_SERVER_ARGUMENTS = codexExecutableConfigIsolationArguments();
+
+export function localCodexAppServerArguments(
+  synaraMcpEndpointUrl?: string,
+  toolPolicyHookCommand?: string,
+): ReadonlyArray<string> {
+  const endpointUrl = synaraMcpEndpointUrl?.trim();
+  const baseArguments = endpointUrl
+    ? codexExecutableConfigIsolationArguments(
+        [
+          "mcp_servers={synara={url=",
+          JSON.stringify(endpointUrl),
+          ",bearer_token_env_var=",
+          JSON.stringify(SYNARA_AGENT_GATEWAY_TOKEN_ENV),
+          "}}",
+        ].join(""),
+      )
+    : [...LOCAL_CODEX_APP_SERVER_ARGUMENTS];
+  return toolPolicyHookCommand
+    ? codexAppServerArgumentsWithToolPolicyHook(baseArguments, toolPolicyHookCommand)
+    : baseArguments;
+}
+
 function spawnCodexAppServer(input: {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly args?: ReadonlyArray<string>;
 }): ChildProcessWithoutNullStreams {
-  const prepared = prepareWindowsSafeProcess(input.binaryPath, ["app-server"], {
-    cwd: input.cwd,
-    env: input.env,
-  });
+  const prepared = prepareWindowsSafeProcess(
+    input.binaryPath,
+    input.args ?? LOCAL_CODEX_APP_SERVER_ARGUMENTS,
+    {
+      cwd: input.cwd,
+      env: input.env,
+    },
+  );
   return spawn(prepared.command, prepared.args, {
     cwd: input.cwd,
     env: input.env,
@@ -886,7 +941,6 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private readonly synaraSkillsDir: string | undefined;
   private readonly agentGatewayMcp:
     | {
-        readonly endpointUrl: () => string;
         readonly acquireSessionLease: (threadId: ThreadId) => AgentGatewaySessionLease;
       }
     | undefined;
@@ -897,7 +951,6 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     options?: {
       readonly synaraSkillsDir?: string;
       readonly agentGatewayMcp?: {
-        readonly endpointUrl: () => string;
         readonly acquireSessionLease: (threadId: ThreadId) => AgentGatewaySessionLease;
       };
       readonly teardownProcessTree?: typeof teardownProviderProcessTree;
@@ -912,23 +965,85 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     this.taskCompleteFallbackGraceMs = Math.max(0, options?.taskCompleteFallbackGraceMs ?? 750);
   }
 
-  // The Synara MCP server rides on the shared overlay config (no secrets),
-  // while the per-thread bearer token travels through the app-server process
-  // env referenced by `bearer_token_env_var`.
-  private async buildSessionProcessEnv(
+  // The Synara MCP server is the only server written into the isolated home
+  // config (no secrets), while the per-thread bearer token travels through the
+  // app-server process env referenced by `bearer_token_env_var`.
+  private async buildSessionProcessLaunch(
     homePath: string | undefined,
-    gatewayBearerToken: string | undefined,
+    gatewayConnection: AgentGatewaySessionLease["connection"] | undefined,
+    importSessionThreadIds?: ReadonlyArray<string>,
   ) {
+    const synaraMcpEndpointUrl = gatewayConnection?.url.trim();
+    const gatewayBearerToken = gatewayConnection?.bearerToken;
+    if (gatewayConnection && (!synaraMcpEndpointUrl || !gatewayBearerToken)) {
+      throw new Error("Codex Synara MCP launch requires a complete scoped gateway connection.");
+    }
+    const expectedMcpServers: ReadonlyArray<CodexRuntimeIsolationExpectedMcpServer> =
+      synaraMcpEndpointUrl
+        ? [
+            {
+              name: SYNARA_MCP_SERVER_NAME,
+              url: synaraMcpEndpointUrl,
+              bearerTokenEnvVar: SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+            },
+          ]
+        : [];
+    const toolPolicyHookCommand = buildInlineCodexToolPolicyHookCommand({
+      nodeExecutable: process.execPath,
+      electronRunAsNode: process.env.ELECTRON_RUN_AS_NODE === "1",
+    });
     const env = await buildCodexProcessEnv({
       ...(homePath ? { homePath } : {}),
-      ...(this.agentGatewayMcp
-        ? { appendConfigToml: buildCodexMcpConfigToml(this.agentGatewayMcp.endpointUrl()) }
+      ...(synaraMcpEndpointUrl
+        ? { appendConfigToml: buildCodexMcpConfigToml(synaraMcpEndpointUrl) }
         : {}),
+      isolateExecutableConfig: true,
+      ...(importSessionThreadIds?.length ? { importSessionThreadIds } : {}),
     });
     if (gatewayBearerToken) {
       env[SYNARA_AGENT_GATEWAY_TOKEN_ENV] = gatewayBearerToken;
     }
-    return env;
+    const modelProviderCredentialEnvNames = codexModelProviderCredentialEnvNames(
+      readCodexConfigContent(env) ?? "",
+    );
+    const expectedShellExcludedEnvVarNames = [
+      ...new Set([
+        ...(gatewayBearerToken ? [SYNARA_AGENT_GATEWAY_TOKEN_ENV] : []),
+        ...modelProviderCredentialEnvNames,
+      ]),
+    ].sort();
+    return {
+      env,
+      args: localCodexAppServerArguments(synaraMcpEndpointUrl, toolPolicyHookCommand),
+      expectedMcpServers,
+      expectedShellExcludedEnvVarNames,
+      toolPolicyHookCommand,
+    };
+  }
+
+  private async verifyRuntimeIsolation(
+    context: CodexSessionContext,
+    expectedCommand: string,
+    expectedMcpServers: ReadonlyArray<CodexRuntimeIsolationExpectedMcpServer>,
+    expectedShellExcludedEnvVarNames: ReadonlyArray<string>,
+  ): Promise<void> {
+    const hookResponse = await this.sendRequest(context, "hooks/list", {});
+    if (!isCodexToolPolicyHookAttested(hookResponse, expectedCommand)) {
+      throw new Error("Codex local tool-policy hook attestation failed.");
+    }
+    const configResponse = await this.sendRequest(context, "config/read", {
+      includeLayers: false,
+      cwd: context.session.cwd,
+    });
+    if (
+      !isCodexRuntimeIsolationConfigAttested(
+        configResponse,
+        expectedMcpServers,
+        expectedShellExcludedEnvVarNames,
+      )
+    ) {
+      throw new Error("Codex local runtime-isolation configuration attestation failed.");
+    }
   }
 
   // Registers `~/.synara/skills` as a codex skill root so portable skills are
@@ -978,6 +1093,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const codexOptions = readCodexProviderOptions(input);
       const codexBinaryPath = codexOptions.binaryPath ?? "codex";
       const codexHomePath = codexOptions.homePath;
+      const resumeThreadId = readResumeThreadId(input);
       await this.assertSupportedCodexCliVersion({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
@@ -987,13 +1103,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
       gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(threadId);
+      const launch = await this.buildSessionProcessLaunch(
+        codexHomePath,
+        gatewaySessionLease?.connection,
+        resumeThreadId ? [resumeThreadId] : undefined,
+      );
       const child = spawnCodexAppServer({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
-        env: await this.buildSessionProcessEnv(
-          codexHomePath,
-          gatewaySessionLease?.connection.bearerToken,
-        ),
+        env: launch.env,
+        args: launch.args,
       });
 
       context = {
@@ -1013,6 +1132,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         pending: new Map(),
         pendingApprovals: new Map(),
         pendingUserInputs: new Map(),
+        fileChangeAssessments: new Map(),
         collabReceiverTurns: new Map(),
         collabReceiverParents: new Map(),
         reviewTurnIds: new Set(),
@@ -1028,6 +1148,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
 
       await this.writeMessage(context, { method: "initialized" });
+      await this.verifyRuntimeIsolation(
+        context,
+        launch.toolPolicyHookCommand,
+        launch.expectedMcpServers,
+        launch.expectedShellExcludedEnvVarNames,
+      );
       await this.registerSynaraSkillsRoot(context);
       try {
         const modelListResponse = await this.sendRequest(context, "model/list", {});
@@ -1056,6 +1182,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         model: normalizedModel ?? null,
         ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
         cwd: resolvedCwd,
+        config: CODEX_TOOL_POLICY_THREAD_CONFIG,
         ...mapCodexRuntimeMode(input.runtimeMode ?? "full-access"),
       };
 
@@ -1063,7 +1190,6 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...sessionOverrides,
         experimentalRawEvents: false,
       };
-      const resumeThreadId = readResumeThreadId(input);
       this.emitLifecycleEvent(
         context,
         "session/threadOpenRequested",
@@ -1631,13 +1757,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
       gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(threadId);
+      const launch = await this.buildSessionProcessLaunch(
+        codexHomePath,
+        gatewaySessionLease?.connection,
+        [sourceProviderThreadId],
+      );
       const child = spawnCodexAppServer({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
-        env: await this.buildSessionProcessEnv(
-          codexHomePath,
-          gatewaySessionLease?.connection.bearerToken,
-        ),
+        env: launch.env,
+        args: launch.args,
       });
 
       context = {
@@ -1654,6 +1783,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         pending: new Map(),
         pendingApprovals: new Map(),
         pendingUserInputs: new Map(),
+        fileChangeAssessments: new Map(),
         collabReceiverTurns: new Map(),
         collabReceiverParents: new Map(),
         reviewTurnIds: new Set(),
@@ -1667,6 +1797,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       await this.writeMessage(context, { method: "initialized" });
+      await this.verifyRuntimeIsolation(
+        context,
+        launch.toolPolicyHookCommand,
+        launch.expectedMcpServers,
+        launch.expectedShellExcludedEnvVarNames,
+      );
       await this.registerSynaraSkillsRoot(context);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
@@ -1690,6 +1826,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(normalizedModel ? { model: normalizedModel } : {}),
         ...(useFastServiceTier ? { serviceTier: "fast" as const } : {}),
         cwd: resolvedCwd,
+        config: CODEX_TOOL_POLICY_THREAD_CONFIG,
         ...mapCodexRuntimeMode(input.runtimeMode),
       };
 
@@ -1871,6 +2008,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         requestId: pendingRequest.requestId,
         requestKind: pendingRequest.requestKind,
         decision,
+        ...(pendingRequest.sensitiveAction?.requiresFreshApproval
+          ? { sensitiveAction: pendingRequest.sensitiveAction }
+          : {}),
       },
     });
   }
@@ -1879,7 +2019,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     context: CodexSessionContext,
   ): Promise<void> {
     const remainingRequests = Array.from(context.pendingApprovals.values()).filter(
-      (request) => !isPermissionApprovalRequest(request),
+      (request) =>
+        !isPermissionApprovalRequest(request) && !pendingApprovalRequiresFreshApproval(request),
     );
     for (const pendingRequest of remainingRequests) {
       context.pendingApprovals.delete(pendingRequest.requestId);
@@ -1898,16 +2039,20 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       throw new Error(`Unknown pending approval request: ${requestId}`);
     }
 
+    const effectiveDecision =
+      decision === "acceptForSession" && pendingApprovalRequiresFreshApproval(pendingRequest)
+        ? "accept"
+        : decision;
     context.pendingApprovals.delete(requestId);
     const isPermissionRequest = isPermissionApprovalRequest(pendingRequest);
-    if (decision === "acceptForSession" && !isPermissionRequest) {
+    if (effectiveDecision === "acceptForSession" && !isPermissionRequest) {
       context.sessionApprovalOverride = CODEX_ALWAYS_ALLOW_SESSION_TURN_OVERRIDES;
     }
-    await this.resolveApprovalRequest(context, pendingRequest, decision);
-    if (decision === "cancel" && isPermissionRequest) {
+    await this.resolveApprovalRequest(context, pendingRequest, effectiveDecision);
+    if (effectiveDecision === "cancel" && isPermissionRequest) {
       await this.interruptTurn(threadId, pendingRequest.turnId, pendingRequest.providerThreadId);
     }
-    if (decision === "acceptForSession" && !isPermissionRequest) {
+    if (effectiveDecision === "acceptForSession" && !isPermissionRequest) {
       await this.resolveRemainingSessionApprovalRequests(context);
     }
   }
@@ -2416,10 +2561,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       binaryPath: "codex",
       cwd: normalizedCwd,
     });
+    const discoveryLaunch = await this.buildSessionProcessLaunch(undefined, undefined);
     const child = spawnCodexAppServer({
       binaryPath: "codex",
       cwd: normalizedCwd,
-      env: await buildCodexProcessEnv(),
+      env: discoveryLaunch.env,
+      args: discoveryLaunch.args,
     });
     const context: CodexSessionContext = {
       session: {
@@ -2443,6 +2590,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       pending: new Map(),
       pendingApprovals: new Map(),
       pendingUserInputs: new Map(),
+      fileChangeAssessments: new Map(),
       collabReceiverTurns: new Map(),
       collabReceiverParents: new Map(),
       reviewTurnIds: new Set(),
@@ -2456,6 +2604,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     try {
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       await this.writeMessage(context, { method: "initialized" });
+      await this.verifyRuntimeIsolation(
+        context,
+        discoveryLaunch.toolPolicyHookCommand,
+        discoveryLaunch.expectedMcpServers,
+        discoveryLaunch.expectedShellExcludedEnvVarNames,
+      );
       await this.registerSynaraSkillsRoot(context);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
@@ -2708,6 +2862,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     notification: JsonRpcNotification,
   ): void {
     const rawRoute = this.readRouteFields(notification.params);
+    this.updateFileChangeAssessment(context, notification, rawRoute.itemId);
     this.rememberCollabReceiverTurns(context, notification.params, rawRoute.turnId);
     const resolvedCollaborationRoute = this.resolveCollaborationRoute(context, notification.params);
     const {
@@ -2800,6 +2955,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       if (isChildConversation) {
         return;
       }
+      context.fileChangeAssessments?.clear();
       this.clearTaskCompleteFallback(context, rawRoute.turnId);
       context.collabReceiverTurns.clear();
       context.collabReceiverParents.clear();
@@ -2825,6 +2981,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       if (isChildConversation) {
         return;
       }
+      context.fileChangeAssessments?.clear();
       this.clearTaskCompleteFallback(context, rawRoute.turnId);
       context.collabReceiverTurns.clear();
       context.collabReceiverParents.clear();
@@ -2951,6 +3108,33 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     let requestId: ApprovalRequestId | undefined;
     if (requestKind) {
       requestId = ApprovalRequestId.makeUnsafe(randomUUID());
+      const requestParameters = this.readObject(request.params);
+      const command = this.readString(requestParameters, "command");
+      const sensitiveAction = mergeSensitiveActionAssessments(
+        classifySensitiveAction({
+          ...(requestParameters ? { toolInput: requestParameters } : {}),
+          ...(command ? { command } : {}),
+          paths: [
+            this.readString(requestParameters, "grantRoot"),
+            this.readString(requestParameters, "path"),
+            this.readString(requestParameters, "file_path"),
+          ].filter((value): value is string => value !== undefined),
+        }),
+        rawRoute.itemId ? context.fileChangeAssessments?.get(rawRoute.itemId) : undefined,
+      );
+      if (
+        request.method === "item/fileChange/requestApproval" &&
+        (!rawRoute.itemId || !context.fileChangeAssessments?.has(rawRoute.itemId))
+      ) {
+        const detail =
+          "Codex file-change approval arrived without a preceding Host-classified item/started notification.";
+        this.emitErrorEvent(context, "item/fileChange/requestApproval/unclassified", detail);
+        await this.writeMessage(context, {
+          id: request.id,
+          result: { decision: "decline" },
+        });
+        return;
+      }
       const requestedPermissions =
         request.method === "item/permissions/requestApproval"
           ? this.readObject(request.params, "permissions")
@@ -2967,8 +3151,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(providerThreadId ? { providerThreadId } : {}),
         ...(providerParentThreadId ? { providerParentThreadId } : {}),
         ...(requestedPermissions ? { requestedPermissions } : {}),
+        sensitiveAction,
       };
-      if (context.sessionApprovalOverride && !isPermissionApprovalRequest(pendingRequest)) {
+      if (
+        context.sessionApprovalOverride &&
+        !isPermissionApprovalRequest(pendingRequest) &&
+        !sensitiveAction.requiresFreshApproval
+      ) {
         await this.resolveApprovalRequest(context, pendingRequest, "acceptForSession");
         return;
       }
@@ -3012,7 +3201,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ...(providerParentThreadId ? { providerParentThreadId } : {}),
       requestId,
       requestKind,
-      payload: request.params,
+      payload:
+        requestKind && requestId
+          ? {
+              ...this.readObject(request.params),
+              sensitiveAction: context.pendingApprovals.get(requestId)?.sensitiveAction,
+            }
+          : request.params,
     });
 
     if (requestKind) {
@@ -3044,6 +3239,29 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         message: `Unsupported server request: ${request.method}`,
       },
     });
+  }
+
+  private updateFileChangeAssessment(
+    context: CodexSessionContext,
+    notification: JsonRpcNotification,
+    itemId: ProviderItemId | undefined,
+  ): void {
+    if (
+      (notification.method !== "item/started" && notification.method !== "item/completed") ||
+      !itemId
+    ) {
+      return;
+    }
+    const item = this.readObject(notification.params, "item");
+    if (this.readString(item, "type") !== "fileChange" || !item) return;
+    const assessments = (context.fileChangeAssessments ??= new Map());
+    if (notification.method === "item/started") {
+      const paths = readCodexFileChangePaths(item);
+      if (paths) assessments.set(itemId, classifySensitiveAction({ paths }));
+      else assessments.delete(itemId);
+      return;
+    }
+    assessments.delete(itemId);
   }
 
   private handleResponse(context: CodexSessionContext, response: JsonRpcResponse): void {

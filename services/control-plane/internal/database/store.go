@@ -178,6 +178,9 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 WHERE event_type = 'execution.started'
 		   AND execution_id IS NOT NULL
 		   AND generation IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_worker_storage_scrubs_active
+		 ON worker_storage_scrubs (worker_id, worker_incarnation)
+		 WHERE status IN ('pending', 'failed')`,
 		`CREATE INDEX IF NOT EXISTS idx_session_events_execution_generation_lifecycle
 		 ON session_events (tenant_id, execution_id, generation, event_type, occurred_at, event_id)
 		 WHERE execution_id IS NOT NULL
@@ -3360,6 +3363,9 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	if err := migrateExecutionSchedulingDecisionsSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateWorkerStorageScrubSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
 	return migrateWorkerReleaseSQLiteSafety(ctx, db)

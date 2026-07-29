@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -13,12 +14,24 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { ApprovalRequestId, ThreadId, type RuntimeMode } from "@synara/contracts";
+import {
+  ApprovalRequestId,
+  ThreadId,
+  type RuntimeMode,
+  type SensitiveActionAssessment,
+} from "@synara/contracts";
+import {
+  CODEX_DISABLED_RUNTIME_FEATURES,
+  CODEX_HOSTED_TOOL_ISOLATION_CONFIG,
+} from "@synara/shared/codexRuntimeIsolation";
+import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "@synara/shared/providerContentTrustPolicy";
 
 import {
   buildCodexProcessEnv,
+  codexModelProviderCredentialEnvNames,
   disableCodexConfigSections,
   resolveCodexBrowserUsePipePath,
+  sanitizeCodexModelProviderConfig,
 } from "./codexProcessEnv";
 import {
   buildCodexInitializeParams,
@@ -28,6 +41,8 @@ import {
   CodexAppServerManager,
   classifyCodexStderrLine,
   isRecoverableThreadResumeError,
+  LOCAL_CODEX_APP_SERVER_ARGUMENTS,
+  localCodexAppServerArguments,
   normalizeCodexModelSlug,
   readCodexAccountSnapshot,
   resolveCodexModelForAccount,
@@ -40,6 +55,10 @@ import { CodexJsonlFramer, CodexJsonlWriter } from "./codexAppServerTransport";
 import { ensureIsolatedScratchWorkspace } from "./scratchWorkspaces";
 import { SYNARA_HARNESS_POLICY_MARKER } from "./agentGateway/harnessPolicy.ts";
 import { acquireAgentGatewaySessionLease } from "./agentGateway/sessionLease.ts";
+import {
+  buildCodexMcpConfigToml,
+  SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+} from "./agentGateway/mcpInjection.ts";
 import { MINIMUM_CODEX_AUTO_REVIEW_CLI_VERSION } from "./provider/codexCliVersion.ts";
 
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
@@ -60,44 +79,245 @@ const autoTurnOverrides = {
 } as const;
 
 describe("Codex Synara harness policy", () => {
+  it("disables repository MCP processes and hooks before starting local app-server", () => {
+    expect(LOCAL_CODEX_APP_SERVER_ARGUMENTS.slice(0, 4)).toEqual([
+      "app-server",
+      "--strict-config",
+      "--config",
+      "mcp_servers={}",
+    ]);
+    for (const config of CODEX_HOSTED_TOOL_ISOLATION_CONFIG) {
+      expect(LOCAL_CODEX_APP_SERVER_ARGUMENTS).toContain(config);
+    }
+    for (const feature of CODEX_DISABLED_RUNTIME_FEATURES) {
+      expect(LOCAL_CODEX_APP_SERVER_ARGUMENTS).toContain(`features.${feature}=false`);
+    }
+  });
+
+  it("replaces repository MCP config with the one Host-owned Synara gateway", () => {
+    const args = localCodexAppServerArguments("http://127.0.0.1:48123/mcp");
+    expect(args.slice(0, 4)).toEqual([
+      "app-server",
+      "--strict-config",
+      "--config",
+      'mcp_servers={synara={url="http://127.0.0.1:48123/mcp",bearer_token_env_var="SYNARA_AGENT_GATEWAY_TOKEN"}}',
+    ]);
+    for (const feature of CODEX_DISABLED_RUNTIME_FEATURES) {
+      expect(args).toContain(`features.${feature}=false`);
+    }
+  });
+
+  it("enables only the exact Host-owned local tool-policy hook", () => {
+    const hookCommand = "'/usr/local/bin/node' -e 'inline-host-hook'";
+    const args = localCodexAppServerArguments("http://127.0.0.1:48123/mcp", hookCommand);
+
+    expect(args[0]).toBe("--dangerously-bypass-hook-trust");
+    expect(args).toContain("features.hooks=false");
+    expect(args).toContain("features.hooks=true");
+    expect(args.lastIndexOf("features.hooks=false")).toBeLessThan(
+      args.lastIndexOf("features.hooks=true"),
+    );
+    const hookArguments = args.filter(
+      (argument) =>
+        argument.startsWith("hooks.PreToolUse=") || argument.startsWith("hooks.PostToolUse="),
+    );
+    expect(hookArguments).toHaveLength(1);
+    expect(hookArguments[0]).toContain("hooks.PreToolUse=");
+    expect(hookArguments.every((argument) => argument.includes(JSON.stringify(hookCommand)))).toBe(
+      true,
+    );
+  });
+
+  it("attests the effective local runtime configuration before opening a thread", async () => {
+    const manager = new CodexAppServerManager();
+    const hookCommand = "'/usr/local/bin/node' -e 'inline-host-hook'";
+    const context = { session: { cwd: "/tmp/synara-project" } };
+    const sendRequest = vi
+      .spyOn(
+        manager as unknown as { sendRequest: (...args: unknown[]) => Promise<unknown> },
+        "sendRequest",
+      )
+      .mockImplementation(async (_context, method) => {
+        if (method === "hooks/list") {
+          return {
+            data: [
+              {
+                hooks: [
+                  {
+                    eventName: "preToolUse",
+                    handlerType: "command",
+                    matcher: ".*",
+                    command: hookCommand,
+                    timeoutSec: 5,
+                    additionalContextLimit: 512,
+                    source: "sessionFlags",
+                    trustStatus: "untrusted",
+                    enabled: true,
+                    isManaged: false,
+                  },
+                ],
+                warnings: [],
+                errors: [],
+              },
+            ],
+          };
+        }
+        return {
+          config: {
+            web_search: "disabled",
+            features: Object.fromEntries(
+              CODEX_DISABLED_RUNTIME_FEATURES.map((feature) => [feature, feature === "hooks"]),
+            ),
+            mcp_servers: {
+              synara: {
+                url: "http://127.0.0.1:48123/mcp",
+                bearer_token_env_var: SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+                environment_id: "local",
+                enabled: true,
+                tool_timeout_sec: null,
+              },
+            },
+            shell_environment_policy: {
+              exclude: [SYNARA_AGENT_GATEWAY_TOKEN_ENV],
+              set: null,
+              include_only: null,
+              experimental_use_profile: null,
+            },
+          },
+        };
+      });
+
+    await (
+      manager as unknown as {
+        verifyRuntimeIsolation: (
+          context: unknown,
+          expectedCommand: string,
+          expectedMcpServers: ReadonlyArray<{
+            readonly name: string;
+            readonly url: string;
+            readonly bearerTokenEnvVar: string;
+          }>,
+          expectedShellExcludedEnvVarNames: ReadonlyArray<string>,
+        ) => Promise<void>;
+      }
+    ).verifyRuntimeIsolation(
+      context,
+      hookCommand,
+      [
+        {
+          name: "synara",
+          url: "http://127.0.0.1:48123/mcp",
+          bearerTokenEnvVar: SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+        },
+      ],
+      [SYNARA_AGENT_GATEWAY_TOKEN_ENV],
+    );
+
+    expect(sendRequest).toHaveBeenNthCalledWith(1, context, "hooks/list", {});
+    expect(sendRequest).toHaveBeenNthCalledWith(2, context, "config/read", {
+      includeLayers: false,
+      cwd: "/tmp/synara-project",
+    });
+  });
+
   it("keeps the same host policy exactly once in default and plan instructions", () => {
     for (const instructions of [
       CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
       CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
     ]) {
       expect(instructions).toContain(SYNARA_HARNESS_POLICY_MARKER);
+      expect(instructions).toContain(PROVIDER_CONTENT_TRUST_POLICY_MARKER);
       expect(instructions.split(SYNARA_HARNESS_POLICY_MARKER)).toHaveLength(2);
       expect(instructions).toContain("Synara is the host and harness");
       expect(instructions).toContain("one exact synara_create_threads plan");
     }
   });
 
-  it("resolves the gateway endpoint when each session environment is built", async () => {
+  it("binds each launch to its scoped gateway connection", async () => {
     const homePath = mkdtempSync(path.join(os.tmpdir(), "synara-codex-gateway-endpoint-"));
     const previousSynaraHome = process.env.SYNARA_HOME;
     process.env.SYNARA_HOME = path.join(homePath, "synara-home");
-    let endpointUrl = "http://127.0.0.1:0/mcp";
     try {
-      const manager = new CodexAppServerManager(undefined, {
-        agentGatewayMcp: {
-          endpointUrl: () => endpointUrl,
-          acquireSessionLease: () => ({
-            connection: { url: endpointUrl, bearerToken: "token" },
-            release: () => undefined,
-          }),
-        },
-      });
-      endpointUrl = "http://127.0.0.1:48123/mcp";
-      const env = await (
+      writeFileSync(
+        path.join(homePath, "config.toml"),
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom"]',
+          'env_key = "CUSTOM_PROVIDER_KEY"',
+          '[model_providers."custom".env_http_headers]',
+          '"X-Provider" = "CUSTOM_PROVIDER_HEADER"',
+        ].join("\n"),
+        "utf8",
+      );
+      const manager = new CodexAppServerManager();
+      const gatewayConnection = {
+        url: "http://127.0.0.1:48123/mcp",
+        bearerToken: "token",
+      };
+      const launch = await (
         manager as unknown as {
-          buildSessionProcessEnv: (
+          buildSessionProcessLaunch: (
             homePath: string | undefined,
-            token: string | undefined,
-          ) => Promise<NodeJS.ProcessEnv>;
+            gatewayConnection: { readonly url: string; readonly bearerToken: string } | undefined,
+          ) => Promise<{
+            env: NodeJS.ProcessEnv;
+            args: ReadonlyArray<string>;
+            expectedMcpServers: ReadonlyArray<{
+              readonly name: string;
+              readonly url: string;
+              readonly bearerTokenEnvVar: string;
+            }>;
+            expectedShellExcludedEnvVarNames: ReadonlyArray<string>;
+            toolPolicyHookCommand: string;
+          }>;
         }
-      ).buildSessionProcessEnv(homePath, "token");
+      ).buildSessionProcessLaunch(homePath, gatewayConnection);
+      const { env } = launch;
       const configPath = path.join(env.CODEX_HOME ?? homePath, "config.toml");
-      expect(readFileSync(configPath, "utf8")).toContain('url = "http://127.0.0.1:48123/mcp"');
+      const isolatedConfig = readFileSync(configPath, "utf8");
+      expect(isolatedConfig).toContain('url = "http://127.0.0.1:48123/mcp"');
+      for (const envVarName of [
+        "CUSTOM_PROVIDER_HEADER",
+        "CUSTOM_PROVIDER_KEY",
+        SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+      ]) {
+        expect(isolatedConfig).toContain(JSON.stringify(envVarName));
+      }
+      expect(env[SYNARA_AGENT_GATEWAY_TOKEN_ENV]).toBe("token");
+      expect(launch.expectedMcpServers).toEqual([
+        {
+          name: "synara",
+          url: gatewayConnection.url,
+          bearerTokenEnvVar: SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+        },
+      ]);
+      expect(launch.expectedShellExcludedEnvVarNames).toEqual([
+        "CUSTOM_PROVIDER_HEADER",
+        "CUSTOM_PROVIDER_KEY",
+        SYNARA_AGENT_GATEWAY_TOKEN_ENV,
+      ]);
+      expect(launch.args[0]).toBe("--dangerously-bypass-hook-trust");
+      expect(launch.args.at(-1)).toContain(JSON.stringify(launch.toolPolicyHookCommand));
+      expect(launch.toolPolicyHookCommand.length).toBeLessThanOrEqual(4_096);
+
+      const discoveryLaunch = await (
+        manager as unknown as {
+          buildSessionProcessLaunch: (
+            homePath: string | undefined,
+            gatewayConnection: undefined,
+          ) => Promise<{
+            args: ReadonlyArray<string>;
+            expectedMcpServers: ReadonlyArray<unknown>;
+            expectedShellExcludedEnvVarNames: ReadonlyArray<string>;
+          }>;
+        }
+      ).buildSessionProcessLaunch(homePath, undefined);
+      expect(discoveryLaunch.expectedMcpServers).toEqual([]);
+      expect(discoveryLaunch.expectedShellExcludedEnvVarNames).toEqual([
+        "CUSTOM_PROVIDER_HEADER",
+        "CUSTOM_PROVIDER_KEY",
+      ]);
+      expect(discoveryLaunch.args).toContain("mcp_servers={}");
     } finally {
       if (previousSynaraHome === undefined) {
         delete process.env.SYNARA_HOME;
@@ -278,6 +498,7 @@ function createPendingApprovalHarness(runtimeMode: RuntimeMode = "approval-requi
           method: "item/commandExecution/requestApproval" as const,
           requestKind: "command" as const,
           threadId: asThreadId("thread_1"),
+          sensitiveAction: undefined as SensitiveActionAssessment | undefined,
         },
       ],
     ]),
@@ -741,7 +962,7 @@ describe("codex CLI version gate", () => {
     }
   });
 
-  it("does not reuse a general-version verdict for the stricter Auto floor", async () => {
+  it("does not reuse a general-version verdict for a stricter requested floor", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "synara-codex-version-auto-floor-"));
     const homePath = path.join(dir, "codex-home");
     mkdirSync(homePath, { recursive: true });
@@ -753,8 +974,8 @@ describe("codex CLI version gate", () => {
     writeFileSync(
       binaryPath,
       isWindows
-        ? `@echo off\r\necho x>>"${counterPath}"\r\necho codex-cli 0.100.0\r\n`
-        : `#!/bin/sh\necho x >> "${counterPath}"\necho "codex-cli 0.100.0"\n`,
+        ? `@echo off\r\necho x>>"${counterPath}"\r\necho codex-cli 0.145.0\r\n`
+        : `#!/bin/sh\necho x >> "${counterPath}"\necho "codex-cli 0.145.0"\n`,
       { mode: 0o755 },
     );
     const probeCount = () => {
@@ -766,6 +987,7 @@ describe("codex CLI version gate", () => {
     };
 
     const { assertSupportedCodexCliVersion, reset } = __codexCliVersionGateTesting;
+    const stricterMinimumVersion = "0.146.0";
     reset();
     try {
       await assertSupportedCodexCliVersion({ binaryPath, cwd: dir, homePath });
@@ -774,9 +996,9 @@ describe("codex CLI version gate", () => {
           binaryPath,
           cwd: dir,
           homePath,
-          minimumVersion: MINIMUM_CODEX_AUTO_REVIEW_CLI_VERSION,
+          minimumVersion: stricterMinimumVersion,
         }),
-      ).rejects.toThrow(MINIMUM_CODEX_AUTO_REVIEW_CLI_VERSION);
+      ).rejects.toThrow(stricterMinimumVersion);
       expect(probeCount()).toBe(2);
     } finally {
       reset();
@@ -944,6 +1166,276 @@ describe("codex CLI version gate", () => {
 });
 
 describe("buildCodexProcessEnv", () => {
+  it("builds a minimal executable-config-isolated home with only shared state and Host MCP", async () => {
+    const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-source-home-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-home-"));
+    const sessionThreadId = "provider-thread-1";
+    const sourceSessionDirectory = path.join(sourceHome, "sessions", "2026", "07", "29");
+    const sessionFileName = `rollout-2026-07-29T00-00-00-${sessionThreadId}.jsonl`;
+    const sourceConfig = [
+      'model_provider = "custom"',
+      'notify = ["/tmp/notify-attacker"]',
+      "",
+      '[model_providers."custom"]',
+      'name = "Custom"',
+      'base_url = "https://provider.example.test/v1"',
+      'experimental_bearer_token = "fake-provider-token"',
+      'auth = { command = "/tmp/provider-auth-attacker" }',
+      "",
+      '[model_providers."existing-env"]',
+      'name = "Existing env provider"',
+      'base_url = "https://existing-provider.example.test/v1"',
+      'env_key = "EXISTING_PROVIDER_KEY"',
+      "",
+      '[model_providers."existing-env".env_http_headers]',
+      '"X-Provider" = "EXISTING_PROVIDER_HEADER"',
+      "",
+      "[mcp_servers.attacker]",
+      'command = "/tmp/attacker-mcp"',
+      "",
+      '[projects."/repo"]',
+      'trust_level = "trusted"',
+      "",
+      '[plugins."attacker@local"]',
+      "enabled = true",
+    ].join("\n");
+    try {
+      writeFileSync(path.join(sourceHome, "config.toml"), sourceConfig, "utf8");
+      writeFileSync(path.join(sourceHome, "auth.json"), '{"auth":"shared"}', "utf8");
+      mkdirSync(sourceSessionDirectory, { recursive: true });
+      writeFileSync(path.join(sourceSessionDirectory, sessionFileName), "{}\n", "utf8");
+      mkdirSync(path.join(sourceHome, "plugins"));
+      writeFileSync(path.join(sourceHome, "plugins", "execute.js"), "throw 1", "utf8");
+
+      const isolatedHome = path.join(runtimeHome, "codex-home-isolated-overlay");
+      mkdirSync(path.join(isolatedHome, "plugins"), { recursive: true });
+      writeFileSync(path.join(isolatedHome, "plugins", "stale.js"), "throw 2", "utf8");
+      writeFileSync(path.join(isolatedHome, "rules"), "allow everything", "utf8");
+      writeFileSync(
+        path.join(isolatedHome, "config.toml"),
+        '[mcp_servers.stale]\ncommand = "/tmp/stale"\n',
+        "utf8",
+      );
+
+      const env = await buildCodexProcessEnv({
+        env: { SYNARA_HOME: runtimeHome },
+        homePath: sourceHome,
+        platform: "darwin",
+        isolateExecutableConfig: true,
+        importSessionThreadIds: [sessionThreadId],
+        appendConfigToml: buildCodexMcpConfigToml("http://127.0.0.1:48123/mcp"),
+      });
+
+      expect(env.CODEX_HOME).toBe(isolatedHome);
+      expect(lstatSync(path.join(isolatedHome, "auth.json")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path.join(isolatedHome, "sessions")).isDirectory()).toBe(true);
+      expect(lstatSync(path.join(isolatedHome, "sessions")).isSymbolicLink()).toBe(false);
+      expect(readFileSync(path.join(isolatedHome, "auth.json"), "utf8")).toContain("shared");
+      expect(
+        readFileSync(
+          path.join(isolatedHome, "sessions", "2026", "07", "29", sessionFileName),
+          "utf8",
+        ),
+      ).toBe("{}\n");
+      expect(existsSync(path.join(isolatedHome, "plugins"))).toBe(false);
+      expect(existsSync(path.join(isolatedHome, "rules"))).toBe(false);
+
+      writeFileSync(path.join(isolatedHome, "state_5.sqlite"), "runtime-state", "utf8");
+      writeFileSync(path.join(isolatedHome, "session_index.jsonl"), "{}\n", "utf8");
+      writeFileSync(path.join(isolatedHome, "sessions", "runtime-owned.jsonl"), "{}\n", "utf8");
+      await buildCodexProcessEnv({
+        env: { SYNARA_HOME: runtimeHome },
+        homePath: sourceHome,
+        platform: "darwin",
+        isolateExecutableConfig: true,
+        appendConfigToml: buildCodexMcpConfigToml("http://127.0.0.1:48123/mcp"),
+      });
+      expect(readFileSync(path.join(isolatedHome, "state_5.sqlite"), "utf8")).toBe("runtime-state");
+      expect(readFileSync(path.join(isolatedHome, "session_index.jsonl"), "utf8")).toBe("{}\n");
+      expect(readFileSync(path.join(isolatedHome, "sessions", "runtime-owned.jsonl"), "utf8")).toBe(
+        "{}\n",
+      );
+
+      const isolatedConfig = readFileSync(path.join(isolatedHome, "config.toml"), "utf8");
+      const providerTokenEnvName = Object.keys(env).find((name) =>
+        name.startsWith("SYNARA_CODEX_MODEL_PROVIDER_TOKEN_"),
+      );
+      expect(providerTokenEnvName).toBeDefined();
+      expect(env[providerTokenEnvName ?? ""]).toBe("fake-provider-token");
+      expect(isolatedConfig).toContain("[mcp_servers.synara]");
+      expect(isolatedConfig).toContain('model_provider = "custom"');
+      expect(isolatedConfig).toContain('[model_providers."custom"]');
+      expect(isolatedConfig).toContain('base_url = "https://provider.example.test/v1"');
+      expect(isolatedConfig).toContain(`env_key = ${JSON.stringify(providerTokenEnvName)}`);
+      expect(isolatedConfig).toContain('env_key = "EXISTING_PROVIDER_KEY"');
+      expect(isolatedConfig).toContain('"X-Provider" = "EXISTING_PROVIDER_HEADER"');
+      expect(isolatedConfig).toContain('url = "http://127.0.0.1:48123/mcp"');
+      expect(isolatedConfig).toContain("SYNARA_AGENT_GATEWAY_TOKEN");
+      expect(isolatedConfig).toContain(providerTokenEnvName);
+      expect(isolatedConfig).toContain("EXISTING_PROVIDER_KEY");
+      expect(isolatedConfig).toContain("EXISTING_PROVIDER_HEADER");
+      expect(isolatedConfig).not.toContain("fake-provider-token");
+      expect(isolatedConfig).not.toContain("attacker");
+      expect(isolatedConfig).not.toContain("notify-attacker");
+      expect(isolatedConfig).not.toContain("provider-auth-attacker");
+      expect(isolatedConfig).not.toContain("stale");
+      expect(isolatedConfig).not.toContain("trust_level");
+      expect(readFileSync(path.join(sourceHome, "config.toml"), "utf8")).toBe(sourceConfig);
+    } finally {
+      rmSync(sourceHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("retains only non-executable custom model-provider configuration", () => {
+    const sanitized = sanitizeCodexModelProviderConfig(
+      [
+        'model_provider = "custom"',
+        'notify = ["/tmp/notify"]',
+        "",
+        '[model_providers."custom"]',
+        'name = "Custom"',
+        'base_url = "https://provider.example.test/v1"',
+        'env_key = "CUSTOM_PROVIDER_KEY"',
+        'auth = { command = "/tmp/token-command" }',
+        "",
+        '[model_providers."custom".env_http_headers]',
+        '"X-Provider" = "CUSTOM_PROVIDER_HEADER"',
+        "",
+        '[model_providers."custom".query_params]',
+        'api-version = "2026-01-01-preview"',
+        "",
+        '[model_providers."custom".auth]',
+        'command = "/tmp/nested-token-command"',
+        "",
+        "[mcp_servers.attacker]",
+        'command = "/tmp/mcp"',
+        "",
+        '[projects."/repo"]',
+        'trust_level = "trusted"',
+      ].join("\n"),
+    );
+
+    expect(sanitized).toContain('model_provider = "custom"');
+    expect(sanitized).toContain('[model_providers."custom"]');
+    expect(sanitized).toContain('env_key = "CUSTOM_PROVIDER_KEY"');
+    expect(sanitized).toContain('[model_providers."custom".env_http_headers]');
+    expect(sanitized).toContain('"X-Provider" = "CUSTOM_PROVIDER_HEADER"');
+    expect(sanitized).toContain('[model_providers."custom".query_params]');
+    expect(sanitized).toContain('api-version = "2026-01-01-preview"');
+    expect(codexModelProviderCredentialEnvNames(sanitized)).toEqual([
+      "CUSTOM_PROVIDER_HEADER",
+      "CUSTOM_PROVIDER_KEY",
+    ]);
+    expect(sanitized).not.toContain("notify");
+    expect(sanitized).not.toContain("token-command");
+    expect(sanitized).not.toContain("mcp_servers");
+    expect(sanitized).not.toContain("trust_level");
+  });
+
+  it("rejects non-portable custom provider env_key names in isolated mode", () => {
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom"]',
+          'env_key = "CUSTOM-PROVIDER-KEY"',
+        ].join("\n"),
+      ),
+    ).toThrow("portable environment variable name");
+  });
+
+  it("rejects inline or non-portable provider header credential mappings", () => {
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom"]',
+          'env_http_headers = { Authorization = "CUSTOM_PROVIDER_HEADER" }',
+        ].join("\n"),
+      ),
+    ).toThrow("dedicated TOML table");
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom".env_http_headers]',
+          'Authorization = "CUSTOM-PROVIDER-HEADER"',
+        ].join("\n"),
+      ),
+    ).toThrow("portable environment variable names");
+  });
+
+  it("rejects credential-bearing provider URLs and unaudited static query params", () => {
+    for (const baseUrl of [
+      "https://user:secret@provider.example.test/v1",
+      "https://provider.example.test/v1?api_key=secret",
+      "https://provider.example.test/v1#secret",
+      "file:///tmp/provider.sock",
+    ]) {
+      expect(() =>
+        sanitizeCodexModelProviderConfig(
+          [
+            'model_provider = "custom"',
+            '[model_providers."custom"]',
+            `base_url = ${JSON.stringify(baseUrl)}`,
+          ].join("\n"),
+        ),
+      ).toThrow("isolated mode");
+    }
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        'openai_base_url = "https://provider.example.test/v1?api_key=secret"',
+      ),
+    ).toThrow("query parameters");
+
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom"]',
+          'query_params = { api-version = "2026-01-01" }',
+        ].join("\n"),
+      ),
+    ).toThrow("dedicated TOML table");
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom".query_params]',
+          'api_key = "secret"',
+        ].join("\n"),
+      ),
+    ).toThrow("only an explicit api-version");
+    expect(() =>
+      sanitizeCodexModelProviderConfig(
+        [
+          'model_provider = "custom"',
+          '[model_providers."custom".query_params]',
+          'api-version = "secret"',
+        ].join("\n"),
+      ),
+    ).toThrow("date or date-preview");
+  });
+
+  it("rejects unsafe isolated-home session import ids before scanning paths", async () => {
+    const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-source-home-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-home-"));
+    try {
+      await expect(
+        buildCodexProcessEnv({
+          env: { SYNARA_HOME: runtimeHome },
+          homePath: sourceHome,
+          isolateExecutableConfig: true,
+          importSessionThreadIds: ["../rules"],
+        }),
+      ).rejects.toThrow("invalid thread id");
+    } finally {
+      rmSync(sourceHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
+
   it("hydrates the active custom provider env_key from the effective CODEX_HOME", async () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), "synara-codex-env-"));
     try {
@@ -1563,7 +2055,7 @@ describe("startSession", () => {
       )
       .mockImplementation(() => {
         throw new Error(
-          "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+          "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.145.0 or newer and restart Synara.",
         );
       });
 
@@ -1575,7 +2067,7 @@ describe("startSession", () => {
           runtimeMode: "full-access",
         }),
       ).rejects.toThrow(
-        "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+        "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.145.0 or newer and restart Synara.",
       );
       expect(versionCheck).toHaveBeenCalledTimes(1);
       expect(events).toEqual([
@@ -1583,7 +2075,7 @@ describe("startSession", () => {
           method: "session/startFailed",
           kind: "error",
           message:
-            "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+            "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.145.0 or newer and restart Synara.",
         },
       ]);
     } finally {
@@ -2681,18 +3173,32 @@ describe("respondToRequest", () => {
     writeMessage.mockClear();
     emitEvent.mockClear();
 
-    await (
-      manager as unknown as {
-        handleServerRequest: (context: unknown, request: Record<string, unknown>) => Promise<void>;
-      }
-    ).handleServerRequest(context, {
+    handleServerNotificationForTest(manager, context, {
+      method: "item/started",
+      params: {
+        threadId: "provider-thread-1",
+        turnId: "turn_2",
+        item: {
+          id: "item_file_change",
+          type: "fileChange",
+          status: "inProgress",
+          changes: [
+            {
+              path: "apps/web/src/components/chat/ComposerPendingApprovalActions.tsx",
+              kind: { type: "update" },
+            },
+          ],
+        },
+      },
+    });
+    emitEvent.mockClear();
+    await handleServerRequestForTest(manager, context, {
       jsonrpc: "2.0",
       id: 99,
       method: "item/fileChange/requestApproval",
       params: {
         turnId: "turn_2",
         itemId: "item_file_change",
-        path: "apps/web/src/components/chat/ComposerPendingApprovalActions.tsx",
       },
     });
 
@@ -2719,6 +3225,128 @@ describe("respondToRequest", () => {
     expect(
       emitEvent.mock.calls.some(([event]) => (event as { kind?: string }).kind === "request"),
     ).toBe(false);
+  });
+
+  it("requires a fresh approval for sensitive actions despite an always-allowed session", async () => {
+    const { manager, context, writeMessage, emitEvent } = createPendingApprovalHarness();
+
+    await manager.respondToRequest(
+      asThreadId("thread_1"),
+      ApprovalRequestId.makeUnsafe("req-approval-1"),
+      "acceptForSession",
+    );
+    writeMessage.mockClear();
+    emitEvent.mockClear();
+
+    await handleServerRequestForTest(manager, context, {
+      id: 102,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        turnId: "turn_2",
+        itemId: "item_git_push",
+        command: "git push --force-with-lease origin main",
+      },
+    });
+
+    expect(context.pendingApprovals.size).toBe(1);
+    const [requestId, pending] = Array.from(context.pendingApprovals.entries())[0]!;
+    expect(pending.sensitiveAction).toMatchObject({
+      categories: ["protected-branch-publish"],
+      requiresFreshApproval: true,
+      allowSessionApproval: false,
+    });
+    expect(writeMessage).not.toHaveBeenCalled();
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "request",
+        payload: expect.objectContaining({
+          sensitiveAction: expect.objectContaining({
+            categories: ["protected-branch-publish"],
+          }),
+        }),
+      }),
+    );
+
+    await manager.respondToRequest(asThreadId("thread_1"), requestId, "acceptForSession");
+    expect(writeMessage).toHaveBeenCalledWith(context, { id: 102, result: { decision: "accept" } });
+    expect(context.sessionApprovalOverride).toEqual(fullAccessTurnOverrides);
+  });
+
+  it("correlates native file-change item paths into a fresh approval", async () => {
+    const { manager, context, writeMessage, emitEvent } = createPendingApprovalHarness();
+
+    await manager.respondToRequest(
+      asThreadId("thread_1"),
+      ApprovalRequestId.makeUnsafe("req-approval-1"),
+      "acceptForSession",
+    );
+    writeMessage.mockClear();
+    emitEvent.mockClear();
+
+    handleServerNotificationForTest(manager, context, {
+      method: "item/started",
+      params: {
+        threadId: "provider-thread-1",
+        turnId: "turn_2",
+        item: {
+          id: "item_package_change",
+          type: "fileChange",
+          status: "inProgress",
+          changes: [{ path: "package.json", kind: { type: "update" } }],
+        },
+      },
+    });
+    emitEvent.mockClear();
+
+    await handleServerRequestForTest(manager, context, {
+      id: 103,
+      method: "item/fileChange/requestApproval",
+      params: {
+        turnId: "turn_2",
+        itemId: "item_package_change",
+      },
+    });
+
+    expect(context.pendingApprovals.size).toBe(1);
+    const [requestId, pending] = Array.from(context.pendingApprovals.entries())[0]!;
+    expect(pending.sensitiveAction).toEqual({
+      categories: ["dependency-change"],
+      requiresFreshApproval: true,
+      allowSessionApproval: false,
+    });
+    expect(writeMessage).not.toHaveBeenCalled();
+
+    await manager.respondToRequest(asThreadId("thread_1"), requestId, "acceptForSession");
+    expect(writeMessage).toHaveBeenCalledWith(context, {
+      id: 103,
+      result: { decision: "accept" },
+    });
+  });
+
+  it("declines an unclassified native file-change approval", async () => {
+    const { manager, context, writeMessage, emitEvent } = createPendingApprovalHarness();
+    const existingRequestIds = [...context.pendingApprovals.keys()];
+
+    await handleServerRequestForTest(manager, context, {
+      id: 104,
+      method: "item/fileChange/requestApproval",
+      params: {
+        turnId: "turn_2",
+        itemId: "item_without_started",
+      },
+    });
+
+    expect([...context.pendingApprovals.keys()]).toEqual(existingRequestIds);
+    expect(writeMessage).toHaveBeenCalledWith(context, {
+      id: 104,
+      result: { decision: "decline" },
+    });
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "error",
+        method: "item/fileChange/requestApproval/unclassified",
+      }),
+    );
   });
 
   it("keeps later permission-profile requests interactive during an always-allowed session", async () => {
@@ -3281,6 +3909,21 @@ describe("collab child conversation routing", () => {
       sandboxPolicy: { type: "dangerFullAccess" },
     };
 
+    handleServerNotificationForTest(manager, context, {
+      method: "item/started",
+      params: {
+        threadId: "child_provider_unmapped",
+        turnId: "turn_child_unmapped",
+        item: {
+          id: "file_child_unmapped",
+          type: "fileChange",
+          status: "inProgress",
+          changes: [{ path: "apps/server/src/example.ts", kind: { type: "update" } }],
+        },
+      },
+    });
+    emitEvent.mockClear();
+
     await handleServerRequestForTest(manager, context, {
       id: 44,
       method: "item/fileChange/requestApproval",
@@ -3288,7 +3931,6 @@ describe("collab child conversation routing", () => {
         threadId: "child_provider_unmapped",
         turnId: "turn_child_unmapped",
         itemId: "file_child_unmapped",
-        path: "apps/server/src/example.ts",
       },
     });
 

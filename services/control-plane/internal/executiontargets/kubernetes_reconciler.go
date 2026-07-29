@@ -26,25 +26,31 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providerproxy"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
 
 const (
-	kubernetesManagedLabel              = "synara.io/managed"
-	kubernetesTargetLabel               = "synara.io/execution-target-id"
-	kubernetesExecutionLabel            = "synara.io/execution-id"
-	kubernetesGenerationLabel           = "synara.io/generation"
-	kubernetesReleaseLabel              = "synara.io/worker-release-revision-id"
-	kubernetesChannelLabel              = "synara.io/worker-release-channel"
-	kubernetesWarmSlotLabel             = "synara.io/warm-slot"
-	kubernetesConfigAnnotation          = "synara.io/config-sha256"
-	kubernetesWorkloadIdentityVolume    = "workload-identity"
-	kubernetesWorkloadIdentityTokenPath = "/var/run/secrets/synara.io/workload-identity/token"
-	kubernetesLocalClusterID            = "kubernetes"
-	kubernetesWorkerProtocolVersion     = 2
-	kubernetesPodBoundRegistrationTrust = "kubernetes-pod-bound-v1"
+	kubernetesManagedLabel                = "synara.io/managed"
+	kubernetesTargetLabel                 = "synara.io/execution-target-id"
+	kubernetesExecutionLabel              = "synara.io/execution-id"
+	kubernetesGenerationLabel             = "synara.io/generation"
+	kubernetesReleaseLabel                = "synara.io/worker-release-revision-id"
+	kubernetesChannelLabel                = "synara.io/worker-release-channel"
+	kubernetesWarmSlotLabel               = "synara.io/warm-slot"
+	kubernetesConfigAnnotation            = "synara.io/config-sha256"
+	kubernetesWorkloadIdentityVolume      = "workload-identity"
+	kubernetesRegistrationTokenVolume     = "registration-token"
+	kubernetesWorkloadIdentityTokenPath   = platform.KubernetesWorkloadIdentityTokenPath
+	kubernetesStagedRegistrationTokenPath = platform.KubernetesStagedRegistrationTokenPath
+	kubernetesNetworkBoundaryInitName     = "network-boundary-init"
+	kubernetesRegistrationTokenInitName   = "registration-token-init"
+	kubernetesLocalClusterID              = "kubernetes"
+	kubernetesWorkerProtocolVersion       = 2
+	kubernetesPodBoundRegistrationTrust   = "kubernetes-pod-bound-v1"
 
 	KubernetesPodFailureApplyFailed    = "pod-apply-failed"
 	KubernetesPodFailurePendingTimeout = "pending-timeout"
@@ -136,6 +142,7 @@ type kubernetesTargetConfiguration struct {
 	ProviderNoProxy                 []string          `json:"providerNoProxy"`
 	CPURequest                      string            `json:"cpuRequest"`
 	CPULimit                        string            `json:"cpuLimit"`
+	PIDsLimit                       uint64            `json:"pidsLimit"`
 	MemoryRequest                   string            `json:"memoryRequest"`
 	MemoryLimit                     string            `json:"memoryLimit"`
 	EphemeralStorageRequest         string            `json:"ephemeralStorageRequest"`
@@ -204,6 +211,7 @@ type KubernetesPodTerminalObservation struct {
 
 type kubernetesClient interface {
 	Apply(context.Context, string, map[string]any) error
+	AttestPodPIDsLimit(context.Context, map[string]string, uint64) error
 	GetPriorityClass(context.Context, string) (kubernetesPriorityClass, error)
 	GetResourceQuota(context.Context, string, string) (kubernetesResourceQuota, error)
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
@@ -399,6 +407,19 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		)
 		r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
 		return problem.Wrap(503, "kubernetes_api_unavailable", "Kubernetes API configuration is unavailable.", err)
+	}
+	if err := client.AttestPodPIDsLimit(ctx, configuration.NodeSelector, configuration.PIDsLimit); err != nil {
+		healthObservation.Status = routing.HealthUnreachable
+		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+			"Managed Kubernetes node PID confinement is unavailable.",
+		)
+		r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
+		return problem.Wrap(
+			503,
+			"kubernetes_pids_limit_unverified",
+			"Every eligible Kubernetes node must expose a finite kubelet podPidsLimit no greater than the Target pidsLimit.",
+			err,
+		)
 	}
 	resolution, err := r.resolveImagePullCredential(ctx, target, configuration.Image)
 	if err != nil {
@@ -1907,14 +1928,14 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 		controlPlanePort, _ = strconv.Atoi(parsedPort)
 	}
 	ports[controlPlanePort] = struct{}{}
-	for field, allowedSchemes := range map[*string]map[string]struct{}{
-		&configuration.ProviderHTTPProxy:  {"http": {}, "https": {}},
-		&configuration.ProviderHTTPSProxy: {"http": {}, "https": {}},
-		&configuration.ProviderAllProxy:   {"http": {}, "https": {}, "socks5": {}},
+	for field, mode := range map[*string]providerproxy.Mode{
+		&configuration.ProviderHTTPProxy:  providerproxy.HTTPOrHTTPS,
+		&configuration.ProviderHTTPSProxy: providerproxy.HTTPOrHTTPS,
+		&configuration.ProviderAllProxy:   providerproxy.HTTPHTTPSOrSOCKS5,
 	} {
-		normalized, proxyPort, proxyErr := normalizeKubernetesProviderProxy(*field, allowedSchemes)
+		normalized, proxyPort, proxyErr := providerproxy.Normalize(*field, mode)
 		if proxyErr != nil {
-			return kubernetesTargetConfiguration{}, proxyErr
+			return kubernetesTargetConfiguration{}, kubernetesProviderProxyProblem(proxyErr)
 		}
 		*field = normalized
 		if proxyPort > 0 {
@@ -1947,14 +1968,33 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes runnerCommand is invalid.")
 		}
 	}
-	for _, value := range []string{
-		configuration.CPURequest, configuration.CPULimit, configuration.MemoryRequest, configuration.MemoryLimit,
-		configuration.EphemeralStorageRequest, configuration.EphemeralStorageLimit, configuration.WorkspaceSizeLimit,
-		configuration.QuotaCPURequests, configuration.QuotaCPULimits, configuration.QuotaMemoryRequests,
-		configuration.QuotaMemoryLimits, configuration.QuotaEphemeralStorage,
-		configuration.GPURequest, configuration.QuotaGPURequests,
-	} {
-		if value != "" && !quantityPattern.MatchString(value) {
+	resourceQuantities := []*string{
+		&configuration.CPURequest, &configuration.CPULimit, &configuration.MemoryRequest, &configuration.MemoryLimit,
+		&configuration.EphemeralStorageRequest, &configuration.EphemeralStorageLimit, &configuration.WorkspaceSizeLimit,
+		&configuration.QuotaCPURequests, &configuration.QuotaCPULimits, &configuration.QuotaMemoryRequests,
+		&configuration.QuotaMemoryLimits, &configuration.QuotaEphemeralStorage,
+		&configuration.GPURequest, &configuration.QuotaGPURequests,
+	}
+	for _, value := range resourceQuantities {
+		*value = strings.TrimSpace(*value)
+	}
+	if configuration.CPULimit == "" || configuration.MemoryLimit == "" ||
+		configuration.EphemeralStorageLimit == "" || configuration.PIDsLimit == 0 {
+		return kubernetesTargetConfiguration{}, problem.New(
+			400,
+			"kubernetes_resource_limits_required",
+			"Kubernetes cpuLimit, memoryLimit, ephemeralStorageLimit, and pidsLimit are required.",
+		)
+	}
+	if configuration.PIDsLimit > platform.MaximumKubernetesPIDsLimit {
+		return kubernetesTargetConfiguration{}, problem.New(
+			400,
+			"invalid_kubernetes_configuration",
+			"Kubernetes pidsLimit exceeds the supported maximum.",
+		)
+	}
+	for _, value := range resourceQuantities {
+		if *value != "" && !quantityPattern.MatchString(*value) {
 			return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes resource quantities are invalid.")
 		}
 	}
@@ -1974,37 +2014,19 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 	return configuration, nil
 }
 
-func normalizeKubernetesProviderProxy(raw string, allowedSchemes map[string]struct{}) (string, int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", 0, nil
+func kubernetesProviderProxyProblem(err error) error {
+	switch {
+	case errors.Is(err, providerproxy.ErrUnsupportedScheme):
+		return problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy scheme is unsupported.")
+	case errors.Is(err, providerproxy.ErrInvalidHost):
+		return problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy host is invalid.")
+	case errors.Is(err, providerproxy.ErrInvalidPort):
+		return problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy port is invalid.")
+	case errors.Is(err, providerproxy.ErrSOCKS5Port):
+		return problem.New(400, "invalid_kubernetes_provider_proxy", "SOCKS5 Provider proxy requires an explicit port.")
+	default:
+		return problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy must be a credential-free HTTP(S) or SOCKS5 authority.")
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Opaque != "" || parsed.Host == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy must be a credential-free HTTP(S) or SOCKS5 authority.")
-	}
-	if _, ok := allowedSchemes[strings.ToLower(parsed.Scheme)]; !ok {
-		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy scheme is unsupported.")
-	}
-	if _, err := gitpolicy.NormalizeHostname(parsed.Hostname()); err != nil {
-		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy host is invalid.")
-	}
-	port := 0
-	if parsed.Port() != "" {
-		port, err = strconv.Atoi(parsed.Port())
-		if err != nil || port < 1 || port > 65535 {
-			return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "Kubernetes Provider proxy port is invalid.")
-		}
-	} else if parsed.Scheme == "http" {
-		port = 80
-	} else if parsed.Scheme == "https" {
-		port = 443
-	} else {
-		return "", 0, problem.New(400, "invalid_kubernetes_provider_proxy", "SOCKS5 Provider proxy requires an explicit port.")
-	}
-	parsed.Path = ""
-	return parsed.String(), port, nil
 }
 
 func (r *KubernetesReconciler) resolveImagePullCredential(

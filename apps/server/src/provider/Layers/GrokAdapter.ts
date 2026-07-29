@@ -67,8 +67,8 @@ import {
   classifyAcpPromptTurnCompletion,
   mapAcpToAdapterError,
   readAcpFailedToolDetail,
+  resolveAcpHumanApprovalOutcome,
   resolveAcpPermissionPolicy,
-  selectAcpPermissionOptionId,
 } from "../acp/AcpAdapterSupport.ts";
 import {
   acceptAcpPlanUpdate,
@@ -1214,10 +1214,12 @@ export function makeGrokAdapter(
             yield* acp.handleRequestPermission((params) =>
               Effect.gen(function* () {
                 yield* logNative(input.threadId, "session/request_permission", params);
+                const permissionRequest = parsePermissionRequest(params);
                 const policyOutcome = resolveAcpPermissionPolicy({
                   runtimeMode: input.runtimeMode,
                   interactionMode: ctx?.activeInteractionMode,
                   options: params.options,
+                  permissionRequest,
                 });
                 if (policyOutcome !== undefined) {
                   if (policyOutcome.outcome === "selected") {
@@ -1239,7 +1241,6 @@ export function makeGrokAdapter(
                   }
                   return { outcome: policyOutcome };
                 }
-                const permissionRequest = parsePermissionRequest(params);
                 const requestId = ApprovalRequestId.makeUnsafe(crypto.randomUUID());
                 const runtimeRequestId = RuntimeRequestId.makeUnsafe(requestId);
                 const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -1260,7 +1261,12 @@ export function makeGrokAdapter(
                     rawPayload: params,
                   }),
                 );
-                const resolved = yield* Deferred.await(decision);
+                const requestedDecision = yield* Deferred.await(decision);
+                const approvalOutcome = resolveAcpHumanApprovalOutcome({
+                  permissionRequest,
+                  requestedDecision,
+                  options: params.options,
+                });
                 pendingApprovals.delete(requestId);
                 yield* offerRuntimeEvent(
                   input.lifecycleGeneration,
@@ -1271,26 +1277,11 @@ export function makeGrokAdapter(
                     turnId: ctx?.activeTurnId,
                     requestId: runtimeRequestId,
                     permissionRequest,
-                    decision: resolved,
+                    decision: requestedDecision,
+                    appliedDecision: approvalOutcome.appliedDecision,
                   }),
                 );
-                return {
-                  outcome:
-                    resolved === "cancel"
-                      ? ({ outcome: "cancelled" } as const)
-                      : (() => {
-                          const selectedOptionId = selectAcpPermissionOptionId(
-                            resolved,
-                            params.options,
-                          );
-                          return selectedOptionId === undefined
-                            ? ({ outcome: "cancelled" } as const)
-                            : ({
-                                outcome: "selected" as const,
-                                optionId: selectedOptionId,
-                              } as const);
-                        })(),
-                };
+                return { outcome: approvalOutcome.outcome };
               }),
             );
             return yield* acp.start();

@@ -420,6 +420,9 @@ describe("decider project scripts", () => {
     const events = Array.isArray(result) ? result : [result];
     expect(events).toHaveLength(2);
     expect(events[0]?.type).toBe("thread.message-sent");
+    if (events[0]?.type === "thread.message-sent") {
+      expect(events[0].payload.source).toBe("native");
+    }
     const turnStartEvent = events[1];
     expect(turnStartEvent?.type).toBe("thread.turn-start-requested");
     expect(turnStartEvent?.causationEventId).toBe(events[0]?.eventId ?? null);
@@ -440,6 +443,224 @@ describe("decider project scripts", () => {
       },
       runtimeMode: "approval-required",
     });
+
+    const externalResult = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe("cmd-turn-start-external"),
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          message: {
+            messageId: asMessageId("message-external-1"),
+            role: "user",
+            text: "untrusted external prompt",
+            attachments: [],
+            source: "external-mcp",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+    const externalEvents = Array.isArray(externalResult) ? externalResult : [externalResult];
+    expect(externalEvents[0]?.type).toBe("thread.message-sent");
+    if (externalEvents[0]?.type === "thread.message-sent") {
+      expect(externalEvents[0].payload.source).toBe("external-mcp");
+    }
+    const externalTurnStart = externalEvents.find(
+      (event) => event.type === "thread.turn-start-requested",
+    );
+    expect(externalTurnStart?.type).toBe("thread.turn-start-requested");
+    if (externalTurnStart?.type === "thread.turn-start-requested") {
+      expect(externalTurnStart.payload.runtimeMode).toBe("approval-required");
+    }
+
+    const automationResult = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe("cmd-turn-start-automation"),
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          message: {
+            messageId: asMessageId("message-automation-1"),
+            role: "user",
+            text: "unattended automation prompt",
+            attachments: [],
+          },
+          dispatchOrigin: "automation",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+    const automationEvents = Array.isArray(automationResult)
+      ? automationResult
+      : [automationResult];
+    expect(automationEvents[0]?.type).toBe("thread.message-sent");
+    if (automationEvents[0]?.type === "thread.message-sent") {
+      expect(automationEvents[0].payload.source).toBe("automation");
+    }
+    const turnStart = automationEvents.find(
+      (event) => event.type === "thread.turn-start-requested",
+    );
+    expect(turnStart?.type).toBe("thread.turn-start-requested");
+    if (turnStart?.type === "thread.turn-start-requested") {
+      expect(turnStart.payload.runtimeMode).toBe("approval-required");
+    }
+
+    const piReadModel = {
+      ...readModel,
+      threads: readModel.threads.map((thread) => ({
+        ...thread,
+        modelSelection: { provider: "pi" as const, model: "test-pi" },
+      })),
+    };
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe("cmd-turn-start-external-pi"),
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            message: {
+              messageId: asMessageId("message-external-pi-1"),
+              role: "user",
+              text: "untrusted external prompt",
+              attachments: [],
+              source: "external-mcp",
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          },
+          readModel: piReadModel,
+        }),
+      ),
+    ).rejects.toThrow("Provider 'pi' cannot process external-mcp content");
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe("cmd-turn-start-automation-pi"),
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            message: {
+              messageId: asMessageId("message-automation-pi-1"),
+              role: "user",
+              text: "unattended automation prompt",
+              attachments: [],
+            },
+            dispatchOrigin: "automation",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "full-access",
+            createdAt: now,
+          },
+          readModel: piReadModel,
+        }),
+      ),
+    ).rejects.toThrow("Provider 'pi' cannot process automation content");
+
+    for (const modelSelection of [
+      { provider: "cursor" as const, model: "auto" },
+      { provider: "grok" as const, model: "grok-build" },
+      { provider: "droid" as const, model: "claude-opus-4-8" },
+    ]) {
+      const startupUnsafeReadModel = {
+        ...readModel,
+        threads: readModel.threads.map((thread) => ({ ...thread, modelSelection })),
+      };
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({
+            command: {
+              type: "thread.turn.start",
+              commandId: CommandId.makeUnsafe(
+                `cmd-turn-start-external-startup-unsafe-${modelSelection.provider}`,
+              ),
+              threadId: ThreadId.makeUnsafe("thread-1"),
+              message: {
+                messageId: asMessageId(
+                  `message-external-startup-unsafe-${modelSelection.provider}`,
+                ),
+                role: "user",
+                text: "untrusted external prompt",
+                attachments: [],
+                source: "external-mcp",
+              },
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              runtimeMode: "approval-required",
+              createdAt: now,
+            },
+            readModel: startupUnsafeReadModel,
+          }),
+        ),
+      ).rejects.toThrow("executable repository startup configuration may run");
+    }
+
+    for (const modelSelection of [
+      { provider: "opencode" as const, model: "openai/gpt-5" },
+      { provider: "kilo" as const, model: "kilo/kilo-auto/free" },
+    ]) {
+      const externalRuntimeReadModel = {
+        ...readModel,
+        threads: readModel.threads.map((thread) => ({ ...thread, modelSelection })),
+      };
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({
+            command: {
+              type: "thread.turn.start",
+              commandId: CommandId.makeUnsafe(
+                `cmd-turn-start-policy-only-${modelSelection.provider}`,
+              ),
+              threadId: ThreadId.makeUnsafe("thread-1"),
+              message: {
+                messageId: asMessageId(`message-policy-only-${modelSelection.provider}`),
+                role: "user",
+                text: "untrusted external prompt",
+                attachments: [],
+                source: "external-mcp",
+              },
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              runtimeMode: "approval-required",
+              createdAt: now,
+            },
+            readModel: externalRuntimeReadModel,
+          }),
+        ),
+      ).rejects.toThrow("no attested Host provenance");
+      await expect(
+        Effect.runPromise(
+          decideOrchestrationCommand({
+            command: {
+              type: "thread.turn.start",
+              commandId: CommandId.makeUnsafe(
+                `cmd-turn-start-external-runtime-${modelSelection.provider}`,
+              ),
+              threadId: ThreadId.makeUnsafe("thread-1"),
+              message: {
+                messageId: asMessageId(`message-external-runtime-${modelSelection.provider}`),
+                role: "user",
+                text: "untrusted external prompt",
+                attachments: [],
+                source: "external-mcp",
+              },
+              providerOptions: {
+                [modelSelection.provider]: { serverUrl: "http://127.0.0.1:4096" },
+              },
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              runtimeMode: "approval-required",
+              createdAt: now,
+            },
+            readModel: externalRuntimeReadModel,
+          }),
+        ),
+      ).rejects.toThrow("externally managed server");
+    }
   });
 
   it("emits thread.runtime-mode-set from thread.runtime-mode.set", async () => {

@@ -1,8 +1,11 @@
 const CODEX_VERSION_PATTERN = /\bv?(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)\b/;
 
-export const MINIMUM_CODEX_CLI_VERSION = "0.37.0";
-// `approvalsReviewer: "auto_review"` and its companion messages shipped in rust-v0.124.0.
-export const MINIMUM_CODEX_AUTO_REVIEW_CLI_VERSION = "0.124.0";
+// Stage 5 executable-config isolation relies on the strict app-server config
+// gate and the complete feature-disable surface shipped in this release.
+export const MINIMUM_CODEX_CLI_VERSION = "0.145.0";
+// Auto review shipped earlier, but every session must also satisfy the Stage 5
+// executable-config isolation floor.
+export const MINIMUM_CODEX_AUTO_REVIEW_CLI_VERSION = MINIMUM_CODEX_CLI_VERSION;
 
 interface ParsedSemver {
   readonly major: number;

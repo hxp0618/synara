@@ -44,6 +44,7 @@ import {
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
   type RuntimeSessionState,
+  type SensitiveActionAssessment,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -68,6 +69,12 @@ import {
   resolveApiModelId,
   trimOrNull,
 } from "@synara/shared/model";
+import { classifySensitiveAction } from "@synara/shared/sensitiveActionPolicy";
+import {
+  providerToolResultRequiresTrustEnvelope,
+  providerUntrustedToolFailureContext,
+  providerUntrustedToolResultEnvelope,
+} from "@synara/shared/providerContentTrustPolicy";
 import { buildClaudeSubagentPrompt } from "@synara/shared/agentMentions";
 import { prepareWindowsSafeProcess } from "@synara/shared/windowsProcess";
 import {
@@ -217,6 +224,7 @@ interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
   readonly suggestions?: ReadonlyArray<PermissionUpdate>;
+  readonly sensitiveAction?: SensitiveActionAssessment;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
@@ -998,11 +1006,12 @@ const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
   "image/png",
   "image/webp",
 ]);
-const CLAUDE_SETTING_SOURCES = [
-  "user",
-  "project",
-  "local",
-] as const satisfies ReadonlyArray<SettingSource>;
+// Filesystem settings can contain command hooks, status-line commands, MCP
+// process definitions, and permission grants that run or take effect before
+// Synara's canUseTool callback. Local SDK sessions therefore use isolation mode
+// just like managed Provider Host sessions. Repository instructions still enter
+// through ordinary untrusted file reads rather than an executable config tier.
+const CLAUDE_SETTING_SOURCES = [] as const satisfies ReadonlyArray<SettingSource>;
 const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 1_000;
 // The SDK's interrupt resolves only once the CLI acknowledges it; a wedged CLI
 // would otherwise stall the caller (and the provider command reactor) forever.
@@ -4251,6 +4260,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             payload: {
               requestType: pending.requestType,
               decision: "cancel",
+              ...(pending.sensitiveAction ? { sensitiveAction: pending.sensitiveAction } : {}),
             },
             providerRefs: nativeProviderRefs(context),
           });
@@ -4576,6 +4586,31 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ).catch(() => ({}));
         };
 
+        const untrustedToolResultHook = async (hookInput: HookInput): Promise<HookJSONOutput> => {
+          if (hookInput.hook_event_name === "PostToolUse") {
+            if (!providerToolResultRequiresTrustEnvelope(hookInput.tool_name)) return {};
+            return {
+              hookSpecificOutput: {
+                hookEventName: "PostToolUse",
+                updatedToolOutput: providerUntrustedToolResultEnvelope(
+                  hookInput.tool_name,
+                  hookInput.tool_response,
+                ),
+              },
+            };
+          }
+          if (hookInput.hook_event_name === "PostToolUseFailure") {
+            if (!providerToolResultRequiresTrustEnvelope(hookInput.tool_name)) return {};
+            return {
+              hookSpecificOutput: {
+                hookEventName: "PostToolUseFailure",
+                additionalContext: providerUntrustedToolFailureContext(hookInput.tool_name),
+              },
+            };
+          }
+          return {};
+        };
+
         const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
           Effect.runPromise(
             Effect.gen(function* () {
@@ -4617,7 +4652,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               }
 
               const runtimeMode = input.runtimeMode ?? "full-access";
-              if (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession) {
+              const sensitiveAction = classifySensitiveAction({ toolName, toolInput });
+              if (
+                !sensitiveAction.requiresFreshApproval &&
+                (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession)
+              ) {
                 return {
                   behavior: "allow",
                   updatedInput: toolInput,
@@ -4637,6 +4676,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 requestType,
                 detail,
                 decision: decisionDeferred,
+                ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
                 ...(callbackOptions.suggestions && callbackOptions.suggestions.length > 0
                   ? { suggestions: callbackOptions.suggestions }
                   : {}),
@@ -4656,12 +4696,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 payload: {
                   requestType,
                   detail,
+                  ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
                   args: {
                     toolName,
                     input: toolInput,
                     sessionApprovalAvailable:
+                      !sensitiveAction.requiresFreshApproval &&
                       callbackOptions.suggestions !== undefined &&
                       callbackOptions.suggestions.length > 0,
+                    ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
                     ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
                   },
                 },
@@ -4700,6 +4743,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 ),
               );
               pendingApprovals.delete(requestId);
+              const effectiveDecision =
+                sensitiveAction.requiresFreshApproval && decision === "acceptForSession"
+                  ? "accept"
+                  : decision;
 
               const resolvedStamp = yield* makeEventStamp();
               yield* offerRuntimeEvent(context, {
@@ -4714,7 +4761,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 requestId: asRuntimeRequestId(requestId),
                 payload: {
                   requestType,
-                  decision,
+                  decision: effectiveDecision,
+                  ...(sensitiveAction.requiresFreshApproval ? { sensitiveAction } : {}),
+                  ...(effectiveDecision !== decision ? { requestedDecision: decision } : {}),
                 },
                 providerRefs: nativeProviderRefs(context, {
                   providerItemId: callbackOptions.toolUseID,
@@ -4723,13 +4772,14 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                   source: "claude.sdk.permission",
                   method: "canUseTool/decision",
                   payload: {
-                    decision,
+                    decision: effectiveDecision,
+                    ...(effectiveDecision !== decision ? { requestedDecision: decision } : {}),
                   },
                 },
               });
 
               if (decision === "accept" || decision === "acceptForSession") {
-                if (decision === "acceptForSession" && runtimeMode !== "auto") {
+                if (effectiveDecision === "acceptForSession" && runtimeMode !== "auto") {
                   // The SDK's permission suggestions only cover some requests;
                   // supervised mode preserves its live "always allow" fallback.
                   // Auto stays reviewer-gated and applies only SDK-provided
@@ -4739,7 +4789,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 return {
                   behavior: "allow",
                   updatedInput: toolInput,
-                  ...(decision === "acceptForSession" && pendingApproval.suggestions
+                  ...(effectiveDecision === "acceptForSession" && pendingApproval.suggestions
                     ? { updatedPermissions: [...pendingApproval.suggestions] }
                     : {}),
                 } satisfies PermissionResult;
@@ -4780,11 +4830,14 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         );
         const effectiveEffort = getEffectiveClaudeCodeEffort(effort);
         const ultracode = effort === "ultracode" && hasEffortLevel(caps, "xhigh");
+        const configuredPermissionMode = toPermissionMode(providerOptions?.permissionMode);
         const permissionMode =
           input.runtimeMode === "auto"
             ? "auto"
-            : (toPermissionMode(providerOptions?.permissionMode) ??
-              (input.runtimeMode === "full-access" ? "bypassPermissions" : undefined));
+            : configuredPermissionMode === "bypassPermissions"
+              ? "default"
+              : (configuredPermissionMode ??
+                (input.runtimeMode === "full-access" ? "default" : undefined));
         const settings = {
           // Native 1M models otherwise compact near their full model limit. Keep
           // Synara's safer 200k budget explicit unless the thread opts into 1M.
@@ -4856,6 +4909,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(apiModelId ? { model: apiModelId } : {}),
           pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude",
           settingSources: [...CLAUDE_SETTING_SOURCES],
+          strictMcpConfig: true,
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
@@ -4871,9 +4925,6 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           // `settings.effortLevel` so it can change live mid-session.
           ...(effectiveEffort === "max" ? { effort: "max" as const } : {}),
           ...(permissionMode ? { permissionMode } : {}),
-          ...(permissionMode === "bypassPermissions"
-            ? { allowDangerouslySkipPermissions: true }
-            : {}),
           ...(providerOptions?.maxThinkingTokens !== undefined
             ? { maxThinkingTokens: providerOptions.maxThinkingTokens }
             : {}),
@@ -4886,6 +4937,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           forwardSubagentText: true,
           hooks: {
             PreToolUse: [{ hooks: [subagentSteerHook] }],
+            PostToolUse: [{ hooks: [untrustedToolResultHook] }],
+            PostToolUseFailure: [{ hooks: [untrustedToolResultHook] }],
           },
           canUseTool,
           env: claudeSdkEnv,
@@ -5620,6 +5673,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             cwd,
             pathToClaudeCodeExecutable: "claude",
             settingSources: [...CLAUDE_SETTING_SOURCES],
+            strictMcpConfig: true,
             permissionMode: "plan" as PermissionMode,
             persistSession: false,
             env,

@@ -73,7 +73,10 @@ export const isSupportedLocalImagePath = isSupportedLocalImagePathShared;
  * Codex overlay, not the user's source `~/.codex` directory.
  */
 export function resolveCodexHomePath(homePath?: string): string {
-  return resolveActiveCodexHomeWritePath(homePath?.trim() ? { homePath } : {});
+  return resolveActiveCodexHomeWritePath({
+    ...(homePath?.trim() ? { homePath } : {}),
+    isolateExecutableConfig: true,
+  });
 }
 
 /** The single generated-images directory we predict against (overlay-aware). */
@@ -84,8 +87,8 @@ export function resolveCodexGeneratedImagesRoot(homePath?: string): string {
 /**
  * All generated-images directories the local-image route should treat as
  * legitimate. Includes both the source `~/.codex/generated_images` and the
- * overlay `<SYNARA_HOME>/codex-home-overlay/generated_images` so we serve
- * images regardless of which home Codex wrote them under.
+ * compatible and executable-config-isolated overlays so we serve images
+ * regardless of which home a Synara Codex process wrote them under.
  */
 export function resolveCodexGeneratedImagesRoots(homePath?: string): readonly string[] {
   const homes = resolveCodexHomeAllowlistCandidates(homePath?.trim() ? { homePath } : {});

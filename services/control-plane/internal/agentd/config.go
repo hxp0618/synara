@@ -30,6 +30,7 @@ type Config struct {
 	AssignedExecutionID          *uuid.UUID
 	WorkerMode                   string
 	TargetKind                   platform.ExecutionTargetKind
+	KubernetesPIDsMax            uint64
 	ClusterID                    string
 	Namespace                    string
 	PodName                      string
@@ -50,6 +51,8 @@ type Config struct {
 	ProcessContainmentCapability map[string]any
 	WorkspaceRoot                string
 	GitCacheRoot                 string
+	PrivateTempRoot              string
+	ProviderOuterSandboxProfile  string
 	WorkspaceFetchWindow         time.Duration
 	PrivateNetworkCIDRs          []string
 	PollInterval                 time.Duration
@@ -77,6 +80,23 @@ func LoadConfig() (Config, error) {
 	targetKind, err := platform.ParseExecutionTargetKind(os.Getenv("SYNARA_EXECUTION_TARGET_KIND"))
 	if err != nil {
 		return Config{}, fmt.Errorf("SYNARA_EXECUTION_TARGET_KIND: %w", err)
+	}
+	var kubernetesPIDsMax uint64
+	rawKubernetesPIDsMax := strings.TrimSpace(os.Getenv(platform.KubernetesPIDsLimitEnvironment))
+	if targetKind == platform.TargetKubernetes {
+		kubernetesPIDsMax, err = strconv.ParseUint(rawKubernetesPIDsMax, 10, 64)
+		if err != nil || kubernetesPIDsMax == 0 || kubernetesPIDsMax > platform.MaximumKubernetesPIDsLimit {
+			return Config{}, fmt.Errorf(
+				"%s must be an integer between 1 and %d for Kubernetes workers",
+				platform.KubernetesPIDsLimitEnvironment,
+				platform.MaximumKubernetesPIDsLimit,
+			)
+		}
+	} else if rawKubernetesPIDsMax != "" {
+		return Config{}, fmt.Errorf(
+			"%s is only valid for Kubernetes workers",
+			platform.KubernetesPIDsLimitEnvironment,
+		)
 	}
 	var sshBootstrapGeneration *int64
 	rawSSHBootstrapGeneration := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION"))
@@ -174,6 +194,15 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	privateTempRoot := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_PRIVATE_TMP_ROOT"))
+	if privateTempRoot != "" {
+		privateTempRoot, err = filepath.Abs(privateTempRoot)
+		if err != nil || dangerousManagedRoot(privateTempRoot) ||
+			pathContainedBy(workspaceRoot, privateTempRoot) || pathContainedBy(privateTempRoot, workspaceRoot) ||
+			pathContainedBy(gitCacheRoot, privateTempRoot) || pathContainedBy(privateTempRoot, gitCacheRoot) {
+			return Config{}, errors.New("SYNARA_AGENTD_PRIVATE_TMP_ROOT must be a dedicated absolute directory outside Workspace and Git cache roots")
+		}
+	}
 	privateNetworkCIDRs, err := parsePrivateNetworkCIDRsJSON(os.Getenv("SYNARA_AGENTD_PRIVATE_NETWORK_CIDRS_JSON"))
 	if err != nil {
 		return Config{}, err
@@ -199,16 +228,17 @@ func LoadConfig() (Config, error) {
 		if targetKind != platform.TargetKubernetes || !filepath.IsAbs(registrationTokenFile) {
 			return Config{}, errors.New("SYNARA_WORKER_REGISTRATION_TOKEN_FILE must be an absolute path for a Kubernetes worker")
 		}
-		contents, readErr := os.ReadFile(filepath.Clean(registrationTokenFile))
+		contents, readErr := readRegularRegistrationTokenFile(registrationTokenFile)
 		if readErr != nil {
 			return Config{}, fmt.Errorf("read SYNARA_WORKER_REGISTRATION_TOKEN_FILE: %w", readErr)
 		}
-		registrationToken = strings.TrimSpace(string(contents))
+		registrationToken = contents
 	}
 	cfg := Config{
 		ControlPlaneURL: parsedURL, RegistrationToken: registrationToken,
 		RegistrationTokenFile: registrationTokenFile,
 		ExecutionTargetID:     targetID, TargetKind: targetKind,
+		KubernetesPIDsMax:      kubernetesPIDsMax,
 		SSHBootstrapGeneration: sshBootstrapGeneration,
 		ClusterID:              envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), InstanceUID: instanceUID,
@@ -221,7 +251,7 @@ func LoadConfig() (Config, error) {
 		CgroupV2ProviderIdentity: cgroupV2ProviderIdentity,
 		CgroupV2ProviderLimits:   cgroupV2ProviderLimits,
 		CgroupV2Attestation:      cgroupV2Attestation,
-		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot,
+		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot, PrivateTempRoot: privateTempRoot,
 		PrivateNetworkCIDRs: privateNetworkCIDRs,
 	}
 	assignedExecutionID, err := loadAssignedExecutionID()
@@ -238,6 +268,10 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.RegistrationToken == "" {
 		return Config{}, errors.New("a Worker registration token or token file is required")
+	}
+	cfg.ProviderOuterSandboxProfile, err = resolveProviderOuterSandboxProfile(cfg)
+	if err != nil {
+		return Config{}, err
 	}
 	if cfg.PollInterval, err = durationEnv("SYNARA_AGENTD_POLL_INTERVAL", time.Second); err != nil {
 		return Config{}, err
@@ -278,7 +312,28 @@ func LoadConfig() (Config, error) {
 	if cfg.ImageDigest != "" && !validImageDigest(cfg.ImageDigest) {
 		return Config{}, errors.New("agentd image digest is invalid")
 	}
+	if cfg.RegistrationTokenFile != "" {
+		if err := removeConsumedRegistrationTokenFile(cfg.RegistrationTokenFile); err != nil {
+			return Config{}, fmt.Errorf("remove consumed SYNARA_WORKER_REGISTRATION_TOKEN_FILE: %w", err)
+		}
+	}
 	return cfg, nil
+}
+
+const (
+	providerOuterSandboxKubernetesRestricted = string(platform.IsolationKubernetesRestricted)
+	providerOuterSandboxSingleTenantTrusted  = string(platform.IsolationSingleTenantTrusted)
+)
+
+func resolveProviderOuterSandboxProfile(cfg Config) (string, error) {
+	if cfg.TargetKind == platform.TargetKubernetes {
+		if strings.TrimSpace(cfg.RegistrationTokenFile) == "" || strings.TrimSpace(cfg.PrivateTempRoot) == "" ||
+			cfg.KubernetesPIDsMax == 0 {
+			return "", errors.New("Kubernetes Provider execution requires Pod-bound registration, a finite kubelet PID declaration, and an explicit Worker-private temporary root")
+		}
+		return providerOuterSandboxKubernetesRestricted, nil
+	}
+	return providerOuterSandboxSingleTenantTrusted, nil
 }
 
 func loadAssignedExecutionID() (*uuid.UUID, error) {

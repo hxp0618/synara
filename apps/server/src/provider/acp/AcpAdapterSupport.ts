@@ -11,6 +11,10 @@ import {
   type ThreadId,
   type ToolLifecycleItemType,
 } from "@synara/contracts";
+import {
+  classifySensitiveAction,
+  type SensitiveActionAssessment,
+} from "@synara/shared/sensitiveActionPolicy";
 import { Schema } from "effect";
 import * as AcpErrors from "./AcpErrors.ts";
 
@@ -106,7 +110,7 @@ export function selectAcpPermissionOptionId(
     decision === "acceptForSession"
       ? (["allow_always", "allow_once"] as const)
       : decision === "accept"
-        ? (["allow_once", "allow_always"] as const)
+        ? (["allow_once"] as const)
         : (["reject_once", "reject_always"] as const);
 
   for (const kind of preferredKinds) {
@@ -125,7 +129,11 @@ export function selectAcpFullAccessPermissionOptionId(
   // ACP agents that expose only the protocol's persistent allow option. Every
   // supported adapter re-applies its native interaction mode before a turn, and
   // Plan-mode reverse requests are still rejected by resolveAcpPermissionPolicy.
-  return selectAcpPermissionOptionId("accept", options);
+  const once = options.find((option) => option.kind === "allow_once")?.optionId.trim();
+  if (once) {
+    return once;
+  }
+  return options.find((option) => option.kind === "allow_always")?.optionId.trim() || undefined;
 }
 
 /** Full access never blocks on a human prompt, even if an agent offers no allow option. */
@@ -148,6 +156,7 @@ export function resolveAcpPermissionPolicy(input: {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode | undefined;
   readonly options: ReadonlyArray<AcpPermissionOptionLike>;
+  readonly permissionRequest: AcpPermissionRequestLike;
 }): AcpPermissionPolicyOutcome | undefined {
   if (input.interactionMode === "plan") {
     const optionId = selectAcpPermissionOptionId("decline", input.options);
@@ -156,6 +165,10 @@ export function resolveAcpPermissionPolicy(input: {
 
   if (input.interactionMode === undefined) {
     return { outcome: "cancelled" };
+  }
+
+  if (assessAcpPermissionRequest(input.permissionRequest).requiresFreshApproval) {
+    return undefined;
   }
 
   return input.runtimeMode === "full-access"
@@ -167,7 +180,69 @@ type AcpToolCallLike = {
   readonly status?: string;
   readonly detail?: string | null;
   readonly title?: string | null;
+  readonly kind?: string;
+  readonly command?: string;
+  readonly data?: Readonly<Record<string, unknown>>;
 };
+
+type AcpPermissionRequestLike = {
+  readonly kind: string;
+  readonly detail?: string;
+  readonly toolCall?: AcpToolCallLike;
+};
+
+export function assessAcpPermissionRequest(
+  permissionRequest: AcpPermissionRequestLike,
+): SensitiveActionAssessment {
+  const toolCall = permissionRequest.toolCall;
+  const data = toolCall?.data;
+  const declaredToolName =
+    typeof data?.toolName === "string"
+      ? data.toolName
+      : typeof data?.name === "string"
+        ? data.name
+        : undefined;
+  const toolName = declaredToolName ?? toolCall?.title ?? toolCall?.kind ?? permissionRequest.kind;
+  const command =
+    toolCall?.command ??
+    (permissionRequest.kind === "execute" ? permissionRequest.detail : undefined);
+  return classifySensitiveAction({
+    toolName,
+    ...(data ? { toolInput: data } : {}),
+    ...(command ? { command } : {}),
+  });
+}
+
+export function effectiveAcpApprovalDecision(
+  permissionRequest: AcpPermissionRequestLike,
+  decision: ProviderApprovalDecision,
+): ProviderApprovalDecision {
+  return decision === "acceptForSession" &&
+    assessAcpPermissionRequest(permissionRequest).requiresFreshApproval
+    ? "accept"
+    : decision;
+}
+
+export function resolveAcpHumanApprovalOutcome(input: {
+  readonly permissionRequest: AcpPermissionRequestLike;
+  readonly requestedDecision: ProviderApprovalDecision;
+  readonly options: ReadonlyArray<AcpPermissionOptionLike>;
+}): {
+  readonly appliedDecision: ProviderApprovalDecision;
+  readonly outcome: AcpPermissionPolicyOutcome;
+} {
+  const appliedDecision = effectiveAcpApprovalDecision(
+    input.permissionRequest,
+    input.requestedDecision,
+  );
+  if (appliedDecision === "cancel") {
+    return { appliedDecision, outcome: { outcome: "cancelled" } };
+  }
+  const optionId = selectAcpPermissionOptionId(appliedDecision, input.options);
+  return optionId === undefined
+    ? { appliedDecision: "cancel", outcome: { outcome: "cancelled" } }
+    : { appliedDecision, outcome: { outcome: "selected", optionId } };
+}
 
 // Converts provider-specific failed tool payloads into a stable turn failure message.
 export function readAcpFailedToolDetail(toolCall: AcpToolCallLike): string | undefined {

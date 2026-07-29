@@ -3,6 +3,7 @@ package executions
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,10 +22,9 @@ type CredentialGrantDescriptor struct {
 	Selector       string    `json:"selector"`
 }
 
-// bindExecutionCredentialGrants snapshots every active Project Workspace
-// Credential Binding into the newly claimed Execution generation. Infrastructure
-// worker_image_pull Bindings intentionally remain outside the Workload and are
-// resolved by the target provisioner rather than by agentd.
+// bindExecutionCredentialGrants snapshots only the read credentials consumed by
+// current controlled stages. Publish credentials remain outside the Provider
+// workload until a dedicated, freshly approved brokered operation exists.
 func bindExecutionCredentialGrants(
 	ctx context.Context,
 	tx *gorm.DB,
@@ -64,7 +64,7 @@ func bindExecutionCredentialGrants(
 
 	descriptors := make([]CredentialGrantDescriptor, 0, len(bindings))
 	for _, binding := range bindings {
-		if binding.BindingKind == "worker_image_pull" {
+		if !providerExecutionCredentialBindingKindAllowed(binding.BindingKind) {
 			continue
 		}
 		if (binding.BindingKind == "git_fetch" || binding.BindingKind == "git_push") &&
@@ -107,6 +107,15 @@ func bindExecutionCredentialGrants(
 		descriptors = append(descriptors, credentialGrantDescriptor(grant, binding, credential))
 	}
 	return descriptors, nil
+}
+
+func providerExecutionCredentialBindingKindAllowed(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "git_fetch", "package_read":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadExecutionCredentialGrantDescriptors(
