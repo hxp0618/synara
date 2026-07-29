@@ -23,6 +23,7 @@ type Daemon struct {
 	readiness   Readiness
 	workers     map[uuid.UUID]*workerHandle
 	retryAfter  map[uuid.UUID]time.Time
+	completed   map[uuid.UUID]Pod
 }
 
 type workerHandle struct {
@@ -41,6 +42,7 @@ func NewDaemon(config Config, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		config: config, logger: logger, instanceID: uuid.New(), now: time.Now,
 		workers: make(map[uuid.UUID]*workerHandle), retryAfter: make(map[uuid.UUID]time.Time),
+		completed: make(map[uuid.UUID]Pod),
 	}
 }
 
@@ -122,6 +124,7 @@ func (d *Daemon) reconcile(ctx context.Context) error {
 	for _, pod := range pods {
 		desired[pod.UID] = pod
 	}
+	d.pruneCompletedAssignments(desired)
 	for uid, worker := range d.workers {
 		pod, found := desired[uid]
 		if !found || pod.VMID != worker.pod.VMID || pod.ExecutionID != worker.pod.ExecutionID || pod.Generation != worker.pod.Generation {
@@ -129,7 +132,7 @@ func (d *Daemon) reconcile(ctx context.Context) error {
 		}
 	}
 	for uid, pod := range desired {
-		if _, found := d.workers[uid]; found || d.now().Before(d.retryAfter[uid]) {
+		if _, found := d.workers[uid]; found || d.assignmentCompleted(pod) || d.now().Before(d.retryAfter[uid]) {
 			continue
 		}
 		workerContext, cancel := context.WithCancel(ctx)
@@ -142,6 +145,25 @@ func (d *Daemon) reconcile(ctx context.Context) error {
 		d.logger.Info("materializing Cocoon host agentd", "pod", pod.Name, "podUid", pod.UID, "vmId", pod.VMID, "executionId", pod.ExecutionID, "generation", pod.Generation)
 	}
 	return nil
+}
+
+func samePodAssignment(left, right Pod) bool {
+	return left.UID == right.UID && left.VMID == right.VMID && left.ExecutionID == right.ExecutionID &&
+		left.Generation == right.Generation && left.GuestImage == right.GuestImage
+}
+
+func (d *Daemon) assignmentCompleted(pod Pod) bool {
+	completed, found := d.completed[pod.UID]
+	return found && samePodAssignment(completed, pod)
+}
+
+func (d *Daemon) pruneCompletedAssignments(desired map[uuid.UUID]Pod) {
+	for uid, completed := range d.completed {
+		pod, found := desired[uid]
+		if !found || !samePodAssignment(completed, pod) {
+			delete(d.completed, uid)
+		}
+	}
 }
 
 func (d *Daemon) observeStaticReadiness() Readiness {
@@ -181,8 +203,14 @@ func (d *Daemon) reapCompletedWorkers() {
 			if err != nil && !errors.Is(err, context.Canceled) {
 				d.logger.Warn("Cocoon host agentd stopped", "pod", worker.pod.Name, "podUid", uid, "error", err)
 				d.retryAfter[uid] = d.now().Add(5 * time.Second)
+				delete(d.completed, uid)
+			} else if err == nil {
+				delete(d.retryAfter, uid)
+				d.completed[uid] = worker.pod
+				d.logger.Info("Cocoon host agentd completed", "pod", worker.pod.Name, "podUid", uid, "executionId", worker.pod.ExecutionID, "generation", worker.pod.Generation)
 			} else {
 				delete(d.retryAfter, uid)
+				delete(d.completed, uid)
 			}
 		default:
 		}
