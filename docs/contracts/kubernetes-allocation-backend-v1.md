@@ -121,6 +121,13 @@ readiness from process existence.
 
 The external Cocoon `SandboxTemplate` is part of the same acceptance boundary.
 Its first container must be named `agent` and carry the immutable guest image.
+Because Synara WarmPool members are ephemeral allocation capacity, the Pod
+template must set `cocoonset.cocoonstack.io/snapshot-policy=never`. Cocoon's
+empty-policy default snapshots on deletion; allowing that default would put an
+unbounded registry upload in the node-loss cleanup path. Durable checkpointed
+guests require a distinct template and lifecycle contract. Missing this
+annotation is rejected as
+`sandbox-operator-cocoon-cleanup-policy-unavailable`.
 Its `nodeSelector` must repeat the exact virtual-node, KVM, supervisor,
 provider-transport, and isolation-profile labels above, so the existence of one
 attested node cannot authorize scheduling onto a different unattested node. It
