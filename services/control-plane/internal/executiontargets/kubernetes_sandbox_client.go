@@ -55,6 +55,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	FencedVSockReady               bool
 	GuestIsolationReady            bool
 	CocoonTemplateSchedulingReady  bool
+	CocoonTemplateCleanupReady     bool
 }
 
 const (
@@ -64,6 +65,7 @@ const (
 	kubernetesCocoonIsolationProfileLabel          = "synara.io/isolation-profile"
 	kubernetesCocoonSupervisorInstanceAnnotation   = "synara.io/host-supervisor-instance"
 	kubernetesCocoonSupervisorObservedAtAnnotation = "synara.io/host-supervisor-observed-at"
+	kubernetesCocoonSnapshotPolicyAnnotation       = "cocoonset.cocoonstack.io/snapshot-policy"
 
 	kubernetesCocoonHostSupervisorV1    = "v1"
 	kubernetesCocoonProviderTransportV2 = "vsock-v2"
@@ -71,6 +73,7 @@ const (
 	kubernetesCocoonVirtualNodeType     = "virtual-node"
 	kubernetesCocoonVirtualProvider     = "cocoon"
 	kubernetesCocoonGuestContainerName  = "agent"
+	kubernetesCocoonEphemeralPolicy     = "never"
 
 	kubernetesCocoonSupervisorHeartbeatMaxAge     = 45 * time.Second
 	kubernetesCocoonSupervisorHeartbeatFutureSkew = 5 * time.Second
@@ -264,6 +267,9 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		return kubernetesSandboxAcceptanceObservation{}, err
 	}
 	observation.TemplateRuntime = strings.TrimSpace(template.Spec.PodTemplate.Metadata.Annotations["sandbox.cocoonstack.io/runtime"])
+	observation.CocoonTemplateCleanupReady = strings.TrimSpace(
+		template.Spec.PodTemplate.Metadata.Annotations[kubernetesCocoonSnapshotPolicyAnnotation],
+	) == kubernetesCocoonEphemeralPolicy
 	if uid, resourceVersion := strings.TrimSpace(template.Metadata.UID), strings.TrimSpace(template.Metadata.ResourceVersion); uid != "" && resourceVersion != "" {
 		observation.TemplateIdentity = uid + ":" + resourceVersion
 	}

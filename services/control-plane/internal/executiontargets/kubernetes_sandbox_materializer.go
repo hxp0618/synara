@@ -121,6 +121,7 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 		CocoonGuestIsolationReady:  observedAcceptance.GuestIsolationReady,
 		CocoonGuestContainerReady:  observedAcceptance.TemplateSandboxRuntimeName == kubernetesCocoonGuestContainerName,
 		CocoonSchedulingFenceReady: observedAcceptance.CocoonTemplateSchedulingReady,
+		CocoonCleanupPolicyReady:   observedAcceptance.CocoonTemplateCleanupReady,
 	}
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) &&
 		observedAcceptance.TemplateRuntime != "vk-cocoon" {

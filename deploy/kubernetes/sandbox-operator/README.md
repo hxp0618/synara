@@ -14,7 +14,13 @@ closed until that tenant is deliberately selected.
 
 For Cocoon, start from `cocoon.example.yaml` and pin the first `agent`
 container to the immutable guest image. The container name is part of
-vk-cocoon's exec/logs contract. Target acceptance also requires the template to
+vk-cocoon's exec/logs contract. Keep
+`cocoonset.cocoonstack.io/snapshot-policy: never` on these ephemeral pool
+members: Cocoon's empty-policy default snapshots on delete, and a real
+two-host loss run blocked cleanup while uploading an approximately 1 GiB
+snapshot. Durable workload checkpointing needs a separate template and
+lifecycle contract. Target acceptance fails closed when this cleanup policy is
+missing. It also requires the template to
 select only virtual nodes carrying the complete KVM/supervisor/vsock/isolation
 labels and to tolerate only the exact Cocoon virtual-kubelet taint. The two
 physical-host acceptance uses an explicit node-loss hook and fenced Generation

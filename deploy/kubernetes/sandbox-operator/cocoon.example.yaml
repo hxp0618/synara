@@ -9,6 +9,7 @@ spec:
   podTemplate:
     metadata:
       annotations:
+        cocoonset.cocoonstack.io/snapshot-policy: never
         sandbox.cocoonstack.io/runtime: vk-cocoon
       labels:
         synara.io/managed: "true"

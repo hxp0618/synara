@@ -33,6 +33,7 @@ func newFakeSandboxClient(runtime string) *fakeSandboxClient {
 			WarmPoolUpdateStrategy: "Recreate", WarmPoolTemplateImageFresh: true,
 			VirtualNodeReady: runtime == "vk-cocoon", KVMRuntimeReady: runtime == "vk-cocoon",
 			CocoonTemplateSchedulingReady: runtime == "vk-cocoon",
+			CocoonTemplateCleanupReady:    runtime == "vk-cocoon",
 		},
 		claims: map[string]kubernetesSandboxClaimObservation{}, sandboxes: map[string]kubernetesSandboxObservation{},
 	}
