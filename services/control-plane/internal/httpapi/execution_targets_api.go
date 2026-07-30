@@ -119,6 +119,30 @@ func (s *Server) updateExecutionTargetProcessContainmentPolicy(w http.ResponseWr
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) updateExecutionTargetRuntimeIsolationPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var policy map[string]any
+	if err := decodeJSON(r, &policy); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.targets.UpdateRuntimeIsolationPolicy(
+		r.Context(), mustPrincipal(r), tenantID, targetID, policy, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (s *Server) disableManagedKubernetesExecutionTarget(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.pathUUID(w, r, "tenantID")
 	if !ok {

@@ -241,7 +241,24 @@ func setupSQLiteManagedDockerLifecycle(t *testing.T) (*gorm.DB, *Service, execut
 	t.Helper()
 	db, service, _ := setupSQLiteRecoveryService(t)
 	fixture := seedExecutionFixtureForTargetKind(t, db, false, "docker")
+	seedDockerRuntimeIsolationObservation(t, db, fixture.TargetID)
 	return db, service, fixture
+}
+
+func seedDockerRuntimeIsolationObservation(t *testing.T, db *gorm.DB, targetID uuid.UUID) {
+	t.Helper()
+	now := time.Now().UTC().Add(time.Second)
+	runtime, profile := "runc", "single-tenant-trusted-v1"
+	observation := persistence.ExecutionTargetRuntimeIsolationObservation{
+		ExecutionTargetID: targetID, DetectedRuntimes: []string{runtime}, DetectedProfiles: []string{profile},
+		RequestedRuntime: runtime, RequestedProfile: profile,
+		EffectiveRuntime: &runtime, EffectiveProfile: &profile,
+		PolicySource: "legacy-native", Decision: "selected", State: "available",
+		ObservedAt: now, ExpiresAt: now.Add(time.Minute), UpdatedAt: now,
+	}
+	if err := db.Create(&observation).Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func loadManagedDockerLifecycleWorker(t *testing.T, db *gorm.DB, workerID uuid.UUID) persistence.WorkerInstance {

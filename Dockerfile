@@ -4,6 +4,7 @@ ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188a
 ARG SERVER_RUNTIME_IMAGE=node:24-bookworm@sha256:d5adb040f90e206d1dc91453d08a4fa4165ec0faebd62a3421e6181a14e7f41f
 ARG AGENTD_BUILD_IMAGE=golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669
 ARG WORKER_RUNTIME_IMAGE=node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+ARG ATTESTOR_RUNTIME_IMAGE=alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 ARG COCOON_GUEST_IMAGE=ghcr.io/cocoonstack/sandbox/rt:24.04@sha256:cc05d8552fb9e56acadbb9ce553cde430992cfeb44e3516e9a66e55c7296def0
 
 FROM ${BUN_IMAGE} AS bun
@@ -162,9 +163,19 @@ COPY services/control-plane .
 RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd \
+  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-gvisor-node-attestor ./cmd/gvisor-node-attestor \
   && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-provider-transport ./cmd/cocoon-provider-transport \
   && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-supervisor ./cmd/cocoon-supervisor \
-  && touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd /out/synara-cocoon-provider-transport /out/synara-cocoon-supervisor
+  && touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd /out/synara-gvisor-node-attestor /out/synara-cocoon-provider-transport /out/synara-cocoon-supervisor
+
+FROM ${ATTESTOR_RUNTIME_IMAGE} AS gvisor-node-attestor
+
+RUN apk add --no-cache ca-certificates=20260611-r0 \
+  && addgroup -g 65532 -S attestor \
+  && adduser -u 65532 -S -D -H -G attestor attestor
+COPY --from=agentd-build /out/synara-gvisor-node-attestor /usr/local/bin/synara-gvisor-node-attestor
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/synara-gvisor-node-attestor"]
 
 FROM ${BUN_IMAGE} AS provider-host-build
 

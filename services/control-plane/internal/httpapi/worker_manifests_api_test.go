@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
+	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
@@ -194,8 +196,16 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 		"MANIFEST-FEATURE-SECRET", "RAW-WORKER-VERSION",
 	}
 	seedWorkerManifestHTTPModels(t, store.DB(), domain.ExecutionTargetID, workerID, manifestID, now)
+	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedConfiguration, err := cipher.Encrypt(`{"secret":"TARGET-CONFIG-SECRET"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", domain.ExecutionTargetID).
-		Update("configuration_encrypted", []byte("TARGET-CONFIG-SECRET")).Error; err != nil {
+		Update("configuration_encrypted", encryptedConfiguration).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,7 +270,7 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 	}
 	identityService := identity.NewService(store.DB(), cfg.SessionTTL, cfg.SessionIdleTTL)
 	projectService := projects.NewService(store.DB())
-	targetService := executiontargets.NewService(store.DB(), profile, nil)
+	targetService := executiontargets.NewService(store.DB(), profile, cipher)
 	sessionService := sessions.NewService(store.DB(), projectService, targetService)
 	executionService := executions.NewService(
 		store.DB(), sessionService, time.Minute, 2*time.Minute, time.Hour, nil, targetService,

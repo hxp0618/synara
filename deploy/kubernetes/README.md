@@ -7,6 +7,10 @@ PostgreSQL, S3-compatible object storage, ingress/TLS, private Registry, and
 Secret/local-KEK management remain operator-managed. EKS/GKE/AKS-specific identity,
 native cloud billing exports, and cloud-provider availability guarantees are not
 part of the current product claim.
+For the optional KVM-free gVisor runtime tier, install the RuntimeClass and
+short-lived Node attestor described in [`gvisor/README.md`](gvisor/README.md).
+The base deployment grants the Control Plane read access to RuntimeClass but
+does not install or select `runsc` automatically.
 Set `trusted-proxy-cidrs` to only the ingress or load-balancer network ranges that append
 `X-Forwarded-For`; leaving it empty records the direct peer address and ignores forwarded client IPs.
 

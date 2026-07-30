@@ -42,6 +42,14 @@ describe("Provider outer sandbox guard", () => {
     };
     expect(requireProviderOuterSandboxProfile(environment)).toBe("microvm-isolated-v1");
   });
+
+  it("accepts an agentd-attested gVisor outer sandbox profile", () => {
+    const environment: NodeJS.ProcessEnv = {
+      PATH: "/bin",
+      [PROVIDER_OUTER_SANDBOX_PROFILE_ENV]: "gvisor-sandboxed-v1",
+    };
+    expect(requireProviderOuterSandboxProfile(environment)).toBe("gvisor-sandboxed-v1");
+  });
 });
 
 describe("provider credential isolation", () => {

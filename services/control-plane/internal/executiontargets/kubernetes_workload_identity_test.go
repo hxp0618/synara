@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +234,83 @@ func TestVerifyKubernetesWorkloadIdentityRejectsWeakenedOuterSandbox(t *testing.
 			assertProblemCode(t, err, 401, "kubernetes_workload_identity_outer_sandbox_invalid")
 		})
 	}
+}
+
+func TestVerifyKubernetesPodOuterSandboxRequiresEffectiveGVisorRuntime(t *testing.T) {
+	targetID := uuid.New()
+	spec := hardenedKubernetesWorkloadIdentityPodSpec("synara-agentd", targetID)
+	spec["runtimeClassName"] = kubernetesDefaultGVisorRuntimeClassName
+	container := spec["containers"].([]any)[0].(map[string]any)
+	environment := container["env"].([]any)
+	for _, raw := range environment {
+		item := raw.(map[string]any)
+		if item["name"] == platform.KubernetesRuntimeIsolationProfileEnvironment {
+			item["value"] = string(platform.IsolationGVisorSandboxed)
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{"spec": spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pod kubernetesVerifiedPod
+	if err := json.Unmarshal(encoded, &pod); err != nil {
+		t.Fatal(err)
+	}
+	decision := runtimeIsolationDecision{
+		EffectiveRuntime: runtimeIsolationGVisor, EffectiveProfile: platform.IsolationGVisorSandboxed,
+		RuntimeClassName: kubernetesDefaultGVisorRuntimeClassName, EligibleNodeNames: []string{"worker-a"},
+	}
+	if err := verifyKubernetesPodOuterSandbox(targetID, pod, 512, decision); err != nil {
+		t.Fatalf("verify gVisor outer sandbox: %v", err)
+	}
+	pod.Spec.RuntimeClassName = "native"
+	if err := verifyKubernetesPodOuterSandbox(targetID, pod, 512, decision); err == nil {
+		t.Fatal("Pod with a mutated RuntimeClass was accepted as gVisor")
+	}
+	pod.Spec.RuntimeClassName = kubernetesDefaultGVisorRuntimeClassName
+	pod.Spec.NodeName = "worker-b"
+	if err := verifyKubernetesPodOuterSandbox(targetID, pod, 512, decision); err == nil {
+		t.Fatal("Pod scheduled outside the attested gVisor node set was accepted")
+	}
+}
+
+func TestGVisorWorkloadRegistrationRequiresImmutableAttestationDecision(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t)
+	executionID := fixture.executionIDs[0]
+	generation := int64(1)
+	runtimeName := runtimeIsolationGVisor
+	profile := string(platform.IsolationGVisorSandboxed)
+	runtimeClass := kubernetesDefaultGVisorRuntimeClassName
+	digest := strings.Repeat("a", 64)
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Minute)
+	if err := fixture.db.Create(&persistence.ExecutionRuntimeIsolationDecision{
+		TenantID: fixture.tenantID, ExecutionID: executionID, Generation: generation,
+		ExecutionTargetID: fixture.targetID, AllocationBackend: "native-pod",
+		RequestedRuntime: runtimeIsolationGVisor, RequestedProfile: profile,
+		EffectiveRuntime: &runtimeName, EffectiveProfile: &profile,
+		PolicySource: "target-explicit", Decision: "selected", RuntimeClassName: &runtimeClass,
+		AttestationDigest: &digest, AttestedAt: &now, AttestationExpiresAt: &expiresAt, CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	pod := kubernetesVerifiedPod{Labels: map[string]string{kubernetesGenerationLabel: "1"}}
+	identity := kubernetesVerifiedWorkerIdentity{AssignedExecutionID: &executionID}
+	decision := runtimeIsolationDecision{
+		EffectiveRuntime: runtimeIsolationGVisor, EffectiveProfile: platform.IsolationGVisorSandboxed,
+		RuntimeClassName: runtimeClass, AttestationDigest: digest,
+	}
+	service := fixture.reconciler.targets
+	if err := service.verifyKubernetesRuntimeIsolationDecisionBinding(
+		context.Background(), fixture.targetID, pod, identity, decision,
+	); err != nil {
+		t.Fatalf("verify immutable gVisor runtime decision: %v", err)
+	}
+	decision.AttestationDigest = strings.Repeat("b", 64)
+	err := service.verifyKubernetesRuntimeIsolationDecisionBinding(
+		context.Background(), fixture.targetID, pod, identity, decision,
+	)
+	assertProblemCode(t, err, 401, "gvisor_live_pod_runtime_invalid")
 }
 
 func TestLoadKubernetesWorkloadIdentityTargetAcceptsOfflineButRejectsDisabled(t *testing.T) {
@@ -724,6 +802,10 @@ func hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName string, target
 				map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
 				map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
 				map[string]any{"name": platform.KubernetesPIDsLimitEnvironment, "value": "512"},
+				map[string]any{
+					"name":  platform.KubernetesRuntimeIsolationProfileEnvironment,
+					"value": string(platform.IsolationKubernetesRestricted),
+				},
 			},
 			"volumeMounts": []any{
 				map[string]any{"name": "workspace", "mountPath": "/data"},

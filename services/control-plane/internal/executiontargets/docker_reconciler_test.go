@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -125,6 +126,74 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	}
 	if bytes.Contains(encodedAudits, []byte("docker-registration-secret")) {
 		t.Fatalf("Docker registration secret leaked into audit logs: %s", encodedAudits)
+	}
+}
+
+func TestDockerPoolReconcilerSelectsAndHardensGVisorRuntime(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	configuration := dockerTestConfiguration(1)
+	configuration["runtimeIsolation"] = map[string]any{
+		"mode": "explicit", "runtime": "gvisor",
+		"minimumProfile":            string(platform.IsolationSingleTenantTrusted),
+		"fallbackPolicy":            "fail-closed",
+		"gvisorCompatibleProviders": []string{"codex"},
+	}
+	configuration["pidsLimit"] = 128
+	fixture.updateConfiguration(t, configuration)
+	engine := newFakeDockerEngine()
+	engine.runtimeNames = []string{"runc", "runsc"}
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+	fixture.reconciler.SetWorkerLifecycleCoordinator(&fakeDockerLifecycle{})
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 1 {
+		t.Fatalf("created gVisor Docker specs = %d", len(engine.createdSpecs))
+	}
+	spec := engine.createdSpecs[0]
+	if spec.Runtime != "runsc" || spec.PIDsLimit != 128 || !spec.ReadonlyRootfs ||
+		!slices.Equal(spec.CapDrop, []string{"ALL"}) ||
+		!slices.Equal(spec.SecurityOpt, []string{"no-new-privileges:true"}) ||
+		spec.Tmpfs["/tmp"] == "" || spec.Tmpfs["/home/synara"] == "" {
+		t.Fatalf("gVisor Docker hardening = %#v", spec)
+	}
+	if !strings.Contains(spec.Tmpfs["/home/synara"], "uid=10001,gid=10001") {
+		t.Fatalf("gVisor Docker home ownership = %q", spec.Tmpfs["/home/synara"])
+	}
+	var target persistence.ExecutionTarget
+	if err := fixture.db.First(&target, "id = ?", fixture.targetID).Error; err != nil {
+		t.Fatal(err)
+	}
+	projected := fixture.reconciler.targets.projectTarget(target)
+	if projected.IsolationProfile != platform.IsolationSingleTenantTrusted || projected.PlatformSharedEligible {
+		t.Fatalf("Docker runsc incorrectly upgraded product boundary: %#v", projected)
+	}
+}
+
+func TestDockerRuntimePolicyUpdateSharesTheReconcilerCycleLock(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	release, acquired, err := fixture.targets.tryDockerReconcilerLock(context.Background())
+	if err != nil || !acquired {
+		t.Fatalf("acquire Docker reconciler lock = %v, %v", acquired, err)
+	}
+	defer release()
+	principal := identity.Principal{UserID: fixture.userID, ActiveTenantID: &fixture.tenantID}
+	_, err = fixture.targets.UpdateRuntimeIsolationPolicy(
+		context.Background(),
+		principal,
+		fixture.tenantID,
+		fixture.targetID,
+		map[string]any{
+			"mode": "explicit", "runtime": "runc",
+			"minimumProfile": "single-tenant-trusted-v1", "fallbackPolicy": "fail-closed",
+		},
+		"docker-runtime-policy-lock",
+		"127.0.0.1",
+	)
+	assertProblemCode(t, err, 409, "execution_target_reconciler_busy")
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("busy Docker reconcile should yield without mutation: %v", err)
 	}
 }
 
@@ -520,10 +589,15 @@ type fakeDockerEngine struct {
 	pullCredentials  []*ImagePullCredential
 	ensureImageCalls int
 	nextID           int
+	runtimeNames     []string
 }
 
 func newFakeDockerEngine() *fakeDockerEngine {
-	return &fakeDockerEngine{containers: map[string]dockerContainer{}}
+	return &fakeDockerEngine{containers: map[string]dockerContainer{}, runtimeNames: []string{"runc"}}
+}
+
+func (e *fakeDockerEngine) RuntimeNames(_ context.Context) ([]string, error) {
+	return append([]string(nil), e.runtimeNames...), nil
 }
 
 func (e *fakeDockerEngine) ListManaged(_ context.Context, targetID uuid.UUID) ([]dockerContainer, error) {

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -210,8 +211,27 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 			"Kubernetes workload ServiceAccount does not match this execution target.",
 		)
 	}
+	runtimeCapabilities, runtimeObservationErr := client.RuntimeIsolationCapabilities(ctx, configuration, time.Now().UTC())
+	gvisorCompatibilityErr := gvisorCompatibilityAccepted(ctx, s.db, target, configuration.RuntimeIsolation)
+	runtimeDecision, runtimeDecisionErr := resolveKubernetesRuntimeIsolation(
+		configuration,
+		filterGVisorCapability(runtimeCapabilities, gvisorCompatibilityErr),
+	)
+	runtimeDecisionErr = preferGVisorCompatibilityError(
+		&runtimeDecision, runtimeDecisionErr, gvisorCompatibilityErr,
+	)
+	if runtimeDecisionErr != nil {
+		if runtimeObservationErr != nil {
+			return VerifiedKubernetesWorkloadIdentity{}, runtimeObservationErr
+		}
+		return VerifiedKubernetesWorkloadIdentity{}, runtimeDecisionErr
+	}
+	configuration.RuntimeIsolationDecision = &runtimeDecision
 	identity, err := kubernetesWorkerIdentityFromVerifiedPod(pod)
 	if err != nil {
+		return VerifiedKubernetesWorkloadIdentity{}, err
+	}
+	if err := s.verifyKubernetesRuntimeIsolationDecisionBinding(ctx, targetID, pod, identity, runtimeDecision); err != nil {
 		return VerifiedKubernetesWorkloadIdentity{}, err
 	}
 	resourceRequests := pod.AgentdResourceRequests
@@ -241,7 +261,7 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 		}
 		resourceRequests = pod.CocoonGuestResourceRequests
 	} else {
-		if err := verifyKubernetesPodOuterSandbox(targetID, pod, configuration.PIDsLimit); err != nil {
+		if err := verifyKubernetesPodOuterSandbox(targetID, pod, configuration.PIDsLimit, runtimeDecision); err != nil {
 			return VerifiedKubernetesWorkloadIdentity{}, err
 		}
 		if err := client.attestNodePodPIDsLimit(ctx, pod.Spec.NodeName, configuration.PIDsLimit); err != nil {
@@ -282,6 +302,40 @@ func (s *Service) VerifyKubernetesWorkloadIdentity(
 		ServiceAccountName:             configuration.ServiceAccountName,
 		ServiceAccountUsername:         expectedUsername,
 	}, nil
+}
+
+func (s *Service) verifyKubernetesRuntimeIsolationDecisionBinding(
+	ctx context.Context,
+	targetID uuid.UUID,
+	pod kubernetesVerifiedPod,
+	identity kubernetesVerifiedWorkerIdentity,
+	current runtimeIsolationDecision,
+) error {
+	if current.EffectiveRuntime != runtimeIsolationGVisor || identity.AssignedExecutionID == nil {
+		return nil
+	}
+	generation, err := strconv.ParseInt(strings.TrimSpace(pod.Labels[kubernetesGenerationLabel]), 10, 64)
+	if err != nil || generation <= 0 {
+		return problem.New(401, "gvisor_live_pod_runtime_invalid", "The gVisor workload Pod Generation identity is invalid.")
+	}
+	var persisted persistence.ExecutionRuntimeIsolationDecision
+	err = s.db.WithContext(ctx).
+		Where("execution_id = ? AND generation = ? AND execution_target_id = ?", *identity.AssignedExecutionID, generation, targetID).
+		Take(&persisted).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(401, "gvisor_live_pod_runtime_invalid", "The gVisor workload Pod has no immutable Generation runtime decision.")
+	}
+	if err != nil {
+		return problem.Wrap(500, "runtime_isolation_decision_load_failed", "The immutable Generation runtime decision could not be loaded.", err)
+	}
+	if persisted.EffectiveRuntime == nil || *persisted.EffectiveRuntime != current.EffectiveRuntime ||
+		persisted.EffectiveProfile == nil || *persisted.EffectiveProfile != string(current.EffectiveProfile) ||
+		persisted.RuntimeClassName == nil || *persisted.RuntimeClassName != current.RuntimeClassName ||
+		persisted.AttestationDigest == nil || *persisted.AttestationDigest != current.AttestationDigest ||
+		persisted.Decision == "rejected" {
+		return problem.New(401, "gvisor_live_pod_runtime_invalid", "The live gVisor runtime no longer matches the immutable Generation decision.")
+	}
+	return nil
 }
 
 func (s *Service) verifyKubernetesSandboxAllocationIdentity(
@@ -577,6 +631,9 @@ func normalizeKubernetesWorkloadIdentityConfiguration(
 	if err := normalizeKubernetesAllocationConfiguration(&configuration); err != nil {
 		return kubernetesTargetConfiguration{}, err
 	}
+	if err := normalizeKubernetesRuntimeIsolationConfiguration(&configuration); err != nil {
+		return kubernetesTargetConfiguration{}, err
+	}
 	return configuration, nil
 }
 
@@ -635,6 +692,7 @@ type kubernetesVerifiedPod struct {
 
 type kubernetesVerifiedPodSpec struct {
 	NodeName                     string                               `json:"nodeName"`
+	RuntimeClassName             string                               `json:"runtimeClassName"`
 	AutomountServiceAccountToken *bool                                `json:"automountServiceAccountToken"`
 	HostNetwork                  bool                                 `json:"hostNetwork"`
 	HostPID                      bool                                 `json:"hostPID"`
@@ -840,6 +898,7 @@ func verifyKubernetesPodOuterSandbox(
 	targetID uuid.UUID,
 	pod kubernetesVerifiedPod,
 	expectedPIDsLimit uint64,
+	runtimeDecision runtimeIsolationDecision,
 ) error {
 	invalid := func() error {
 		return problem.New(
@@ -849,7 +908,14 @@ func verifyKubernetesPodOuterSandbox(
 		)
 	}
 	spec := pod.Spec
+	expectedRuntimeClassName := ""
+	if runtimeDecision.EffectiveRuntime == runtimeIsolationGVisor {
+		expectedRuntimeClassName = runtimeDecision.RuntimeClassName
+	}
 	if strings.TrimSpace(spec.NodeName) == "" ||
+		strings.TrimSpace(spec.RuntimeClassName) != expectedRuntimeClassName ||
+		(runtimeDecision.EffectiveRuntime == runtimeIsolationGVisor &&
+			!slices.Contains(runtimeDecision.EligibleNodeNames, strings.TrimSpace(spec.NodeName))) ||
 		spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken ||
 		spec.HostNetwork || spec.HostPID || spec.HostIPC ||
 		(spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace) ||
@@ -895,7 +961,11 @@ func verifyKubernetesPodOuterSandbox(
 	if err != nil || registrationTokenLimits.CPUMillicores == nil || registrationTokenLimits.MemoryBytes == nil || registrationTokenLimits.EphemeralStorageBytes == nil {
 		return invalid()
 	}
-	if !kubernetesOuterSandboxEnvironmentValid(container.Environment, expectedPIDsLimit) ||
+	if !kubernetesOuterSandboxEnvironmentValid(
+		container.Environment,
+		expectedPIDsLimit,
+		runtimeDecision.EffectiveProfile,
+	) ||
 		!kubernetesOuterSandboxVolumesValid(
 			targetID,
 			spec.Volumes,
@@ -940,13 +1010,14 @@ func containsFold(values []string, expected string) bool {
 func kubernetesOuterSandboxEnvironmentValid(environment []struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
-}, expectedPIDsLimit uint64) bool {
+}, expectedPIDsLimit uint64, expectedProfile platform.ExecutionTargetIsolationProfile) bool {
 	want := map[string]string{
-		"SYNARA_EXECUTION_TARGET_KIND":          "kubernetes",
-		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE": kubernetesStagedRegistrationTokenPath,
-		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL":  "v2",
-		"SYNARA_AGENTD_PRIVATE_TMP_ROOT":        "/tmp",
-		platform.KubernetesPIDsLimitEnvironment: strconv.FormatUint(expectedPIDsLimit, 10),
+		"SYNARA_EXECUTION_TARGET_KIND":                        "kubernetes",
+		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE":               kubernetesStagedRegistrationTokenPath,
+		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL":                "v2",
+		"SYNARA_AGENTD_PRIVATE_TMP_ROOT":                      "/tmp",
+		platform.KubernetesPIDsLimitEnvironment:               strconv.FormatUint(expectedPIDsLimit, 10),
+		platform.KubernetesRuntimeIsolationProfileEnvironment: string(expectedProfile),
 	}
 	seen := make(map[string]struct{}, len(want))
 	for _, item := range environment {

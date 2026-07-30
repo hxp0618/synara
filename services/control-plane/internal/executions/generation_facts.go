@@ -188,6 +188,9 @@ func (s *Service) recordExecutionGenerationClaimLocked(
 	); err != nil {
 		return err
 	}
+	if err := s.bindDockerRuntimeIsolationDecisionLocked(ctx, tx, execution, leasedAt); err != nil {
+		return err
+	}
 	seed, err := loadGenerationFactSeed(ctx, tx, execution)
 	if err != nil {
 		return err

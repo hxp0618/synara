@@ -59,6 +59,9 @@ const executionTarget: ControlPlaneExecutionTarget = {
   name: "Docker workers",
   status: "active",
   capabilities: {},
+  isolationProfile: "single-tenant-trusted-v1",
+  platformSharedEligible: false,
+  productBoundary: "single-tenant-trusted",
   createdAt: "2026-07-24T00:00:00Z",
   updatedAt: "2026-07-24T00:00:00Z",
 };

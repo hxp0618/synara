@@ -3,6 +3,10 @@
 状态：2026-07-28 已冻结 microVM 位置与可信边界；snapshot-restore 仍未实现，本文不得作为运行期
 验收证据。它把
 [方向评估](cloud-agent-direction-assessment-20260726.md) 的建议具体化为可评审的契约形状。
+不具备 KVM 的普通 Linux VM 所对应的 gVisor 中间隔离档位另见
+[`gVisor Runtime Isolation Tier v0`](gvisor-runtime-isolation-tier-v0.md)；其实现与本地验证状态以
+链接文档为准，在真实 Provider/性能 release gate 放行前仍不能据此升级
+平台默认隔离声明。
 
 ## 0. 目标与 SLO
 

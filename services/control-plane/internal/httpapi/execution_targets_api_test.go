@@ -69,6 +69,54 @@ func TestUpdateExecutionTargetProcessContainmentPolicyRoute(t *testing.T) {
 	}
 }
 
+func TestUpdateExecutionTargetRuntimeIsolationPolicyRoute(t *testing.T) {
+	fixture := newWorkerManifestHTTPFixture(t)
+	var organization persistence.Organization
+	if err := fixture.db.Where("tenant_id = ?", fixture.tenantID).First(&organization).Error; err != nil {
+		t.Fatal(err)
+	}
+	create := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/tenants/"+fixture.tenantID.String()+"/execution-targets",
+		strings.NewReader(`{"organizationId":"`+organization.ID.String()+`","kind":"kubernetes","name":"runtime-policy-route","configuration":{"image":"synara-agentd:test"},"capabilities":{}}`),
+	)
+	create.Header.Set("Content-Type", "application/json")
+	create.AddCookie(&http.Cookie{Name: fixture.cookieName, Value: fixture.ownerToken})
+	createdRecorder := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(createdRecorder, create)
+	if createdRecorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", createdRecorder.Code, createdRecorder.Body.String())
+	}
+	var created executiontargets.Target
+	if err := json.Unmarshal(createdRecorder.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/execution-targets/" + created.ID.String() + "/runtime-isolation-policy"
+	body := `{"mode":"explicit","runtime":"gvisor","minimumProfile":"gvisor-sandboxed-v1","fallbackPolicy":"fail-closed","runtimeClassName":"synara-gvisor","gvisorCompatibleProviders":["CODEX"]}`
+	request := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: fixture.cookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		fixture.handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+	assertProblemResponse(t, request(fixture.memberToken), http.StatusForbidden, "tenant_forbidden")
+	updatedRecorder := request(fixture.ownerToken)
+	if updatedRecorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", updatedRecorder.Code, updatedRecorder.Body.String())
+	}
+	var updated executiontargets.Target
+	if err := json.Unmarshal(updatedRecorder.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "offline" || updated.RuntimeIsolationPolicy == nil ||
+		len(updated.RuntimeIsolationPolicy.GVisorCompatibleProviders) != 1 ||
+		updated.RuntimeIsolationPolicy.GVisorCompatibleProviders[0] != "codex" {
+		t.Fatalf("updated runtime isolation Target = %#v", updated)
+	}
+}
+
 func TestDisableManagedKubernetesExecutionTargetRoute(t *testing.T) {
 	fixture := newWorkerManifestHTTPFixture(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)

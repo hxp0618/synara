@@ -997,6 +997,50 @@ describe("controlPlaneClient", () => {
     expect(resumed).toMatchObject({ id: "execution-1", status: "recovering", generation: 1 });
   });
 
+  it("loads bounded runtime isolation decisions without exposing attestation payloads", async () => {
+    const fetchMock = vi.fn<RequiredInitFetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                generation: 2,
+                executionTargetId: "target-1",
+                allocationBackend: "native-pod",
+                requestedRuntime: "gvisor",
+                requestedProfile: "gvisor-sandboxed-v1",
+                effectiveRuntime: "gvisor",
+                effectiveProfile: "gvisor-sandboxed-v1",
+                policySource: "target-explicit",
+                decision: "selected",
+                decisionReasonCode: null,
+                runtimeClassName: "synara-gvisor",
+                attestedAt: "2026-07-30T08:00:00Z",
+                attestationExpiresAt: "2026-07-30T08:00:45Z",
+                createdAt: "2026-07-30T08:00:01Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const decisions =
+      await controlPlaneClient.listExecutionRuntimeIsolationDecisions("execution/one");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/executions/execution%2Fone/runtime-isolation",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(decisions.items[0]).toMatchObject({
+      generation: 2,
+      effectiveRuntime: "gvisor",
+      effectiveProfile: "gvisor-sandboxed-v1",
+    });
+    expect(decisions.items[0]).not.toHaveProperty("attestationDigest");
+  });
+
   it("loads the Session pending Interaction snapshot and resolves through encoded durable routes", async () => {
     const responses = [
       new Response(JSON.stringify({ items: [], snapshotSequence: 17 }), {
@@ -1563,6 +1607,60 @@ describe("controlPlaneClient", () => {
         method: "PATCH",
         credentials: "include",
         body: JSON.stringify({ experimentalProviders: ["codex"] }),
+      }),
+    );
+  });
+
+  it("updates an Execution Target runtime isolation policy without sending target secrets", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "target/one",
+            tenantId: "tenant/one",
+            organizationId: null,
+            kind: "kubernetes",
+            name: "Kubernetes workers",
+            status: "offline",
+            capabilities: {},
+            runtimeIsolationPolicy: {
+              mode: "explicit",
+              requestedRuntime: "gvisor",
+              preferred: [],
+              minimumProfile: "gvisor-sandboxed-v1",
+              fallbackPolicy: "fail-closed",
+              runtimeClassName: "synara-gvisor",
+              gvisorCompatibleProviders: ["codex"],
+            },
+            createdAt: "2026-07-14T00:00:00Z",
+            updatedAt: "2026-07-14T01:00:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const policy = {
+      mode: "explicit" as const,
+      runtime: "gvisor" as const,
+      minimumProfile: "gvisor-sandboxed-v1" as const,
+      fallbackPolicy: "fail-closed" as const,
+      runtimeClassName: "synara-gvisor",
+      gvisorCompatibleProviders: ["codex" as const],
+    };
+
+    const target = await controlPlaneClient.updateExecutionTargetRuntimeIsolationPolicy(
+      "tenant/one",
+      "target/one",
+      policy,
+    );
+
+    expect(target.runtimeIsolationPolicy?.gvisorCompatibleProviders).toEqual(["codex"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/runtime-isolation-policy",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify(policy),
       }),
     );
   });

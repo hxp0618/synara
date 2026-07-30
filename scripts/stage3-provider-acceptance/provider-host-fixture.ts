@@ -1338,7 +1338,9 @@ export class Stage3ProviderAcceptanceHost {
   }
 }
 
-function validFixtureCredentialPayload(payload: Record<string, unknown> | undefined): boolean {
+function validFixtureCredentialPayload(
+  payload: Record<string, unknown> | undefined,
+): payload is Record<string, unknown> {
   if (payload?.apiKey === STAGE3_FIXTURE_CREDENTIAL_SENTINEL) return true;
   const apiKey = optionalString(payload?.apiKey);
   const baseUrl = optionalString(payload?.baseUrl);

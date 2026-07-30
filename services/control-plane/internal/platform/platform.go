@@ -58,17 +58,20 @@ type ExecutionTargetIsolationProfile string
 const (
 	IsolationSingleTenantTrusted  ExecutionTargetIsolationProfile = "single-tenant-trusted-v1"
 	IsolationKubernetesRestricted ExecutionTargetIsolationProfile = "kubernetes-restricted-v1"
+	IsolationGVisorSandboxed      ExecutionTargetIsolationProfile = "gvisor-sandboxed-v1"
 	IsolationMicroVM              ExecutionTargetIsolationProfile = "microvm-isolated-v1"
 )
 
 const (
-	KubernetesWorkloadIdentityTokenPath      = "/var/run/secrets/synara.io/workload-identity/token"
-	KubernetesStagedRegistrationTokenPath    = "/var/run/secrets/synara.io/registration/one-shot/token"
-	KubernetesNetworkBoundaryVerifyArgument  = "--verify-kubernetes-network-boundary"
-	ProviderCredentialScopeVerifyArgument    = "--verify-provider-credential-scope"
-	KubernetesRegistrationTokenStageArgument = "--stage-kubernetes-registration-token"
-	KubernetesPIDsLimitEnvironment           = "SYNARA_AGENTD_KUBERNETES_PIDS_MAX"
-	MaximumKubernetesPIDsLimit               = 1_048_576
+	KubernetesWorkloadIdentityTokenPath          = "/var/run/secrets/synara.io/workload-identity/token"
+	KubernetesStagedRegistrationTokenPath        = "/var/run/secrets/synara.io/registration/one-shot/token"
+	KubernetesNetworkBoundaryVerifyArgument      = "--verify-kubernetes-network-boundary"
+	ProviderCredentialScopeVerifyArgument        = "--verify-provider-credential-scope"
+	KubernetesRegistrationTokenStageArgument     = "--stage-kubernetes-registration-token"
+	KubernetesPIDsLimitEnvironment               = "SYNARA_AGENTD_KUBERNETES_PIDS_MAX"
+	KubernetesRuntimeIsolationProfileEnvironment = "SYNARA_AGENTD_KUBERNETES_RUNTIME_ISOLATION_PROFILE"
+	GVisorRuntimeVerifyArgument                  = "--verify-gvisor-runtime"
+	MaximumKubernetesPIDsLimit                   = 1_048_576
 )
 
 type ExecutionTargetIsolationDeclaration struct {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,50 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
+
+func TestNormalizeGVisorCompatibleProviders(t *testing.T) {
+	providers, err := normalizeGVisorCompatibleProviders([]string{" CLAUDEAGENT ", "CODEX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(providers, []string{"codex", "claudeAgent"}) {
+		t.Fatalf("normalized gVisor-compatible Providers = %#v", providers)
+	}
+	if _, err := normalizeGVisorCompatibleProviders([]string{"codex", "CODEX"}); err == nil {
+		t.Fatal("duplicate gVisor-compatible Provider was accepted")
+	}
+	if _, err := normalizeGVisorCompatibleProviders([]string{"unknown"}); err == nil {
+		t.Fatal("unknown gVisor-compatible Provider was accepted")
+	}
+}
+
+func TestCreateRevisionPersistsImmutableGVisorCompatibility(t *testing.T) {
+	fixture := newReleaseFixture(t)
+	result, err := fixture.service.CreateRevision(
+		fixture.ctx, fixture.principal, fixture.tenantID, fixture.targetID,
+		CreateRevisionInput{
+			WorkerManifestID: fixture.firstManifestID, Description: "gVisor accepted",
+			GVisorCompatibleProviders: []string{" CLAUDEAGENT ", "CODEX"},
+		},
+		"release-gvisor-compatibility", "request-release-gvisor-compatibility", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Value.GVisorCompatibleProviders, []string{"codex", "claudeAgent"}) {
+		t.Fatalf("created Worker Release compatibility = %#v", result.Value.GVisorCompatibleProviders)
+	}
+	var stored persistence.WorkerReleaseRevision
+	if err := fixture.db.First(&stored, "id = ?", result.Value.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(stored.GVisorCompatibleProviders, result.Value.GVisorCompatibleProviders) {
+		t.Fatalf("stored Worker Release compatibility = %#v", stored.GVisorCompatibleProviders)
+	}
+	if err := fixture.db.Model(&stored).Update("gvisor_compatible_providers", []string{"codex"}).Error; err == nil {
+		t.Fatal("Worker Release gVisor compatibility was mutable")
+	}
+}
 
 func TestWorkerReleaseCanaryPromotionRollbackAndScheduling(t *testing.T) {
 	fixture := newReleaseFixture(t)

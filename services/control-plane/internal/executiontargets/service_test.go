@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,100 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	}); err == nil {
 		t.Fatal("personal execution target without organization ownership was accepted")
 	}
+}
+
+func TestCreateKubernetesTargetPersistsAndProjectsAutoRuntimeIsolation(t *testing.T) {
+	ctx := context.Background()
+	config, _ := platform.Defaults(platform.ProfilePersonal)
+	store, err := database.OpenMetadataStore(ctx, config, "", filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	domain, err := bootstrap.Ensure(ctx, store.DB(), platform.ProfilePersonal, "execution-target-runtime-isolation-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x24}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB(), config, cipher)
+	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
+	created, err := service.Create(ctx, principal, domain.TenantID, CreateInput{
+		OrganizationID: &domain.OrganizationID, Kind: "kubernetes", Name: "gvisor-auto",
+		Configuration: map[string]any{"image": "synara-agentd:test"}, Capabilities: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := created.RuntimeIsolationPolicy
+	if policy == nil || policy.Mode != runtimeIsolationModeAuto || policy.RequestedRuntime != "auto" ||
+		!slices.Equal(policy.Preferred, []string{runtimeIsolationGVisor, runtimeIsolationRunc}) ||
+		policy.MinimumProfile != platform.IsolationKubernetesRestricted ||
+		policy.FallbackPolicy != runtimeIsolationFallbackAllowLower ||
+		policy.RuntimeClassName != kubernetesDefaultGVisorRuntimeClassName {
+		t.Fatalf("projected runtime isolation policy = %#v", policy)
+	}
+	var persisted persistence.ExecutionTarget
+	if err := store.DB().First(&persisted, "id = ?", created.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := cipher.Decrypt(persisted.ConfigurationEncrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(decoded, `"runtimeIsolation"`) || strings.Contains(decoded, "secret-value") {
+		t.Fatalf("persisted runtime policy = %s", decoded)
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(30 * time.Second)
+	decision := runtimeIsolationDecision{
+		RequestedRuntime: "auto", RequestedProfile: platform.IsolationKubernetesRestricted,
+		EffectiveRuntime: runtimeIsolationGVisor, EffectiveProfile: platform.IsolationGVisorSandboxed,
+		PolicySource: "target-auto", Decision: "selected",
+	}
+	if err := persistRuntimeIsolationObservation(ctx, store.DB(), created.ID, []runtimeIsolationCapability{
+		{Runtime: runtimeIsolationGVisor, Profile: platform.IsolationGVisorSandboxed, AttestationExpiresAt: &expiresAt},
+		{Runtime: runtimeIsolationRunc, Profile: platform.IsolationKubernetesRestricted},
+	}, &decision, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(ctx, principal, domain.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, found := findTargetByID(listed, created.ID)
+	if !found {
+		t.Fatalf("created target missing from list: %#v", listed)
+	}
+	if projected.RuntimeIsolationStatus == nil || projected.RuntimeIsolationStatus.State != "available" ||
+		!slices.Equal(projected.RuntimeIsolationStatus.DetectedRuntimes, []string{runtimeIsolationGVisor, runtimeIsolationRunc}) ||
+		!projected.RuntimeIsolationStatus.ExpiresAt.Equal(now.Add(30*time.Second)) {
+		t.Fatalf("projected runtime isolation availability = %#v", projected.RuntimeIsolationStatus)
+	}
+	_, err = service.Create(ctx, principal, domain.TenantID, CreateInput{
+		OrganizationID: &domain.OrganizationID, Kind: "kubernetes", Name: "invalid-gvisor-policy",
+		Configuration: map[string]any{
+			"image": "synara-agentd:test",
+			"runtimeIsolation": map[string]any{
+				"mode": "explicit", "runtime": "gvisor", "unknownField": true,
+			},
+		},
+	})
+	assertProblemCode(t, err, 400, "runtime_isolation_configuration_invalid")
+}
+
+func findTargetByID(targets []Target, id uuid.UUID) (Target, bool) {
+	for _, target := range targets {
+		if target.ID == id {
+			return target, true
+		}
+	}
+	return Target{}, false
 }
 
 func TestPlatformSharedWeakTargetsAreExcludedFromTenantProductSurface(t *testing.T) {

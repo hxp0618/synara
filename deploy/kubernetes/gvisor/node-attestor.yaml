@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: synara-gvisor-node-attestor
+  namespace: synara-system
+  labels:
+    app.kubernetes.io/name: synara-gvisor-node-attestor
+    app.kubernetes.io/part-of: synara
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: synara-gvisor-node-attestor
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: synara-gvisor-node-attestor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: synara-gvisor-node-attestor
+subjects:
+  - kind: ServiceAccount
+    name: synara-gvisor-node-attestor
+    namespace: synara-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: synara-gvisor-node-attestor
+  namespace: synara-system
+  labels:
+    app.kubernetes.io/name: synara-gvisor-node-attestor
+    app.kubernetes.io/part-of: synara
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: synara-gvisor-node-attestor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: synara-gvisor-node-attestor
+        app.kubernetes.io/part-of: synara
+    spec:
+      serviceAccountName: synara-gvisor-node-attestor
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      nodeSelector:
+        synara.io/gvisor-ready: "true"
+      containers:
+        - name: attestor
+          image: REPLACE_SYNARA_GVISOR_NODE_ATTESTOR_IMAGE_BY_DIGEST
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SYNARA_GVISOR_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SYNARA_GVISOR_RUNTIME_PATH
+              value: /host/runsc
+            - name: SYNARA_GVISOR_CONTAINERD_CONFIG_PATH
+              value: /host/containerd/config.toml
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            # The host containerd config is commonly mode 0600. This trust-anchor
+            # process runs as uid 0 only to read the two exact read-only host
+            # mounts; it has no capabilities, runtime socket, or writable host path.
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: runtime-bin
+              mountPath: /host/runsc
+              readOnly: true
+            - name: containerd-config
+              mountPath: /host/containerd/config.toml
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: runtime-bin
+          hostPath:
+            path: /usr/local/bin/runsc
+            type: File
+        - name: containerd-config
+          hostPath:
+            path: /etc/containerd/config.toml
+            type: File
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

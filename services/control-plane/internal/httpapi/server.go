@@ -289,6 +289,7 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireAuth(http.HandlerFunc(server.getExecutionTarget)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProviderPolicy)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProcessContainmentPolicy)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/runtime-isolation-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetRuntimeIsolationPolicy)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable", server.requireAuth(http.HandlerFunc(server.disableManagedKubernetesExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install", server.requireAuth(http.HandlerFunc(server.installSSHExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade", server.requireAuth(http.HandlerFunc(server.upgradeSSHExecutionTarget)))
@@ -390,6 +391,7 @@ func New(
 	mux.Handle("POST /v1/executions/{executionID}/cancel", server.requireAuth(http.HandlerFunc(server.cancelExecution)))
 	mux.Handle("POST /v1/executions/{executionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurnExecution)))
 	mux.Handle("GET /v1/executions/{executionID}/interactions", server.requireAuth(http.HandlerFunc(server.listExecutionInteractions)))
+	mux.Handle("GET /v1/executions/{executionID}/runtime-isolation", server.requireAuth(http.HandlerFunc(server.listExecutionRuntimeIsolationDecisions)))
 	mux.Handle("POST /v1/executions/{executionID}/approvals/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionApproval)))
 	mux.Handle("POST /v1/executions/{executionID}/user-input/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionUserInput)))
 	mux.Handle("GET /v1/sessions/{sessionID}/artifacts", server.requireAuth(http.HandlerFunc(server.listArtifacts)))
@@ -1182,6 +1184,19 @@ func (s *Server) listExecutionInteractions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	items, err := s.executions.ListInteractions(r.Context(), mustPrincipal(r), executionID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listExecutionRuntimeIsolationDecisions(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	items, err := s.executions.ListRuntimeIsolationDecisions(r.Context(), mustPrincipal(r), executionID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -17,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 )
 
 type Service struct {
@@ -152,13 +153,18 @@ func (s *Service) CreateRevision(
 	if len(input.Description) > 2000 {
 		return OperationResult[Revision]{}, problem.New(400, "invalid_worker_release_description", "description must not exceed 2000 characters.")
 	}
+	input.GVisorCompatibleProviders, err = normalizeGVisorCompatibleProviders(input.GVisorCompatibleProviders)
+	if err != nil {
+		return OperationResult[Revision]{}, err
+	}
 
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
 		Operation: "worker-release.revision.create", SuccessStatus: 201,
 		Request: map[string]any{
 			"executionTargetId": targetID, "workerManifestId": input.WorkerManifestID,
-			"description": input.Description,
+			"description":               input.Description,
+			"gvisorCompatibleProviders": input.GVisorCompatibleProviders,
 		},
 	}, func(tx *gorm.DB) (Revision, error) {
 		target, err := loadTenantTarget(ctx, tx, tenantID, targetID, true)
@@ -211,7 +217,8 @@ func (s *Service) CreateRevision(
 		model := persistence.WorkerReleaseRevision{
 			ID: uuid.New(), TenantID: tenantID, ExecutionTargetID: targetID,
 			Revision: highest + 1, WorkerManifestID: input.WorkerManifestID,
-			Description: input.Description, CreatedBy: principal.UserID, CreatedAt: now,
+			GVisorCompatibleProviders: append([]string(nil), input.GVisorCompatibleProviders...),
+			Description:               input.Description, CreatedBy: principal.UserID, CreatedAt: now,
 		}
 		if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 			return Revision{}, problem.Wrap(409, "worker_release_revision_conflict", "Worker release revision creation conflicted with another request.", err)
@@ -829,9 +836,32 @@ func projectRevisionWithManifest(model persistence.WorkerReleaseRevision, manife
 		ID: model.ID, TenantID: model.TenantID, ExecutionTargetID: model.ExecutionTargetID,
 		Revision: model.Revision, WorkerManifestID: model.WorkerManifestID,
 		WorkerBuildVersion: manifest.WorkerBuildVersion, WorkerBuildGitSHA: manifest.WorkerBuildGitSHA,
-		ImageDigest: manifest.ImageDigest, Description: model.Description,
-		CreatedBy: model.CreatedBy, CreatedAt: model.CreatedAt,
+		ImageDigest:               manifest.ImageDigest,
+		GVisorCompatibleProviders: append([]string{}, model.GVisorCompatibleProviders...),
+		Description:               model.Description,
+		CreatedBy:                 model.CreatedBy, CreatedAt: model.CreatedAt,
 	}
+}
+
+func normalizeGVisorCompatibleProviders(values []string) ([]string, error) {
+	selected := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		provider, valid := providercatalog.CanonicalName(value)
+		if !valid {
+			return nil, problem.New(400, "invalid_worker_release_gvisor_compatibility", "gvisorCompatibleProviders contains an unknown Provider.")
+		}
+		if _, duplicate := selected[provider]; duplicate {
+			return nil, problem.New(400, "invalid_worker_release_gvisor_compatibility", "gvisorCompatibleProviders cannot contain duplicate Providers.")
+		}
+		selected[provider] = struct{}{}
+	}
+	result := make([]string, 0, len(selected))
+	for _, provider := range providercatalog.ProviderNames() {
+		if _, found := selected[provider]; found {
+			result = append(result, provider)
+		}
+	}
+	return result, nil
 }
 
 func projectPolicy(model persistence.WorkerReleasePolicy) Policy {

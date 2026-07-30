@@ -32,7 +32,6 @@ import {
   buildCodexProcessEnv,
   codexModelProviderCredentialEnvNames,
   disableCodexConfigSections,
-  resolveCodexBrowserUsePipePath,
   sanitizeCodexModelProviderConfig,
   SYNARA_COMPETING_BROWSER_PLUGIN_SECTION_HEADERS,
 } from "./codexProcessEnv";
@@ -357,9 +356,7 @@ describe("Codex Synara harness policy", () => {
         }
       ).buildSessionProcessLaunch(homePath, { url: endpointUrl, bearerToken: "token" });
       const configPath = path.join(env.CODEX_HOME ?? homePath, "config.toml");
-      expect(readFileSync(configPath, "utf8")).toContain(
-        'url = "http://127.0.0.1:48123/mcp"',
-      );
+      expect(readFileSync(configPath, "utf8")).toContain('url = "http://127.0.0.1:48123/mcp"');
     } finally {
       if (previousSynaraHome === undefined) {
         delete process.env.SYNARA_HOME;

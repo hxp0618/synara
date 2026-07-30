@@ -113,53 +113,55 @@ type KubernetesReconcilerConfig struct {
 }
 
 type kubernetesTargetConfiguration struct {
-	AllocationBackend               string            `json:"allocationBackend"`
-	SandboxTemplateName             string            `json:"sandboxTemplateName"`
-	SandboxWarmPoolName             string            `json:"sandboxWarmPoolName"`
-	SandboxClaimReadyTimeoutSeconds int               `json:"sandboxClaimReadyTimeoutSeconds"`
-	SandboxAllowedTenantIDs         []uuid.UUID       `json:"sandboxAllowedTenantIds"`
-	APIServer                       string            `json:"apiServer"`
-	BearerToken                     string            `json:"bearerToken"`
-	BearerTokenFile                 string            `json:"bearerTokenFile"`
-	CACertificate                   string            `json:"caCertificate"`
-	CAFile                          string            `json:"caFile"`
-	Namespace                       string            `json:"namespace"`
-	ManageNamespace                 *bool             `json:"manageNamespace"`
-	ServiceAccountName              string            `json:"serviceAccountName"`
-	Image                           string            `json:"image"`
-	ImagePullPolicy                 string            `json:"imagePullPolicy"`
-	ImagePullSecrets                []string          `json:"imagePullSecrets"`
-	ControlPlaneURL                 string            `json:"controlPlaneUrl"`
-	AllowInsecureControlPlane       bool              `json:"allowInsecureControlPlane"`
-	RunnerCommand                   []string          `json:"runnerCommand"`
-	MaxActivePods                   int               `json:"maxActivePods"`
-	EgressCIDRs                     []string          `json:"egressCidrs"`
-	EgressTCPPorts                  []int             `json:"egressTcpPorts"`
-	PrivateNetworkCIDRs             []string          `json:"privateNetworkCidrs"`
-	ProviderHTTPProxy               string            `json:"providerHttpProxy"`
-	ProviderHTTPSProxy              string            `json:"providerHttpsProxy"`
-	ProviderAllProxy                string            `json:"providerAllProxy"`
-	ProviderNoProxy                 []string          `json:"providerNoProxy"`
-	CPURequest                      string            `json:"cpuRequest"`
-	CPULimit                        string            `json:"cpuLimit"`
-	PIDsLimit                       uint64            `json:"pidsLimit"`
-	MemoryRequest                   string            `json:"memoryRequest"`
-	MemoryLimit                     string            `json:"memoryLimit"`
-	EphemeralStorageRequest         string            `json:"ephemeralStorageRequest"`
-	EphemeralStorageLimit           string            `json:"ephemeralStorageLimit"`
-	WorkspaceSizeLimit              string            `json:"workspaceSizeLimit"`
-	GitCachePersistentVolumeClaim   string            `json:"gitCachePersistentVolumeClaim"`
-	QuotaCPURequests                string            `json:"quotaCpuRequests"`
-	QuotaCPULimits                  string            `json:"quotaCpuLimits"`
-	QuotaMemoryRequests             string            `json:"quotaMemoryRequests"`
-	QuotaMemoryLimits               string            `json:"quotaMemoryLimits"`
-	QuotaEphemeralStorage           string            `json:"quotaEphemeralStorage"`
-	GPUResourceName                 string            `json:"gpuResourceName"`
-	GPURequest                      string            `json:"gpuRequest"`
-	QuotaGPURequests                string            `json:"quotaGpuRequests"`
-	NodeSelector                    map[string]string `json:"nodeSelector"`
-	Tolerations                     []map[string]any  `json:"tolerations"`
-	RequireNodeSpread               bool              `json:"requireNodeSpread"`
+	AllocationBackend               string                         `json:"allocationBackend"`
+	RuntimeIsolation                *runtimeIsolationConfiguration `json:"runtimeIsolation"`
+	RuntimeIsolationDecision        *runtimeIsolationDecision      `json:"-"`
+	SandboxTemplateName             string                         `json:"sandboxTemplateName"`
+	SandboxWarmPoolName             string                         `json:"sandboxWarmPoolName"`
+	SandboxClaimReadyTimeoutSeconds int                            `json:"sandboxClaimReadyTimeoutSeconds"`
+	SandboxAllowedTenantIDs         []uuid.UUID                    `json:"sandboxAllowedTenantIds"`
+	APIServer                       string                         `json:"apiServer"`
+	BearerToken                     string                         `json:"bearerToken"`
+	BearerTokenFile                 string                         `json:"bearerTokenFile"`
+	CACertificate                   string                         `json:"caCertificate"`
+	CAFile                          string                         `json:"caFile"`
+	Namespace                       string                         `json:"namespace"`
+	ManageNamespace                 *bool                          `json:"manageNamespace"`
+	ServiceAccountName              string                         `json:"serviceAccountName"`
+	Image                           string                         `json:"image"`
+	ImagePullPolicy                 string                         `json:"imagePullPolicy"`
+	ImagePullSecrets                []string                       `json:"imagePullSecrets"`
+	ControlPlaneURL                 string                         `json:"controlPlaneUrl"`
+	AllowInsecureControlPlane       bool                           `json:"allowInsecureControlPlane"`
+	RunnerCommand                   []string                       `json:"runnerCommand"`
+	MaxActivePods                   int                            `json:"maxActivePods"`
+	EgressCIDRs                     []string                       `json:"egressCidrs"`
+	EgressTCPPorts                  []int                          `json:"egressTcpPorts"`
+	PrivateNetworkCIDRs             []string                       `json:"privateNetworkCidrs"`
+	ProviderHTTPProxy               string                         `json:"providerHttpProxy"`
+	ProviderHTTPSProxy              string                         `json:"providerHttpsProxy"`
+	ProviderAllProxy                string                         `json:"providerAllProxy"`
+	ProviderNoProxy                 []string                       `json:"providerNoProxy"`
+	CPURequest                      string                         `json:"cpuRequest"`
+	CPULimit                        string                         `json:"cpuLimit"`
+	PIDsLimit                       uint64                         `json:"pidsLimit"`
+	MemoryRequest                   string                         `json:"memoryRequest"`
+	MemoryLimit                     string                         `json:"memoryLimit"`
+	EphemeralStorageRequest         string                         `json:"ephemeralStorageRequest"`
+	EphemeralStorageLimit           string                         `json:"ephemeralStorageLimit"`
+	WorkspaceSizeLimit              string                         `json:"workspaceSizeLimit"`
+	GitCachePersistentVolumeClaim   string                         `json:"gitCachePersistentVolumeClaim"`
+	QuotaCPURequests                string                         `json:"quotaCpuRequests"`
+	QuotaCPULimits                  string                         `json:"quotaCpuLimits"`
+	QuotaMemoryRequests             string                         `json:"quotaMemoryRequests"`
+	QuotaMemoryLimits               string                         `json:"quotaMemoryLimits"`
+	QuotaEphemeralStorage           string                         `json:"quotaEphemeralStorage"`
+	GPUResourceName                 string                         `json:"gpuResourceName"`
+	GPURequest                      string                         `json:"gpuRequest"`
+	QuotaGPURequests                string                         `json:"quotaGpuRequests"`
+	NodeSelector                    map[string]string              `json:"nodeSelector"`
+	Tolerations                     []map[string]any               `json:"tolerations"`
+	RequireNodeSpread               bool                           `json:"requireNodeSpread"`
 }
 
 type kubernetesPod struct {
@@ -213,6 +215,8 @@ type KubernetesPodTerminalObservation struct {
 type kubernetesClient interface {
 	Apply(context.Context, string, map[string]any) error
 	AttestPodPIDsLimit(context.Context, map[string]string, uint64, string) error
+	RuntimeIsolationCapabilities(context.Context, kubernetesTargetConfiguration, time.Time) ([]runtimeIsolationCapability, error)
+	EnsureRuntimeIsolationCanary(context.Context, persistence.ExecutionTarget, kubernetesTargetConfiguration, *ImagePullCredential) error
 	GetPriorityClass(context.Context, string) (kubernetesPriorityClass, error)
 	GetResourceQuota(context.Context, string, string) (kubernetesResourceQuota, error)
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
@@ -422,6 +426,36 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			err,
 		)
 	}
+	runtimeObservedAt := r.now()
+	runtimeCapabilities, runtimeObservationErr := client.RuntimeIsolationCapabilities(ctx, configuration, runtimeObservedAt)
+	gvisorCompatibilityErr := gvisorCompatibilityAccepted(
+		ctx, r.targets.db, target, configuration.RuntimeIsolation,
+	)
+	runtimeDecision, runtimeDecisionErr := resolveKubernetesRuntimeIsolation(
+		configuration,
+		filterGVisorCapability(runtimeCapabilities, gvisorCompatibilityErr),
+	)
+	runtimeDecisionErr = preferGVisorCompatibilityError(
+		&runtimeDecision, runtimeDecisionErr, gvisorCompatibilityErr,
+	)
+	if observationPersistErr := persistRuntimeIsolationObservation(
+		ctx, r.targets.db, target.ID, runtimeCapabilities, &runtimeDecision,
+		firstRuntimeIsolationError(runtimeObservationErr, runtimeDecisionErr), runtimeObservedAt,
+	); observationPersistErr != nil {
+		return observationPersistErr
+	}
+	if runtimeDecisionErr != nil {
+		healthObservation.Status = routing.HealthUnreachable
+		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+			"Managed Kubernetes runtime isolation is unavailable.",
+		)
+		r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
+		if runtimeObservationErr != nil {
+			return runtimeObservationErr
+		}
+		return runtimeDecisionErr
+	}
+	configuration.RuntimeIsolationDecision = &runtimeDecision
 	resolution, err := r.resolveImagePullCredential(ctx, target, configuration.Image)
 	if err != nil {
 		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
@@ -462,6 +496,19 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			return err
 		}
 		r.recordFoundationState(target.ID, foundationHash, r.now())
+	}
+	if err := client.EnsureRuntimeIsolationCanary(ctx, target, configuration, credential); err != nil {
+		if observationErr := persistRuntimeIsolationObservation(
+			ctx, r.targets.db, target.ID, runtimeCapabilities, &runtimeDecision, err, r.now(),
+		); observationErr != nil {
+			return observationErr
+		}
+		healthObservation.Status = routing.HealthUnreachable
+		healthObservation.Reason = managedKubernetesRoutingReasonPointer(
+			"Managed Kubernetes runtime isolation canary is not ready.",
+		)
+		r.setKubernetesStatus(ctx, target, "offline", foundationChanged, false, 0, 0)
+		return err
 	}
 	executions, err := r.loadKubernetesExecutions(ctx, target.ID)
 	if err != nil {
@@ -997,6 +1044,10 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		if execution.Status != "queued" && execution.Status != "recovering" {
 			continue
 		}
+		if err := r.persistRuntimeIsolationDecision(ctx, target, execution, configuration); err != nil {
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
+		}
 		name := kubernetesPodName(execution)
 		if _, found := existing[name]; found {
 			acknowledgedReservations[routing.ReservationIdentity{
@@ -1132,6 +1183,15 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		readyWarmCapacity,
 		warmRelease,
 	)
+	return nil
+}
+
+func firstRuntimeIsolationError(errors ...error) error {
+	for _, err := range errors {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1798,6 +1858,9 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 	configuration kubernetesTargetConfiguration,
 ) (kubernetesTargetConfiguration, error) {
 	if err := normalizeKubernetesAllocationConfiguration(&configuration); err != nil {
+		return kubernetesTargetConfiguration{}, err
+	}
+	if err := normalizeKubernetesRuntimeIsolationConfiguration(&configuration); err != nil {
 		return kubernetesTargetConfiguration{}, err
 	}
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendNativePod) {

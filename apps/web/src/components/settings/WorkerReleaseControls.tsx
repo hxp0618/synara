@@ -1,3 +1,4 @@
+import { PROVIDER_CAPABILITY_CATALOG, type ProviderHostProviderKind } from "@synara/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState, type FormEvent } from "react";
 
@@ -29,6 +30,7 @@ type IdempotencyState = { signature: string; key: string };
 type CreateReleaseMutationInput = {
   workerManifestId: string;
   description: string;
+  gvisorCompatibleProviders: ReadonlyArray<ProviderHostProviderKind>;
   idempotencyKey: string;
 };
 
@@ -42,6 +44,9 @@ type TransitionReleaseMutationInput = {
 };
 
 const WORKER_RELEASE_TEXT_LIMIT = 2_000;
+const KNOWN_PROVIDER_NAMES = new Set(
+  PROVIDER_CAPABILITY_CATALOG.providers.map((provider) => provider.provider),
+);
 
 export function WorkerReleaseControls(props: {
   tenantId: string;
@@ -53,6 +58,9 @@ export function WorkerReleaseControls(props: {
   const queryClient = useQueryClient();
   const [manifestId, setManifestId] = useState("");
   const [description, setDescription] = useState("");
+  const [gvisorCompatibleProviders, setGVisorCompatibleProviders] = useState<
+    ReadonlyArray<ProviderHostProviderKind>
+  >([]);
   const [reason, setReason] = useState("");
   const [canaryPercent, setCanaryPercent] = useState(10);
   const [transitionNotice, setTransitionNotice] = useState<string | null>(null);
@@ -96,18 +104,27 @@ export function WorkerReleaseControls(props: {
   )
     ? manifestId
     : (availableManifests[0]?.manifestId ?? "");
+  const targetGVisorCompatibleProviders = gvisorCompatibilityOptions(props.target);
+  const selectedGVisorCompatibleProviders = targetGVisorCompatibleProviders.filter((provider) =>
+    gvisorCompatibleProviders.includes(provider),
+  );
 
   const createRelease = useMutation({
     mutationFn: (input: CreateReleaseMutationInput) =>
       controlPlaneClient.createWorkerRelease(
         props.tenantId,
         props.target.id,
-        { workerManifestId: input.workerManifestId, description: input.description },
+        {
+          workerManifestId: input.workerManifestId,
+          description: input.description,
+          gvisorCompatibleProviders: input.gvisorCompatibleProviders,
+        },
         { idempotencyKey: input.idempotencyKey },
       ),
     onSuccess: async (_revision, input) => {
       createIdempotency.current = null;
       setDescription((current) => (current.trim() === input.description ? "" : current));
+      setGVisorCompatibleProviders([]);
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -143,7 +160,11 @@ export function WorkerReleaseControls(props: {
     event.preventDefault();
     if (!canMutate || !selectedManifestId) return;
     const trimmedDescription = description.trim();
-    const signature = JSON.stringify([selectedManifestId, trimmedDescription]);
+    const signature = JSON.stringify([
+      selectedManifestId,
+      trimmedDescription,
+      selectedGVisorCompatibleProviders,
+    ]);
     const idempotencyKey = resolveIdempotencyKey(
       createIdempotency,
       signature,
@@ -152,6 +173,7 @@ export function WorkerReleaseControls(props: {
     createRelease.mutate({
       workerManifestId: selectedManifestId,
       description: trimmedDescription,
+      gvisorCompatibleProviders: selectedGVisorCompatibleProviders,
       idempotencyKey,
     });
   };
@@ -313,6 +335,40 @@ export function WorkerReleaseControls(props: {
               }}
             />
           </ControlPlaneFormField>
+          <ControlPlaneFormField label="gVisor-compatible Providers">
+            <div className="flex min-h-8 flex-wrap items-center gap-1.5">
+              {targetGVisorCompatibleProviders.length === 0 ? (
+                <span className="text-muted-foreground">
+                  The Target has not accepted any Provider for gVisor.
+                </span>
+              ) : (
+                targetGVisorCompatibleProviders.map((provider) => {
+                  const selected = selectedGVisorCompatibleProviders.includes(provider);
+                  return (
+                    <Button
+                      key={provider}
+                      aria-pressed={selected}
+                      disabled={releaseManagementDisabled || createRelease.isPending}
+                      size="sm"
+                      type="button"
+                      variant={selected ? "secondary" : "outline"}
+                      onClick={() => {
+                        setGVisorCompatibleProviders((current) =>
+                          current.includes(provider)
+                            ? current.filter((candidate) => candidate !== provider)
+                            : [...current, provider],
+                        );
+                        createIdempotency.current = null;
+                        createRelease.reset();
+                      }}
+                    >
+                      {provider}
+                    </Button>
+                  );
+                })
+              )}
+            </div>
+          </ControlPlaneFormField>
           <div className="sm:col-span-2">
             <Button
               disabled={!canMutate || availableManifests.length === 0 || createRelease.isPending}
@@ -391,6 +447,7 @@ function WorkerReleaseRevisionList(props: {
       {props.overview.revisions.map((revision) => {
         const isPromoted = policy?.promotedRevisionId === revision.id;
         const isCanary = policy?.canaryRevisionId === revision.id;
+        const gvisorCompatibleProviders = revision.gvisorCompatibleProviders ?? [];
         return (
           <div
             key={revision.id}
@@ -410,6 +467,11 @@ function WorkerReleaseRevisionList(props: {
                   ? `Image ${shortIdentifier(revision.imageDigest)}`
                   : "No image digest reported"}
                 {revision.description ? ` · ${revision.description}` : ""}
+              </p>
+              <p className="truncate text-muted-foreground">
+                {gvisorCompatibleProviders.length > 0
+                  ? `gVisor accepted for ${gvisorCompatibleProviders.join(", ")}`
+                  : "gVisor Provider compatibility not accepted"}
               </p>
             </div>
             {props.canManage ? (
@@ -496,6 +558,29 @@ function ReleaseRequestError(props: { message: string }) {
       {props.message}
     </p>
   );
+}
+
+function gvisorCompatibilityOptions(
+  target: ControlPlaneExecutionTarget,
+): ReadonlyArray<ProviderHostProviderKind> {
+  const candidates = new Set<ProviderHostProviderKind>(
+    target.runtimeIsolationPolicy?.gvisorCompatibleProviders ?? [],
+  );
+  const rawPolicy = target.capabilities.providerPolicy;
+  if (typeof rawPolicy === "object" && rawPolicy !== null && !Array.isArray(rawPolicy)) {
+    const rawProviders = (rawPolicy as Record<string, unknown>).experimentalProviders;
+    if (Array.isArray(rawProviders)) {
+      for (const provider of rawProviders) {
+        if (
+          typeof provider === "string" &&
+          KNOWN_PROVIDER_NAMES.has(provider as ProviderHostProviderKind)
+        ) {
+          candidates.add(provider as ProviderHostProviderKind);
+        }
+      }
+    }
+  }
+  return [...candidates];
 }
 
 function resolveIdempotencyKey(

@@ -25,6 +25,8 @@ func AllModels() []any {
 		&ExecutionSchedulingPolicyHead{}, &ExecutionSchedulingPolicyRevision{},
 		&ExecutionSchedulingPolicyRule{}, &ExecutionSchedulingPolicyRuleValue{},
 		&ExecutionGenerationFact{}, &ExecutionGenerationPodFailureFact{}, &ExecutionKubernetesAllocation{},
+		&ExecutionRuntimeIsolationDecision{},
+		&ExecutionTargetRuntimeIsolationObservation{},
 		&WorkerIncarnationFact{}, &WorkerIncarnationMetricRollup{}, &WorkerIncarnationMetricRollupEntry{},
 		&ExecutionGenerationMetricRollup{}, &ExecutionGenerationMetricRollupEntry{},
 		&ExecutionGenerationPodFailureMetricRollupEntry{},

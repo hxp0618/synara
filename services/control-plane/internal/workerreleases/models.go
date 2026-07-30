@@ -17,17 +17,18 @@ const (
 )
 
 type Revision struct {
-	ID                 uuid.UUID `json:"id"`
-	TenantID           uuid.UUID `json:"tenantId"`
-	ExecutionTargetID  uuid.UUID `json:"executionTargetId"`
-	Revision           int64     `json:"revision"`
-	WorkerManifestID   uuid.UUID `json:"workerManifestId"`
-	WorkerBuildVersion string    `json:"workerBuildVersion"`
-	WorkerBuildGitSHA  *string   `json:"workerBuildGitSha,omitempty"`
-	ImageDigest        *string   `json:"imageDigest,omitempty"`
-	Description        string    `json:"description"`
-	CreatedBy          uuid.UUID `json:"createdBy"`
-	CreatedAt          time.Time `json:"createdAt"`
+	ID                        uuid.UUID `json:"id"`
+	TenantID                  uuid.UUID `json:"tenantId"`
+	ExecutionTargetID         uuid.UUID `json:"executionTargetId"`
+	Revision                  int64     `json:"revision"`
+	WorkerManifestID          uuid.UUID `json:"workerManifestId"`
+	WorkerBuildVersion        string    `json:"workerBuildVersion"`
+	WorkerBuildGitSHA         *string   `json:"workerBuildGitSha,omitempty"`
+	ImageDigest               *string   `json:"imageDigest,omitempty"`
+	GVisorCompatibleProviders []string  `json:"gvisorCompatibleProviders"`
+	Description               string    `json:"description"`
+	CreatedBy                 uuid.UUID `json:"createdBy"`
+	CreatedAt                 time.Time `json:"createdAt"`
 }
 
 type Policy struct {
@@ -66,8 +67,9 @@ type Overview struct {
 }
 
 type CreateRevisionInput struct {
-	WorkerManifestID uuid.UUID `json:"workerManifestId"`
-	Description      string    `json:"description"`
+	WorkerManifestID          uuid.UUID `json:"workerManifestId"`
+	Description               string    `json:"description"`
+	GVisorCompatibleProviders []string  `json:"gvisorCompatibleProviders"`
 }
 
 type PolicyChangeInput struct {

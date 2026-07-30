@@ -12,6 +12,13 @@ import (
 )
 
 func main() {
+	if handled, err := agentd.RunGVisorRuntimeVerifier(os.Args); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "gVisor runtime verification failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := agentd.RunKubernetesNetworkBoundaryVerifier(os.Args); handled {
 		if err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "Kubernetes network boundary verification failed")

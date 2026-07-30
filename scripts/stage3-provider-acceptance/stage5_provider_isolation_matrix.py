@@ -77,12 +77,19 @@ class MatrixOptions:
     kubernetes_control_plane_port: int | None
     allow_control_plane_node: bool
     node_selector: str
+    runtime_class: str | None
     worker_image: str
     runner_command: tuple[str, ...]
     timeout_per_cell_seconds: float
     skip_build: bool
     control_plane_binary: pathlib.Path | None
     providers: tuple[ProviderConfiguration, ...]
+
+
+def stage5_cases(options: MatrixOptions) -> tuple[str, ...]:
+    if options.runtime_class is None:
+        return STAGE5_CASES
+    return (*STAGE5_CASES, acceptance.REAL_PROVIDER_GVISOR_CASE)
 
 
 def _provider_label(provider: str) -> str:
@@ -135,6 +142,10 @@ def parse_args(argv: Sequence[str]) -> MatrixOptions:
     )
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--node-selector", required=True)
+    parser.add_argument(
+        "--kubernetes-runtime-class",
+        help="Require explicit gVisor isolation and this RuntimeClass in every matrix cell",
+    )
     parser.add_argument("--kubernetes-worker-image", required=True)
     parser.add_argument("--runner-command-json", required=True)
     parser.add_argument("--kubernetes-allow-nondisposable", action="store_true")
@@ -168,6 +179,13 @@ def parse_args(argv: Sequence[str]) -> MatrixOptions:
         or any(character in selector for character in "\r\n\x00")
     ):
         parser.error("--node-selector must be a bounded Kubernetes label selector")
+    runtime_class = (
+        parsed.kubernetes_runtime_class.strip()
+        if parsed.kubernetes_runtime_class is not None
+        else None
+    )
+    if runtime_class is not None and not acceptance.is_kubernetes_node_name(runtime_class):
+        parser.error("--kubernetes-runtime-class must be a lowercase DNS subdomain")
     worker_image = parsed.kubernetes_worker_image.strip()
     if IMMUTABLE_IMAGE_PATTERN.fullmatch(worker_image) is None:
         parser.error("--kubernetes-worker-image must be an immutable credential-free @sha256 reference")
@@ -270,6 +288,7 @@ def parse_args(argv: Sequence[str]) -> MatrixOptions:
         kubernetes_control_plane_port=parsed.kubernetes_control_plane_port,
         allow_control_plane_node=parsed.kubernetes_allow_control_plane_node,
         node_selector=selector,
+        runtime_class=runtime_class,
         worker_image=worker_image,
         runner_command=runner_command,
         timeout_per_cell_seconds=parsed.timeout_per_cell,
@@ -469,7 +488,7 @@ def child_command(
         "--timeout",
         str(options.timeout_per_cell_seconds),
     ]
-    for case in STAGE5_CASES:
+    for case in stage5_cases(options):
         command.extend(["--real-provider-case", case])
     if options.kubernetes_kubeconfig is not None:
         command.extend(["--kubernetes-kubeconfig", str(options.kubernetes_kubeconfig)])
@@ -481,6 +500,8 @@ def child_command(
         command.extend(
             ["--kubernetes-control-plane-port", str(options.kubernetes_control_plane_port)]
         )
+    if options.runtime_class is not None:
+        command.extend(["--kubernetes-runtime-class", options.runtime_class])
     if configuration.credential.base_url_environment_name is not None:
         command.extend(
             [
@@ -688,6 +709,36 @@ def validate_stage5_case_evidence(
             and content.get("controlPlaneSource") == "native"
             and content.get("actualWebhookProvenanceProved") is False
         )
+    if case == acceptance.REAL_PROVIDER_GVISOR_CASE:
+        compatibility = evidence.get("compatibility")
+        if not isinstance(compatibility, Mapping):
+            return False
+        tools = compatibility.get("tools")
+        probes = compatibility.get("probes")
+        durations = compatibility.get("durationsMs")
+        max_rss = compatibility.get("maxRssKiB")
+        return (
+            command.get("runtime") == "node-bounded-gvisor-compat-v1"
+            and command.get("outputContainsRawProbeErrors") is False
+            and isinstance(command.get("sha256"), str)
+            and len(command["sha256"]) == 64
+            and compatibility.get("schemaVersion") == 1
+            and compatibility.get("runtime") == "gvisor"
+            and isinstance(tools, Mapping)
+            and set(tools) == set(acceptance.GVISOR_COMPATIBILITY_REQUIRED_TOOLS)
+            and all(value is True for value in tools.values())
+            and isinstance(probes, Mapping)
+            and all(value is True for value in probes.values())
+            and isinstance(durations, Mapping)
+            and set(durations) == set(acceptance.GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS)
+            and all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                for value in durations.values()
+            )
+            and isinstance(max_rss, int)
+            and not isinstance(max_rss, bool)
+            and max_rss > 0
+        )
     return False
 
 
@@ -742,7 +793,7 @@ def validate_child_report(
     kubernetes = configuration.get("kubernetes") if isinstance(configuration, Mapping) else None
     if (
         not isinstance(real_provider, Mapping)
-        or real_provider.get("requestedCases") != list(STAGE5_CASES)
+        or real_provider.get("requestedCases") != list(stage5_cases(options))
     ):
         fail(
             "stage5.matrix.child_cases_invalid",
@@ -762,12 +813,13 @@ def validate_child_report(
         or kubernetes.get("workerImage") != options.worker_image
         or kubernetes.get("skipWorkerBuild") is not True
         or kubernetes.get("allowNondisposable") is not True
+        or kubernetes.get("runtimeClassName") != options.runtime_class
     ):
         fail(
             "stage5.matrix.child_kubernetes_boundary_invalid",
             "The child report did not retain the exact context, Node, or immutable Worker image boundary.",
         )
-    for case in STAGE5_CASES:
+    for case in stage5_cases(options):
         metadata = acceptance.REAL_PROVIDER_CASE_METADATA[case]
         result = _case_by_id(report, metadata["id"])
         evidence = result.get("evidence") if isinstance(result, Mapping) else None
@@ -777,6 +829,13 @@ def validate_child_report(
             or not isinstance(evidence, Mapping)
             or evidence.get("nodeName") != node_name
             or evidence.get("nodePinned") is not True
+            or (
+                options.runtime_class is not None
+                and (
+                    evidence.get("runtimeClassName") != options.runtime_class
+                    or evidence.get("runtimeIsolationProfile") != "gvisor-sandboxed-v1"
+                )
+            )
         ):
             fail(
                 "stage5.matrix.child_case_invalid",
@@ -990,8 +1049,9 @@ def run_cell(
         "markdownSha256": markdown_sha256,
         "caseIds": [
             acceptance.REAL_PROVIDER_CASE_METADATA[case]["id"]
-            for case in STAGE5_CASES
+            for case in stage5_cases(options)
         ],
+        "gvisorCompatibility": _gvisor_compatibility_evidence(report, options),
     }
     return record, errors
 
@@ -1025,6 +1085,73 @@ def credential_redactor(options: MatrixOptions) -> acceptance.SecretRedactor:
             "[REDACTED_STAGE5_OPERATOR_CREDENTIAL]",
         )
     return redactor
+
+
+def _gvisor_compatibility_evidence(
+    report: Mapping[str, Any] | None,
+    options: MatrixOptions,
+) -> dict[str, Any] | None:
+    if options.runtime_class is None or report is None:
+        return None
+    cases = report.get("cases")
+    if not isinstance(cases, list):
+        return None
+    case_id = acceptance.REAL_PROVIDER_CASE_METADATA[acceptance.REAL_PROVIDER_GVISOR_CASE]["id"]
+    for item in cases:
+        if not isinstance(item, Mapping) or item.get("id") != case_id:
+            continue
+        evidence = item.get("evidence")
+        compatibility = evidence.get("compatibility") if isinstance(evidence, Mapping) else None
+        if not isinstance(compatibility, Mapping):
+            return None
+        durations = compatibility.get("durationsMs")
+        max_rss = compatibility.get("maxRssKiB")
+        if not isinstance(durations, Mapping) or not isinstance(max_rss, int) or isinstance(max_rss, bool):
+            return None
+        return {
+            "durationsMs": dict(durations),
+            "maxRssKiB": max_rss,
+            "runtime": compatibility.get("runtime"),
+            "schemaVersion": compatibility.get("schemaVersion"),
+        }
+    return None
+
+
+def _gvisor_compatibility_summary(
+    cells: Sequence[Mapping[str, Any]],
+    options: MatrixOptions,
+) -> dict[str, Any] | None:
+    if options.runtime_class is None:
+        return None
+    duration_samples: dict[str, list[int]] = {}
+    memory_samples: list[int] = []
+    for cell in cells:
+        evidence = cell.get("gvisorCompatibility")
+        if not isinstance(evidence, Mapping):
+            continue
+        durations = evidence.get("durationsMs")
+        if isinstance(durations, Mapping):
+            for label, value in durations.items():
+                if isinstance(label, str) and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    duration_samples.setdefault(label, []).append(value)
+        max_rss = evidence.get("maxRssKiB")
+        if isinstance(max_rss, int) and not isinstance(max_rss, bool) and max_rss > 0:
+            memory_samples.append(max_rss)
+    expected_samples = len(cells)
+    return {
+        "expectedSampleCount": expected_samples,
+        "complete": bool(cells)
+        and len(memory_samples) == expected_samples
+        and set(duration_samples) == set(acceptance.GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS)
+        and all(len(samples) == expected_samples for samples in duration_samples.values()),
+        "durationDistributionsMs": {
+            label: acceptance.duration_distribution_ms(samples)
+            for label, samples in sorted(duration_samples.items())
+        },
+        "maxRssKiB": (
+            acceptance.duration_distribution_ms(memory_samples) if memory_samples else None
+        ),
+    }
 
 
 def _atomic_write_text(path: pathlib.Path, value: str) -> None:
@@ -1062,6 +1189,39 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             lines.append(
                 f"| {cell.get('provider', '')} | {cell.get('nodeName', '')} | "
                 f"{cell.get('status', '')} | {cell.get('durationMs', '')} |"
+            )
+    compatibility_summary = report.get("gvisorCompatibilitySummary")
+    if isinstance(compatibility_summary, Mapping):
+        lines.extend(
+            [
+                "",
+                "## gVisor compatibility distributions",
+                "",
+                f"Complete: **{str(bool(compatibility_summary.get('complete'))).lower()}**",
+                "",
+                "| Probe | Samples | P50 | P95 | P99 | Unit |",
+                "| --- | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        duration_distributions = compatibility_summary.get(
+            "durationDistributionsMs"
+        )
+        if isinstance(duration_distributions, Mapping):
+            for label, distribution in sorted(duration_distributions.items()):
+                if not isinstance(distribution, Mapping):
+                    continue
+                lines.append(
+                    f"| {label} | {distribution.get('sampleCount', '')} | "
+                    f"{distribution.get('p50', '')} | {distribution.get('p95', '')} | "
+                    f"{distribution.get('p99', '')} | ms |"
+                )
+        memory_distribution = compatibility_summary.get("maxRssKiB")
+        if isinstance(memory_distribution, Mapping):
+            lines.append(
+                f"| maxRss | {memory_distribution.get('sampleCount', '')} | "
+                f"{memory_distribution.get('p50', '')} | "
+                f"{memory_distribution.get('p95', '')} | "
+                f"{memory_distribution.get('p99', '')} | KiB |"
             )
     errors = report.get("errors")
     if isinstance(errors, list) and errors:
@@ -1103,10 +1263,11 @@ def _configuration_report(options: MatrixOptions) -> dict[str, Any]:
         "kubernetesControlPlanePortPinned": options.kubernetes_control_plane_port is not None,
         "controlPlaneNodeExplicitlyAllowed": options.allow_control_plane_node,
         "nodeSelector": options.node_selector,
+        "runtimeClassName": options.runtime_class,
         "workerImage": options.worker_image,
         "workerImageImmutable": True,
         "providers": [configuration.provider for configuration in options.providers],
-        "stage5Cases": list(STAGE5_CASES),
+        "stage5Cases": list(stage5_cases(options)),
         "timeoutPerCellSeconds": options.timeout_per_cell_seconds,
         "runnerExecutable": pathlib.PurePosixPath(options.runner_command[0]).name,
         "runnerArgumentCount": len(options.runner_command) - 1,
@@ -1141,6 +1302,7 @@ def run_matrix(options: MatrixOptions) -> tuple[dict[str, Any], int]:
         "finalNodeInventory": None,
         "expectedCellCount": len(PROVIDERS) * len(node_names),
         "cells": cells,
+        "gvisorCompatibilitySummary": None,
         "errors": errors,
         "outputSecretScan": None,
     }
@@ -1178,6 +1340,15 @@ def run_matrix(options: MatrixOptions) -> tuple[dict[str, Any], int]:
     report["durationMs"] = acceptance.elapsed_ms(started)
     report["completedCellCount"] = len(cells)
     report["passedCellCount"] = sum(cell.get("status") == "pass" for cell in cells)
+    report["gvisorCompatibilitySummary"] = _gvisor_compatibility_summary(cells, options)
+    if options.runtime_class is not None and not report["gvisorCompatibilitySummary"].get("complete"):
+        errors.append(
+            MatrixError(
+                "stage5.matrix.gvisor_compatibility_evidence_incomplete",
+                "The gVisor matrix did not retain complete toolchain, runtime, duration, and memory evidence for every cell.",
+            ).as_report_error()
+        )
+        report["errors"] = errors
     report["status"] = "pass" if not errors and len(cells) == report["expectedCellCount"] else "fail"
     write_report(report, options, redactor)
     try:
@@ -1235,6 +1406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "completedCellCount": 0,
             "passedCellCount": 0,
             "cells": [],
+            "gvisorCompatibilitySummary": None,
             "errors": [report_error],
             "outputSecretScan": None,
         }

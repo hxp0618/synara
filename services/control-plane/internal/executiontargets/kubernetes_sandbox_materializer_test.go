@@ -776,7 +776,10 @@ func seedKubernetesAllocationGenerationFacts(t *testing.T, fixture kubernetesRec
 			WarmPoolMode: "disabled", WarmPoolResult: "not-requested", DispatchRequestedAt: &now,
 			CreatedAt: now, UpdatedAt: now,
 		}
-		if err := fixture.db.Create(&fact).Error; err != nil {
+		if err := fixture.db.Where(
+			"tenant_id = ? AND execution_id = ? AND generation = ?",
+			fact.TenantID, fact.ExecutionID, fact.Generation,
+		).FirstOrCreate(&fact).Error; err != nil {
 			t.Fatalf("seed Generation fact: %v", err)
 		}
 	}

@@ -606,6 +606,30 @@ func TestLoadConfigReadsKubernetesPodBoundRegistrationTokenFile(t *testing.T) {
 	}
 }
 
+func TestResolveProviderOuterSandboxProfileAcceptsOnlyDeclaredKubernetesGVisor(t *testing.T) {
+	cfg := Config{
+		TargetKind: platform.TargetKubernetes, RegistrationTokenFile: "/var/run/synara/token",
+		PrivateTempRoot: "/tmp", KubernetesPIDsMax: 128,
+		KubernetesRuntimeIsolationProfile: string(platform.IsolationGVisorSandboxed),
+	}
+	profile, err := resolveProviderOuterSandboxProfile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile != providerOuterSandboxGVisorSandboxed {
+		t.Fatalf("gVisor Provider outer sandbox profile = %q", profile)
+	}
+	cfg.KubernetesRuntimeIsolationProfile = string(platform.IsolationMicroVM)
+	if _, err := resolveProviderOuterSandboxProfile(cfg); err == nil {
+		t.Fatal("ambient microVM profile without Cocoon attestation was accepted")
+	}
+	cfg.TargetKind = platform.TargetDocker
+	cfg.KubernetesRuntimeIsolationProfile = string(platform.IsolationGVisorSandboxed)
+	if _, err := resolveProviderOuterSandboxProfile(cfg); err == nil {
+		t.Fatal("Docker Worker declared a Kubernetes gVisor profile")
+	}
+}
+
 func TestLoadConfigRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	root := t.TempDir()
 	for _, test := range []struct {

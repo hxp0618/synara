@@ -22,6 +22,9 @@ const target: ControlPlaneExecutionTarget = {
   name: "Production Kubernetes",
   status: "active",
   capabilities: {},
+  isolationProfile: "kubernetes-restricted-v1",
+  platformSharedEligible: true,
+  productBoundary: "multi-tenant-restricted",
   createdAt: "2026-07-22T00:00:00Z",
   updatedAt: "2026-07-22T00:00:00Z",
 };

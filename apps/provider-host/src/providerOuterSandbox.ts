@@ -2,6 +2,7 @@ export const PROVIDER_OUTER_SANDBOX_PROFILE_ENV = "SYNARA_PROVIDER_OUTER_SANDBOX
 
 export const PROVIDER_OUTER_SANDBOX_PROFILES = [
   "kubernetes-restricted-v1",
+  "gvisor-sandboxed-v1",
   "microvm-isolated-v1",
   "single-tenant-trusted-v1",
 ] as const;

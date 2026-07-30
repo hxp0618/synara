@@ -372,6 +372,56 @@ export type ControlPlaneAgentSession = {
 
 export type ControlPlaneExecutionTargetKind = "local" | "ssh" | "docker" | "kubernetes";
 
+export type ControlPlaneIsolationProfile =
+  | "single-tenant-trusted-v1"
+  | "kubernetes-restricted-v1"
+  | "gvisor-sandboxed-v1"
+  | "microvm-isolated-v1";
+
+export type ControlPlaneRuntimeIsolationPolicy = {
+  mode: "explicit" | "auto" | "legacy-native";
+  requestedRuntime: "auto" | "runc" | "gvisor" | "firecracker";
+  preferred: ReadonlyArray<"runc" | "gvisor" | "firecracker">;
+  minimumProfile: ControlPlaneIsolationProfile;
+  fallbackPolicy: "fail-closed" | "allow-lower";
+  runtimeClassName?: string;
+  gvisorCompatibleProviders: ReadonlyArray<ProviderHostProviderKind>;
+};
+
+export type ControlPlaneRuntimeIsolationPolicyInput =
+  | {
+      mode: "explicit";
+      runtime: "runc" | "gvisor" | "firecracker";
+      minimumProfile: ControlPlaneIsolationProfile;
+      fallbackPolicy: "fail-closed" | "allow-lower";
+      runtimeClassName?: string;
+      gvisorCompatibleProviders?: ReadonlyArray<ProviderHostProviderKind>;
+    }
+  | {
+      mode: "auto";
+      preferred: ReadonlyArray<"runc" | "gvisor" | "firecracker">;
+      minimumProfile: ControlPlaneIsolationProfile;
+      fallbackPolicy: "fail-closed" | "allow-lower";
+      runtimeClassName?: string;
+      gvisorCompatibleProviders?: ReadonlyArray<ProviderHostProviderKind>;
+    };
+
+export type ControlPlaneRuntimeIsolationStatus = {
+  state: "available" | "degraded" | "unattested" | "stale";
+  detectedRuntimes: ReadonlyArray<"runc" | "gvisor" | "firecracker">;
+  detectedProfiles: ReadonlyArray<ControlPlaneIsolationProfile>;
+  reasonCode: string | null;
+  observedAt: string;
+  expiresAt: string;
+  runningGeneration?: {
+    generation: number;
+    effectiveRuntime: "runc" | "gvisor" | "firecracker";
+    effectiveProfile: ControlPlaneIsolationProfile;
+    decision: "selected" | "fallback";
+    policySource: "legacy-native" | "target-explicit" | "target-auto" | "lane-policy";
+  };
+};
+
 export type ControlPlaneExecutionTarget = {
   id: string;
   tenantId: string | null;
@@ -380,6 +430,11 @@ export type ControlPlaneExecutionTarget = {
   name: string;
   status: "active" | "disabled" | "offline";
   capabilities: Record<string, unknown>;
+  isolationProfile: ControlPlaneIsolationProfile;
+  platformSharedEligible: boolean;
+  productBoundary: "single-tenant-trusted" | "multi-tenant-restricted";
+  runtimeIsolationPolicy?: ControlPlaneRuntimeIsolationPolicy;
+  runtimeIsolationStatus?: ControlPlaneRuntimeIsolationStatus;
   createdAt: string;
   updatedAt: string;
 };
@@ -548,6 +603,7 @@ export type ControlPlaneWorkerReleaseRevision = {
   workerBuildVersion: string;
   workerBuildGitSha?: string;
   imageDigest?: string;
+  gvisorCompatibleProviders: ReadonlyArray<ProviderHostProviderKind>;
   description: string;
   createdBy: string;
   createdAt: string;
@@ -659,6 +715,23 @@ export type ControlPlaneExecutionResume = {
   turnId: string;
   status: "recovering";
   generation: number;
+};
+
+export type ControlPlaneRuntimeIsolationDecision = {
+  generation: number;
+  executionTargetId: string;
+  allocationBackend: string;
+  requestedRuntime: "auto" | "runc" | "gvisor" | "firecracker";
+  requestedProfile: ControlPlaneIsolationProfile;
+  effectiveRuntime: "runc" | "gvisor" | "firecracker" | null;
+  effectiveProfile: ControlPlaneIsolationProfile | null;
+  policySource: "legacy-native" | "target-explicit" | "target-auto" | "lane-policy";
+  decision: "selected" | "fallback" | "rejected";
+  decisionReasonCode: string | null;
+  runtimeClassName: string | null;
+  attestedAt: string | null;
+  attestationExpiresAt: string | null;
+  createdAt: string;
 };
 
 export type ControlPlaneReviewTarget =
@@ -1386,7 +1459,11 @@ export const controlPlaneClient = {
   createWorkerRelease: (
     tenantId: string,
     targetId: string,
-    input: { workerManifestId: string; description: string },
+    input: {
+      workerManifestId: string;
+      description: string;
+      gvisorCompatibleProviders?: ReadonlyArray<ProviderHostProviderKind>;
+    },
     options?: ControlPlaneIdempotencyOptions,
   ) =>
     controlPlaneRequest<ControlPlaneWorkerReleaseRevision>(
@@ -1435,6 +1512,15 @@ export const controlPlaneClient = {
     controlPlaneRequest<ControlPlaneExecutionTarget>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/provider-policy`,
       { method: "PATCH", body: { experimentalProviders } },
+    ),
+  updateExecutionTargetRuntimeIsolationPolicy: (
+    tenantId: string,
+    targetId: string,
+    policy: ControlPlaneRuntimeIsolationPolicyInput,
+  ) =>
+    controlPlaneRequest<ControlPlaneExecutionTarget>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/runtime-isolation-policy`,
+      { method: "PUT", body: policy },
     ),
   provisionSSHExecutionTarget: (
     tenantId: string,
@@ -1553,6 +1639,10 @@ export const controlPlaneClient = {
   listPendingInteractions: (sessionId: string) =>
     controlPlaneRequest<ControlPlanePendingInteractionSnapshot>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/interactions`,
+    ),
+  listExecutionRuntimeIsolationDecisions: (executionId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneRuntimeIsolationDecision> }>(
+      `/v1/executions/${encodeURIComponent(executionId)}/runtime-isolation`,
     ),
   resolveApproval: (
     executionId: string,

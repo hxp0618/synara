@@ -17,6 +17,17 @@ const target: ControlPlaneExecutionTarget = {
   name: "Docker workers",
   status: "active",
   capabilities: {},
+  isolationProfile: "single-tenant-trusted-v1",
+  platformSharedEligible: false,
+  productBoundary: "single-tenant-trusted",
+  runtimeIsolationPolicy: {
+    mode: "auto",
+    requestedRuntime: "auto",
+    preferred: ["gvisor", "runc"],
+    minimumProfile: "single-tenant-trusted-v1",
+    fallbackPolicy: "fail-closed",
+    gvisorCompatibleProviders: ["codex", "claudeAgent"],
+  },
   createdAt: "2026-07-15T00:00:00Z",
   updatedAt: "2026-07-15T00:00:00Z",
 };
@@ -95,6 +106,7 @@ describe("WorkerReleaseControls", () => {
           workerManifestId: "manifest-1",
           workerBuildVersion: "0.6.0",
           imageDigest: `sha256:${"a".repeat(64)}`,
+          gvisorCompatibleProviders: ["codex"],
           description: "Baseline",
           createdBy: "user-1",
           createdAt: "2026-07-15T00:00:00Z",
@@ -106,6 +118,9 @@ describe("WorkerReleaseControls", () => {
     expect(markup).toContain("Promote baseline");
     expect(markup).toContain("Register immutable revision");
     expect(markup).toContain("0.7.0 · manifest-2");
+    expect(markup).toContain("gVisor accepted for codex");
+    expect(markup).toContain("gVisor-compatible Providers");
+    expect(markup).toContain('aria-pressed="false"');
     expect(markup).not.toContain("0.6.0 · manifest-1");
   });
 
@@ -130,6 +145,7 @@ describe("WorkerReleaseControls", () => {
           workerManifestId: "manifest-2",
           workerBuildVersion: "0.7.0",
           imageDigest: `sha256:${"b".repeat(64)}`,
+          gvisorCompatibleProviders: ["codex", "claudeAgent"],
           description: "Candidate",
           createdBy: "user-1",
           createdAt: "2026-07-15T01:00:00Z",
@@ -142,6 +158,7 @@ describe("WorkerReleaseControls", () => {
           workerManifestId: "manifest-1",
           workerBuildVersion: "0.6.0",
           imageDigest: `sha256:${"a".repeat(64)}`,
+          gvisorCompatibleProviders: ["codex"],
           description: "Baseline",
           createdBy: "user-1",
           createdAt: "2026-07-15T00:00:00Z",

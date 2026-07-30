@@ -693,7 +693,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
         emitLine: (line) => encoded.push(line),
       });
       startCodexSession(host);
-      host.handleCommand(command("SendTurn", "brokered-credential-turn", { inputText: "[credential]" }));
+      host.handleCommand(
+        command("SendTurn", "brokered-credential-turn", { inputText: "[credential]" }),
+      );
     } finally {
       if (previousDescriptor === undefined) delete process.env.SYNARA_PROVIDER_CREDENTIAL_FD;
       else process.env.SYNARA_PROVIDER_CREDENTIAL_FD = previousDescriptor;

@@ -82,6 +82,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kubernetes_control_plane_host="host.docker.internal",
         kubernetes_control_plane_port=None,
         kubernetes_node_name=None,
+        kubernetes_runtime_class=None,
         kind_bin="kind",
         kind_cluster_name=None,
         kind_node_image="kindest/node:v1.33.1",
@@ -4288,6 +4289,59 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertIn("kubernetesNetworkBoundaryConsecutivePasses = 2", implementation)
         self.assertNotIn("response", implementation.lower())
 
+    def test_gvisor_compatibility_command_is_bounded_and_result_schema_is_strict(self) -> None:
+        command = acceptance.gvisor_compatibility_node_command("/usr/local/bin/node")
+        self.assertTrue(command.startswith("/usr/local/bin/node -e '"))
+        self.assertLess(len(command.encode("utf-8")), 64 << 10)
+        self.assertNotIn("SYNARA_GVISOR_COMPATIBILITY_FAILED_V1", command)
+
+        payload = {
+            "schemaVersion": 1,
+            "runtime": "gvisor",
+            "tools": {
+                tool: True for tool in acceptance.GVISOR_COMPATIBILITY_REQUIRED_TOOLS
+            },
+            "probes": {
+                probe: True
+                for probe in (
+                    "gvisorKernel",
+                    "git",
+                    "node",
+                    "bun",
+                    "packageManagers",
+                    "go",
+                    "rust",
+                    "java",
+                    "python",
+                    "pty",
+                    "fileMetadata",
+                    "fileWatch",
+                    "signal",
+                    "loopbackTcp",
+                )
+            },
+            "durationsMs": {
+                label: index
+                for index, label in enumerate(
+                    acceptance.GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS
+                )
+            },
+            "maxRssKiB": 4096,
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).rstrip(b"=")
+        output = acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii") + encoded + b"\n"
+
+        self.assertEqual(acceptance.parse_gvisor_compatibility_output(output), payload)
+        payload["probes"]["pty"] = False
+        invalid = acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii") + base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).rstrip(b"=") + b"\n"
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            acceptance.parse_gvisor_compatibility_output(invalid)
+        self.assertEqual(caught.exception.code, "runner.gvisor_runtime_incompatible")
+
     def test_stage5_credential_scope_probe_checks_presence_without_serializing_values(self) -> None:
         command = acceptance.stage5_credential_scope_node_command()
         parsed = shlex.split(command)
@@ -8106,6 +8160,36 @@ class RunnerOptionsTest(unittest.TestCase):
                     ]
                 )
 
+    def test_gvisor_compatibility_case_requires_exact_runtime_class(self) -> None:
+        arguments = [
+            "--suite",
+            "real-provider-smoke",
+            "--target",
+            "kubernetes",
+            "--runner-command-json",
+            '["/usr/local/bin/provider-host"]',
+            "--real-provider-credential-env",
+            "SYNARA_ACCEPTANCE_CODEX_KEY",
+            "--real-provider-case",
+            acceptance.REAL_PROVIDER_GVISOR_CASE,
+            "--kubernetes-node-name",
+            "worker-a",
+        ]
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-placeholder-key"},
+            clear=True,
+        ):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(arguments)
+            options = acceptance.parse_args(
+                [*arguments, "--kubernetes-runtime-class", "synara-gvisor"]
+            )
+
+        self.assertEqual(options.real_provider_cases, (acceptance.REAL_PROVIDER_GVISOR_CASE,))
+        self.assertNotIn(acceptance.REAL_PROVIDER_GVISOR_CASE, acceptance.REAL_PROVIDER_CASES)
+        self.assertIn(acceptance.REAL_PROVIDER_GVISOR_CASE, acceptance.REAL_PROVIDER_CASE_CHOICES)
+
     def test_real_provider_failure_matrix_expands_in_canonical_order(self) -> None:
         options = acceptance.parse_args(
             [
@@ -10007,6 +10091,66 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertEqual(
             target_api.payload["configuration"]["nodeSelector"],
             {"kubernetes.io/hostname": "worker-a.example"},
+        )
+
+    def test_create_kubernetes_target_serializes_explicit_gvisor_policy(self) -> None:
+        class TargetAPI:
+            payload: Mapping[str, Any] | None = None
+
+            def request(
+                inner_self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, expected, maximum_timeout
+                inner_self.payload = payload
+                return {"id": "target-gvisor"}
+
+        class TargetDriver(acceptance.KubernetesDriver):
+            def _worker_proxy_url(self) -> str:
+                return "http://127.0.0.1:41234"
+
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_runtime_class="synara-gvisor",
+        )
+        with mock.patch.object(acceptance, "reserve_loopback_port", return_value=43123):
+            driver = TargetDriver(
+                pathlib.Path.cwd(), options, acceptance.Deadline(30.0), acceptance.SecretRedactor()
+            )
+        self.addCleanup(driver._release_state)
+        target_api = TargetAPI()
+        driver.api = target_api  # type: ignore[assignment]
+        driver.api_server = "https://127.0.0.1:26443"
+        driver.ca_certificate = "fixture-ca"
+        driver.kubernetes_token = "fixture-token"
+
+        driver._create_kubernetes_target(
+            "tenant-id",
+            "organization-id",
+            "codex",
+            name="gvisor-target",
+            namespace="gvisor-namespace",
+            service_account="gvisor-service-account",
+            image="gvisor-image",
+        )
+
+        assert target_api.payload is not None
+        self.assertEqual(
+            target_api.payload["configuration"]["runtimeIsolation"],
+            {
+                "mode": "explicit",
+                "runtime": "gvisor",
+                "minimumProfile": "gvisor-sandboxed-v1",
+                "fallbackPolicy": "fail-closed",
+                "runtimeClassName": "synara-gvisor",
+                "gvisorCompatibleProviders": ["codex"],
+            },
         )
 
     def test_kubernetes_node_name_option_is_target_scoped_and_canonical(self) -> None:

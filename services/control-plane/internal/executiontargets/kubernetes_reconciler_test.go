@@ -2474,6 +2474,13 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 			&persistence.AgentSession{ID: sessionID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID, ProjectID: projectID, CreatedBy: domain.UserID, Title: fmt.Sprintf("Kubernetes session %d", index), Status: "active", Visibility: "organization", Provider: "codex", ExecutionTargetID: target.ID},
 			&persistence.AgentTurn{ID: turnID, TenantID: domain.TenantID, SessionID: sessionID, CreatedBy: domain.UserID, Status: "queued", InputText: fmt.Sprintf("Kubernetes turn %d", index)},
 			&persistence.AgentExecution{ID: executionID, TenantID: domain.TenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: "kubernetes", RequestedBy: domain.UserID, QueuedAt: now.Add(time.Duration(index) * time.Second)},
+			&persistence.ExecutionGenerationFact{
+				TenantID: domain.TenantID, ExecutionID: executionID, Generation: 1,
+				SessionID: sessionID, TurnID: turnID, ExecutionTargetID: target.ID,
+				TargetKind: "kubernetes", Provider: "codex", RecoveryReason: "initial-claim",
+				WarmPoolMode: "disabled", WarmPoolResult: "not-requested",
+				DispatchRequestedAt: runtimeIsolationTimePointer(now), CreatedAt: now, UpdatedAt: now,
+			},
 		)
 	}
 	for _, model := range models {
@@ -2549,7 +2556,12 @@ func (f kubernetesReconcileFixture) updateConfiguration(t *testing.T, configurat
 	}
 }
 
-func (f kubernetesReconcileFixture) seedReleaseRevision(t *testing.T, revision int64, imageDigest string) uuid.UUID {
+func (f kubernetesReconcileFixture) seedReleaseRevision(
+	t *testing.T,
+	revision int64,
+	imageDigest string,
+	gvisorCompatibleProviders ...string,
+) uuid.UUID {
 	t.Helper()
 	manifestID := uuid.New()
 	manifest := persistence.WorkerManifest{
@@ -2566,7 +2578,8 @@ func (f kubernetesReconcileFixture) seedReleaseRevision(t *testing.T, revision i
 	model := persistence.WorkerReleaseRevision{
 		ID: revisionID, TenantID: f.tenantID, ExecutionTargetID: f.targetID,
 		Revision: revision, WorkerManifestID: manifestID, Description: "Kubernetes release test",
-		CreatedBy: f.userID, CreatedAt: time.Now().UTC(),
+		GVisorCompatibleProviders: append([]string(nil), gvisorCompatibleProviders...),
+		CreatedBy:                 f.userID, CreatedAt: time.Now().UTC(),
 	}
 	if err := f.db.Create(&model).Error; err != nil {
 		t.Fatal(err)
@@ -2778,19 +2791,22 @@ func (f *fakeKubernetesFactory) Open(kubernetesTargetConfiguration) (kubernetesC
 }
 
 type fakeKubernetesClient struct {
-	applied                 []map[string]any
-	pods                    map[string]kubernetesPod
-	priorityClasses         map[string]kubernetesPriorityClass
-	priorityClassReadErr    error
-	priorityClassReadCount  map[string]int
-	resourceQuota           kubernetesResourceQuota
-	resourceQuotaReadErr    error
-	deletedPods             []string
-	podApplyErr             error
-	podApplyErrFor          map[string]error
-	listPodUIDsErr          error
-	deletePodErr            error
-	pidsLimitAttestationErr error
+	applied                      []map[string]any
+	pods                         map[string]kubernetesPod
+	priorityClasses              map[string]kubernetesPriorityClass
+	priorityClassReadErr         error
+	priorityClassReadCount       map[string]int
+	resourceQuota                kubernetesResourceQuota
+	resourceQuotaReadErr         error
+	deletedPods                  []string
+	podApplyErr                  error
+	podApplyErrFor               map[string]error
+	listPodUIDsErr               error
+	deletePodErr                 error
+	pidsLimitAttestationErr      error
+	runtimeIsolationCapabilities []runtimeIsolationCapability
+	runtimeIsolationErr          error
+	runtimeIsolationCanaryErr    error
 }
 
 func newFakeKubernetesClient() *fakeKubernetesClient {
@@ -2802,6 +2818,9 @@ func newFakeKubernetesClient() *fakeKubernetesClient {
 			},
 		},
 		priorityClassReadCount: map[string]int{},
+		runtimeIsolationCapabilities: []runtimeIsolationCapability{{
+			Runtime: runtimeIsolationRunc, Profile: platform.IsolationKubernetesRestricted,
+		}},
 	}
 }
 
@@ -2812,6 +2831,33 @@ func (c *fakeKubernetesClient) AttestPodPIDsLimit(
 	_ string,
 ) error {
 	return c.pidsLimitAttestationErr
+}
+
+func (c *fakeKubernetesClient) RuntimeIsolationCapabilities(
+	_ context.Context,
+	configuration kubernetesTargetConfiguration,
+	_ time.Time,
+) ([]runtimeIsolationCapability, error) {
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		return []runtimeIsolationCapability{{
+			Runtime: runtimeIsolationFirecracker, Profile: platform.IsolationMicroVM,
+		}}, c.runtimeIsolationErr
+	}
+	return c.runtimeIsolationCapabilities, c.runtimeIsolationErr
+}
+
+func (c *fakeKubernetesClient) EnsureRuntimeIsolationCanary(
+	_ context.Context,
+	_ persistence.ExecutionTarget,
+	_ kubernetesTargetConfiguration,
+	_ *ImagePullCredential,
+) error {
+	return c.runtimeIsolationCanaryErr
+}
+
+func runtimeIsolationTimePointer(value time.Time) *time.Time {
+	copy := value
+	return &copy
 }
 
 func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[string]any) error {

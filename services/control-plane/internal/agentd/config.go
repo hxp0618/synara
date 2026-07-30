@@ -23,47 +23,48 @@ import (
 )
 
 type Config struct {
-	ControlPlaneURL              *url.URL
-	RegistrationToken            string
-	RegistrationTokenFile        string
-	ExecutionTargetID            uuid.UUID
-	AssignedExecutionID          *uuid.UUID
-	WorkerMode                   string
-	TargetKind                   platform.ExecutionTargetKind
-	KubernetesPIDsMax            uint64
-	ClusterID                    string
-	Namespace                    string
-	PodName                      string
-	InstanceUID                  string
-	SSHBootstrapGeneration       *int64
-	Version                      string
-	BuildGitSHA                  string
-	ImageDigest                  string
-	WorkerImageManifest          *workerImageManifest
-	Capabilities                 map[string]any
-	ExperimentalProviders        []string
-	RunnerCommand                []string
-	RunnerProtocol               RunnerProtocol
-	CgroupV2Root                 string
-	CgroupV2ProviderIdentity     *ProtectedCgroupIdentity
-	CgroupV2ProviderLimits       *ProtectedCgroupResourceLimits
-	CgroupV2Attestation          *ProtectedCgroupAttestationConfig
-	ProcessContainmentCapability map[string]any
-	WorkspaceRoot                string
-	GitCacheRoot                 string
-	PrivateTempRoot              string
-	ProviderOuterSandboxProfile  string
-	CocoonSupervisorAttestation  *CocoonSupervisorAttestation
-	WorkspaceFetchWindow         time.Duration
-	PrivateNetworkCIDRs          []string
-	PollInterval                 time.Duration
-	HeartbeatInterval            time.Duration
-	LeaseRenewInterval           time.Duration
-	DrainTimeout                 time.Duration
-	RequestTimeout               time.Duration
-	SandboxAllocationBindTimeout time.Duration
-	ArtifactTimeout              time.Duration
-	RunnerMessageBytes           int
+	ControlPlaneURL                   *url.URL
+	RegistrationToken                 string
+	RegistrationTokenFile             string
+	ExecutionTargetID                 uuid.UUID
+	AssignedExecutionID               *uuid.UUID
+	WorkerMode                        string
+	TargetKind                        platform.ExecutionTargetKind
+	KubernetesPIDsMax                 uint64
+	ClusterID                         string
+	Namespace                         string
+	PodName                           string
+	InstanceUID                       string
+	SSHBootstrapGeneration            *int64
+	Version                           string
+	BuildGitSHA                       string
+	ImageDigest                       string
+	WorkerImageManifest               *workerImageManifest
+	Capabilities                      map[string]any
+	ExperimentalProviders             []string
+	RunnerCommand                     []string
+	RunnerProtocol                    RunnerProtocol
+	CgroupV2Root                      string
+	CgroupV2ProviderIdentity          *ProtectedCgroupIdentity
+	CgroupV2ProviderLimits            *ProtectedCgroupResourceLimits
+	CgroupV2Attestation               *ProtectedCgroupAttestationConfig
+	ProcessContainmentCapability      map[string]any
+	WorkspaceRoot                     string
+	GitCacheRoot                      string
+	PrivateTempRoot                   string
+	KubernetesRuntimeIsolationProfile string
+	ProviderOuterSandboxProfile       string
+	CocoonSupervisorAttestation       *CocoonSupervisorAttestation
+	WorkspaceFetchWindow              time.Duration
+	PrivateNetworkCIDRs               []string
+	PollInterval                      time.Duration
+	HeartbeatInterval                 time.Duration
+	LeaseRenewInterval                time.Duration
+	DrainTimeout                      time.Duration
+	RequestTimeout                    time.Duration
+	SandboxAllocationBindTimeout      time.Duration
+	ArtifactTimeout                   time.Duration
+	RunnerMessageBytes                int
 }
 
 var stage3ProviderNames = providercatalog.ProviderNames()
@@ -253,7 +254,8 @@ func LoadConfig() (Config, error) {
 		CgroupV2ProviderLimits:   cgroupV2ProviderLimits,
 		CgroupV2Attestation:      cgroupV2Attestation,
 		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot, PrivateTempRoot: privateTempRoot,
-		PrivateNetworkCIDRs: privateNetworkCIDRs,
+		KubernetesRuntimeIsolationProfile: strings.TrimSpace(os.Getenv(platform.KubernetesRuntimeIsolationProfileEnvironment)),
+		PrivateNetworkCIDRs:               privateNetworkCIDRs,
 	}
 	assignedExecutionID, err := loadAssignedExecutionID()
 	if err != nil {
@@ -338,6 +340,7 @@ func LoadConfig() (Config, error) {
 
 const (
 	providerOuterSandboxKubernetesRestricted = string(platform.IsolationKubernetesRestricted)
+	providerOuterSandboxGVisorSandboxed      = string(platform.IsolationGVisorSandboxed)
 	providerOuterSandboxMicroVM              = string(platform.IsolationMicroVM)
 	providerOuterSandboxSingleTenantTrusted  = string(platform.IsolationSingleTenantTrusted)
 )
@@ -349,9 +352,23 @@ func resolveProviderOuterSandboxProfile(cfg Config) (string, error) {
 			return "", errors.New("Kubernetes Provider execution requires Pod-bound registration, a finite kubelet PID declaration, and an explicit Worker-private temporary root")
 		}
 		if cfg.CocoonSupervisorAttestation != nil {
+			if cfg.KubernetesRuntimeIsolationProfile != "" &&
+				cfg.KubernetesRuntimeIsolationProfile != providerOuterSandboxMicroVM {
+				return "", errors.New("Cocoon Provider execution cannot declare a non-microVM runtime isolation profile")
+			}
 			return providerOuterSandboxMicroVM, nil
 		}
-		return providerOuterSandboxKubernetesRestricted, nil
+		switch cfg.KubernetesRuntimeIsolationProfile {
+		case "", providerOuterSandboxKubernetesRestricted:
+			return providerOuterSandboxKubernetesRestricted, nil
+		case providerOuterSandboxGVisorSandboxed:
+			return providerOuterSandboxGVisorSandboxed, nil
+		default:
+			return "", errors.New("Kubernetes Provider execution declared an unsupported runtime isolation profile")
+		}
+	}
+	if cfg.KubernetesRuntimeIsolationProfile != "" {
+		return "", errors.New("Kubernetes runtime isolation profile is only valid for Kubernetes workers")
 	}
 	if cfg.CocoonSupervisorAttestation != nil {
 		return "", errors.New("Cocoon supervisor attestation is only valid for Kubernetes workers")

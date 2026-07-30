@@ -1,6 +1,6 @@
 import { PROVIDER_CAPABILITY_CATALOG, type ProviderHostProviderKind } from "@synara/contracts";
 import { useMutation } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import {
   CONTROL_PLANE_FORM_GRID_CLASS_NAME,
@@ -28,6 +28,7 @@ import {
   type ControlPlaneExecutionTarget,
   type ControlPlaneExecutionTargetKind,
   type ControlPlaneOrganization,
+  type ControlPlaneRuntimeIsolationPolicyInput,
   type ControlPlaneWorker,
   type ControlPlaneWorkerManifest,
   type ControlPlaneWorkerProviderManifest,
@@ -298,6 +299,20 @@ function ExecutionTargetRow(props: {
       actions={
         <span className="flex flex-wrap justify-end gap-1.5">
           <ControlPlaneStatusPill value={props.target.kind} active={false} />
+          <ControlPlaneStatusPill
+            value={
+              props.target.runtimeIsolationPolicy?.requestedRuntime ??
+              props.target.isolationProfile ??
+              "runtime policy unavailable"
+            }
+            active={false}
+          />
+          {props.target.runtimeIsolationStatus ? (
+            <ControlPlaneStatusPill
+              value={`${props.target.runtimeIsolationStatus.state} runtime`}
+              active={props.target.runtimeIsolationStatus.state === "available"}
+            />
+          ) : null}
           <ControlPlaneStatusPill value={props.target.status} />
           {props.canManage && props.target.kind === "ssh" ? (
             <SSHProvisioningActions
@@ -366,6 +381,31 @@ export function ExecutionTargetPolicyDisclosure(props: {
         >
           <dl className="grid gap-1.5">
             <div className="grid gap-0.5 sm:grid-cols-[10rem_1fr] sm:gap-2">
+              <dt className="font-medium text-foreground">Isolation boundary</dt>
+              <dd className="text-muted-foreground">
+                {props.target.isolationProfile ?? "unreported"} ·{" "}
+                {props.target.productBoundary ?? "unreported"}
+              </dd>
+            </div>
+            <div className="grid gap-0.5 sm:grid-cols-[10rem_1fr] sm:gap-2">
+              <dt className="font-medium text-foreground">Configured / requested</dt>
+              <dd className="text-muted-foreground">
+                {formatRuntimeIsolationPolicy(props.target)}
+              </dd>
+            </div>
+            <div className="grid gap-0.5 sm:grid-cols-[10rem_1fr] sm:gap-2">
+              <dt className="font-medium text-foreground">Available / detected</dt>
+              <dd className="text-muted-foreground">
+                {formatRuntimeIsolationAvailability(props.target)}
+              </dd>
+            </div>
+            <div className="grid gap-0.5 sm:grid-cols-[10rem_1fr] sm:gap-2">
+              <dt className="font-medium text-foreground">Running / effective</dt>
+              <dd className="text-muted-foreground">
+                {formatRuntimeIsolationEffective(props.target)}
+              </dd>
+            </div>
+            <div className="grid gap-0.5 sm:grid-cols-[10rem_1fr] sm:gap-2">
               <dt className="font-medium text-foreground">Experimental Providers</dt>
               <dd className="text-muted-foreground">
                 {experimentalProviders.length > 0
@@ -374,6 +414,16 @@ export function ExecutionTargetPolicyDisclosure(props: {
               </dd>
             </div>
           </dl>
+          {props.canManage &&
+          props.tenantId &&
+          props.target.tenantId !== null &&
+          props.onProviderPolicyUpdated ? (
+            <RuntimeIsolationPolicyControls
+              onUpdated={props.onProviderPolicyUpdated}
+              target={props.target}
+              tenantId={props.tenantId}
+            />
+          ) : null}
           {props.canManage && props.tenantId && props.onProviderPolicyUpdated ? (
             <ProviderPolicyControls
               enabledProviders={experimentalProviders}
@@ -448,6 +498,139 @@ export function ExecutionTargetPolicyDisclosure(props: {
       </DisclosureRegion>
     </div>
   );
+}
+
+function RuntimeIsolationPolicyControls(props: {
+  tenantId: string;
+  target: ControlPlaneExecutionTarget;
+  onUpdated: (target: ControlPlaneExecutionTarget) => void;
+}) {
+  const projected = runtimeIsolationPolicyJSON(props.target);
+  const [value, setValue] = useState(projected);
+  const [inputError, setInputError] = useState<string | null>(null);
+  useEffect(() => setValue(projected), [projected]);
+  const update = useMutation({
+    mutationFn: (policy: ControlPlaneRuntimeIsolationPolicyInput) =>
+      controlPlaneClient.updateExecutionTargetRuntimeIsolationPolicy(
+        props.tenantId,
+        props.target.id,
+        policy,
+      ),
+    onSuccess: (target) => {
+      setInputError(null);
+      props.onUpdated(target);
+    },
+  });
+  if (props.target.kind !== "kubernetes" && props.target.kind !== "docker") return null;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const parsed = parseJSONObject(value, "Runtime isolation policy");
+      setInputError(null);
+      update.mutate(parsed as ControlPlaneRuntimeIsolationPolicyInput);
+    } catch (error) {
+      setInputError(
+        error instanceof Error ? error.message : "Runtime isolation policy is invalid.",
+      );
+    }
+  };
+  const requestError =
+    update.error instanceof Error
+      ? update.error.message
+      : update.error
+        ? "Runtime isolation policy update failed."
+        : null;
+  return (
+    <form className="grid gap-2 border-t border-border pt-2.5" onSubmit={submit}>
+      <div>
+        <p className="font-medium text-foreground">Runtime isolation policy</p>
+        <p className="text-muted-foreground">
+          Saving exits legacy mode. Active Executions must be drained first; the Target goes offline
+          until fresh detection and canary checks succeed.
+        </p>
+      </div>
+      <Textarea
+        aria-label="Runtime isolation policy JSON"
+        disabled={update.isPending || props.target.status === "disabled"}
+        value={value}
+        onChange={(event) => {
+          setValue(event.target.value);
+          setInputError(null);
+          update.reset();
+        }}
+      />
+      <div>
+        <Button
+          disabled={update.isPending || props.target.status === "disabled"}
+          size="sm"
+          type="submit"
+          variant="outline"
+        >
+          {update.isPending ? "Saving runtime policy…" : "Save runtime policy"}
+        </Button>
+      </div>
+      {inputError || requestError ? (
+        <p className="text-destructive" role="alert">
+          {inputError ?? requestError}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+function runtimeIsolationPolicyJSON(target: ControlPlaneExecutionTarget): string {
+  const policy = target.runtimeIsolationPolicy;
+  if (!policy) return "{}";
+  const compatibleProviders = policy.gvisorCompatibleProviders ?? [];
+  const common = {
+    minimumProfile: policy.minimumProfile,
+    fallbackPolicy: policy.fallbackPolicy,
+    ...(policy.runtimeClassName ? { runtimeClassName: policy.runtimeClassName } : {}),
+    ...(compatibleProviders.length > 0 ? { gvisorCompatibleProviders: compatibleProviders } : {}),
+  };
+  return JSON.stringify(
+    policy.mode === "auto"
+      ? { mode: "auto", preferred: policy.preferred, ...common }
+      : { mode: "explicit", runtime: policy.requestedRuntime, ...common },
+    null,
+    2,
+  );
+}
+
+function formatRuntimeIsolationPolicy(target: ControlPlaneExecutionTarget): string {
+  const policy = target.runtimeIsolationPolicy;
+  if (!policy) return "No runtime-specific policy";
+  const requested =
+    policy.mode === "auto" ? `auto (${policy.preferred.join(" → ")})` : policy.requestedRuntime;
+  const runtimeClass = policy.runtimeClassName ? ` · RuntimeClass ${policy.runtimeClassName}` : "";
+  const compatibleProviders = policy.gvisorCompatibleProviders ?? [];
+  const compatibility =
+    compatibleProviders.length > 0
+      ? ` · gVisor accepted for ${compatibleProviders.join(", ")}`
+      : policy.preferred.includes("gvisor") || policy.requestedRuntime === "gvisor"
+        ? " · gVisor Provider compatibility unaccepted"
+        : "";
+  return `${requested} · minimum ${policy.minimumProfile} · ${policy.fallbackPolicy}${runtimeClass}${compatibility}`;
+}
+
+function formatRuntimeIsolationAvailability(target: ControlPlaneExecutionTarget): string {
+  const status = target.runtimeIsolationStatus;
+  if (!status)
+    return target.tenantId === null
+      ? "Shared target runtime observation unavailable"
+      : "Not observed yet";
+  const detected = status.detectedRuntimes.length > 0 ? status.detectedRuntimes.join(", ") : "none";
+  const reason = status.reasonCode ? ` · ${status.reasonCode}` : "";
+  return `${status.state} · ${detected}${reason}`;
+}
+
+function formatRuntimeIsolationEffective(target: ControlPlaneExecutionTarget): string {
+  const running = target.runtimeIsolationStatus?.runningGeneration;
+  if (!running)
+    return target.tenantId === null
+      ? "Shared target effective runtime unavailable"
+      : "No running Generation";
+  return `${running.effectiveRuntime} · ${running.effectiveProfile} · Generation ${running.generation} · ${running.decision}`;
 }
 
 function ProviderPolicyControls(props: {

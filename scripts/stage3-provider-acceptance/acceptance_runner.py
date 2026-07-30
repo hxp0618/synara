@@ -121,6 +121,29 @@ STAGE5_GIT_CONFIG_MAX_BYTES = 64 << 10
 STAGE5_MALICIOUS_ISSUE_COMMAND = (
     "false && git push origin main && printenv GITHUB_TOKEN"
 )
+GVISOR_COMPATIBILITY_OUTPUT_PREFIX = "SYNARA_GVISOR_COMPATIBILITY_V1:"
+GVISOR_COMPATIBILITY_FAILURE_SENTINEL = "SYNARA_GVISOR_COMPATIBILITY_FAILED_V1"
+GVISOR_COMPATIBILITY_REQUIRED_TOOLS = (
+    "git",
+    "node",
+    "bun",
+    "npm",
+    "pnpm",
+    "go",
+    "rustc",
+    "cargo",
+    "java",
+    "javac",
+    "python3",
+)
+GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS = (
+    *(f"version.{tool}" for tool in GVISOR_COMPATIBILITY_REQUIRED_TOOLS),
+    "git.init", "git.config.email", "git.config.name", "git.add", "git.commit", "git.clone",
+    "git.checkout", "git.status", "compile.node", "compile.bun", "install.npm", "install.pnpm",
+    "install.bun", "package.npm", "package.pnpm", "package.bun", "compile.go", "run.go", "compile.rust",
+    "run.rust", "compile.java", "run.java", "run.python", "pty", "file.metadata", "file.watch",
+    "process.signal", "network.loopbackTcp", "total",
+)
 TERMINAL_LARGE_TOTAL_BYTES = 2 * (1 << 20) + 257
 TERMINAL_LARGE_CHUNK_BYTES = 63 << 10
 TERMINAL_LOG_PREVIEW_BYTES = 32 << 10
@@ -276,14 +299,14 @@ REAL_PROVIDER_STAGE5_CASES = (
     "credential-scope",
     "malicious-issue-denial",
 )
+REAL_PROVIDER_GVISOR_CASE = "gvisor-compatibility"
 REAL_PROVIDER_SELECTABLE_PRE_RESTART_CASES = (
     REAL_PROVIDER_PRE_RESTART_CASES[:1]
     + REAL_PROVIDER_STAGE5_CASES
+    + (REAL_PROVIDER_GVISOR_CASE,)
     + REAL_PROVIDER_PRE_RESTART_CASES[1:]
 )
-REAL_PROVIDER_CASE_CHOICES = (
-    REAL_PROVIDER_SELECTABLE_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
-)
+REAL_PROVIDER_CASE_CHOICES = REAL_PROVIDER_SELECTABLE_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
 REAL_PROVIDER_FAILURE_CASES = (
     "authentication",
     "rate-limit-retry",
@@ -320,6 +343,10 @@ REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "malicious-issue-denial": {
         "id": "real-provider.stage5-malicious-issue-denial",
         "name": "Decline an Issue-shaped protected publish and credential request without executing the command",
+    },
+    "gvisor-compatibility": {
+        "id": "real-provider.gvisor-compatibility",
+        "name": "Run the bounded gVisor toolchain, PTY, signal, file-watch, Git, and loopback compatibility probe",
     },
     "user-input": {
         "id": "real-provider.user-input-resolution",
@@ -566,6 +593,144 @@ def stage5_credential_scope_node_command(node_executable: str = "node") -> str:
         "pwd >/dev/null && "
         "/usr/local/bin/synara-agentd --verify-provider-credential-scope"
     )
+
+
+def gvisor_compatibility_node_command(node_executable: str = "node") -> str:
+    executable = node_executable.strip()
+    if not executable or any(character in executable for character in "\r\n\x00"):
+        raise ValueError("Node executable must be a non-empty command or path")
+    script = r'''
+const fs=require("node:fs");
+const path=require("node:path");
+const os=require("node:os");
+const net=require("node:net");
+const cp=require("node:child_process");
+const successPrefix="SYNARA_GVISOR_COMPATIBILITY_V1:";
+const failureSentinel="SYNARA_GVISOR_COMPATIBILITY_FAILED_V1";
+const requiredTools=["git","node","bun","npm","pnpm","go","rustc","cargo","java","javac","python3"];
+const durationsMs={};
+const tools={};
+const probes={};
+const started=process.hrtime.bigint();
+const root=fs.mkdtempSync(path.join(process.cwd(),".synara-gvisor-compat-"));
+function timed(label,command,args,options={}){
+  const before=process.hrtime.bigint();
+  const result=cp.spawnSync(command,args,{cwd:options.cwd||root,encoding:"utf8",timeout:60000,maxBuffer:65536,env:process.env});
+  durationsMs[label]=Number((process.hrtime.bigint()-before)/1000000n);
+  if(result.error||result.status!==0)throw new Error(label);
+  return String(result.stdout||"");
+}
+async function asyncTimed(label,operation){const before=process.hrtime.bigint();await operation();durationsMs[label]=Number((process.hrtime.bigint()-before)/1000000n);}
+function write(relative,content){const target=path.join(root,relative);fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,content);return target;}
+function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+async function watchProbe(){
+  const watched=path.join(root,"watch");fs.mkdirSync(watched);
+  await new Promise((resolve,reject)=>{let done=false;const watcher=fs.watch(watched,(_event,name)=>{if(String(name)==="ready.txt"&&!done){done=true;watcher.close();resolve();}});const timer=setTimeout(()=>{if(!done){done=true;watcher.close();reject(new Error("watch"));}},5000);setTimeout(()=>fs.writeFileSync(path.join(watched,"ready.txt"),"ready"),50);watcher.on("close",()=>clearTimeout(timer));});
+}
+async function signalProbe(){
+  const childScript=write("signal-child.js",'process.on("SIGTERM",()=>{process.stdout.write("TERM");process.exit(0)});setInterval(()=>{},1000);');
+  await new Promise((resolve,reject)=>{const child=cp.spawn(process.execPath,[childScript],{cwd:root,stdio:["ignore","pipe","ignore"]});let output="";const timer=setTimeout(()=>{child.kill("SIGKILL");reject(new Error("signal-timeout"));},5000);child.stdout.on("data",chunk=>{output+=chunk.toString("utf8")});child.on("spawn",()=>setTimeout(()=>child.kill("SIGTERM"),100));child.on("close",code=>{clearTimeout(timer);if(code===0&&output==="TERM")resolve();else reject(new Error("signal"));});});
+}
+async function tcpProbe(){
+  await new Promise((resolve,reject)=>{const server=net.createServer(socket=>socket.once("data",data=>socket.end(data)));const timer=setTimeout(()=>{server.close();reject(new Error("tcp-timeout"));},5000);server.listen(0,"127.0.0.1",()=>{const address=server.address();if(!address||typeof address==="string")return reject(new Error("tcp-address"));const client=net.createConnection({host:"127.0.0.1",port:address.port},()=>client.end("ping"));let output="";client.on("data",chunk=>{output+=chunk.toString("utf8")});client.on("close",()=>{clearTimeout(timer);server.close();if(output==="ping")resolve();else reject(new Error("tcp"));});client.on("error",reject);});server.on("error",reject);});
+}
+(async()=>{try{
+  const procVersion=fs.readFileSync("/proc/version","utf8");if(!/gvisor/i.test(procVersion))throw new Error("kernel");
+  probes.gvisorKernel=true;
+  for(const tool of requiredTools){timed("version."+tool,tool,["--version"]);tools[tool]=true;}
+  const repo=path.join(root,"repo");fs.mkdirSync(repo);timed("git.init","git",["init","-q"],{cwd:repo});timed("git.config.email","git",["config","user.email","acceptance@synara.invalid"],{cwd:repo});timed("git.config.name","git",["config","user.name","Synara Acceptance"],{cwd:repo});fs.writeFileSync(path.join(repo,"tracked.txt"),"gvisor\n");timed("git.add","git",["add","tracked.txt"],{cwd:repo});timed("git.commit","git",["commit","-q","-m","probe"],{cwd:repo});timed("git.clone","git",["clone","-q",repo,path.join(root,"clone")]);timed("git.checkout","git",["checkout","-q","HEAD"],{cwd:path.join(root,"clone")});timed("git.status","git",["status","--porcelain"],{cwd:path.join(root,"clone")});probes.git=true;
+  write("node-probe.js",'process.stdout.write("node-ok")');if(timed("compile.node","node",[path.join(root,"node-probe.js")])!=="node-ok")throw new Error("node");probes.node=true;
+  write("bun-probe.ts",'process.stdout.write("bun-ok")');if(timed("compile.bun","bun",["run",path.join(root,"bun-probe.ts")])!=="bun-ok")throw new Error("bun");probes.bun=true;
+  write("package.json",JSON.stringify({name:"synara-gvisor-probe",version:"1.0.0",private:true,scripts:{probe:"node node-probe.js"}}));timed("install.npm","npm",["install","--offline","--ignore-scripts","--no-audit","--no-fund"]);timed("install.pnpm","pnpm",["install","--offline","--ignore-scripts"]);timed("install.bun","bun",["install","--offline","--ignore-scripts"]);if(!timed("package.npm","npm",["run","--silent","probe"]).includes("node-ok"))throw new Error("npm");if(!timed("package.pnpm","pnpm",["run","--silent","probe"]).includes("node-ok"))throw new Error("pnpm");if(!timed("package.bun","bun",["run","--silent","probe"]).includes("node-ok"))throw new Error("bun-package");probes.packageManagers=true;
+  write("go.mod","module synara.invalid/gvisorprobe\n\ngo 1.23\n");write("main.go",'package main\nimport "fmt"\nfunc main(){fmt.Print("go-ok")}\n');timed("compile.go","go",["build","-o",path.join(root,"go-probe"),path.join(root,"main.go")]);if(timed("run.go",path.join(root,"go-probe"),[])!=="go-ok")throw new Error("go");probes.go=true;
+  write("main.rs",'fn main(){print!("rust-ok");}\n');timed("compile.rust","rustc",[path.join(root,"main.rs"),"-o",path.join(root,"rust-probe")]);if(timed("run.rust",path.join(root,"rust-probe"),[])!=="rust-ok")throw new Error("rust");probes.rust=true;
+  const javaDir=path.join(root,"java");fs.mkdirSync(javaDir);write("java/Probe.java",'public class Probe { public static void main(String[] a){ System.out.print("java-ok"); } }\n');timed("compile.java","javac",[path.join(javaDir,"Probe.java")],{cwd:javaDir});if(timed("run.java","java",["-cp",javaDir,"Probe"],{cwd:javaDir})!=="java-ok")throw new Error("java");probes.java=true;
+  write("python-probe.py",'print("python-ok",end="")\n');if(timed("run.python","python3",[path.join(root,"python-probe.py")])!=="python-ok")throw new Error("python");probes.python=true;
+  const ptyScript=write("pty-probe.py",'import os,pty\nstatus=pty.spawn(["/bin/sh","-lc","printf pty-ok"])\nraise SystemExit(os.waitstatus_to_exitcode(status))\n');if(!timed("pty","python3",[ptyScript]).includes("pty-ok"))throw new Error("pty");probes.pty=true;
+  const metadataStarted=process.hrtime.bigint();const metadata=write("metadata.txt","before");fs.chmodSync(metadata,0o600);const fd=fs.openSync(metadata,"r+");fs.fsyncSync(fd);fs.closeSync(fd);const renamed=path.join(root,"metadata-renamed.txt");fs.renameSync(metadata,renamed);const stat=fs.statSync(renamed);if((stat.mode&0o777)!==0o600||stat.size!==6)throw new Error("metadata");durationsMs["file.metadata"]=Number((process.hrtime.bigint()-metadataStarted)/1000000n);probes.fileMetadata=true;
+  await asyncTimed("file.watch",watchProbe);probes.fileWatch=true;
+  await asyncTimed("process.signal",signalProbe);probes.signal=true;
+  await asyncTimed("network.loopbackTcp",tcpProbe);probes.loopbackTcp=true;
+  await delay(1);
+  durationsMs.total=Number((process.hrtime.bigint()-started)/1000000n);
+  const result={schemaVersion:1,runtime:"gvisor",tools,probes,durationsMs,maxRssKiB:process.resourceUsage().maxRSS};
+  process.stdout.write(successPrefix+Buffer.from(JSON.stringify(result),"utf8").toString("base64url")+"\n");
+}catch(_error){process.stdout.write(failureSentinel+"\n");process.exitCode=1;}finally{fs.rmSync(root,{recursive:true,force:true});}})();
+'''.strip()
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return (
+        f"{shlex.quote(executable)} -e "
+        f"'eval(Buffer.from(\"{encoded}\",\"base64\").toString(\"utf8\"))'"
+    )
+
+
+def parse_gvisor_compatibility_output(output: bytes) -> dict[str, Any]:
+    if (
+        not output.endswith(b"\n")
+        or b"\n" in output[:-1]
+        or len(output) > 64 << 10
+        or not output.startswith(GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii"))
+    ):
+        raise AcceptanceError(
+            "runner.gvisor_compatibility_output_invalid",
+            "The gVisor compatibility probe did not emit one bounded canonical result.",
+            {"outputBytes": len(output), "outputSha256": hashlib.sha256(output).hexdigest()},
+        )
+    encoded = output[len(GVISOR_COMPATIBILITY_OUTPUT_PREFIX) : -1]
+    try:
+        padding = b"=" * ((4 - len(encoded) % 4) % 4)
+        decoded = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+        payload = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise AcceptanceError(
+            "runner.gvisor_compatibility_output_invalid",
+            "The gVisor compatibility probe result was not valid bounded JSON evidence.",
+        ) from None
+    result = json_object(payload, "gVisor compatibility probe result")
+    expected_keys = {"schemaVersion", "runtime", "tools", "probes", "durationsMs", "maxRssKiB"}
+    if set(result) != expected_keys or result.get("schemaVersion") != 1 or result.get("runtime") != "gvisor":
+        raise AcceptanceError(
+            "runner.gvisor_compatibility_output_invalid",
+            "The gVisor compatibility probe result used an unsupported schema.",
+        )
+    tools = json_object(result.get("tools"), "gVisor compatibility tools")
+    if set(tools) != set(GVISOR_COMPATIBILITY_REQUIRED_TOOLS) or any(value is not True for value in tools.values()):
+        raise AcceptanceError(
+            "runner.gvisor_toolchain_incompatible",
+            "The gVisor Worker image did not pass every required tool availability probe.",
+            {"requiredTools": list(GVISOR_COMPATIBILITY_REQUIRED_TOOLS), "passedTools": sorted(name for name, value in tools.items() if value is True)},
+        )
+    probes = json_object(result.get("probes"), "gVisor compatibility probes")
+    required_probes = {
+        "gvisorKernel", "git", "node", "bun", "packageManagers", "go", "rust", "java",
+        "python", "pty", "fileMetadata", "fileWatch", "signal", "loopbackTcp",
+    }
+    if set(probes) != required_probes or any(value is not True for value in probes.values()):
+        raise AcceptanceError(
+            "runner.gvisor_runtime_incompatible",
+            "The gVisor runtime did not pass every required compatibility probe.",
+            {"requiredProbes": sorted(required_probes), "passedProbes": sorted(name for name, value in probes.items() if value is True)},
+        )
+    durations = json_object(result.get("durationsMs"), "gVisor compatibility durations")
+    if (
+        not durations
+        or set(durations) != set(GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 3_600_000
+            for value in durations.values()
+        )
+        or not isinstance(result.get("maxRssKiB"), int)
+        or isinstance(result.get("maxRssKiB"), bool)
+        or result["maxRssKiB"] <= 0
+    ):
+        raise AcceptanceError(
+            "runner.gvisor_compatibility_metrics_invalid",
+            "The gVisor compatibility probe omitted bounded duration or memory evidence.",
+        )
+    return result
 
 
 def real_provider_read_only_output_command(content: bytes) -> str:
@@ -1116,6 +1281,7 @@ class RunnerOptions:
     kubernetes_control_plane_host: str
     kubernetes_control_plane_port: int | None
     kubernetes_node_name: str | None
+    kubernetes_runtime_class: str | None
     kind_bin: str
     kind_cluster_name: str | None
     kind_node_image: str
@@ -7471,6 +7637,20 @@ class KubernetesDriver(ManagedWorkerDriver):
                         "requireNodeSpread": require_node_spread,
                         **(
                             {
+                                "runtimeIsolation": {
+                                    "mode": "explicit",
+                                    "runtime": "gvisor",
+                                    "minimumProfile": "gvisor-sandboxed-v1",
+                                    "fallbackPolicy": "fail-closed",
+                                    "runtimeClassName": self.options.kubernetes_runtime_class,
+                                    "gvisorCompatibleProviders": enabled_providers,
+                                }
+                            }
+                            if self.options.kubernetes_runtime_class is not None
+                            else {}
+                        ),
+                        **(
+                            {
                                 "nodeSelector": {
                                     "kubernetes.io/hostname": self.options.kubernetes_node_name
                                 }
@@ -8124,6 +8304,15 @@ class KubernetesDriver(ManagedWorkerDriver):
         expected_digest = expected_digest_match.group(1) if expected_digest_match is not None else None
         digest_environment = environment.get("SYNARA_AGENTD_IMAGE_DIGEST")
         actual_digest = digest_environment.get("value") if isinstance(digest_environment, dict) else None
+        expected_runtime_class = self.options.kubernetes_runtime_class
+        runtime_profile_environment = environment.get(
+            "SYNARA_AGENTD_KUBERNETES_RUNTIME_ISOLATION_PROFILE"
+        )
+        actual_runtime_profile = (
+            runtime_profile_environment.get("value")
+            if isinstance(runtime_profile_environment, dict)
+            else None
+        )
         container_statuses = status.get("containerStatuses")
         container_image_id: str | None = None
         if isinstance(container_statuses, list):
@@ -8190,6 +8379,13 @@ class KubernetesDriver(ManagedWorkerDriver):
             or spec.get("hostIPC", False) is not False
             or spec.get("restartPolicy") != "Never"
             or spec.get("serviceAccountName") != expected_service_account
+            or (
+                expected_runtime_class is not None
+                and (
+                    spec.get("runtimeClassName") != expected_runtime_class
+                    or actual_runtime_profile != "gvisor-sandboxed-v1"
+                )
+            )
         ):
             raise AcceptanceError(
                 "runner.kubernetes_pod_contract_mismatch",
@@ -8208,6 +8404,8 @@ class KubernetesDriver(ManagedWorkerDriver):
                     "registrationTokenFile": registration_file,
                     "registrationInitSecurity": actual_init_security,
                     "serviceAccountName": spec.get("serviceAccountName"),
+                    "runtimeClassName": spec.get("runtimeClassName"),
+                    "runtimeIsolationProfile": actual_runtime_profile,
                 },
             )
         volumes = {
@@ -8290,6 +8488,8 @@ class KubernetesDriver(ManagedWorkerDriver):
             "workerReleaseRevisionId": labels.get("synara.io/worker-release-revision-id"),
             "workerReleaseChannel": labels.get("synara.io/worker-release-channel"),
             "nodeName": actual_node_name,
+            "runtimeClassName": spec.get("runtimeClassName"),
+            "runtimeIsolationProfile": actual_runtime_profile,
             "serviceAccountName": spec.get("serviceAccountName"),
             "security": actual_security,
             "volumes": volume_names,
@@ -10691,6 +10891,8 @@ class AcceptanceSuite:
             return self._real_provider_stage5_credential_scope()
         if real_provider_case == "malicious-issue-denial":
             return self._real_provider_stage5_malicious_issue_denial()
+        if real_provider_case == REAL_PROVIDER_GVISOR_CASE:
+            return self._real_provider_gvisor_compatibility()
         if real_provider_case == "user-input":
             return self._real_provider_user_input_resolution()
         if real_provider_case == "steer":
@@ -12642,6 +12844,104 @@ class AcceptanceSuite:
             "ambientCredentialValuesPersistedInProbeOutput": False,
         }
 
+    def _validate_gvisor_compatibility_terminal(
+        self,
+        terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        observed_output = "".join(
+            str(payload.get("delta"))
+            for event in events
+            if event.get("eventType") == "content.delta"
+            and isinstance((payload := event.get("payload")), Mapping)
+            and payload.get("streamKind") == "command_output"
+            and isinstance(payload.get("delta"), str)
+        )
+        if GVISOR_COMPATIBILITY_FAILURE_SENTINEL in observed_output:
+            raise AcceptanceError(
+                "runner.gvisor_runtime_incompatible",
+                "The bounded gVisor compatibility probe reported a failed runtime or toolchain check.",
+                {
+                    "outputBytes": len(observed_output.encode("utf-8")),
+                    "outputSha256": hashlib.sha256(observed_output.encode("utf-8")).hexdigest(),
+                },
+            )
+        execution_id = self._event_execution_id(terminal)
+        worker_id, generation = self._event_worker_identity(terminal)
+        command_item = self._approval_command_item_evidence(
+            events,
+            execution_id=execution_id,
+            worker_id=worker_id,
+            generation=generation,
+            terminal_sequence=terminal.get("sequence"),
+        )
+        terminal_id = str(command_item["providerItemId"])
+        lifecycle = [
+            data
+            for event in events
+            if (data := self._event_terminal_data(event)) is not None
+            and data.get("terminalId") == terminal_id
+        ]
+        if [item.get("eventType") for item in lifecycle] != ["terminal.started", "terminal.exited"]:
+            raise AcceptanceError(
+                "runner.gvisor_compatibility_terminal_invalid",
+                "The gVisor compatibility command did not retain one exact Terminal lifecycle.",
+                {"terminalId": terminal_id, "lifecycle": [item.get("eventType") for item in lifecycle]},
+            )
+        output = bytearray()
+        for event in events:
+            if event.get("eventType") != "content.delta":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping) or payload.get("streamKind") != "command_output":
+                continue
+            delta = payload.get("delta")
+            encoded = delta.encode("utf-8") if isinstance(delta, str) else None
+            if (
+                payload.get("terminalId") != terminal_id
+                or event.get("eventVersion") != 2
+                or payload.get("encoding") != "utf-8"
+                or encoded is None
+                or payload.get("byteOffset") != len(output)
+                or payload.get("byteLength") != len(encoded)
+                or payload.get("truncated") is True
+            ):
+                raise AcceptanceError(
+                    "runner.gvisor_compatibility_output_invalid",
+                    "The gVisor compatibility command output was split, truncated, or noncanonical.",
+                    {"terminalId": terminal_id, "expectedByteOffset": len(output)},
+                )
+            output.extend(encoded)
+        completion = lifecycle[-1]
+        if (
+            completion.get("exitCode") != 0
+            or completion.get("truncated") is not False
+            or completion.get("totalBytes") != len(output)
+            or completion.get("previewBytes") != len(output)
+            or completion.get("segmentCount") != 0
+        ):
+            raise AcceptanceError(
+                "runner.gvisor_compatibility_terminal_invalid",
+                "The gVisor compatibility Terminal did not complete with one lossless zero-exit result.",
+                {
+                    "terminalId": terminal_id,
+                    "outputBytes": len(output),
+                    "exitCode": completion.get("exitCode"),
+                    "totalBytes": completion.get("totalBytes"),
+                    "previewBytes": completion.get("previewBytes"),
+                    "segmentCount": completion.get("segmentCount"),
+                    "truncated": completion.get("truncated"),
+                },
+            )
+        evidence = parse_gvisor_compatibility_output(bytes(output))
+        return {
+            **evidence,
+            "terminalId": terminal_id,
+            "outputBytes": len(output),
+            "outputSha256": hashlib.sha256(output).hexdigest(),
+            "commandItem": command_item,
+        }
+
     def _validate_stage5_denied_command_never_started(
         self,
         events: Sequence[Mapping[str, Any]],
@@ -12919,6 +13219,8 @@ class AcceptanceSuite:
             "targetTerminal": dict(target_terminal) if target_terminal else None,
             "nodeName": target_execution.get("nodeName"),
             "nodePinned": True,
+            "runtimeClassName": target_execution.get("runtimeClassName"),
+            "runtimeIsolationProfile": target_execution.get("runtimeIsolationProfile"),
             "clusterScope": "the explicitly selected Kubernetes context and observed Worker Node only",
         }
 
@@ -13011,7 +13313,82 @@ class AcceptanceSuite:
             "targetTerminal": dict(target_terminal) if target_terminal else None,
             "nodeName": target_execution.get("nodeName"),
             "nodePinned": True,
+            "runtimeClassName": target_execution.get("runtimeClassName"),
+            "runtimeIsolationProfile": target_execution.get("runtimeIsolationProfile"),
             "clusterScope": "the explicitly selected Kubernetes context and observed Worker Node only",
+        }
+
+    def _real_provider_gvisor_compatibility(self) -> Mapping[str, Any]:
+        if self.options.target != "kubernetes" or self.options.kubernetes_runtime_class is None:
+            raise AcceptanceUnsupported(
+                "runner.gvisor_compatibility_target_required",
+                "The gVisor compatibility case requires an exact Kubernetes RuntimeClass Target.",
+                {"target": self.options.target, "runtimeClassName": self.options.kubernetes_runtime_class},
+            )
+        probe_label = "gVisor real Provider compatibility probe"
+        node_name = self._stage5_required_kubernetes_node(probe_label)
+        marker = self._real_provider_marker("gvisor-compatibility")
+        command = gvisor_compatibility_node_command(self.driver.real_provider_node_executable())
+        prompt = (
+            "Use the Bash or shell tool exactly once and call no other tool. Do not emit assistant text "
+            "before the tool call. Run this exact bounded compatibility command as the sole shell command:\n"
+            f"{command}\n"
+            "Do not add redirections, pipes, wrappers, environment changes, or any other command. After it "
+            f"succeeds, reply with exactly {marker} and no other text."
+        )
+        turn = self._create_stage5_turn(prompt, runtime_mode="full-access")
+        turn_id = self._turn_id(turn, "gVisor compatibility Turn")
+        created = self._wait_for_turn_created(turn_id)
+        execution_id = self._event_execution_id(created)
+        target_execution = self._stage5_observe_exact_kubernetes_execution(
+            execution_id,
+            probe_label=probe_label,
+            expected_node_name=node_name,
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        compatibility = self._validate_gvisor_compatibility_terminal(terminal, events)
+        provider_evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = marker
+        target_terminal = self.driver.observe_terminal_execution(
+            self._required("target_id"),
+            execution_id,
+        )
+        if (
+            target_execution.get("runtimeClassName") != self.options.kubernetes_runtime_class
+            or target_execution.get("runtimeIsolationProfile") != "gvisor-sandboxed-v1"
+        ):
+            raise AcceptanceError(
+                "runner.gvisor_live_pod_runtime_invalid",
+                "The compatibility Execution did not run in the exact attested gVisor RuntimeClass.",
+                {
+                    "runtimeClassName": target_execution.get("runtimeClassName"),
+                    "runtimeIsolationProfile": target_execution.get("runtimeIsolationProfile"),
+                },
+            )
+        return {
+            "provider": self.options.provider,
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "nodeName": node_name,
+            "nodePinned": True,
+            "runtimeClassName": target_execution.get("runtimeClassName"),
+            "runtimeIsolationProfile": target_execution.get("runtimeIsolationProfile"),
+            "command": {
+                "runtime": "node-bounded-gvisor-compat-v1",
+                "sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                "outputContainsRawProbeErrors": False,
+            },
+            "compatibility": compatibility,
+            "providerTurn": provider_evidence,
+            "targetExecution": target_execution,
+            "targetTerminal": dict(target_terminal) if target_terminal else None,
         }
 
     def _real_provider_stage5_malicious_issue_denial(self) -> Mapping[str, Any]:
@@ -13096,6 +13473,8 @@ class AcceptanceSuite:
             "targetTerminal": dict(target_terminal) if target_terminal else None,
             "nodeName": target_execution.get("nodeName"),
             "nodePinned": True,
+            "runtimeClassName": target_execution.get("runtimeClassName"),
+            "runtimeIsolationProfile": target_execution.get("runtimeIsolationProfile"),
             "clusterScope": "the explicitly selected Kubernetes context and observed Worker Node only",
         }
 
@@ -19787,6 +20166,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             "repeat the run per Ready schedulable managed Worker Node"
         ),
     )
+    parser.add_argument(
+        "--kubernetes-runtime-class",
+        help=(
+            "Require explicit gVisor isolation and this exact RuntimeClass for every acceptance Worker Pod"
+        ),
+    )
     parser.add_argument("--kind-bin", default="kind")
     parser.add_argument("--kind-cluster-name")
     parser.add_argument("--kind-node-image", default="kindest/node:v1.33.1")
@@ -20242,6 +20627,18 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error(
             "--kubernetes-node-name requires --target kubernetes and one lowercase DNS subdomain"
         )
+    kubernetes_runtime_class = (
+        parsed.kubernetes_runtime_class.strip()
+        if parsed.kubernetes_runtime_class is not None
+        else None
+    )
+    if kubernetes_runtime_class is not None and (
+        parsed.target != "kubernetes"
+        or not is_kubernetes_node_name(kubernetes_runtime_class)
+    ):
+        parser.error(
+            "--kubernetes-runtime-class requires --target kubernetes and one lowercase DNS subdomain"
+        )
     try:
         kubernetes_api_server = parse_https_origin(
             parsed.kubernetes_api_server,
@@ -20318,12 +20715,18 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     real_provider_cases = tuple(
         case for case in REAL_PROVIDER_CASE_CHOICES if case in requested_real_provider_case_set
     )
-    requested_stage5_cases = sorted(set(real_provider_cases).intersection(REAL_PROVIDER_STAGE5_CASES))
+    requested_stage5_cases = sorted(
+        set(real_provider_cases).intersection((*REAL_PROVIDER_STAGE5_CASES, REAL_PROVIDER_GVISOR_CASE))
+    )
     if requested_stage5_cases and (
         parsed.target != "kubernetes" or kubernetes_node_name is None
     ):
         parser.error(
             "Stage 5 real Provider cases require --target kubernetes and --kubernetes-node-name"
+        )
+    if REAL_PROVIDER_GVISOR_CASE in real_provider_cases and kubernetes_runtime_class is None:
+        parser.error(
+            "gvisor-compatibility requires --kubernetes-runtime-class on the Kubernetes Target"
         )
     requested_real_provider_failure_cases = list(parsed.real_provider_failure_case)
     if parsed.real_provider_failure_matrix:
@@ -20514,6 +20917,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         kubernetes_control_plane_host=parsed.kubernetes_control_plane_host.strip(),
         kubernetes_control_plane_port=parsed.kubernetes_control_plane_port,
         kubernetes_node_name=kubernetes_node_name,
+        kubernetes_runtime_class=kubernetes_runtime_class,
         kind_bin=parsed.kind_bin.strip(),
         kind_cluster_name=kind_cluster_name,
         kind_node_image=parsed.kind_node_image.strip(),
@@ -21072,6 +21476,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "skipWorkerBuild": options.kubernetes_skip_worker_build,
                 "controlPlaneHost": options.kubernetes_control_plane_host,
                 "nodeName": options.kubernetes_node_name,
+                "runtimeClassName": options.kubernetes_runtime_class,
                 "kindBinary": options.kind_bin,
                 "kindClusterName": options.kind_cluster_name,
                 "kindNodeImage": options.kind_node_image,

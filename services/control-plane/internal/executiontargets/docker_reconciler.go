@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,11 +26,14 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 const (
+	dockerReconcilerAdvisoryLock = "synara:docker-worker-pool-reconciler"
+
 	dockerManagedLabel         = "synara.io/managed"
 	dockerTargetLabel          = "synara.io/execution-target-id"
 	dockerConfigLabel          = "synara.io/config-sha256"
@@ -89,21 +93,24 @@ type BackgroundObserver interface {
 }
 
 type dockerTargetConfiguration struct {
-	SocketPath                string   `json:"socketPath"`
-	Image                     string   `json:"image"`
-	PullPolicy                string   `json:"pullPolicy"`
-	ControlPlaneURL           string   `json:"controlPlaneUrl"`
-	AllowInsecureControlPlane bool     `json:"allowInsecureControlPlane"`
-	RunnerCommand             []string `json:"runnerCommand"`
-	DesiredWorkers            int      `json:"desiredWorkers"`
-	WorkspaceVolume           string   `json:"workspaceVolume"`
-	WorkspaceMount            string   `json:"workspaceMount"`
-	WorkspaceRoot             string   `json:"workspaceRoot"`
-	GitCacheRoot              string   `json:"gitCacheRoot"`
-	NetworkMode               string   `json:"networkMode"`
-	User                      string   `json:"user"`
-	MemoryBytes               int64    `json:"memoryBytes"`
-	NanoCPUs                  int64    `json:"nanoCpus"`
+	SocketPath                string                         `json:"socketPath"`
+	Image                     string                         `json:"image"`
+	PullPolicy                string                         `json:"pullPolicy"`
+	ControlPlaneURL           string                         `json:"controlPlaneUrl"`
+	AllowInsecureControlPlane bool                           `json:"allowInsecureControlPlane"`
+	RunnerCommand             []string                       `json:"runnerCommand"`
+	DesiredWorkers            int                            `json:"desiredWorkers"`
+	WorkspaceVolume           string                         `json:"workspaceVolume"`
+	WorkspaceMount            string                         `json:"workspaceMount"`
+	WorkspaceRoot             string                         `json:"workspaceRoot"`
+	GitCacheRoot              string                         `json:"gitCacheRoot"`
+	NetworkMode               string                         `json:"networkMode"`
+	User                      string                         `json:"user"`
+	MemoryBytes               int64                          `json:"memoryBytes"`
+	NanoCPUs                  int64                          `json:"nanoCpus"`
+	PIDsLimit                 int64                          `json:"pidsLimit"`
+	RuntimeIsolation          *runtimeIsolationConfiguration `json:"runtimeIsolation"`
+	RuntimeIsolationDecision  *runtimeIsolationDecision      `json:"-"`
 }
 
 type dockerContainer struct {
@@ -114,21 +121,28 @@ type dockerContainer struct {
 }
 
 type dockerContainerSpec struct {
-	Name        string
-	Image       string
-	Environment []string
-	Entrypoint  []string
-	Labels      map[string]string
-	User        string
-	WorkingDir  string
-	Binds       []string
-	ExtraHosts  []string
-	NetworkMode string
-	MemoryBytes int64
-	NanoCPUs    int64
+	Name           string
+	Image          string
+	Environment    []string
+	Entrypoint     []string
+	Labels         map[string]string
+	User           string
+	WorkingDir     string
+	Binds          []string
+	ExtraHosts     []string
+	NetworkMode    string
+	MemoryBytes    int64
+	NanoCPUs       int64
+	PIDsLimit      int64
+	Runtime        string
+	CapDrop        []string
+	SecurityOpt    []string
+	ReadonlyRootfs bool
+	Tmpfs          map[string]string
 }
 
 type dockerEngine interface {
+	RuntimeNames(context.Context) ([]string, error)
 	ListManaged(context.Context, uuid.UUID) ([]dockerContainer, error)
 	EnsureImage(context.Context, string, string, *ImagePullCredential) error
 	CreateAndStart(context.Context, dockerContainerSpec) (dockerContainer, error)
@@ -190,7 +204,7 @@ func (r *DockerPoolReconciler) Run(ctx context.Context) {
 }
 
 func (r *DockerPoolReconciler) ReconcileOnce(ctx context.Context) error {
-	release, acquired, err := persistence.TryAdvisoryLock(ctx, r.targets.db, "synara:docker-worker-pool-reconciler")
+	release, acquired, err := r.targets.tryDockerReconcilerLock(ctx)
 	if err != nil {
 		return problem.Wrap(500, "docker_reconciler_lock_failed", "Docker reconciler coordination failed.", err)
 	}
@@ -213,6 +227,16 @@ func (r *DockerPoolReconciler) ReconcileOnce(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
+func (s *Service) tryDockerReconcilerLock(ctx context.Context) (func(), bool, error) {
+	if s.db.Dialector.Name() == "postgres" {
+		return persistence.TryAdvisoryLock(ctx, s.db, dockerReconcilerAdvisoryLock)
+	}
+	if !s.dockerReconcilerLocalMu.TryLock() {
+		return func() {}, false, nil
+	}
+	return s.dockerReconcilerLocalMu.Unlock, true, nil
+}
+
 func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persistence.ExecutionTarget) error {
 	configuration, err := r.loadConfiguration(target)
 	if err != nil {
@@ -224,6 +248,31 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 		r.setStatus(ctx, target, "offline", false, "engine_unavailable", 0, 0)
 		return problem.Wrap(503, "docker_engine_unavailable", "Docker Engine is unavailable.", err)
 	}
+	runtimeNames, err := engine.RuntimeNames(ctx)
+	if err != nil {
+		r.setStatus(ctx, target, "offline", false, "runtime_unavailable", 0, 0)
+		return problem.Wrap(503, "docker_runtime_isolation_unavailable", "Docker runtime inventory is unavailable.", err)
+	}
+	gvisorCompatibilityErr := gvisorCompatibilityAccepted(
+		ctx, r.targets.db, target, configuration.RuntimeIsolation,
+	)
+	runtimeDecision, err := resolveDockerRuntimeIsolation(
+		configuration,
+		filterDockerGVisorRuntimeNames(runtimeNames, gvisorCompatibilityErr),
+	)
+	err = preferGVisorCompatibilityError(&runtimeDecision, err, gvisorCompatibilityErr)
+	runtimeObservedAt := r.now()
+	if observationErr := persistRuntimeIsolationObservation(
+		ctx, r.targets.db, target.ID, detectDockerRuntimeIsolationCapabilities(runtimeNames), &runtimeDecision, err, runtimeObservedAt,
+	); observationErr != nil {
+		r.setStatus(ctx, target, "offline", false, "runtime_observation_unavailable", 0, 0)
+		return observationErr
+	}
+	if err != nil {
+		r.setStatus(ctx, target, "offline", false, "runtime_unavailable", 0, 0)
+		return err
+	}
+	configuration.RuntimeIsolationDecision = &runtimeDecision
 	resolution, err := r.resolveImagePullCredential(ctx, target, configuration.Image)
 	if err != nil {
 		r.setStatus(ctx, target, "offline", false, "image_pull_credential_invalid", 0, 0)
@@ -448,6 +497,23 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	if err := r.setStatus(ctx, target, status, changed, "reconciled", len(specs), running); err != nil {
 		return err
 	}
+	if status == "active" {
+		finalObservedAt := r.now()
+		var targetUpdatedAt time.Time
+		if err := r.targets.db.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
+			Where("id = ?", target.ID).Select("updated_at").Scan(&targetUpdatedAt).Error; err != nil {
+			return problem.Wrap(500, "runtime_isolation_target_load_failed", "The reconciled Docker Target timestamp could not be loaded.", err)
+		}
+		if targetUpdatedAt.After(finalObservedAt) {
+			finalObservedAt = targetUpdatedAt
+		}
+		if err := persistRuntimeIsolationObservation(
+			ctx, r.targets.db, target.ID, detectDockerRuntimeIsolationCapabilities(runtimeNames),
+			&runtimeDecision, nil, finalObservedAt,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -549,6 +615,24 @@ func (r *DockerPoolReconciler) normalize(
 	if configuration.NanoCPUs < 0 {
 		return dockerTargetConfiguration{}, problem.New(400, "invalid_docker_configuration", "Docker nanoCpus must not be negative.")
 	}
+	if err := normalizeDockerRuntimeIsolationConfiguration(&configuration); err != nil {
+		return dockerTargetConfiguration{}, err
+	}
+	if slices.Contains(configuration.RuntimeIsolation.Preferred, runtimeIsolationGVisor) ||
+		configuration.RuntimeIsolation.Runtime == runtimeIsolationGVisor {
+		_, _, numericNonRootUser := dockerNumericUser(configuration.User)
+		if configuration.PIDsLimit == 0 {
+			configuration.PIDsLimit = 256
+		}
+		if configuration.PIDsLimit < 1 || configuration.PIDsLimit > platform.MaximumKubernetesPIDsLimit ||
+			configuration.MemoryBytes == 0 || configuration.NanoCPUs == 0 || !numericNonRootUser {
+			return dockerTargetConfiguration{}, problem.New(
+				400,
+				"runtime_isolation_configuration_invalid",
+				"Docker gVisor requires a numeric non-root user and finite PID, memory, and CPU limits.",
+			)
+		}
+	}
 	if len(configuration.RunnerCommand) == 0 || strings.TrimSpace(r.config.RegistrationToken) == "" {
 		return dockerTargetConfiguration{}, problem.New(503, "docker_worker_configuration_unavailable", "Docker runnerCommand and Worker registration are required.")
 	}
@@ -616,13 +700,14 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		}
 	}
 	hashPayload, err := json.Marshal(struct {
-		SpecVersion   int
-		Configuration dockerTargetConfiguration
-		Capabilities  json.RawMessage
-		TokenHash     [32]byte
-		ReleasePlan   *managedReleasePlan
-		LeaseRenew    time.Duration
-	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
+		SpecVersion     int
+		Configuration   dockerTargetConfiguration
+		RuntimeDecision *runtimeIsolationDecision
+		Capabilities    json.RawMessage
+		TokenHash       [32]byte
+		ReleasePlan     *managedReleasePlan
+		LeaseRenew      time.Duration
+	}{dockerContainerSpecVersion, configuration, configuration.RuntimeIsolationDecision, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
 	if err != nil {
 		return nil, "", err
 	}
@@ -657,8 +742,41 @@ func (r *DockerPoolReconciler) desiredSpecs(
 			Binds: []string{configuration.WorkspaceVolume + ":" + configuration.WorkspaceMount}, ExtraHosts: extraHosts,
 			NetworkMode: configuration.NetworkMode, MemoryBytes: configuration.MemoryBytes, NanoCPUs: configuration.NanoCPUs,
 		}
+		if configuration.RuntimeIsolationDecision != nil &&
+			configuration.RuntimeIsolationDecision.EffectiveRuntime == runtimeIsolationGVisor {
+			uid, gid, _ := dockerNumericUser(configuration.User)
+			specs[index].Runtime = "runsc"
+			specs[index].PIDsLimit = configuration.PIDsLimit
+			specs[index].CapDrop = []string{"ALL"}
+			specs[index].SecurityOpt = []string{"no-new-privileges:true"}
+			specs[index].ReadonlyRootfs = true
+			specs[index].Tmpfs = map[string]string{
+				"/tmp":         "rw,nosuid,nodev,noexec,size=64m,mode=1777",
+				"/home/synara": "rw,nosuid,nodev,size=64m,mode=0700,uid=" + uid + ",gid=" + gid,
+			}
+		}
 	}
 	return specs, configHash, nil
+}
+
+func dockerNumericUser(value string) (string, string, bool) {
+	parts := strings.Split(value, ":")
+	if len(parts) > 2 || len(parts) == 0 {
+		return "", "", false
+	}
+	uid, err := strconv.ParseUint(parts[0], 10, 32)
+	if err != nil || uid == 0 {
+		return "", "", false
+	}
+	gid := uid
+	if len(parts) == 2 {
+		parsed, parseErr := strconv.ParseUint(parts[1], 10, 32)
+		if parseErr != nil {
+			return "", "", false
+		}
+		gid = parsed
+	}
+	return strconv.FormatUint(uid, 10), strconv.FormatUint(gid, 10), true
 }
 
 type dockerReleaseSlot struct {
@@ -787,6 +905,31 @@ type dockerHTTPEngine struct {
 	client *http.Client
 }
 
+func (e *dockerHTTPEngine) RuntimeNames(ctx context.Context) ([]string, error) {
+	var response struct {
+		DefaultRuntime string                     `json:"DefaultRuntime"`
+		Runtimes       map[string]json.RawMessage `json:"Runtimes"`
+	}
+	if err := e.do(ctx, http.MethodGet, "/info", nil, &response, http.StatusOK); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(response.Runtimes)+1)
+	for name := range response.Runtimes {
+		if name = strings.TrimSpace(name); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	if name := strings.TrimSpace(response.DefaultRuntime); name != "" {
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 func (e *dockerHTTPEngine) ListManaged(ctx context.Context, targetID uuid.UUID) ([]dockerContainer, error) {
 	filters, _ := json.Marshal(map[string][]string{"label": {dockerTargetLabel + "=" + targetID.String()}})
 	query := url.Values{"all": {"1"}, "filters": {string(filters)}}
@@ -881,12 +1024,18 @@ func (e *dockerHTTPEngine) CreateAndStart(ctx context.Context, spec dockerContai
 		User       string            `json:"User"`
 		WorkingDir string            `json:"WorkingDir"`
 		HostConfig struct {
-			Binds         []string `json:"Binds"`
-			ExtraHosts    []string `json:"ExtraHosts,omitempty"`
-			NetworkMode   string   `json:"NetworkMode"`
-			Memory        int64    `json:"Memory"`
-			NanoCPUs      int64    `json:"NanoCpus"`
-			RestartPolicy struct {
+			Binds          []string          `json:"Binds"`
+			ExtraHosts     []string          `json:"ExtraHosts,omitempty"`
+			NetworkMode    string            `json:"NetworkMode"`
+			Memory         int64             `json:"Memory"`
+			NanoCPUs       int64             `json:"NanoCpus"`
+			PIDsLimit      int64             `json:"PidsLimit,omitempty"`
+			Runtime        string            `json:"Runtime,omitempty"`
+			CapDrop        []string          `json:"CapDrop,omitempty"`
+			SecurityOpt    []string          `json:"SecurityOpt,omitempty"`
+			ReadonlyRootfs bool              `json:"ReadonlyRootfs,omitempty"`
+			Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
+			RestartPolicy  struct {
 				Name string `json:"Name"`
 			} `json:"RestartPolicy"`
 		} `json:"HostConfig"`
@@ -896,6 +1045,12 @@ func (e *dockerHTTPEngine) CreateAndStart(ctx context.Context, spec dockerContai
 	requestBody.HostConfig.NetworkMode = spec.NetworkMode
 	requestBody.HostConfig.Memory = spec.MemoryBytes
 	requestBody.HostConfig.NanoCPUs = spec.NanoCPUs
+	requestBody.HostConfig.PIDsLimit = spec.PIDsLimit
+	requestBody.HostConfig.Runtime = spec.Runtime
+	requestBody.HostConfig.CapDrop = spec.CapDrop
+	requestBody.HostConfig.SecurityOpt = spec.SecurityOpt
+	requestBody.HostConfig.ReadonlyRootfs = spec.ReadonlyRootfs
+	requestBody.HostConfig.Tmpfs = spec.Tmpfs
 	requestBody.HostConfig.RestartPolicy.Name = "unless-stopped"
 	var response struct {
 		ID string `json:"Id"`

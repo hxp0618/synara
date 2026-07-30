@@ -120,11 +120,13 @@ func (r *KubernetesReconciler) foundationHash(
 	}
 	payload, err := json.Marshal(struct {
 		Configuration   kubernetesTargetConfiguration
+		RuntimeDecision *runtimeIsolationDecision
 		Capabilities    json.RawMessage
 		LeaseRenew      time.Duration
 		PodSpecRevision string
 	}{
 		Configuration:   configuration,
+		RuntimeDecision: configuration.RuntimeIsolationDecision,
 		Capabilities:    capabilities,
 		LeaseRenew:      workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL),
 		PodSpecRevision: kubernetesWorkerPodSpecRevision,
@@ -365,6 +367,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 		map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
 	}
+	environment = append(environment, kubernetesRuntimeIsolationEnvironment(configuration)...)
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
@@ -410,6 +413,7 @@ func (r *KubernetesReconciler) executionPod(
 		},
 		"containers": []any{container}, "volumes": volumes,
 	}
+	applyKubernetesRuntimeIsolation(podSpec, configuration)
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
 	}
@@ -568,6 +572,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 		map[string]any{"name": "SYNARA_AGENTD_PRIVATE_TMP_ROOT", "value": "/tmp"},
 	}
+	environment = append(environment, kubernetesRuntimeIsolationEnvironment(configuration)...)
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
@@ -613,6 +618,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 		},
 		"containers": []any{container}, "volumes": volumes,
 	}
+	applyKubernetesRuntimeIsolation(podSpec, configuration)
 	if len(configuration.NodeSelector) > 0 {
 		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
 	}
@@ -680,6 +686,24 @@ func applyKubernetesWorkerPoolSchedulingTemplate(podSpec map[string]any, templat
 		podSpec["tolerations"] = append(existing, normalized.Tolerations...)
 	}
 	return nil
+}
+
+func applyKubernetesRuntimeIsolation(podSpec map[string]any, configuration kubernetesTargetConfiguration) {
+	if configuration.RuntimeIsolationDecision == nil ||
+		configuration.RuntimeIsolationDecision.EffectiveRuntime != runtimeIsolationGVisor {
+		return
+	}
+	podSpec["runtimeClassName"] = configuration.RuntimeIsolationDecision.RuntimeClassName
+}
+
+func kubernetesRuntimeIsolationEnvironment(configuration kubernetesTargetConfiguration) []any {
+	if configuration.RuntimeIsolationDecision == nil {
+		return nil
+	}
+	return []any{map[string]any{
+		"name":  platform.KubernetesRuntimeIsolationProfileEnvironment,
+		"value": string(configuration.RuntimeIsolationDecision.EffectiveProfile),
+	}}
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

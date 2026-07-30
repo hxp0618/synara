@@ -96,6 +96,130 @@ func (s *store) Migrate(ctx context.Context, files fs.FS) error {
 
 func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	statements := []string{
+		`DROP TRIGGER IF EXISTS trg_execution_runtime_isolation_decisions_insert`,
+		`CREATE TRIGGER trg_execution_runtime_isolation_decisions_insert
+		 BEFORE INSERT ON execution_runtime_isolation_decisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Execution runtime isolation decision')
+		   WHERE NEW.generation <= 0
+		      OR NEW.allocation_backend NOT IN ('docker-engine', 'native-pod', 'sandbox-operator-standard', 'sandbox-operator-cocoon')
+		      OR NEW.requested_runtime NOT IN ('auto', 'runc', 'gvisor', 'firecracker')
+		      OR NEW.requested_profile NOT IN (
+		        'single-tenant-trusted-v1', 'kubernetes-restricted-v1',
+		        'gvisor-sandboxed-v1', 'microvm-isolated-v1'
+		      )
+		      OR NEW.policy_source NOT IN ('legacy-native', 'target-explicit', 'target-auto', 'lane-policy')
+		      OR NEW.decision NOT IN ('selected', 'fallback', 'rejected')
+		      OR (
+		        NEW.decision IN ('selected', 'fallback') AND (
+		          NEW.effective_runtime IS NULL
+		          OR NEW.effective_runtime NOT IN ('runc', 'gvisor', 'firecracker')
+		          OR NEW.effective_profile IS NULL
+		          OR NEW.effective_profile NOT IN (
+		            'single-tenant-trusted-v1', 'kubernetes-restricted-v1',
+		            'gvisor-sandboxed-v1', 'microvm-isolated-v1'
+		          )
+		          OR NEW.decision_reason_code IS NOT NULL
+		        )
+		      )
+		      OR (
+		        NEW.decision = 'rejected' AND (
+		          NEW.effective_runtime IS NOT NULL
+		          OR NEW.effective_profile IS NOT NULL
+		          OR NEW.decision_reason_code IS NULL
+		          OR NEW.runtime_class_name IS NOT NULL
+		          OR NEW.attestation_digest IS NOT NULL
+		          OR NEW.attested_at IS NOT NULL
+		          OR NEW.attestation_expires_at IS NOT NULL
+		        )
+		      )
+		      OR (
+		        NEW.allocation_backend = 'docker-engine'
+		        AND NEW.effective_runtime = 'gvisor'
+		        AND (
+		          NEW.effective_profile IS NOT 'single-tenant-trusted-v1'
+		          OR NEW.runtime_class_name IS NOT NULL
+		          OR NEW.attestation_digest IS NOT NULL
+		          OR NEW.attested_at IS NOT NULL
+		          OR NEW.attestation_expires_at IS NOT NULL
+		        )
+		      )
+		      OR (
+		        NEW.allocation_backend IS NOT 'docker-engine'
+		        AND NEW.effective_runtime = 'gvisor' AND (
+		          NEW.effective_profile IS NOT 'gvisor-sandboxed-v1'
+		          OR NEW.runtime_class_name IS NULL
+		          OR NEW.attestation_digest IS NULL
+		          OR length(NEW.attestation_digest) <> 64
+		          OR NEW.attestation_digest GLOB '*[^0-9a-f]*'
+		          OR NEW.attested_at IS NULL
+		          OR NEW.attestation_expires_at IS NULL
+		          OR julianday(NEW.attestation_expires_at) <= julianday(NEW.attested_at)
+		        )
+		      )
+		      OR (NEW.effective_runtime IS NOT 'gvisor' AND NEW.runtime_class_name IS NOT NULL)
+		      OR (
+		        NEW.effective_runtime = 'firecracker' AND (
+		          NEW.effective_profile IS NOT 'microvm-isolated-v1'
+		          OR NEW.attestation_digest IS NULL
+		          OR length(NEW.attestation_digest) <> 64
+		          OR NEW.attestation_digest GLOB '*[^0-9a-f]*'
+		          OR NEW.attested_at IS NULL
+		          OR NEW.attestation_expires_at IS NULL
+		          OR julianday(NEW.attestation_expires_at) <= julianday(NEW.attested_at)
+		        )
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM execution_generation_facts AS fact
+		        WHERE fact.tenant_id = NEW.tenant_id
+		          AND fact.execution_id = NEW.execution_id
+		          AND fact.generation = NEW.generation
+		          AND fact.execution_target_id = NEW.execution_target_id
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_runtime_isolation_decisions_update`,
+		`CREATE TRIGGER trg_execution_runtime_isolation_decisions_update
+		 BEFORE UPDATE ON execution_runtime_isolation_decisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution runtime isolation decisions are append-only');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_runtime_isolation_decisions_delete`,
+		`CREATE TRIGGER trg_execution_runtime_isolation_decisions_delete
+		 BEFORE DELETE ON execution_runtime_isolation_decisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution runtime isolation decisions are append-only');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_revisions_gvisor_compatibility_insert`,
+		`CREATE TRIGGER trg_worker_release_revisions_gvisor_compatibility_insert
+		 BEFORE INSERT ON worker_release_revisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker Release gVisor compatibility')
+		   WHERE NEW.gvisor_compatible_providers IS NULL
+		      OR json_valid(NEW.gvisor_compatible_providers) = 0
+		      OR json_type(NEW.gvisor_compatible_providers) <> 'array'
+		      OR json_array_length(NEW.gvisor_compatible_providers) > 8
+		      OR EXISTS (
+		        SELECT 1 FROM json_each(NEW.gvisor_compatible_providers)
+		        WHERE type <> 'text'
+		           OR value NOT IN ('codex', 'claudeAgent', 'cursor', 'antigravity', 'grok', 'kilo', 'opencode', 'pi')
+		      )
+		      OR EXISTS (
+		        SELECT 1 FROM json_each(NEW.gvisor_compatible_providers)
+		        GROUP BY value HAVING COUNT(*) > 1
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_revisions_immutable_update`,
+		`CREATE TRIGGER trg_worker_release_revisions_immutable_update
+		 BEFORE UPDATE ON worker_release_revisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker Release revisions are append-only');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_revisions_immutable_delete`,
+		`CREATE TRIGGER trg_worker_release_revisions_immutable_delete
+		 BEFORE DELETE ON worker_release_revisions
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker Release revisions are append-only');
+		 END`,
 		`UPDATE agent_sessions
 		 SET resource_state = CASE
 		       WHEN EXISTS (

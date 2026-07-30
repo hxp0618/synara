@@ -7,14 +7,15 @@ import (
 )
 
 type WorkerReleaseRevision struct {
-	ID                uuid.UUID `gorm:"column:id;type:uuid;primaryKey;uniqueIndex:uq_worker_release_revision_tenant_id,priority:2;uniqueIndex:uq_worker_release_revision_target_id,priority:2"`
-	TenantID          uuid.UUID `gorm:"column:tenant_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_tenant_id,priority:1"`
-	ExecutionTargetID uuid.UUID `gorm:"column:execution_target_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_target_id,priority:1;uniqueIndex:uq_worker_release_revision_target_number,priority:1;uniqueIndex:uq_worker_release_revision_target_manifest,priority:1"`
-	Revision          int64     `gorm:"column:revision;not null;uniqueIndex:uq_worker_release_revision_target_number,priority:2"`
-	WorkerManifestID  uuid.UUID `gorm:"column:worker_manifest_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_target_manifest,priority:2"`
-	Description       string    `gorm:"column:description;not null;default:''"`
-	CreatedBy         uuid.UUID `gorm:"column:created_by;type:uuid;not null"`
-	CreatedAt         time.Time `gorm:"column:created_at;not null"`
+	ID                        uuid.UUID `gorm:"column:id;type:uuid;primaryKey;uniqueIndex:uq_worker_release_revision_tenant_id,priority:2;uniqueIndex:uq_worker_release_revision_target_id,priority:2"`
+	TenantID                  uuid.UUID `gorm:"column:tenant_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_tenant_id,priority:1"`
+	ExecutionTargetID         uuid.UUID `gorm:"column:execution_target_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_target_id,priority:1;uniqueIndex:uq_worker_release_revision_target_number,priority:1;uniqueIndex:uq_worker_release_revision_target_manifest,priority:1"`
+	Revision                  int64     `gorm:"column:revision;not null;uniqueIndex:uq_worker_release_revision_target_number,priority:2"`
+	WorkerManifestID          uuid.UUID `gorm:"column:worker_manifest_id;type:uuid;not null;uniqueIndex:uq_worker_release_revision_target_manifest,priority:2"`
+	GVisorCompatibleProviders []string  `gorm:"column:gvisor_compatible_providers;serializer:json;not null;default:'[]'"`
+	Description               string    `gorm:"column:description;not null;default:''"`
+	CreatedBy                 uuid.UUID `gorm:"column:created_by;type:uuid;not null"`
+	CreatedAt                 time.Time `gorm:"column:created_at;not null"`
 }
 
 func (WorkerReleaseRevision) TableName() string { return "worker_release_revisions" }

@@ -44,6 +44,7 @@ def matrix_options(output_dir: pathlib.Path) -> matrix.MatrixOptions:
         kubernetes_control_plane_port=58091,
         allow_control_plane_node=False,
         node_selector="synara.dev/pool=provider",
+        runtime_class=None,
         worker_image=IMMUTABLE_IMAGE,
         runner_command=("/usr/local/bin/provider-host",),
         timeout_per_cell_seconds=1800.0,
@@ -91,8 +92,15 @@ def child_report(
     git_sha: str = "b" * 40,
 ) -> dict[str, Any]:
     cases = []
-    for case in matrix.STAGE5_CASES:
-        evidence: dict[str, Any] = {"nodeName": node_name, "nodePinned": True}
+    for case in matrix.stage5_cases(options):
+        evidence: dict[str, Any] = {
+            "nodeName": node_name,
+            "nodePinned": True,
+            "runtimeClassName": options.runtime_class,
+            "runtimeIsolationProfile": (
+                "gvisor-sandboxed-v1" if options.runtime_class is not None else None
+            ),
+        }
         if case == "metadata-egress":
             evidence.update(
                 {
@@ -179,7 +187,7 @@ def child_report(
                     },
                 }
             )
-        else:
+        elif case == "malicious-issue-denial":
             assessment = matrix._fresh_assessment(
                 ("credential-access", "protected-branch-publish")
             )
@@ -220,6 +228,50 @@ def child_report(
                     },
                 }
             )
+        else:
+            evidence.update(
+                {
+                    "command": {
+                        "runtime": "node-bounded-gvisor-compat-v1",
+                        "sha256": "c" * 64,
+                        "outputContainsRawProbeErrors": False,
+                    },
+                    "compatibility": {
+                        "schemaVersion": 1,
+                        "runtime": "gvisor",
+                        "tools": {
+                            tool: True
+                            for tool in acceptance.GVISOR_COMPATIBILITY_REQUIRED_TOOLS
+                        },
+                        "probes": {
+                            probe: True
+                            for probe in (
+                                "gvisorKernel",
+                                "git",
+                                "node",
+                                "bun",
+                                "packageManagers",
+                                "go",
+                                "rust",
+                                "java",
+                                "python",
+                                "pty",
+                                "fileMetadata",
+                                "fileWatch",
+                                "signal",
+                                "loopbackTcp",
+                            )
+                        },
+                        "durationsMs": {
+                            label: index
+                            for index, label in enumerate(
+                                acceptance.GVISOR_COMPATIBILITY_REQUIRED_DURATION_LABELS
+                            )
+                        },
+                        "maxRssKiB": 1024,
+                    },
+                }
+            )
         cases.append(
             {
                 "id": acceptance.REAL_PROVIDER_CASE_METADATA[case]["id"],
@@ -241,13 +293,14 @@ def child_report(
         "status": "pass",
         "source": {"gitSha": git_sha, "worktreeDirty": False},
         "configuration": {
-            "realProvider": {"requestedCases": list(matrix.STAGE5_CASES)},
+            "realProvider": {"requestedCases": list(matrix.stage5_cases(options))},
             "kubernetes": {
                 "context": options.kubernetes_context,
                 "nodeName": node_name,
                 "workerImage": options.worker_image,
                 "skipWorkerBuild": True,
                 "allowNondisposable": True,
+                "runtimeClassName": options.runtime_class,
             },
         },
         "cases": cases,
@@ -404,6 +457,62 @@ class ChildBoundaryTest(unittest.TestCase):
         self.assertIn("--kubernetes-control-plane-port", command)
         self.assertIn("58091", command)
         self.assertNotIn("claude-secret", command)
+
+    def test_gvisor_matrix_requires_exact_runtime_class_in_command_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = dataclasses.replace(
+                matrix_options(pathlib.Path(directory)), runtime_class="synara-gvisor"
+            )
+            command = matrix.child_command(
+                options, "codex", "worker-a", pathlib.Path(directory) / "cell"
+            )
+            report = child_report(options, "codex", "worker-a")
+
+            self.assertIn("--kubernetes-runtime-class", command)
+            self.assertIn("synara-gvisor", command)
+            self.assertIn(acceptance.REAL_PROVIDER_GVISOR_CASE, command)
+            self.assertEqual(
+                matrix.validate_child_report(
+                    report,
+                    options=options,
+                    provider="codex",
+                    node_name="worker-a",
+                    expected_git_sha="b" * 40,
+                ),
+                [],
+            )
+            compatibility = matrix._gvisor_compatibility_evidence(report, options)
+            self.assertIsNotNone(compatibility)
+            summary = matrix._gvisor_compatibility_summary(
+                [
+                    {"gvisorCompatibility": compatibility},
+                    {"gvisorCompatibility": compatibility},
+                ],
+                options,
+            )
+            self.assertIsNotNone(summary)
+            self.assertTrue(summary["complete"])
+            self.assertEqual(summary["maxRssKiB"]["sampleCount"], 2)
+            rendered = matrix.markdown_from_report(
+                {
+                    "status": "pass",
+                    "cells": [],
+                    "gvisorCompatibilitySummary": summary,
+                    "errors": [],
+                }
+            )
+            self.assertIn("## gVisor compatibility distributions", rendered)
+            self.assertIn("| total | 2 |", rendered)
+            self.assertIn("| maxRss | 2 | 1024 | 1024 | 1024 | KiB |", rendered)
+            report["cases"][0]["evidence"]["runtimeClassName"] = "runc"
+            errors = matrix.validate_child_report(
+                report,
+                options=options,
+                provider="codex",
+                node_name="worker-a",
+                expected_git_sha="b" * 40,
+            )
+        self.assertIn("stage5.matrix.child_case_invalid", {error["code"] for error in errors})
 
     def test_accepts_only_a_complete_passing_exact_node_child_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -33,6 +33,9 @@ function executionTarget(
     name: "Docker workers",
     status: "active",
     capabilities: {},
+    isolationProfile: "single-tenant-trusted-v1",
+    platformSharedEligible: false,
+    productBoundary: "single-tenant-trusted",
     createdAt: "2026-07-14T00:00:00Z",
     updatedAt: "2026-07-14T00:00:00Z",
     ...overrides,
@@ -155,6 +158,49 @@ describe("Execution Target Provider Policy", () => {
     expect(markup).toContain('aria-expanded="false"');
   });
 
+  it("keeps configured, detected, and running runtime isolation facts distinct", () => {
+    const markup = renderToStaticMarkup(
+      <ExecutionTargetPolicyDisclosure
+        target={executionTarget({
+          kind: "kubernetes",
+          isolationProfile: "kubernetes-restricted-v1",
+          productBoundary: "multi-tenant-restricted",
+          platformSharedEligible: true,
+          runtimeIsolationPolicy: {
+            mode: "explicit",
+            requestedRuntime: "gvisor",
+            preferred: [],
+            minimumProfile: "gvisor-sandboxed-v1",
+            fallbackPolicy: "fail-closed",
+            runtimeClassName: "synara-gvisor",
+            gvisorCompatibleProviders: ["codex"],
+          },
+          runtimeIsolationStatus: {
+            state: "available",
+            detectedRuntimes: ["gvisor", "runc"],
+            detectedProfiles: ["kubernetes-restricted-v1", "gvisor-sandboxed-v1"],
+            reasonCode: null,
+            observedAt: "2026-07-30T08:00:00Z",
+            expiresAt: "2026-07-30T08:00:45Z",
+            runningGeneration: {
+              generation: 3,
+              effectiveRuntime: "gvisor",
+              effectiveProfile: "gvisor-sandboxed-v1",
+              decision: "selected",
+              policySource: "target-explicit",
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(markup).toContain("Configured / requested");
+    expect(markup).toContain("Available / detected");
+    expect(markup).toContain("Running / effective");
+    expect(markup).toContain("gvisor · gvisor-sandboxed-v1 · Generation 3 · selected");
+    expect(markup).toContain("gVisor accepted for codex");
+  });
+
   it("renders observed build, runtime, release policy, and capability evidence", () => {
     const markup = renderToStaticMarkup(
       <ExecutionTargetPolicyDisclosure
@@ -246,6 +292,7 @@ describe("Execution Target Provider Policy", () => {
 
     expect(markup).toContain("Shared target observation is not available");
     expect(markup).toContain("Revoke worker");
+    expect(markup).not.toContain("Save runtime policy");
   });
 
   it("offers an explicit Provider Policy update path for tenant-owned targets", () => {
@@ -261,5 +308,26 @@ describe("Execution Target Provider Policy", () => {
     expect(markup).toContain("Disable Codex");
     expect(markup).toContain("Enable Claude");
     expect(markup).toContain("re-registers with the new policy");
+    expect(markup).toContain("Save runtime policy");
+    expect(markup).toContain("Active Executions must be drained first");
+  });
+
+  it("prefills a legacy runtime policy with its equivalent explicit policy", () => {
+    const markup = renderExecutionTargetSection({
+      canManage: true,
+      target: executionTarget({
+        runtimeIsolationPolicy: {
+          mode: "legacy-native",
+          requestedRuntime: "runc",
+          preferred: [],
+          minimumProfile: "single-tenant-trusted-v1",
+          fallbackPolicy: "fail-closed",
+          gvisorCompatibleProviders: [],
+        },
+      }),
+    });
+
+    expect(markup).toContain("&quot;mode&quot;: &quot;explicit&quot;");
+    expect(markup).toContain("&quot;runtime&quot;: &quot;runc&quot;");
   });
 });

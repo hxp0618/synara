@@ -3,18 +3,36 @@ package executiontargets
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+)
+
+const (
+	kubernetesGVisorRuntimeHandlerAnnotation   = "synara.io/gvisor-runtime-handler"
+	kubernetesGVisorRuntimeVersionAnnotation   = "synara.io/gvisor-runtime-version"
+	kubernetesGVisorRuntimeBinaryAnnotation    = "synara.io/gvisor-runtime-binary-sha256"
+	kubernetesGVisorRuntimeConfigAnnotation    = "synara.io/gvisor-runtime-config-sha256"
+	kubernetesGVisorAttestorInstanceAnnotation = "synara.io/gvisor-attestor-instance"
+	kubernetesGVisorAttestedAtAnnotation       = "synara.io/gvisor-attested-at"
+	kubernetesGVisorAttestationMaxAge          = 45 * time.Second
+	kubernetesGVisorAttestationFutureSkew      = 5 * time.Second
 )
 
 type kubernetesHTTPFactory struct{}
@@ -100,6 +118,429 @@ func (c *kubernetesHTTPClient) AttestPodPIDsLimit(
 		}
 	}
 	return nil
+}
+
+func (c *kubernetesHTTPClient) RuntimeIsolationCapabilities(
+	ctx context.Context,
+	configuration kubernetesTargetConfiguration,
+	now time.Time,
+) ([]runtimeIsolationCapability, error) {
+	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
+		return []runtimeIsolationCapability{{
+			Runtime: runtimeIsolationFirecracker, Profile: platform.IsolationMicroVM,
+		}}, nil
+	}
+	capabilities := []runtimeIsolationCapability{{
+		Runtime: runtimeIsolationRunc, Profile: platform.IsolationKubernetesRestricted,
+	}}
+	if configuration.RuntimeIsolation == nil ||
+		(!slices.Contains(configuration.RuntimeIsolation.Preferred, runtimeIsolationGVisor) &&
+			configuration.RuntimeIsolation.Runtime != runtimeIsolationGVisor) {
+		return capabilities, nil
+	}
+	capability, err := c.attestGVisorRuntime(ctx, configuration, now)
+	if err != nil {
+		return capabilities, err
+	}
+	return append([]runtimeIsolationCapability{capability}, capabilities...), nil
+}
+
+func (c *kubernetesHTTPClient) attestGVisorRuntime(
+	ctx context.Context,
+	configuration kubernetesTargetConfiguration,
+	now time.Time,
+) (runtimeIsolationCapability, error) {
+	runtimeClassName := strings.TrimSpace(configuration.RuntimeIsolation.RuntimeClassName)
+	var runtimeClass struct {
+		Handler    string `json:"handler"`
+		Scheduling *struct {
+			NodeSelector map[string]string `json:"nodeSelector"`
+			Tolerations  []map[string]any  `json:"tolerations"`
+		} `json:"scheduling"`
+	}
+	if err := c.do(
+		ctx,
+		http.MethodGet,
+		"/apis/node.k8s.io/v1/runtimeclasses/"+url.PathEscape(runtimeClassName),
+		nil,
+		&runtimeClass,
+		http.StatusOK,
+	); err != nil {
+		return runtimeIsolationCapability{}, problem.Wrap(
+			503,
+			"gvisor_runtime_class_unavailable",
+			"The configured gVisor RuntimeClass is unavailable.",
+			err,
+		)
+	}
+	if strings.TrimSpace(runtimeClass.Handler) != kubernetesApprovedGVisorRuntimeHandler {
+		return runtimeIsolationCapability{}, problem.New(
+			503,
+			"gvisor_runtime_handler_unapproved",
+			"The configured RuntimeClass does not use the approved gVisor runtime handler.",
+		)
+	}
+
+	nodeSelector := cloneStringMap(configuration.NodeSelector)
+	tolerations := cloneObjectList(configuration.Tolerations)
+	if runtimeClass.Scheduling != nil {
+		for key, value := range runtimeClass.Scheduling.NodeSelector {
+			if current, exists := nodeSelector[key]; exists && current != value {
+				return runtimeIsolationCapability{}, problem.New(
+					503,
+					"gvisor_eligible_node_unattested",
+					"The RuntimeClass and Target node selectors do not identify a consistent gVisor node set.",
+				)
+			}
+			nodeSelector[key] = value
+		}
+		tolerations = append(tolerations, cloneObjectList(runtimeClass.Scheduling.Tolerations)...)
+	}
+	nodes, err := c.listNodes(ctx, nodeSelector, tolerations)
+	if err != nil {
+		return runtimeIsolationCapability{}, problem.Wrap(
+			503,
+			"gvisor_eligible_node_unattested",
+			"Eligible gVisor nodes could not be observed.",
+			err,
+		)
+	}
+	if len(nodes) == 0 {
+		return runtimeIsolationCapability{}, problem.New(
+			503,
+			"gvisor_eligible_node_unattested",
+			"The Target has no eligible attested gVisor nodes.",
+		)
+	}
+
+	type attestedNode struct {
+		Name       string `json:"name"`
+		Instance   string `json:"instance"`
+		Version    string `json:"version"`
+		BinaryHash string `json:"binaryHash"`
+		ConfigHash string `json:"configHash"`
+	}
+	attested := make([]attestedNode, 0, len(nodes))
+	earliestExpiry := time.Time{}
+	for _, node := range nodes {
+		annotations := node.annotations
+		instance := strings.TrimSpace(annotations[kubernetesGVisorAttestorInstanceAnnotation])
+		if _, parseErr := uuid.Parse(instance); parseErr != nil {
+			return runtimeIsolationCapability{}, problem.New(
+				503,
+				"gvisor_eligible_node_unattested",
+				"An eligible node does not expose a valid gVisor attestor identity.",
+			)
+		}
+		version := strings.TrimSpace(annotations[kubernetesGVisorRuntimeVersionAnnotation])
+		binaryHash := strings.TrimSpace(annotations[kubernetesGVisorRuntimeBinaryAnnotation])
+		configHash := strings.TrimSpace(annotations[kubernetesGVisorRuntimeConfigAnnotation])
+		if strings.TrimSpace(annotations[kubernetesGVisorRuntimeHandlerAnnotation]) != kubernetesApprovedGVisorRuntimeHandler ||
+			version == "" || !isLowerHexSHA256(binaryHash) || !isLowerHexSHA256(configHash) {
+			return runtimeIsolationCapability{}, problem.New(
+				503,
+				"gvisor_eligible_node_unattested",
+				"An eligible node does not expose the approved gVisor runtime identity.",
+			)
+		}
+		observedRaw := strings.TrimSpace(annotations[kubernetesGVisorAttestedAtAnnotation])
+		observedAt, parseErr := time.Parse(time.RFC3339Nano, observedRaw)
+		if parseErr != nil || observedAt.Before(now.Add(-kubernetesGVisorAttestationMaxAge)) ||
+			observedAt.After(now.Add(kubernetesGVisorAttestationFutureSkew)) {
+			return runtimeIsolationCapability{}, problem.New(
+				503,
+				"gvisor_attestation_stale",
+				"An eligible node has a missing or stale gVisor runtime attestation.",
+			)
+		}
+		nodeExpiry := observedAt.Add(kubernetesGVisorAttestationMaxAge)
+		if earliestExpiry.IsZero() || nodeExpiry.Before(earliestExpiry) {
+			earliestExpiry = nodeExpiry
+		}
+		attested = append(attested, attestedNode{
+			Name: node.name, Instance: instance, Version: version,
+			BinaryHash: binaryHash, ConfigHash: configHash,
+		})
+	}
+	sort.Slice(attested, func(left, right int) bool { return attested[left].Name < attested[right].Name })
+	payload, err := json.Marshal(struct {
+		RuntimeClass string         `json:"runtimeClass"`
+		Handler      string         `json:"handler"`
+		Nodes        []attestedNode `json:"nodes"`
+	}{RuntimeClass: runtimeClassName, Handler: kubernetesApprovedGVisorRuntimeHandler, Nodes: attested})
+	if err != nil {
+		return runtimeIsolationCapability{}, err
+	}
+	digest := sha256.Sum256(payload)
+	attestedAt := now.UTC()
+	expiresAt := earliestExpiry.UTC()
+	eligibleNodeNames := make([]string, 0, len(attested))
+	for _, node := range attested {
+		eligibleNodeNames = append(eligibleNodeNames, node.Name)
+	}
+	return runtimeIsolationCapability{
+		Runtime: runtimeIsolationGVisor, Profile: platform.IsolationGVisorSandboxed,
+		RuntimeClassName: runtimeClassName, AttestationDigest: hex.EncodeToString(digest[:]),
+		AttestedAt: &attestedAt, AttestationExpiresAt: &expiresAt,
+		EligibleNodeNames: eligibleNodeNames,
+	}, nil
+}
+
+func (c *kubernetesHTTPClient) EnsureRuntimeIsolationCanary(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	configuration kubernetesTargetConfiguration,
+	credential *ImagePullCredential,
+) error {
+	decision := configuration.RuntimeIsolationDecision
+	if decision == nil || decision.EffectiveRuntime != runtimeIsolationGVisor {
+		return nil
+	}
+	identityPayload, err := json.Marshal(struct {
+		TargetID          uuid.UUID `json:"targetId"`
+		Image             string    `json:"image"`
+		RuntimeClassName  string    `json:"runtimeClassName"`
+		AttestationDigest string    `json:"attestationDigest"`
+	}{
+		TargetID: target.ID, Image: configuration.Image,
+		RuntimeClassName: decision.RuntimeClassName, AttestationDigest: decision.AttestationDigest,
+	})
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(identityPayload)
+	name := "synara-gvisor-canary-" + strings.ReplaceAll(target.ID.String(), "-", "")[:12] + "-" +
+		hex.EncodeToString(digest[:])[:12]
+	selector := url.QueryEscape("synara.io/gvisor-canary-target-id=" + target.ID.String())
+	var canaries struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+				UID  string `json:"uid"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := c.do(
+		ctx,
+		http.MethodGet,
+		strings.TrimSuffix(kubernetesNamespacedPath(configuration.Namespace, "pods", ""), "/")+"?labelSelector="+selector,
+		nil,
+		&canaries,
+		http.StatusOK,
+	); err != nil {
+		return problem.Wrap(503, "gvisor_canary_failed", "Existing gVisor runtime canaries could not be listed.", err)
+	}
+	for _, canary := range canaries.Items {
+		if canary.Metadata.Name == name {
+			continue
+		}
+		if strings.TrimSpace(canary.Metadata.Name) == "" || strings.TrimSpace(canary.Metadata.UID) == "" {
+			return problem.New(503, "gvisor_canary_failed", "An existing gVisor runtime canary has an invalid identity.")
+		}
+		if err := c.DeletePod(ctx, configuration.Namespace, canary.Metadata.Name, canary.Metadata.UID); err != nil {
+			return problem.Wrap(503, "gvisor_canary_failed", "A stale gVisor runtime canary could not be deleted.", err)
+		}
+	}
+	path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
+	var observed struct {
+		Status struct {
+			Phase string `json:"phase"`
+		} `json:"status"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &observed, http.StatusOK); err == nil {
+		switch strings.TrimSpace(observed.Status.Phase) {
+		case "Succeeded":
+			return nil
+		case "Failed":
+			return problem.New(503, "gvisor_canary_failed", "The gVisor runtime compatibility canary failed.")
+		default:
+			return problem.New(503, "gvisor_canary_pending", "The gVisor runtime compatibility canary is not complete.")
+		}
+	} else {
+		var statusErr *kubernetesAPIStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+			return problem.Wrap(503, "gvisor_canary_failed", "The gVisor runtime compatibility canary could not be observed.", err)
+		}
+	}
+
+	requests := map[string]any{"cpu": "10m", "memory": "16Mi", "ephemeral-storage": "16Mi"}
+	limits := map[string]any{"cpu": "100m", "memory": "64Mi", "ephemeral-storage": "64Mi"}
+	pod := map[string]any{
+		"apiVersion": "v1", "kind": "Pod",
+		"metadata": map[string]any{
+			"name": name, "namespace": configuration.Namespace,
+			"labels": map[string]string{
+				"synara.io/managed": "true", "synara.io/gvisor-canary-target-id": target.ID.String(),
+			},
+		},
+		"spec": map[string]any{
+			"runtimeClassName":   decision.RuntimeClassName,
+			"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
+			"enableServiceLinks": false, "hostNetwork": false, "hostPID": false, "hostIPC": false,
+			"restartPolicy": "Never", "terminationGracePeriodSeconds": 5,
+			"securityContext": map[string]any{
+				"runAsNonRoot": true, "fsGroup": 10001,
+				"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+			},
+			"containers": []any{map[string]any{
+				"name": "runtime-verifier", "image": configuration.Image,
+				"imagePullPolicy": configuration.ImagePullPolicy,
+				"command":         []any{"/usr/local/bin/synara-agentd", platform.GVisorRuntimeVerifyArgument},
+				"securityContext": kubernetesRestrictedContainerSecurityContext(),
+				"resources":       map[string]any{"requests": requests, "limits": limits},
+				"volumeMounts":    []any{map[string]any{"name": "tmp", "mountPath": "/tmp"}},
+			}},
+			"volumes": []any{map[string]any{"name": "tmp", "emptyDir": map[string]any{"sizeLimit": "16Mi"}}},
+		},
+	}
+	if len(configuration.NodeSelector) > 0 {
+		pod["spec"].(map[string]any)["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
+	}
+	if len(configuration.Tolerations) > 0 {
+		pod["spec"].(map[string]any)["tolerations"] = cloneObjectList(configuration.Tolerations)
+	}
+	if len(configuration.ImagePullSecrets) > 0 || credential != nil {
+		secrets := make([]any, 0, len(configuration.ImagePullSecrets)+1)
+		for _, secretName := range configuration.ImagePullSecrets {
+			secrets = append(secrets, map[string]any{"name": secretName})
+		}
+		if credential != nil {
+			secrets = append(secrets, map[string]any{"name": kubernetesRegistrySecretName(target.ID)})
+		}
+		pod["spec"].(map[string]any)["imagePullSecrets"] = secrets
+	}
+	if err := c.Apply(ctx, path, pod); err != nil {
+		return problem.Wrap(503, "gvisor_canary_failed", "The gVisor runtime compatibility canary could not be created.", err)
+	}
+	return problem.New(503, "gvisor_canary_pending", "The gVisor runtime compatibility canary is not complete.")
+}
+
+type kubernetesEligibleNode struct {
+	name        string
+	annotations map[string]string
+}
+
+type kubernetesNodeTaint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Effect string `json:"effect"`
+}
+
+func (c *kubernetesHTTPClient) listNodes(
+	ctx context.Context,
+	nodeSelector map[string]string,
+	tolerations []any,
+) ([]kubernetesEligibleNode, error) {
+	selectorParts := make([]string, 0, len(nodeSelector))
+	for key, value := range nodeSelector {
+		selectorParts = append(selectorParts, key+"="+value)
+	}
+	sort.Strings(selectorParts)
+	query := url.Values{}
+	if len(selectorParts) > 0 {
+		query.Set("labelSelector", strings.Join(selectorParts, ","))
+	}
+	path := "/api/v1/nodes"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var nodes struct {
+		Items []struct {
+			Metadata struct {
+				Name              string            `json:"name"`
+				Annotations       map[string]string `json:"annotations"`
+				DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
+			} `json:"metadata"`
+			Spec struct {
+				Unschedulable bool                  `json:"unschedulable"`
+				Taints        []kubernetesNodeTaint `json:"taints"`
+			} `json:"spec"`
+			Status struct {
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &nodes, http.StatusOK); err != nil {
+		return nil, err
+	}
+	result := make([]kubernetesEligibleNode, 0, len(nodes.Items))
+	seen := make(map[string]struct{}, len(nodes.Items))
+	for _, item := range nodes.Items {
+		name := strings.TrimSpace(item.Metadata.Name)
+		if name == "" {
+			return nil, errors.New("Kubernetes node list contains an empty name")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("Kubernetes node list contains duplicate node %q", name)
+		}
+		seen[name] = struct{}{}
+		ready := false
+		for _, condition := range item.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				ready = true
+				break
+			}
+		}
+		if !ready || item.Spec.Unschedulable || item.Metadata.DeletionTimestamp != nil ||
+			!kubernetesNodeTaintsTolerated(item.Spec.Taints, tolerations) {
+			continue
+		}
+		result = append(result, kubernetesEligibleNode{name: name, annotations: item.Metadata.Annotations})
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].name < result[right].name })
+	return result, nil
+}
+
+func kubernetesNodeTaintsTolerated(
+	taints []kubernetesNodeTaint,
+	tolerations []any,
+) bool {
+	for _, taint := range taints {
+		if taint.Effect != "NoSchedule" && taint.Effect != "NoExecute" {
+			continue
+		}
+		matched := false
+		for _, rawToleration := range tolerations {
+			toleration, ok := rawToleration.(map[string]any)
+			if !ok {
+				continue
+			}
+			key, _ := toleration["key"].(string)
+			effect, _ := toleration["effect"].(string)
+			if effect != "" && effect != taint.Effect {
+				continue
+			}
+			operator, _ := toleration["operator"].(string)
+			if operator == "" {
+				operator = "Equal"
+			}
+			switch operator {
+			case "Exists":
+				matched = key == "" || key == taint.Key
+			case "Equal":
+				value, _ := toleration["value"].(string)
+				matched = key == taint.Key && value == taint.Value
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowerHexSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 func attestCocoonHostPIDsLimit(name string, annotations map[string]string, maximum uint64) error {

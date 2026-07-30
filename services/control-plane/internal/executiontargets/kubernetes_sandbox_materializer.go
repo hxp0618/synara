@@ -217,6 +217,20 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 		if err != nil {
 			return result, err
 		}
+		decisionConfiguration := configuration
+		if configuration.RuntimeIsolationDecision != nil &&
+			configuration.RuntimeIsolationDecision.EffectiveRuntime == runtimeIsolationFirecracker {
+			decision := *configuration.RuntimeIsolationDecision
+			attestedAt := now.UTC()
+			expiresAt := attestedAt.Add(kubernetesCocoonSupervisorHeartbeatMaxAge)
+			decision.AttestationDigest = digest
+			decision.AttestedAt = &attestedAt
+			decision.AttestationExpiresAt = &expiresAt
+			decisionConfiguration.RuntimeIsolationDecision = &decision
+		}
+		if err := r.persistRuntimeIsolationDecision(ctx, target, execution, decisionConfiguration); err != nil {
+			return result, err
+		}
 		key := kubernetesSandboxAllocationKey(execution.ID, generation)
 		if _, found := existingByKey[key]; !found {
 			if occupied >= configuration.MaxActivePods {

@@ -233,7 +233,7 @@ func (s *Service) DisableManagedKubernetesTarget(
 	if err != nil {
 		return Target{}, false, err
 	}
-	return toTarget(target), replayed, nil
+	return s.projectTarget(target), replayed, nil
 }
 
 func (s *Service) tryKubernetesReconcilerLock(ctx context.Context) (func(), bool, error) {

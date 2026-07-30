@@ -10,6 +10,48 @@ The default Provider Host is the deterministic fixture in this directory, so a p
 Control Plane-to-Worker-to-Host protocol, container isolation, and recovery path; it does not prove a real Codex
 or Claude adapter release.
 
+## gVisor runtime acceptance boundary
+
+Kubernetes runs can add `--kubernetes-runtime-class synara-gvisor`. The runner
+then creates every Target with explicit `gvisor-sandboxed-v1` / fail-closed
+policy and rejects a case unless the live execution Pod reports the exact
+RuntimeClass and effective profile. This option never installs gVisor and does
+not weaken the existing immutable-image, exact-node, credential, cleanup, or
+clean-source gates.
+
+Run the Codex × Claude security matrix on every selected Ready gVisor Node:
+
+```sh
+python3 scripts/stage3-provider-acceptance/stage5_provider_isolation_matrix.py \
+  --kubernetes-context YOUR_CONTEXT \
+  --kubernetes-allow-nondisposable \
+  --node-selector 'synara.io/gvisor-ready=true' \
+  --kubernetes-runtime-class synara-gvisor \
+  --kubernetes-worker-image 'REGISTRY/WORKER@sha256:...' \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY
+```
+
+Run each Provider's complete functional matrix with the same runtime boundary
+by adding `--real-provider-matrix`, and run `--suite real-provider-load` with an
+operator-approved SLA file for dispatch/ready, recovery, throughput, memory,
+and P50/P95/P99 evidence. A basic RuntimeClass Pod or the deterministic fixture
+suite is not a substitute for those real-Provider reports.
+
+When the aggregate coordinator receives `--kubernetes-runtime-class`, it adds
+the strict `gvisor-compatibility` case to every Provider × exact-Node cell. The
+real Provider invokes one bounded Node program that verifies the gVisor guest
+kernel; Git init/clone/checkout/status; Node and Bun execution; offline
+npm/pnpm/Bun install plus package scripts; Go, Rust, Java, and Python
+compile/run paths; PTY, signal delivery, file metadata/rename/watch, and
+loopback TCP. The child report retains only an exact Boolean result schema,
+per-probe durations, and maximum RSS. The aggregate JSON and Markdown reports
+publish P50/P95/P99 distributions across all cells and fail if any expected
+sample is absent. The Worker image therefore must contain every checked
+toolchain; an unavailable tool is a compatibility failure, not an automatic
+skip.
+
 The Local driver requires a POSIX host because it owns and terminates the isolated Control Plane process group.
 
 Run the Local fixture suite:
@@ -388,7 +430,8 @@ outside the root or reads the user's ambient credential files to manufacture a p
 
 `--real-provider-case metadata-egress`, `--real-provider-case credential-scope`, and
 `--real-provider-case malicious-issue-denial` are explicit Stage 5 Kubernetes runtime-isolation gates and are
-intentionally not part of the Stage 3 `--real-provider-matrix`. All three pin the generated Execution Target with
+intentionally not part of the Stage 3 `--real-provider-matrix`. The aggregate coordinator also adds the separate
+`gvisor-compatibility` case whenever an exact gVisor RuntimeClass is required. All four pin the generated Execution Target with
 `--kubernetes-node-name <exact kubernetes.io/hostname>`, observe the live Pod on that Node, and require the real
 Codex or Claude process to exercise the gate itself. The metadata case probes AWS IPv4, Alibaba Cloud IPv4, and AWS IPv6
 metadata addresses through the Worker image's bounded agentd isolation verifier. `pwd` is part of the canonical command
@@ -423,7 +466,7 @@ then explicitly sends `decline`. Codex and Claude may retain one fenced `item.st
 prove `commandExecuted=false`, and end with the exact Provider marker. This proves the real Provider request/decline boundary; it does not
 prove Stage 9 webhook provenance or an unattended automation dispatch.
 
-Run all three cases separately for Codex and Claude on every Ready, non-cordoned Worker selected by the production Target.
+Run the three security cases separately for Codex and Claude on every Ready, non-cordoned Worker selected by the production Target.
 Pass only an immutable pullable Worker image and the exact Node name for one run; never use a broad selector as an
 implicit node claim:
 
@@ -465,6 +508,7 @@ cell, Secret finding, or inventory change makes the aggregate fail:
 python3 scripts/stage3-provider-acceptance/stage5_provider_isolation_matrix.py \
   --kubernetes-context <managed-context> \
   --node-selector '<production-target-label-selector>' \
+  --kubernetes-runtime-class synara-gvisor \
   --kubernetes-worker-image <immutable-worker-image@sha256:digest> \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --kubernetes-allow-nondisposable \
@@ -483,7 +527,9 @@ not be presented as a dedicated managed Worker pool acceptance.
 
 The coordinator retains credential names/values only as process inputs, never report fields, scans child process
 output in memory without persisting it, and scans the complete output tree before a pass. A matrix timeout may require
-operator cleanup of the exact child resources and is reported as such.
+operator cleanup of the exact child resources and is reported as such. With an exact RuntimeClass, the report also
+requires complete toolchain, probe-duration, and maximum-RSS evidence for every Provider × Node cell; the aggregate
+Markdown table exposes the P50/P95/P99 distributions without retaining raw command output or probe errors.
 
 A base smoke pass without selected cases proves only two real Provider Turns, Control Plane restart, native Cursor
 continuity, exact cleanup, and the report Secret scan for the selected Target. It does not replace Approval/User
