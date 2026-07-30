@@ -4293,7 +4293,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         command = acceptance.gvisor_compatibility_node_command("/usr/local/bin/node")
         self.assertEqual(
             command,
-            "/usr/local/bin/node /opt/synara/runtime/gvisor-compatibility-probe.mjs",
+            "/usr/local/bin/node /opt/synara/gvisor-compatibility-probe.mjs",
         )
         self.assertLess(len(command.encode("utf-8")), 256)
         self.assertNotIn("SYNARA_GVISOR_COMPATIBILITY_FAILED_V1", command)
