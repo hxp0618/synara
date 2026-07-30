@@ -50,6 +50,7 @@ import {
 } from "../../persistence/Services/ProviderRuntimeEvents.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { isGitRepository } from "../../git/isRepo.ts";
+import { makeRuntimeJournalPoisonGate } from "../runtimeJournalPoisonGate.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
@@ -1920,17 +1921,19 @@ const make = Effect.gen(function* () {
         event.type === "turn.completed" ||
         event.type === "turn.aborted"
       ) {
-        const nextActiveTurnId =
-          event.type === "turn.started"
-            ? (eventTurnId ?? null)
-            : isTerminalTurnEvent ||
-                event.type === "session.exited" ||
-                (event.type === "session.state.changed" &&
-                  (event.payload.state === "ready" ||
-                    event.payload.state === "stopped" ||
-                    event.payload.state === "error"))
-              ? null
-              : activeTurnId;
+        let nextActiveTurnId = activeTurnId;
+        if (event.type === "turn.started") {
+          nextActiveTurnId = eventTurnId ?? null;
+        } else if (
+          isTerminalTurnEvent ||
+          event.type === "session.exited" ||
+          (event.type === "session.state.changed" &&
+            (event.payload.state === "ready" ||
+              event.payload.state === "stopped" ||
+              event.payload.state === "error"))
+        ) {
+          nextActiveTurnId = null;
+        }
         const status = (() => {
           switch (event.type) {
             case "session.state.changed":
@@ -1939,8 +1942,14 @@ const make = Effect.gen(function* () {
               return "running";
             case "session.exited":
               return "stopped";
-            case "turn.completed":
-              return runtimeTurnState(event) === "failed" ? "error" : "ready";
+            case "turn.completed": {
+              const turnState = runtimeTurnState(event);
+              if (turnState === "failed") return "error";
+              if (turnState === "interrupted" || turnState === "cancelled") {
+                return "interrupted";
+              }
+              return "ready";
+            }
             case "turn.aborted":
               return "interrupted";
             case "session.started":
@@ -1950,16 +1959,15 @@ const make = Effect.gen(function* () {
               return activeTurnId !== null ? "running" : "ready";
           }
         })();
-        const lastError =
-          event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-            : status === "error"
-              ? (asString(runtimePayloadRecord(event)?.errorMessage) ??
-                thread.session?.lastError ??
-                "Turn failed")
-              : status === "ready" || status === "interrupted"
-                ? null
-                : (thread.session?.lastError ?? null);
+        let lastError = thread.session?.lastError ?? null;
+        if (event.type === "session.state.changed" && event.payload.state === "error") {
+          lastError = event.payload.reason ?? lastError ?? "Provider session error";
+        } else if (status === "error") {
+          lastError =
+            asString(runtimePayloadRecord(event)?.errorMessage) ?? lastError ?? "Turn failed";
+        } else if (status === "ready" || status === "interrupted") {
+          lastError = null;
+        }
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -2548,6 +2556,41 @@ const make = Effect.gen(function* () {
   });
   const runtimeJournalDrainLock = yield* Semaphore.make(1);
 
+  // A deterministically failing row would otherwise pin the single global
+  // cursor forever: the drain never advances, the durable poller re-reads the
+  // same head row, and projection freezes for every thread and every provider
+  // — durably, across restarts. Once the poison gate trips (see the module for
+  // why it needs both an attempt and a wall-clock gate), the head row is
+  // dead-lettered: skipped with an error log so the journal flows again.
+  const poisonGate = makeRuntimeJournalPoisonGate();
+
+  const deadLetterPoisonHeadRow = Effect.gen(function* () {
+    const cursor = yield* runtimeEvents.getConsumerCursor(PROVIDER_RUNTIME_INGESTION_CONSUMER);
+    if (!poisonGate.noteBlockedDrain(cursor, Date.now())) return false;
+    const highWater = yield* runtimeEvents.getHighWaterSequence;
+    const page = yield* runtimeEvents.readAfter({
+      sequenceExclusive: cursor,
+      throughSequenceInclusive: highWater,
+      limit: 1,
+    });
+    const poison = page[0];
+    if (poison === undefined) return false;
+    yield* Effect.logError("provider runtime journal dead-lettered a poison event", {
+      sequence: poison.sequence,
+      eventId: poison.event.eventId,
+      eventType: poison.event.type,
+      threadId: poison.event.threadId,
+      provider: poison.event.provider,
+    });
+    const advanced = yield* runtimeEvents.advanceConsumerCursor({
+      consumerName: PROVIDER_RUNTIME_INGESTION_CONSUMER,
+      eventSequence: poison.sequence,
+      updatedAt: new Date().toISOString(),
+    });
+    poisonGate.reset();
+    return advanced;
+  });
+
   const drainRuntimeJournalThrough = (throughSequenceInclusive?: number) =>
     runtimeJournalDrainLock.withPermits(1)(
       Effect.gen(function* () {
@@ -2578,7 +2621,13 @@ const make = Effect.gen(function* () {
             }),
           );
           yield* worker.drain;
-          if (runtimeJournalPageBlocked) return;
+          if (runtimeJournalPageBlocked) {
+            // Either the poison threshold was reached and the head row was
+            // skipped (loop again from the fresh cursor), or the drain yields
+            // to the durable poller, which retries from the exact cursor.
+            if (yield* deadLetterPoisonHeadRow) continue;
+            return;
+          }
 
           const advancedCursor = yield* runtimeEvents.getConsumerCursor(
             PROVIDER_RUNTIME_INGESTION_CONSUMER,

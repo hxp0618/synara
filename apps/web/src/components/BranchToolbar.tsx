@@ -41,7 +41,7 @@ import {
   type BranchSelectorVariant,
 } from "./BranchToolbarBranchSelector";
 import {
-  RUNTIME_AUTO_ICON_ACCENT_CLASS_NAME,
+  RUNTIME_AUTO_ACCENT_CLASS_NAME,
   RUNTIME_FULL_ACCESS_ACCENT_CLASS_NAME,
   COMPOSER_PICKER_TRIGGER_TEXT_CLASS_NAME,
   COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME,
@@ -105,6 +105,44 @@ function ContinueInMenuItem({
         <CheckIcon className="size-3.5 shrink-0 text-[var(--color-text-foreground)]" />
       ) : null}
     </MenuItem>
+  );
+}
+
+function RuntimeModeMenuItem({
+  mode,
+  icon,
+  accent = false,
+}: {
+  mode: RuntimeMode;
+  icon: ReactNode;
+  accent?: boolean;
+}) {
+  const presentation = RUNTIME_MODE_PRESENTATION[mode];
+  return (
+    <MenuRadioItem
+      value={mode}
+      className={cn(
+        "runtime-mode-menu-item",
+        mode === "auto" && "runtime-mode-menu-item--auto",
+        accent &&
+          "text-[var(--runtime-full-access-accent)] data-highlighted:text-[var(--runtime-full-access-accent)]",
+      )}
+    >
+      <span className="grid w-full min-w-0 flex-1 grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-x-3">
+        <span className="flex h-5 items-center justify-center">{icon}</span>
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span>{presentation.label}</span>
+          <span
+            className={cn(
+              "runtime-mode-menu-description text-xs font-normal",
+              accent ? "text-current" : "text-muted-foreground",
+            )}
+          >
+            {presentation.description}
+          </span>
+        </span>
+      </span>
+    </MenuRadioItem>
   );
 }
 
@@ -176,9 +214,10 @@ export function RuntimeUsageControls({
                 className={cn(
                   "min-w-0 shrink-0 justify-start gap-1.5 whitespace-nowrap px-2 [&_svg]:mx-0 sm:px-2.5",
                   COMPOSER_PICKER_TRIGGER_TEXT_CLASS_NAME,
+                  runtimeMode === "auto" && RUNTIME_AUTO_ACCENT_CLASS_NAME,
                   runtimeMode === "full-access" && RUNTIME_FULL_ACCESS_ACCENT_CLASS_NAME,
                 )}
-                title={`${runtimePresentation.label}: ${runtimePresentation.description} Click to change permissions.`}
+                title={`${runtimePresentation.label}: ${runtimePresentation.description}. Click to change permissions.`}
               />
             }
           >
@@ -186,10 +225,7 @@ export function RuntimeUsageControls({
               {runtimeMode === "full-access" ? (
                 <CentralIcon name="shield-access" className="size-3.5 shrink-0" />
               ) : runtimeMode === "auto" ? (
-                <CentralIcon
-                  name="shield-code"
-                  className={cn("size-3.5 shrink-0", RUNTIME_AUTO_ICON_ACCENT_CLASS_NAME)}
-                />
+                <CentralIcon name="shield-code" className="size-3.5 shrink-0" />
               ) : (
                 <HiOutlineHandRaised className="size-3.5 shrink-0" />
               )}
@@ -204,8 +240,13 @@ export function RuntimeUsageControls({
               />
             </span>
           </MenuTrigger>
-          <ComposerPickerMenuPopup align="start" side="top" className="min-w-72">
+          <ComposerPickerMenuPopup
+            align="start"
+            side="top"
+            className="runtime-mode-menu w-[26rem] min-w-[26rem]"
+          >
             <MenuRadioGroup
+              className="flex flex-col gap-1"
               value={runtimeMode}
               onValueChange={(value) => {
                 if (
@@ -219,47 +260,21 @@ export function RuntimeUsageControls({
                 onRuntimeModeChange(value);
               }}
             >
-              <MenuRadioItem value="approval-required">
-                <span className="inline-flex items-start gap-2">
-                  <HiOutlineHandRaised className="mt-0.5 size-4 shrink-0" />
-                  <span className="flex flex-col">
-                    <span>Supervised</span>
-                    <span className="text-xs font-normal text-muted-foreground">
-                      {RUNTIME_MODE_PRESENTATION["approval-required"].description}
-                    </span>
-                  </span>
-                </span>
-              </MenuRadioItem>
+              <RuntimeModeMenuItem
+                mode="approval-required"
+                icon={<HiOutlineHandRaised className="size-4 shrink-0" />}
+              />
               {autoModeAvailable ? (
-                <MenuRadioItem value="auto">
-                  <span className="inline-flex items-start gap-2">
-                    <CentralIcon
-                      name="shield-code"
-                      className={cn("mt-0.5 size-4 shrink-0", RUNTIME_AUTO_ICON_ACCENT_CLASS_NAME)}
-                    />
-                    <span className="flex flex-col">
-                      <span>Auto</span>
-                      <span className="text-xs font-normal text-muted-foreground">
-                        {RUNTIME_MODE_PRESENTATION.auto.description}
-                      </span>
-                    </span>
-                  </span>
-                </MenuRadioItem>
+                <RuntimeModeMenuItem
+                  mode="auto"
+                  icon={<CentralIcon name="shield-code" className="size-4 shrink-0" />}
+                />
               ) : null}
-              <MenuRadioItem
-                value="full-access"
-                className="data-checked:text-[var(--runtime-full-access-accent)]"
-              >
-                <span className="inline-flex items-start gap-2">
-                  <CentralIcon name="shield-access" className="mt-0.5 size-4 shrink-0" />
-                  <span className="flex flex-col">
-                    <span>Full access</span>
-                    <span className="text-xs font-normal text-muted-foreground">
-                      {RUNTIME_MODE_PRESENTATION["full-access"].description}
-                    </span>
-                  </span>
-                </span>
-              </MenuRadioItem>
+              <RuntimeModeMenuItem
+                mode="full-access"
+                accent
+                icon={<CentralIcon name="shield-access" className="size-4 shrink-0" />}
+              />
             </MenuRadioGroup>
           </ComposerPickerMenuPopup>
         </Menu>

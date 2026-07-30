@@ -108,6 +108,7 @@ packages/*/dist
 apps/web/.playwright
 apps/web/playwright-report
 /.playwright-mcp/
+apps/web/test-results
 .playwright-cli/
 output/playwright/
 apps/web/src/components/__screenshots__

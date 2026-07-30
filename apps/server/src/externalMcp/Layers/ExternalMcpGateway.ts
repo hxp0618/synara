@@ -38,6 +38,7 @@ import {
   parseMcpMessage,
   type JsonRpcId,
   type JsonRpcRequest,
+  type McpToolCallResult,
 } from "../../agentGateway/protocol.ts";
 import {
   gatewayToolErrorResult,
@@ -144,9 +145,10 @@ function readAuditMetadata(tool: string, args: Record<string, unknown>): Externa
   };
 }
 
-function createdThreadIds(result: { readonly content: ReadonlyArray<{ readonly text: string }> }) {
+function createdThreadIds(result: McpToolCallResult) {
   try {
-    const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+    const content = result.content[0];
+    const payload = JSON.parse(content?.type === "text" ? content.text : "{}") as {
       readonly threadId?: unknown;
       readonly threadIds?: unknown;
     };
