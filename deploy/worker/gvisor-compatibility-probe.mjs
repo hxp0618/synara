@@ -285,7 +285,7 @@ try {
     maxRssKiB: process.resourceUsage().maxRSS,
   };
   process.stdout.write(
-    successPrefix + Buffer.from(JSON.stringify(result), "utf8").toString("base64url") + "\n",
+    successPrefix + Buffer.from(JSON.stringify(result), "utf8").toString("base64url"),
   );
 } catch (_error) {
   process.stdout.write(`${failureSentinel}\n`);

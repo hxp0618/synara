@@ -620,8 +620,8 @@ def gvisor_compatibility_prompt(command: str, marker: str) -> str:
 
 def parse_gvisor_compatibility_output(output: bytes) -> dict[str, Any]:
     if (
-        not output.endswith(b"\n")
-        or b"\n" in output[:-1]
+        b"\n" in output
+        or b"\r" in output
         or len(output) > 64 << 10
         or not output.startswith(GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii"))
     ):
@@ -630,7 +630,7 @@ def parse_gvisor_compatibility_output(output: bytes) -> dict[str, Any]:
             "The gVisor compatibility probe did not emit one bounded canonical result.",
             {"outputBytes": len(output), "outputSha256": hashlib.sha256(output).hexdigest()},
         )
-    encoded = output[len(GVISOR_COMPATIBILITY_OUTPUT_PREFIX) : -1]
+    encoded = output[len(GVISOR_COMPATIBILITY_OUTPUT_PREFIX) :]
     try:
         padding = b"=" * ((4 - len(encoded) % 4) % 4)
         decoded = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)

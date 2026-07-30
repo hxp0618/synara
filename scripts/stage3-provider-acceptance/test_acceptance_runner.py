@@ -4379,13 +4379,13 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         encoded = base64.urlsafe_b64encode(
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
         ).rstrip(b"=")
-        output = acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii") + encoded + b"\n"
+        output = acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii") + encoded
 
         self.assertEqual(acceptance.parse_gvisor_compatibility_output(output), payload)
         payload["probes"]["pty"] = False
         invalid = acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX.encode("ascii") + base64.urlsafe_b64encode(
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        ).rstrip(b"=") + b"\n"
+        ).rstrip(b"=")
         with self.assertRaises(acceptance.AcceptanceError) as caught:
             acceptance.parse_gvisor_compatibility_output(invalid)
         self.assertEqual(caught.exception.code, "runner.gvisor_runtime_incompatible")

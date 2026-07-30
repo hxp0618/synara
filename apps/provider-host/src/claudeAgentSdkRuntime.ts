@@ -7,6 +7,16 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { classifySensitiveAction } from "@synara/shared/sensitiveActionPolicy";
@@ -72,8 +82,17 @@ type AttemptState = {
   sawPartialText: boolean;
   hadTurnActivity: boolean;
   tools: Map<string, AttemptTool>;
+  bashOutputs: Map<string, ClaudeBashOutput>;
+  pendingBashToolResults: Map<string, PendingClaudeBashToolResult>;
+  failedBashToolUses: Set<string>;
   generatedFiles: WorkspaceGeneratedFileCollector;
   turnDiffs: TurnDiffCollector;
+};
+
+type PendingClaudeBashToolResult = {
+  content: unknown;
+  failed: boolean;
+  structured?: ClaudeBashOutput;
 };
 
 type AttemptTool = {
@@ -122,7 +141,10 @@ type PromptStream = {
 };
 
 const INTERRUPT_GRACE_MS = 2_000;
+const BASH_POST_TOOL_USE_DRAIN_MS = 500;
+const BASH_POST_TOOL_USE_POLL_MS = 10;
 const MAX_ERROR_BYTES = 64 * 1024;
+const MAX_INLINE_RETAINED_OUTPUT_BYTES = 64 * 1024;
 const CLAUDE_TERMINAL_LOG_ORIGINAL_NAME = "claude-terminal.log";
 const CLAUDE_SYSTEM_PROMPT_APPEND_BASE = [
   "You are running inside Synara, a coding app that embeds the Claude Agent SDK.",
@@ -285,6 +307,9 @@ class ClaudeAgentSdkRuntime {
       sawPartialText: false,
       hadTurnActivity: false,
       tools: new Map(),
+      bashOutputs: new Map(),
+      pendingBashToolResults: new Map(),
+      failedBashToolUses: new Set(),
       generatedFiles: new WorkspaceGeneratedFileCollector({
         workspaceDirectory: this.options.input.workspaceDirectory,
         provider: "claudeAgent",
@@ -307,13 +332,26 @@ class ClaudeAgentSdkRuntime {
       this.activePromptStream = promptStream;
       if (this.interruptRequested) this.requestNativeInterrupt(runtime);
 
+      let terminalResult: Extract<RunnerMessage, { type: "result" }> | undefined;
       for await (const message of runtime) {
         const terminal = this.handleMessage(message, state);
         if (terminal) {
-          await state.generatedFiles.flush();
-          await state.turnDiffs.flush();
-          return terminal;
+          terminalResult ??= terminal;
+          // The SDK can withhold late lifecycle hooks until the input stream
+          // closes. Keep consuming its output after the terminal result so a
+          // PostToolUse hook can still replace the abbreviated tool result.
+          promptStream.close();
         }
+      }
+      if (terminalResult) {
+        await this.drainPendingBashToolResults(state);
+        if (state.tools.size > 0) {
+          this.failOpenTools(state);
+          throw new Error("Claude Agent SDK completed with an open tool execution.");
+        }
+        await state.generatedFiles.flush();
+        await state.turnDiffs.flush();
+        return terminalResult;
       }
       if (this.interruptRequested) throw new ProviderInterruptedError();
       throw new Error("Claude Agent SDK ended before emitting a terminal result.");
@@ -465,6 +503,19 @@ class ClaudeAgentSdkRuntime {
       if (input.hook_event_name !== "PostToolUse") return { continue: true };
       state.hadTurnActivity = true;
       const toolInput = asRecord(input.tool_input) ?? {};
+      const toolUseId = this.resolveBashHookToolUseId(
+        state,
+        trimmedString(input.tool_use_id),
+        input.tool_name,
+        toolInput,
+      );
+      const bashOutput = hydrateClaudeBashOutput(
+        claudeBashOutput(input.tool_response),
+        this.options.input.runtimeOutputDirectory,
+      );
+      if (toolUseId && bashOutput && isClaudeBashTool(input.tool_name)) {
+        state.bashOutputs.set(toolUseId, bashOutput);
+      }
       for (const path of claudeGeneratedFilePaths(input.tool_name, toolInput)) {
         state.generatedFiles.observe(path);
       }
@@ -487,6 +538,9 @@ class ClaudeAgentSdkRuntime {
           },
         });
       }
+      if (toolUseId && isClaudeBashTool(input.tool_name)) {
+        this.completePendingBashToolResult(state, toolUseId, "success");
+      }
       if (!providerToolResultRequiresTrustEnvelope(input.tool_name)) {
         return { continue: true };
       }
@@ -506,6 +560,20 @@ class ClaudeAgentSdkRuntime {
     return async (input) => {
       if (input.hook_event_name !== "PostToolUseFailure") return { continue: true };
       state.hadTurnActivity = true;
+      const toolInput = asRecord(input.tool_input) ?? {};
+      const toolUseId = this.resolveBashHookToolUseId(
+        state,
+        trimmedString(input.tool_use_id),
+        input.tool_name,
+        toolInput,
+      );
+      if (toolUseId && isClaudeBashTool(input.tool_name)) {
+        if (state.pendingBashToolResults.has(toolUseId)) {
+          this.completePendingBashToolResult(state, toolUseId, "failure");
+        } else {
+          state.failedBashToolUses.add(toolUseId);
+        }
+      }
       if (!providerToolResultRequiresTrustEnvelope(input.tool_name)) {
         return { continue: true };
       }
@@ -839,10 +907,6 @@ class ClaudeAgentSdkRuntime {
       this.pendingSteerResults -= 1;
       return undefined;
     }
-    if (state.tools.size > 0) {
-      this.failOpenTools(state);
-      throw new Error("Claude Agent SDK completed with an open tool execution.");
-    }
     if (state.outputText.length === 0) {
       const resultText = readString(record, "result");
       if (resultText) this.appendOutput(resultText, state);
@@ -897,7 +961,7 @@ class ClaudeAgentSdkRuntime {
   private handleUserMessage(message: Record<string, unknown>, state: AttemptState): void {
     const content = asRecord(message.message)?.content;
     if (!Array.isArray(content)) return;
-    const structured = claudeBashOutput(message.tool_use_result);
+    const messageBashOutput = claudeBashOutput(message.tool_use_result);
     for (const value of content) {
       const block = asRecord(value);
       if (readString(block, "type") !== "tool_result") continue;
@@ -906,58 +970,143 @@ class ClaudeAgentSdkRuntime {
       const tool = state.tools.get(toolUseId);
       if (!tool) continue;
       if (!isClientSurfacedTool(tool.toolName)) {
-        if (tool.terminalId) {
-          const outputCandidates: RuntimeOutputCandidate[] = [
-            ...(structured?.persistedOutputPath
-              ? [
-                  {
-                    path: structured.persistedOutputPath,
-                    ...(structured.persistedOutputSize !== undefined
-                      ? { reportedSize: structured.persistedOutputSize }
-                      : {}),
-                  },
-                ]
-              : []),
-            ...(structured?.rawOutputPath ? [{ path: structured.rawOutputPath }] : []),
-          ];
-          const emittedArtifact = this.emitRuntimeOutputArtifact(tool, outputCandidates);
-          const output = structured
-            ? [structured.stdout, structured.stderr].filter((entry) => entry.length > 0).join("\n")
-            : terminalResultText(block?.content);
-          if (!emittedArtifact && output) {
-            tool.outputBytes += emitTerminalOutput({
-              emit: this.options.emit,
-              provider: "claudeAgent",
-              terminalId: tool.terminalId,
-              output,
-              redact: this.options.redact,
-            });
-          }
-          if (outputCandidates.length > 0 && !emittedArtifact) {
-            tool.outputTruncated = true;
-            if (structured?.persistedOutputSize !== undefined) {
-              tool.reportedTotalBytes = structured.persistedOutputSize;
-            }
-            this.emitUnsafeRuntimeOutputWarning("command");
-          }
-        }
-        if (structured?.backgroundTaskId) {
-          tool.backgroundTaskId = structured.backgroundTaskId;
-          this.emitToolActivity(tool, "updated", toolUseId);
+        const storedBashOutput = state.bashOutputs.get(toolUseId);
+        const hookFailed = state.failedBashToolUses.delete(toolUseId);
+        if (isClaudeBashTool(tool.toolName) && !storedBashOutput && !hookFailed) {
+          state.pendingBashToolResults.set(toolUseId, {
+            content: block?.content,
+            failed: block?.is_error === true,
+            ...(messageBashOutput ? { structured: messageBashOutput } : {}),
+          });
           continue;
         }
-        state.tools.delete(toolUseId);
-        const failed = block?.is_error === true || structured?.interrupted === true;
-        const exitCode =
-          structured?.exitCode ?? (!failed && structured !== undefined ? 0 : undefined);
-        this.emitToolActivity(tool, failed ? "failed" : "completed", toolUseId, {
-          ...(exitCode !== undefined ? { exitCode } : {}),
-          ...(failed ? { failureKind: "provider_error" as const } : {}),
-        });
+        this.completeNonClientToolResult(
+          state,
+          toolUseId,
+          tool,
+          storedBashOutput ?? messageBashOutput,
+          block?.content,
+          block?.is_error === true,
+          hookFailed ? "failure" : undefined,
+        );
       } else {
+        state.bashOutputs.delete(toolUseId);
+        state.pendingBashToolResults.delete(toolUseId);
+        state.failedBashToolUses.delete(toolUseId);
         state.tools.delete(toolUseId);
       }
     }
+  }
+
+  private completePendingBashToolResult(
+    state: AttemptState,
+    toolUseId: string,
+    hookOutcome: "success" | "failure",
+  ): void {
+    const pending = state.pendingBashToolResults.get(toolUseId);
+    const tool = state.tools.get(toolUseId);
+    if (!pending || !tool || isClientSurfacedTool(tool.toolName)) return;
+    state.pendingBashToolResults.delete(toolUseId);
+    state.failedBashToolUses.delete(toolUseId);
+    this.completeNonClientToolResult(
+      state,
+      toolUseId,
+      tool,
+      state.bashOutputs.get(toolUseId) ?? pending.structured,
+      pending.content,
+      pending.failed,
+      hookOutcome,
+    );
+  }
+
+  private async drainPendingBashToolResults(state: AttemptState): Promise<void> {
+    if (state.pendingBashToolResults.size === 0) return;
+    const deadline = Date.now() + BASH_POST_TOOL_USE_DRAIN_MS;
+    while (state.pendingBashToolResults.size > 0 && Date.now() < deadline) {
+      await new Promise<void>((resolveTimer) => {
+        setTimeout(resolveTimer, BASH_POST_TOOL_USE_POLL_MS);
+      });
+    }
+    for (const [toolUseId, pending] of state.pendingBashToolResults) {
+      this.completePendingBashToolResult(state, toolUseId, pending.failed ? "failure" : "success");
+    }
+  }
+
+  private resolveBashHookToolUseId(
+    state: AttemptState,
+    reportedToolUseId: string | undefined,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+  ): string | undefined {
+    if (!isClaudeBashTool(toolName)) return reportedToolUseId;
+    if (reportedToolUseId && state.tools.has(reportedToolUseId)) return reportedToolUseId;
+    const command = trimmedString(toolInput.command);
+    const candidates = [...state.tools].filter(([, tool]) => {
+      if (!isClaudeBashTool(tool.toolName)) return false;
+      return !command || trimmedString(tool.input.command) === command;
+    });
+    return candidates.length === 1 ? candidates[0]?.[0] : reportedToolUseId;
+  }
+
+  private completeNonClientToolResult(
+    state: AttemptState,
+    toolUseId: string,
+    tool: AttemptTool,
+    structured: ClaudeBashOutput | undefined,
+    content: unknown,
+    resultFailed: boolean,
+    hookOutcome?: "success" | "failure",
+  ): void {
+    state.bashOutputs.delete(toolUseId);
+    if (tool.terminalId) {
+      const outputCandidates: RuntimeOutputCandidate[] = [
+        ...(structured?.persistedOutputPath
+          ? [
+              {
+                path: structured.persistedOutputPath,
+                ...(structured.persistedOutputSize !== undefined
+                  ? { reportedSize: structured.persistedOutputSize }
+                  : {}),
+              },
+            ]
+          : []),
+        ...(structured?.rawOutputPath ? [{ path: structured.rawOutputPath }] : []),
+      ];
+      const emittedArtifact = this.emitRuntimeOutputArtifact(tool, outputCandidates);
+      const output = structured
+        ? [structured.stdout, structured.stderr].filter((entry) => entry.length > 0).join("\n")
+        : terminalResultText(content);
+      if (!emittedArtifact && output) {
+        tool.outputBytes += emitTerminalOutput({
+          emit: this.options.emit,
+          provider: "claudeAgent",
+          terminalId: tool.terminalId,
+          output,
+          redact: this.options.redact,
+        });
+      }
+      if (outputCandidates.length > 0 && !emittedArtifact) {
+        tool.outputTruncated = true;
+        if (structured?.persistedOutputSize !== undefined) {
+          tool.reportedTotalBytes = structured.persistedOutputSize;
+        }
+        this.emitUnsafeRuntimeOutputWarning("command");
+      }
+    }
+    if (structured?.backgroundTaskId) {
+      tool.backgroundTaskId = structured.backgroundTaskId;
+      this.emitToolActivity(tool, "updated", toolUseId);
+      return;
+    }
+    state.tools.delete(toolUseId);
+    const failed = resultFailed || hookOutcome === "failure" || structured?.interrupted === true;
+    const exitCode =
+      structured?.exitCode ??
+      (!failed && (structured !== undefined || hookOutcome === "success") ? 0 : undefined);
+    this.emitToolActivity(tool, failed ? "failed" : "completed", toolUseId, {
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(failed ? { failureKind: "provider_error" as const } : {}),
+    });
   }
 
   private handleTaskNotification(message: Record<string, unknown>, state: AttemptState): void {
@@ -967,6 +1116,33 @@ class ClaudeAgentSdkRuntime {
     if (!tool || !tool.terminalId) return;
     const outputPath = readString(message, "output_file");
     const summary = readString(message, "summary");
+    const failed = readString(message, "status") !== "completed";
+    if (isClaudeBashTool(tool.toolName)) {
+      const storedBashOutput = state.bashOutputs.get(toolUseId);
+      if (storedBashOutput) {
+        this.completeNonClientToolResult(
+          state,
+          toolUseId,
+          tool,
+          storedBashOutput,
+          summary,
+          failed,
+          failed ? "failure" : "success",
+        );
+        return;
+      }
+      state.pendingBashToolResults.set(toolUseId, {
+        content: summary,
+        failed,
+        structured: {
+          stdout: summary ?? "",
+          stderr: "",
+          interrupted: false,
+          ...(outputPath ? { rawOutputPath: outputPath } : {}),
+        },
+      });
+      return;
+    }
     const emittedArtifact = this.emitRuntimeOutputArtifact(
       tool,
       outputPath ? [{ path: outputPath }] : [],
@@ -984,14 +1160,17 @@ class ClaudeAgentSdkRuntime {
       tool.outputTruncated = true;
       this.emitUnsafeRuntimeOutputWarning("background");
     }
+    state.bashOutputs.delete(toolUseId);
+    state.pendingBashToolResults.delete(toolUseId);
+    state.failedBashToolUses.delete(toolUseId);
     state.tools.delete(toolUseId);
     this.emitToolActivity(
       tool,
-      readString(message, "status") === "completed" ? "completed" : "failed",
+      failed ? "failed" : "completed",
       toolUseId,
-      readString(message, "status") === "completed"
-        ? undefined
-        : { failureKind: "provider_error", ...(outputPath ? { truncated: true } : {}) },
+      failed
+        ? { failureKind: "provider_error", ...(outputPath ? { truncated: true } : {}) }
+        : undefined,
     );
   }
 
@@ -1089,6 +1268,9 @@ class ClaudeAgentSdkRuntime {
       }
     }
     state.tools.clear();
+    state.bashOutputs.clear();
+    state.pendingBashToolResults.clear();
+    state.failedBashToolUses.clear();
   }
 
   private attemptTool(
@@ -1830,6 +2012,85 @@ function claudeBashOutput(value: unknown): ClaudeBashOutput | undefined {
       ? { persistedOutputSize }
       : {}),
   };
+}
+
+function hydrateClaudeBashOutput(
+  output: ClaudeBashOutput | undefined,
+  runtimeOutputDirectory: string | undefined,
+): ClaudeBashOutput | undefined {
+  if (
+    !output ||
+    output.stdout.length > 0 ||
+    output.stderr.length > 0 ||
+    !runtimeOutputDirectory ||
+    !output.persistedOutputPath ||
+    output.persistedOutputSize === undefined
+  ) {
+    return output;
+  }
+  const stdout = readControlledRetainedOutput(
+    runtimeOutputDirectory,
+    output.persistedOutputPath,
+    output.persistedOutputSize,
+  );
+  if (stdout === undefined) return output;
+  const {
+    persistedOutputPath: _persistedOutputPath,
+    persistedOutputSize: _persistedOutputSize,
+    rawOutputPath: _rawOutputPath,
+    ...inline
+  } = output;
+  return { ...inline, stdout };
+}
+
+function isClaudeBashTool(toolName: string): boolean {
+  return toolName.trim().toLowerCase() === "bash";
+}
+
+function readControlledRetainedOutput(
+  runtimeOutputDirectory: string,
+  candidate: string,
+  expectedSize: number,
+): string | undefined {
+  if (
+    !Number.isSafeInteger(expectedSize) ||
+    expectedSize < 0 ||
+    expectedSize > MAX_INLINE_RETAINED_OUTPUT_BYTES ||
+    !runtimeOutputRelativePath(runtimeOutputDirectory, candidate)
+  ) {
+    return undefined;
+  }
+  let descriptor: number | undefined;
+  try {
+    const canonicalRoot = realpathSync.native(runtimeOutputDirectory);
+    const canonicalCandidate = realpathSync.native(candidate);
+    if (
+      !runtimeOutputRelativePath(canonicalRoot, canonicalCandidate) ||
+      lstatSync(candidate).isSymbolicLink()
+    ) {
+      return undefined;
+    }
+    descriptor = openSync(candidate, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(descriptor);
+    const resolved = statSync(canonicalCandidate);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.size !== expectedSize ||
+      resolved.dev !== opened.dev ||
+      resolved.ino !== opened.ino ||
+      resolved.size !== opened.size
+    ) {
+      return undefined;
+    }
+    const content = readFileSync(descriptor);
+    if (content.length !== expectedSize) return undefined;
+    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
 }
 
 function runtimeOutputRelativePath(

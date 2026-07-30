@@ -371,6 +371,310 @@ describe("Claude Agent SDK runtime", () => {
     },
   );
 
+  it("recovers bounded retained Bash output from an early PostToolUse hook", async () => {
+    const messages: RunnerMessage[] = [];
+    const output = "compatibility evidence\n";
+    const testDirectory = mkdtempSync(join(tmpdir(), "synara-claude-retained-output-"));
+    const runtimeOutputDirectory = join(testDirectory, "runtime-output");
+    const outputPath = join(runtimeOutputDirectory, "tool-results", "tool-hook-output.log");
+    mkdirSync(join(runtimeOutputDirectory, "tool-results"), { recursive: true });
+    writeFileSync(outputPath, output);
+    try {
+      const queryFactory: ClaudeQueryFactory = ({ options }) =>
+        fakeQuery(
+          (async function* () {
+            yield sdkMessage(systemInit("session-hook-output", "claude-test"));
+            const postToolUse = requiredOptions(options).hooks?.PostToolUse?.[0]?.hooks[0];
+            await postToolUse?.(
+              {
+                hook_event_name: "PostToolUse",
+                tool_name: "Bash",
+                tool_input: { command: "run compatibility probe" },
+                tool_response: {
+                  stdout: "",
+                  stderr: "",
+                  interrupted: false,
+                  persistedOutputPath: outputPath,
+                  persistedOutputSize: Buffer.byteLength(output),
+                },
+                tool_use_id: "tool-hook-output",
+              } as never,
+              undefined,
+              { signal: new AbortController().signal },
+            );
+            yield sdkMessage({
+              type: "assistant",
+              session_id: "session-hook-output",
+              message: {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "tool-hook-output",
+                    name: "Bash",
+                    input: { command: "run compatibility probe" },
+                  },
+                ],
+              },
+            });
+            yield sdkMessage({
+              type: "user",
+              session_id: "session-hook-output",
+              tool_use_result: { normalized: true },
+              message: {
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: "tool-hook-output",
+                    content: "",
+                  },
+                ],
+              },
+            });
+            yield sdkMessage(successResult("session-hook-output", "done", {}));
+          })(),
+        );
+
+      const run = startProviderHostRun(
+        claudeInput({ inputText: "capture hook output", runtimeOutputDirectory }),
+        null,
+        (message) => messages.push(message),
+        { claudeQueryFactory: queryFactory },
+      );
+
+      await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.command.output",
+        payload: {
+          provider: "claudeAgent",
+          terminalId: "tool-hook-output",
+          encoding: "utf-8",
+          text: output,
+          byteOffset: 0,
+          byteLength: Buffer.byteLength(output),
+        },
+      });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.provider.activity",
+        payload: expect.objectContaining({
+          provider: "claudeAgent",
+          itemType: "Bash",
+          status: "completed",
+          itemId: "tool-hook-output",
+          terminalId: "tool-hook-output",
+          terminalEventType: "terminal.exited",
+          exitCode: 0,
+          totalBytes: Buffer.byteLength(output),
+          previewBytes: Buffer.byteLength(output),
+          truncated: false,
+        }),
+      });
+      expect(messages.filter((message) => message.type === "artifact")).toEqual([]);
+    } finally {
+      rmSync(testDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for a late PostToolUse hook before completing a Bash terminal", async () => {
+    const messages: RunnerMessage[] = [];
+    const output = "late compatibility evidence\n";
+    const queryFactory: ClaudeQueryFactory = ({ options, prompt }) =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-late-hook-output", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-late-hook-output",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-late-hook-output",
+                  name: "Bash",
+                  input: { command: "run compatibility probe" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-late-hook-output",
+            tool_use_result: {
+              stdout: "stale retained summary",
+              stderr: "",
+              interrupted: false,
+            },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-late-hook-output",
+                  content: "retained output placeholder",
+                },
+              ],
+            },
+          });
+          expect(messages).not.toContainEqual(
+            expect.objectContaining({ eventType: "runtime.command.output" }),
+          );
+          expect(messages).not.toContainEqual(
+            expect.objectContaining({
+              eventType: "runtime.provider.activity",
+              payload: expect.objectContaining({ status: "completed" }),
+            }),
+          );
+          const postToolUse = requiredOptions(options).hooks?.PostToolUse?.[0]?.hooks[0];
+          yield sdkMessage(successResult("session-late-hook-output", "done", {}));
+          // The real SDK may not release the hook until the prompt input is
+          // closed after its terminal result.
+          for await (const _ of prompt) {
+            // Drain until the runtime closes the prompt stream.
+          }
+          await postToolUse?.(
+            {
+              hook_event_name: "PostToolUse",
+              tool_name: "Bash",
+              tool_input: { command: "run compatibility probe" },
+              tool_response: {
+                stdout: output,
+                stderr: "",
+                interrupted: false,
+              },
+            } as never,
+            undefined,
+            { signal: new AbortController().signal },
+          );
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "capture late hook output" }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.command.output",
+      payload: {
+        provider: "claudeAgent",
+        terminalId: "tool-late-hook-output",
+        encoding: "utf-8",
+        text: output,
+        byteOffset: 0,
+        byteLength: Buffer.byteLength(output),
+      },
+    });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.provider.activity",
+      payload: expect.objectContaining({
+        provider: "claudeAgent",
+        itemType: "Bash",
+        status: "completed",
+        itemId: "tool-late-hook-output",
+        terminalId: "tool-late-hook-output",
+        terminalEventType: "terminal.exited",
+        exitCode: 0,
+        totalBytes: Buffer.byteLength(output),
+        previewBytes: Buffer.byteLength(output),
+        truncated: false,
+      }),
+    });
+    expect(JSON.stringify(messages)).not.toContain("retained output placeholder");
+    expect(JSON.stringify(messages)).not.toContain("stale retained summary");
+  });
+
+  it("waits for a late PostToolUseFailure hook before failing a Bash terminal", async () => {
+    const messages: RunnerMessage[] = [];
+    const queryFactory: ClaudeQueryFactory = ({ options }) =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-late-hook-failure", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-late-hook-failure",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-late-hook-failure",
+                  name: "Bash",
+                  input: { command: "exit 1" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-late-hook-failure",
+            tool_use_result: { normalized: true },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-late-hook-failure",
+                  content: "command failed",
+                  is_error: true,
+                },
+              ],
+            },
+          });
+          const postToolUseFailure =
+            requiredOptions(options).hooks?.PostToolUseFailure?.[0]?.hooks[0];
+          yield sdkMessage(successResult("session-late-hook-failure", "handled", {}));
+          await postToolUseFailure?.(
+            {
+              hook_event_name: "PostToolUseFailure",
+              tool_name: "Bash",
+              tool_input: { command: "exit 1" },
+              tool_use_id: "tool-late-hook-failure",
+              error: "command failed",
+            } as never,
+            undefined,
+            { signal: new AbortController().signal },
+          );
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "run a failing command" }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "handled" } });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.command.output",
+      payload: {
+        provider: "claudeAgent",
+        terminalId: "tool-late-hook-failure",
+        encoding: "utf-8",
+        text: "command failed",
+        byteOffset: 0,
+        byteLength: 14,
+      },
+    });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.provider.activity",
+      payload: expect.objectContaining({
+        provider: "claudeAgent",
+        itemType: "Bash",
+        status: "failed",
+        itemId: "tool-late-hook-failure",
+        terminalId: "tool-late-hook-failure",
+        terminalEventType: "terminal.failed",
+        failureKind: "provider_error",
+      }),
+    });
+  });
+
   it("emits a controlled background output_file once without duplicating its summary", async () => {
     const messages: RunnerMessage[] = [];
     const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
@@ -451,6 +755,94 @@ describe("Claude Agent SDK runtime", () => {
       expect.objectContaining({ eventType: "runtime.command.output" }),
     );
     expect(JSON.stringify(messages)).not.toContain(runtimeOutputDirectory);
+  });
+
+  it("prefers a late Bash hook over an abbreviated background task notification", async () => {
+    const messages: RunnerMessage[] = [];
+    const output = "complete background compatibility evidence\n";
+    const queryFactory: ClaudeQueryFactory = ({ options }) =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-background-hook", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-background-hook",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-background-hook",
+                  name: "Bash",
+                  input: { command: "run compatibility probe" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-background-hook",
+            tool_use_result: {
+              stdout: "",
+              stderr: "",
+              interrupted: false,
+              backgroundTaskId: "background-hook",
+            },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-background-hook",
+                  content: "background task started",
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "system",
+            subtype: "task_notification",
+            session_id: "session-background-hook",
+            tool_use_id: "tool-background-hook",
+            status: "completed",
+            summary: "abbreviated background summary",
+            output_file: "/tmp/uncontrolled-background-output.log",
+          });
+          const postToolUse = requiredOptions(options).hooks?.PostToolUse?.[0]?.hooks[0];
+          await postToolUse?.(
+            {
+              hook_event_name: "PostToolUse",
+              tool_name: "Bash",
+              tool_input: { command: "run compatibility probe" },
+              tool_response: { stdout: output, stderr: "", interrupted: false },
+              tool_use_id: "tool-background-hook",
+            } as never,
+            undefined,
+            { signal: new AbortController().signal },
+          );
+          yield sdkMessage(successResult("session-background-hook", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "capture background hook output" }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.command.output",
+      payload: {
+        provider: "claudeAgent",
+        terminalId: "tool-background-hook",
+        encoding: "utf-8",
+        text: output,
+        byteOffset: 0,
+        byteLength: Buffer.byteLength(output),
+      },
+    });
+    expect(JSON.stringify(messages)).not.toContain("abbreviated background summary");
   });
 
   it.each([
