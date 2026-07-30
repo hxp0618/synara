@@ -4798,6 +4798,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             runtime_mode="approval-required",
         )
 
+    def test_kubernetes_first_real_provider_turn_waits_for_target_readiness(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.options = dataclasses.replace(suite.options, target="kubernetes")
+        suite._create_turn = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                acceptance.AcceptanceError(
+                    "execution_capacity_authority_unavailable",
+                    "capacity authority pending",
+                ),
+                {"id": "turn-stage5"},
+            ]
+        )
+
+        with mock.patch.object(acceptance.Deadline, "sleep", return_value=None):
+            evidence = suite._start_real_provider_turn()
+
+        self.assertEqual(evidence["turnId"], "turn-stage5")
+        self.assertEqual(suite.state.pending_real_turn_id, "turn-stage5")
+        self.assertEqual(suite._create_turn.call_count, 2)
+        for call in suite._create_turn.call_args_list:
+            self.assertEqual(call.kwargs, {"runtime_mode": "full-access"})
+            self.assertIn(
+                str(evidence["expectedMarker"]),
+                str(call.args[0]),
+            )
+
     def test_stage5_credential_terminal_rejects_present_sentinel(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
         terminal, events = _stage5_probe_terminal_events(

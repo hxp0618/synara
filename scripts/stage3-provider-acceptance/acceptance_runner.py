@@ -11020,9 +11020,14 @@ class AcceptanceSuite:
                 {"turnId": self.state.pending_real_turn_id},
             )
         marker = self._real_provider_marker()
-        turn = self._create_turn(
+        prompt = (
             "This is an automated Synara runtime acceptance check. "
             f"Reply with exactly {marker} and no other text."
+        )
+        turn = (
+            self._create_stage5_turn(prompt, runtime_mode="full-access")
+            if self.options.target == "kubernetes"
+            else self._create_turn(prompt)
         )
         turn_id = turn.get("id")
         if not isinstance(turn_id, str) or not turn_id:
