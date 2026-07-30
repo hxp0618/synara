@@ -266,6 +266,7 @@ RUN set -eu; \
   rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
+COPY --chown=0:0 --chmod=0444 deploy/worker/provider-tools-path.sh /etc/profile.d/99-synara-provider-tools.sh
 RUN set -eu; \
   expected_bun="$(node -p "require('/opt/synara/provider-tools/package.json').dependencies.bun")"; \
   actual_bun="$(/opt/synara/provider-tools/node_modules/.bin/bun --version)"; \
@@ -323,7 +324,8 @@ RUN printf '%s\n' '#!/bin/sh' 'exec node /opt/synara/provider-host/index.mjs "$@
   > /usr/local/bin/provider-host \
   && chmod 0755 /usr/local/bin/provider-host \
   && test "$(stat -c %a /opt/synara/gvisor-compatibility-probe.mjs)" = 444 \
-  && su synara-worker -s /bin/sh -c 'node --check /opt/synara/gvisor-compatibility-probe.mjs'
+  && su synara-worker -s /bin/sh -c 'node --check /opt/synara/gvisor-compatibility-probe.mjs' \
+  && su synara-worker -s /bin/sh -c '/bin/bash -lc "command -v bun | grep -qx /opt/synara/provider-tools/node_modules/.bin/bun && command -v pnpm | grep -qx /opt/synara/provider-tools/node_modules/.bin/pnpm && git --version >/dev/null && bun --version >/dev/null && pnpm --version >/dev/null"'
 
 ENV HOME=/home/synara \
   PATH=/opt/synara/provider-tools/node_modules/.bin:/home/synara/.local/bin:${PATH} \
@@ -353,6 +355,7 @@ COPY --from=provider-tools-bookworm /usr/local/bin/node /usr/local/bin/node
 COPY --from=provider-tools-bookworm /opt/synara/provider-tools /opt/synara/provider-tools
 COPY --from=provider-host-build /out/provider-host.mjs /opt/synara/provider-host/index.mjs
 COPY --from=agentd-build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
+COPY --chown=0:0 --chmod=0444 deploy/worker/provider-tools-path.sh /etc/profile.d/99-synara-provider-tools.sh
 RUN printf '%s\n' '#!/bin/sh' \
   'export PATH=/opt/synara/provider-tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   'exec node /opt/synara/provider-host/index.mjs "$@"' \

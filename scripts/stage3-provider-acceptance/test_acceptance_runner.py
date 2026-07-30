@@ -4306,6 +4306,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertIn(acceptance.GVISOR_COMPATIBILITY_FAILURE_SENTINEL, implementation)
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(acceptance.GVISOR_COMPATIBILITY_PROBE_PATH, dockerfile)
+        profile = (
+            REPO_ROOT / "deploy/worker/provider-tools-path.sh"
+        ).read_text(encoding="utf-8")
+        canonical_path = (
+            "/opt/synara/provider-tools/node_modules/.bin:"
+            "/home/synara/.local/bin:/usr/local/sbin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        self.assertIn(f"export PATH={canonical_path}", profile)
+        self.assertEqual(
+            dockerfile.count(
+                "deploy/worker/provider-tools-path.sh "
+                "/etc/profile.d/99-synara-provider-tools.sh"
+            ),
+            2,
+        )
+        self.assertIn(
+            "command -v bun | grep -qx "
+            "/opt/synara/provider-tools/node_modules/.bin/bun",
+            dockerfile,
+        )
+        self.assertIn(
+            "command -v pnpm | grep -qx "
+            "/opt/synara/provider-tools/node_modules/.bin/pnpm",
+            dockerfile,
+        )
 
         payload = {
             "schemaVersion": 1,
