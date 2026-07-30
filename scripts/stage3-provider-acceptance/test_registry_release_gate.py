@@ -1955,10 +1955,18 @@ class InputValidationTest(unittest.TestCase):
         lock = json.loads(lock_text)
         packages = lock["packages"]
 
+        expected_bun = package["dependencies"]["bun"]
         expected_npm = package["dependencies"]["npm"]
+        expected_pnpm = package["dependencies"]["pnpm"]
+        self.assertEqual(expected_bun, "1.3.14")
         self.assertEqual(expected_npm, "12.0.1")
+        self.assertEqual(expected_pnpm, "11.18.0")
+        self.assertEqual(packages[""]["dependencies"]["bun"], expected_bun)
         self.assertEqual(packages[""]["dependencies"]["npm"], expected_npm)
+        self.assertEqual(packages[""]["dependencies"]["pnpm"], expected_pnpm)
+        self.assertEqual(packages["node_modules/bun"]["version"], expected_bun)
         self.assertEqual(packages["node_modules/npm"]["version"], expected_npm)
+        self.assertEqual(packages["node_modules/pnpm"]["version"], expected_pnpm)
         self.assertEqual(
             packages["node_modules/npm"]["resolved"],
             "https://registry.npmjs.org/npm/-/npm-12.0.1.tgz",
@@ -1991,8 +1999,25 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(dockerfile.count("COPY deploy/worker/install-provider-tools.sh"), 2)
         self.assertEqual(dockerfile.count("RUN sh /usr/local/bin/install-provider-tools.sh"), 2)
         self.assertIn("npm ci --omit=dev --include=optional", installer)
+        self.assertIn("node node_modules/bun/install.js", installer)
         self.assertIn("./node_modules/.bin/codex --version", installer)
         self.assertIn("./node_modules/.bin/claude --version", installer)
+        self.assertIn("./node_modules/.bin/bun --version", installer)
+        self.assertIn("./node_modules/.bin/pnpm --version", installer)
+        apk_lock = set(
+            (REPO_ROOT / "deploy/worker/apk-packages.lock")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        self.assertTrue(
+            {
+                "go=1.26.3-r0",
+                "rust=1.96.1-r0",
+                "cargo=1.96.1-r0",
+                "openjdk21-jdk=21.0.11_p10-r0",
+                "python3=3.14.5-r0",
+            }.issubset(apk_lock)
+        )
         self.assertIn('max_attempts=3', installer)
         self.assertIn('provider-tools install failed after ${attempt} attempts', installer)
         self.assertIn('if [ "${apk_install_attempt}" -ge 3 ]; then', dockerfile)
@@ -2030,7 +2055,7 @@ class InputValidationTest(unittest.TestCase):
                         "fi",
                         'attempts=$((attempts + 1))',
                         'printf \"%s\" \"$attempts\" > \"$TEST_ATTEMPT_FILE\"',
-                        "mkdir -p node_modules/.bin node_modules/@anthropic-ai/claude-code",
+                        "mkdir -p node_modules/.bin node_modules/@anthropic-ai/claude-code node_modules/bun",
                         "cat <<'EOF' > node_modules/.bin/codex",
                         "#!/bin/sh",
                         "set -eu",
@@ -2049,6 +2074,17 @@ class InputValidationTest(unittest.TestCase):
                         "EOF",
                         "chmod +x node_modules/.bin/claude",
                         ": > node_modules/@anthropic-ai/claude-code/install.cjs",
+                        ": > node_modules/bun/install.js",
+                        "cat <<'EOF' > node_modules/.bin/bun",
+                        "#!/bin/sh",
+                        "echo 1.3.14",
+                        "EOF",
+                        "chmod +x node_modules/.bin/bun",
+                        "cat <<'EOF' > node_modules/.bin/pnpm",
+                        "#!/bin/sh",
+                        "echo 11.18.0",
+                        "EOF",
+                        "chmod +x node_modules/.bin/pnpm",
                         "exit 0",
                     ]
                 )
@@ -2092,7 +2128,11 @@ class InputValidationTest(unittest.TestCase):
             self.assertEqual(claude_log.read_text(encoding="utf-8").splitlines(), ["claude"])
             self.assertEqual(
                 node_log.read_text(encoding="utf-8").splitlines(),
-                ["node_modules/@anthropic-ai/claude-code/install.cjs"] * 3,
+                [
+                    "node_modules/@anthropic-ai/claude-code/install.cjs",
+                    "node_modules/bun/install.js",
+                ]
+                * 3,
             )
             self.assertIn("provider-tools install attempt 1 failed; retrying", completed.stderr)
             self.assertIn("provider-tools install attempt 2 failed; retrying", completed.stderr)

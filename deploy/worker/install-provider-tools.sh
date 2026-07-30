@@ -10,8 +10,11 @@ while :; do
 
   if npm ci --omit=dev --include=optional --ignore-scripts --no-audit --no-fund \
     && node node_modules/@anthropic-ai/claude-code/install.cjs \
+    && node node_modules/bun/install.js \
     && ./node_modules/.bin/codex --version \
-    && ./node_modules/.bin/claude --version; then
+    && ./node_modules/.bin/claude --version \
+    && ./node_modules/.bin/bun --version \
+    && ./node_modules/.bin/pnpm --version; then
     npm cache clean --force
     exit 0
   fi

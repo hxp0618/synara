@@ -6,6 +6,7 @@ ARG AGENTD_BUILD_IMAGE=golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d
 ARG WORKER_RUNTIME_IMAGE=node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 ARG ATTESTOR_RUNTIME_IMAGE=alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 ARG COCOON_GUEST_IMAGE=ghcr.io/cocoonstack/sandbox/rt:24.04@sha256:cc05d8552fb9e56acadbb9ce553cde430992cfeb44e3516e9a66e55c7296def0
+ARG ALPINE_REPOSITORY_PREFIX=
 
 FROM ${BUN_IMAGE} AS bun
 
@@ -170,9 +171,17 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM ${ATTESTOR_RUNTIME_IMAGE} AS gvisor-node-attestor
 
-RUN apk add --no-cache ca-certificates=20260611-r0 \
-  && addgroup -g 65532 -S attestor \
-  && adduser -u 65532 -S -D -H -G attestor attestor
+ARG ALPINE_REPOSITORY_PREFIX
+
+RUN set -eu; \
+  cp /etc/apk/repositories /tmp/apk.repositories; \
+  if [ -n "${ALPINE_REPOSITORY_PREFIX}" ]; then \
+    sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPOSITORY_PREFIX%/}#g" /etc/apk/repositories; \
+  fi; \
+  apk add --no-cache ca-certificates=20260611-r0; \
+  mv /tmp/apk.repositories /etc/apk/repositories; \
+  addgroup -g 65532 -S attestor; \
+  adduser -u 65532 -S -D -H -G attestor attestor
 COPY --from=agentd-build /out/synara-gvisor-node-attestor /usr/local/bin/synara-gvisor-node-attestor
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/synara-gvisor-node-attestor"]
@@ -230,6 +239,7 @@ ARG SOURCE_DATE_EPOCH=0
 ARG BUN_IMAGE
 ARG AGENTD_BUILD_IMAGE
 ARG WORKER_RUNTIME_IMAGE
+ARG ALPINE_REPOSITORY_PREFIX
 
 RUN mkdir -p /opt/synara \
   && printf '%s\n' "${SYNARA_GIT_SHA}" > /opt/synara/.build-revision \
@@ -237,6 +247,10 @@ RUN mkdir -p /opt/synara \
 
 COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
 RUN set -eu; \
+  cp /etc/apk/repositories /tmp/apk.repositories; \
+  if [ -n "${ALPINE_REPOSITORY_PREFIX}" ]; then \
+    sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPOSITORY_PREFIX%/}#g" /etc/apk/repositories; \
+  fi; \
   apk_install_attempt=1; \
   while :; do \
     if xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock; then \
@@ -248,13 +262,20 @@ RUN set -eu; \
     echo "apk add failed on attempt ${apk_install_attempt}; retrying" >&2; \
     apk_install_attempt=$((apk_install_attempt + 1)); \
   done; \
+  mv /tmp/apk.repositories /etc/apk/repositories; \
   rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
 RUN set -eu; \
+  expected_bun="$(node -p "require('/opt/synara/provider-tools/package.json').dependencies.bun")"; \
+  actual_bun="$(/opt/synara/provider-tools/node_modules/.bin/bun --version)"; \
+  test "$actual_bun" = "$expected_bun"; \
   expected_npm="$(node -p "require('/opt/synara/provider-tools/package.json').dependencies.npm")"; \
   actual_npm="$(node -p "require('/opt/synara/provider-tools/node_modules/npm/package.json').version")"; \
   test "$actual_npm" = "$expected_npm"; \
+  expected_pnpm="$(node -p "require('/opt/synara/provider-tools/package.json').dependencies.pnpm")"; \
+  actual_pnpm="$(/opt/synara/provider-tools/node_modules/.bin/pnpm --version)"; \
+  test "$actual_pnpm" = "$expected_pnpm"; \
   rm -rf /usr/local/lib/node_modules/npm; \
   ln -sf /opt/synara/provider-tools/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
   ln -sf /opt/synara/provider-tools/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
