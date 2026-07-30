@@ -10274,6 +10274,7 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             kubernetes_api_server="https://127.0.0.1:26443",
             kubernetes_tls_server_name="k8s.orb.local",
             kubernetes_allow_nondisposable=True,
+            kubernetes_runtime_class="synara-gvisor",
         )
         driver = acceptance.KubernetesDriver(
             pathlib.Path.cwd(),
@@ -10368,6 +10369,23 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                     "apiGroups": ["authentication.k8s.io"],
                     "resources": ["tokenreviews"],
                     "verbs": ["create"],
+                }
+            ],
+        )
+        runtime_class_rules = [
+            rule
+            for rule in cluster_role["rules"]
+            if rule["apiGroups"] == ["node.k8s.io"]
+            and rule["resources"] == ["runtimeclasses"]
+        ]
+        self.assertEqual(
+            runtime_class_rules,
+            [
+                {
+                    "apiGroups": ["node.k8s.io"],
+                    "resources": ["runtimeclasses"],
+                    "resourceNames": ["synara-gvisor"],
+                    "verbs": ["get"],
                 }
             ],
         )

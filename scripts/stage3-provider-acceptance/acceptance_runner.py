@@ -8809,6 +8809,53 @@ class KubernetesDriver(ManagedWorkerDriver):
 
     def _prepare_cluster_access(self) -> Mapping[str, Any]:
         ownership_labels = self._ownership_labels()
+        cluster_role_rules: list[dict[str, Any]] = [
+            {
+                "apiGroups": [""],
+                "resources": [
+                    "namespaces",
+                    "pods",
+                    "serviceaccounts",
+                    "secrets",
+                    "resourcequotas",
+                ],
+                "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+            },
+            {
+                "apiGroups": ["networking.k8s.io"],
+                "resources": ["networkpolicies"],
+                "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+            },
+            {
+                "apiGroups": [""],
+                "resources": ["nodes"],
+                "verbs": ["get", "list", "watch"],
+            },
+            {
+                "apiGroups": [""],
+                "resources": ["nodes/proxy"],
+                "verbs": ["get"],
+            },
+            {
+                "apiGroups": ["scheduling.k8s.io"],
+                "resources": ["priorityclasses"],
+                "verbs": ["get"],
+            },
+            {
+                "apiGroups": ["authentication.k8s.io"],
+                "resources": ["tokenreviews"],
+                "verbs": ["create"],
+            },
+        ]
+        if self.options.kubernetes_runtime_class is not None:
+            cluster_role_rules.append(
+                {
+                    "apiGroups": ["node.k8s.io"],
+                    "resources": ["runtimeclasses"],
+                    "resourceNames": [self.options.kubernetes_runtime_class],
+                    "verbs": ["get"],
+                }
+            )
         manifest = {
             "apiVersion": "v1",
             "kind": "List",
@@ -8831,44 +8878,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                     "apiVersion": "rbac.authorization.k8s.io/v1",
                     "kind": "ClusterRole",
                     "metadata": {"name": self.bootstrap_role, "labels": ownership_labels},
-                    "rules": [
-                        {
-                            "apiGroups": [""],
-                            "resources": [
-                                "namespaces",
-                                "pods",
-                                "serviceaccounts",
-                                "secrets",
-                                "resourcequotas",
-                            ],
-                            "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-                        },
-                        {
-                            "apiGroups": ["networking.k8s.io"],
-                            "resources": ["networkpolicies"],
-                            "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-                        },
-                        {
-                            "apiGroups": [""],
-                            "resources": ["nodes"],
-                            "verbs": ["get", "list", "watch"],
-                        },
-                        {
-                            "apiGroups": [""],
-                            "resources": ["nodes/proxy"],
-                            "verbs": ["get"],
-                        },
-                        {
-                            "apiGroups": ["scheduling.k8s.io"],
-                            "resources": ["priorityclasses"],
-                            "verbs": ["get"],
-                        },
-                        {
-                            "apiGroups": ["authentication.k8s.io"],
-                            "resources": ["tokenreviews"],
-                            "verbs": ["create"],
-                        },
-                    ],
+                    "rules": cluster_role_rules,
                 },
                 {
                     "apiVersion": "rbac.authorization.k8s.io/v1",
