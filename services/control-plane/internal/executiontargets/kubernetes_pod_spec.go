@@ -118,6 +118,17 @@ func (r *KubernetesReconciler) foundationHash(
 	if err != nil {
 		return "", err
 	}
+	runtimeDecision := configuration.RuntimeIsolationDecision
+	if runtimeDecision != nil {
+		stableDecision := *runtimeDecision
+		// The observation window proves that the attestation is currently fresh,
+		// but it does not change the Pod specification. Keep the attestation
+		// digest in the hash so an actual runtime or eligible-node identity change
+		// still rolls the Pod without recycling it on every reconciliation pass.
+		stableDecision.AttestedAt = nil
+		stableDecision.AttestationExpiresAt = nil
+		runtimeDecision = &stableDecision
+	}
 	payload, err := json.Marshal(struct {
 		Configuration   kubernetesTargetConfiguration
 		RuntimeDecision *runtimeIsolationDecision
@@ -126,7 +137,7 @@ func (r *KubernetesReconciler) foundationHash(
 		PodSpecRevision string
 	}{
 		Configuration:   configuration,
-		RuntimeDecision: configuration.RuntimeIsolationDecision,
+		RuntimeDecision: runtimeDecision,
 		Capabilities:    capabilities,
 		LeaseRenew:      workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL),
 		PodSpecRevision: kubernetesWorkerPodSpecRevision,

@@ -430,6 +430,29 @@ func TestKubernetesReconcilerFreezesAttestedGVisorDecisionBeforePodApply(t *test
 	if !foundProfile {
 		t.Fatalf("gVisor Pod environment = %#v", environment)
 	}
+
+	initialPodIdentities := make(map[string]string, len(client.pods))
+	initialPodHashes := make(map[string]string, len(client.pods))
+	for name, pod := range client.pods {
+		initialPodIdentities[name] = pod.UID
+		initialPodHashes[name] = pod.Annotations[kubernetesConfigAnnotation]
+	}
+	refreshedAt := now.Add(5 * time.Second)
+	refreshedExpiry := expiresAt.Add(5 * time.Second)
+	client.runtimeIsolationCapabilities[0].AttestedAt = &refreshedAt
+	client.runtimeIsolationCapabilities[0].AttestationExpiresAt = &refreshedExpiry
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deletedPods) != 0 || len(client.pods) != len(initialPodIdentities) {
+		t.Fatalf("fresh attestation window recycled gVisor Pods: deleted=%#v active=%d", client.deletedPods, len(client.pods))
+	}
+	for name, initialUID := range initialPodIdentities {
+		pod, found := client.pods[name]
+		if !found || pod.UID != initialUID || pod.Annotations[kubernetesConfigAnnotation] != initialPodHashes[name] {
+			t.Fatalf("fresh attestation window changed gVisor Pod %s: beforeUID=%s after=%#v", name, initialUID, pod)
+		}
+	}
 }
 
 func TestKubernetesReconcilerFiltersUnacceptedGVisorAndUsesAllowedFallback(t *testing.T) {
