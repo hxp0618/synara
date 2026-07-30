@@ -318,6 +318,7 @@ COPY --from=agentd-build /out/synara-agentd /usr/local/bin/synara-agentd
 COPY --from=agentd-build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
 COPY --from=agentd-build /out/synara-cocoon-supervisor /usr/local/bin/synara-cocoon-supervisor
 COPY --from=provider-host-build /out/provider-host.mjs /opt/synara/provider-host/index.mjs
+COPY --chown=0:0 --chmod=0444 deploy/worker/gvisor-compatibility-probe.mjs /opt/synara/runtime/gvisor-compatibility-probe.mjs
 RUN printf '%s\n' '#!/bin/sh' 'exec node /opt/synara/provider-host/index.mjs "$@"' \
   > /usr/local/bin/provider-host && chmod 0755 /usr/local/bin/provider-host
 

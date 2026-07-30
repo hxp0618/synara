@@ -4291,13 +4291,21 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
     def test_gvisor_compatibility_command_is_bounded_and_result_schema_is_strict(self) -> None:
         command = acceptance.gvisor_compatibility_node_command("/usr/local/bin/node")
-        self.assertTrue(command.startswith("/usr/local/bin/node -e '"))
-        self.assertLess(len(command.encode("utf-8")), 64 << 10)
+        self.assertEqual(
+            command,
+            "/usr/local/bin/node /opt/synara/runtime/gvisor-compatibility-probe.mjs",
+        )
+        self.assertLess(len(command.encode("utf-8")), 256)
         self.assertNotIn("SYNARA_GVISOR_COMPATIBILITY_FAILED_V1", command)
-        encoded_script = command.split('Buffer.from("', 1)[1].split('"', 1)[0]
-        implementation = base64.b64decode(encoded_script).decode("utf-8")
-        self.assertIn('const versionArgs={go:["version"]}', implementation)
-        self.assertIn('versionArgs[tool]||["--version"]', implementation)
+        implementation = (
+            REPO_ROOT / "deploy/worker/gvisor-compatibility-probe.mjs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('const versionArgs = { go: ["version"] };', implementation)
+        self.assertIn('versionArgs[tool] || ["--version"]', implementation)
+        self.assertIn(acceptance.GVISOR_COMPATIBILITY_OUTPUT_PREFIX, implementation)
+        self.assertIn(acceptance.GVISOR_COMPATIBILITY_FAILURE_SENTINEL, implementation)
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(acceptance.GVISOR_COMPATIBILITY_PROBE_PATH, dockerfile)
 
         payload = {
             "schemaVersion": 1,
