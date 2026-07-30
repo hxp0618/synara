@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "failed",
+  "startedAt": "2026-07-26T16:37:32Z",
+  "updatedAt": "2026-07-26T16:41:30Z",
+  "finishedAt": "2026-07-26T16:41:30Z",
+  "context": "orbstack",
+  "namespace": "synara-stage4-lifecycle-debug2",
+  "rbacName": "synara-control-plane-reconciler-synara-stage4-lifecycle-debug2",
+  "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-debug2.json",
+  "journalFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-debug2.json.journal.jsonl",
+  "partialFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-debug2.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 71
+  },
+  "plannedCases": [
+    "resource-lifecycle"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": [],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "failed",
+    "startedAt": "2026-07-26T16:37:32Z",
+    "finishedAt": "2026-07-26T16:41:30Z",
+    "durationSeconds": 238,
+    "evidenceFile": "docs/reports/stage-4-orbstack-resource-lifecycle-20260727-debug2.json",
+    "unexpectedExitStatus": 130
+  }
+}
