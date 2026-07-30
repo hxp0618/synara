@@ -35,7 +35,7 @@ def matrix_options(output_dir: pathlib.Path) -> matrix.MatrixOptions:
     return matrix.MatrixOptions(
         repo_root=pathlib.Path(__file__).resolve().parents[2],
         output_dir=output_dir,
-        kubectl_bin="kubectl",
+        kubectl_bin="/opt/synara/bin/kubectl-v1.36.1",
         kubernetes_context="managed-production",
         kubernetes_kubeconfig=None,
         kubernetes_api_server=None,
@@ -301,6 +301,7 @@ def child_report(
                 "skipWorkerBuild": True,
                 "allowNondisposable": True,
                 "runtimeClassName": options.runtime_class,
+                "kubectlBinary": options.kubectl_bin,
             },
         },
         "cases": cases,
@@ -456,6 +457,8 @@ class ChildBoundaryTest(unittest.TestCase):
         self.assertIn("CLAUDE_KEY", command)
         self.assertIn("--kubernetes-control-plane-port", command)
         self.assertIn("58091", command)
+        self.assertIn("--kubectl-bin", command)
+        self.assertIn("/opt/synara/bin/kubectl-v1.36.1", command)
         self.assertNotIn("claude-secret", command)
 
     def test_gvisor_matrix_requires_exact_runtime_class_in_command_and_evidence(self) -> None:

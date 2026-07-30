@@ -475,6 +475,8 @@ def child_command(
         configuration.credential.field,
         "--kubernetes-context",
         options.kubernetes_context,
+        "--kubectl-bin",
+        options.kubectl_bin,
         "--kubernetes-allow-nondisposable",
         "--kubernetes-skip-worker-build",
         "--kubernetes-worker-image",
@@ -814,6 +816,7 @@ def validate_child_report(
         or kubernetes.get("skipWorkerBuild") is not True
         or kubernetes.get("allowNondisposable") is not True
         or kubernetes.get("runtimeClassName") != options.runtime_class
+        or kubernetes.get("kubectlBinary") != options.kubectl_bin
     ):
         fail(
             "stage5.matrix.child_kubernetes_boundary_invalid",
@@ -1257,6 +1260,7 @@ def write_report(
 def _configuration_report(options: MatrixOptions) -> dict[str, Any]:
     return {
         "kubernetesContext": options.kubernetes_context,
+        "kubectlExecutable": pathlib.PurePath(options.kubectl_bin).name,
         "kubernetesKubeconfigProvided": options.kubernetes_kubeconfig is not None,
         "kubernetesApiServerOverride": options.kubernetes_api_server is not None,
         "kubernetesTlsServerNameOverride": options.kubernetes_tls_server_name is not None,

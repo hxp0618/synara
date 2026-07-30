@@ -1298,6 +1298,7 @@ class RunnerOptions:
     real_provider_credential_field: str
     real_provider_base_url_env: str | None
     real_provider_model: str | None
+    kubectl_bin: str = "kubectl"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -9146,7 +9147,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         cleanup_timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         timeout = cleanup_timeout or self.deadline.request_timeout(maximum=30.0)
-        command = ["kubectl", "--context", self.context]
+        command = [self.options.kubectl_bin, "--context", self.context]
         if self.api_server_override is not None:
             command.extend(["--server", self.api_server_override])
         if self.tls_server_name_override is not None:
@@ -9168,7 +9169,7 @@ class KubernetesDriver(ManagedWorkerDriver):
             raise AcceptanceError(
                 "runner.kubernetes_command_failed",
                 f"kubectl could not run: {self.redactor.text(str(error))}",
-                {"command": ["kubectl", *arguments[:3]]},
+                {"command": [self.options.kubectl_bin, *arguments[:3]]},
             ) from None
 
     def _kubectl_command(
@@ -9189,7 +9190,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "runner.kubernetes_command_failed",
                 f"kubectl exited with status {completed.returncode}.",
                 {
-                    "command": ["kubectl", *arguments[:3]],
+                    "command": [self.options.kubectl_bin, *arguments[:3]],
                     "exitCode": completed.returncode,
                     "outputExcerpt": output[-1000:],
                 },
@@ -9244,7 +9245,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "runner.kubernetes_command_failed",
                 f"kubectl exited with status {completed.returncode}.",
                 {
-                    "command": ["kubectl", *arguments[:3]],
+                    "command": [self.options.kubectl_bin, *arguments[:3]],
                     "exitCode": completed.returncode,
                     "outputExcerpt": output[-1000:],
                 },
@@ -9424,7 +9425,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "runner.kubernetes_cleanup_command_failed",
                 f"kubectl cleanup exited with status {completed.returncode}.",
                 {
-                    "command": ["kubectl", *arguments[:3]],
+                    "command": [self.options.kubectl_bin, *arguments[:3]],
                     "exitCode": completed.returncode,
                     "maximumAttempts": KUBERNETES_CLEANUP_MAX_ATTEMPTS,
                     "outputExcerpt": output[-1000:],
@@ -20132,6 +20133,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
     parser.add_argument("--kubernetes-context", help="Explicit reusable Kubernetes context; defaults to an owned Kind cluster")
     parser.add_argument("--kubernetes-kubeconfig", type=pathlib.Path)
+    parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument(
         "--kubernetes-api-server",
         help="Override the reused Context API server with a credential-free HTTPS origin",
@@ -20611,6 +20613,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--kubernetes-control-plane-port must be between 1 and 65535")
     if not parsed.kind_bin.strip() or any(character in parsed.kind_bin for character in "\r\n\t\x00"):
         parser.error("--kind-bin must be a command or executable path")
+    if not parsed.kubectl_bin.strip() or any(
+        character in parsed.kubectl_bin for character in "\r\n\t\x00"
+    ):
+        parser.error("--kubectl-bin must be a command or executable path")
     if not parsed.kind_node_image.strip() or any(character in parsed.kind_node_image for character in "\r\n\t\x00"):
         parser.error("--kind-node-image must be a non-empty image reference")
     kubernetes_context = parsed.kubernetes_context.strip() if parsed.kubernetes_context else None
@@ -20934,6 +20940,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         real_provider_credential_field=parsed.real_provider_credential_field,
         real_provider_base_url_env=real_provider_base_url_env,
         real_provider_model=real_provider_model,
+        kubectl_bin=parsed.kubectl_bin.strip(),
     )
 
 
@@ -21478,6 +21485,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "controlPlaneHost": options.kubernetes_control_plane_host,
                 "nodeName": options.kubernetes_node_name,
                 "runtimeClassName": options.kubernetes_runtime_class,
+                "kubectlBinary": options.kubectl_bin,
                 "kindBinary": options.kind_bin,
                 "kindClusterName": options.kind_cluster_name,
                 "kindNodeImage": options.kind_node_image,

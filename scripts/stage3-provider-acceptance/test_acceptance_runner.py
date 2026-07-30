@@ -10452,6 +10452,7 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             kubernetes_api_server="https://127.0.0.1:26443",
             kubernetes_tls_server_name="k8s.orb.local",
             kubernetes_allow_nondisposable=True,
+            kubectl_bin="/opt/synara/bin/kubectl-v1.36.1",
         )
         driver = acceptance.KubernetesDriver(
             pathlib.Path.cwd(),
@@ -10472,7 +10473,7 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             [
-                "kubectl",
+                "/opt/synara/bin/kubectl-v1.36.1",
                 "--context",
                 "orbstack",
                 "--server",
@@ -10484,6 +10485,30 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 "json",
             ],
         )
+
+    def test_kubectl_binary_option_is_validated(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--kubectl-bin",
+                "/opt/synara/bin/kubectl-v1.36.1",
+            ]
+        )
+        self.assertEqual(
+            options.kubectl_bin,
+            "/opt/synara/bin/kubectl-v1.36.1",
+        )
+
+        for value in ("", "kubectl\nother"):
+            with (
+                self.subTest(value=value),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                acceptance.parse_args(
+                    ["--target", "kubernetes", "--kubectl-bin", value]
+                )
 
     def test_owned_kind_cleanup_retries_transient_delete_and_verifies_absence(self) -> None:
         driver = self._owned_kind_driver()
