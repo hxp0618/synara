@@ -4297,6 +4297,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         )
         self.assertLess(len(command.encode("utf-8")), 256)
         self.assertNotIn("SYNARA_GVISOR_COMPATIBILITY_FAILED_V1", command)
+        marker = "SYNARA_GVISOR_PROMPT_MARKER"
+        prompt = acceptance.gvisor_compatibility_prompt(command, marker)
+        self.assertEqual(prompt.count(command), 1)
+        self.assertIn(
+            f"at least {acceptance.GVISOR_COMPATIBILITY_TOOL_TIMEOUT_SECONDS} seconds",
+            prompt,
+        )
+        self.assertIn("tool invocation metadata", prompt)
+        self.assertIn("do not add a timeout command", prompt)
+        self.assertIn(f"reply with exactly {marker}", prompt)
         implementation = (
             REPO_ROOT / "deploy/worker/gvisor-compatibility-probe.mjs"
         ).read_text(encoding="utf-8")

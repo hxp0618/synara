@@ -125,6 +125,7 @@ GVISOR_COMPATIBILITY_OUTPUT_PREFIX = "SYNARA_GVISOR_COMPATIBILITY_V1:"
 GVISOR_COMPATIBILITY_FAILURE_SENTINEL = "SYNARA_GVISOR_COMPATIBILITY_FAILED_V1"
 GVISOR_RUNTIME_VERIFY_ARGUMENT = "--verify-gvisor-runtime"
 GVISOR_COMPATIBILITY_PROBE_PATH = "/opt/synara/gvisor-compatibility-probe.mjs"
+GVISOR_COMPATIBILITY_TOOL_TIMEOUT_SECONDS = 120
 GVISOR_COMPATIBILITY_REQUIRED_TOOLS = (
     "git",
     "node",
@@ -602,6 +603,19 @@ def gvisor_compatibility_node_command(node_executable: str = "node") -> str:
     if not executable or any(character in executable for character in "\r\n\x00"):
         raise ValueError("Node executable must be a non-empty command or path")
     return f"{shlex.quote(executable)} {shlex.quote(GVISOR_COMPATIBILITY_PROBE_PATH)}"
+
+
+def gvisor_compatibility_prompt(command: str, marker: str) -> str:
+    return (
+        "Use the Bash or shell tool exactly once and call no other tool. Do not emit assistant text "
+        "before the tool call. Configure that one tool invocation to wait in the foreground for at "
+        f"least {GVISOR_COMPATIBILITY_TOOL_TIMEOUT_SECONDS} seconds; do not detach or background the "
+        "process. The wait belongs only in the tool invocation metadata: do not add a timeout command, "
+        "redirections, pipes, wrappers, environment changes, or any other command. Run this exact "
+        "bounded compatibility command as the sole shell command:\n"
+        f"{command}\n"
+        f"After it succeeds, reply with exactly {marker} and no other text."
+    )
 
 
 def parse_gvisor_compatibility_output(output: bytes) -> dict[str, Any]:
@@ -13474,13 +13488,7 @@ class AcceptanceSuite:
         node_name = self._stage5_required_kubernetes_node(probe_label)
         marker = self._real_provider_marker("gvisor-compatibility")
         command = gvisor_compatibility_node_command(self.driver.real_provider_node_executable())
-        prompt = (
-            "Use the Bash or shell tool exactly once and call no other tool. Do not emit assistant text "
-            "before the tool call. Run this exact bounded compatibility command as the sole shell command:\n"
-            f"{command}\n"
-            "Do not add redirections, pipes, wrappers, environment changes, or any other command. After it "
-            f"succeeds, reply with exactly {marker} and no other text."
-        )
+        prompt = gvisor_compatibility_prompt(command, marker)
         turn = self._create_stage5_turn(prompt, runtime_mode="full-access")
         turn_id = self._turn_id(turn, "gVisor compatibility Turn")
         created = self._wait_for_turn_created(turn_id)
