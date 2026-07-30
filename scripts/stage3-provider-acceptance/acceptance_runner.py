@@ -608,6 +608,7 @@ const cp=require("node:child_process");
 const successPrefix="SYNARA_GVISOR_COMPATIBILITY_V1:";
 const failureSentinel="SYNARA_GVISOR_COMPATIBILITY_FAILED_V1";
 const requiredTools=["git","node","bun","npm","pnpm","go","rustc","cargo","java","javac","python3"];
+const versionArgs={go:["version"]};
 const durationsMs={};
 const tools={};
 const probes={};
@@ -637,7 +638,7 @@ async function tcpProbe(){
 (async()=>{try{
   const procVersion=fs.readFileSync("/proc/version","utf8");if(!/gvisor/i.test(procVersion))throw new Error("kernel");
   probes.gvisorKernel=true;
-  for(const tool of requiredTools){timed("version."+tool,tool,["--version"]);tools[tool]=true;}
+  for(const tool of requiredTools){timed("version."+tool,tool,versionArgs[tool]||["--version"]);tools[tool]=true;}
   const repo=path.join(root,"repo");fs.mkdirSync(repo);timed("git.init","git",["init","-q"],{cwd:repo});timed("git.config.email","git",["config","user.email","acceptance@synara.invalid"],{cwd:repo});timed("git.config.name","git",["config","user.name","Synara Acceptance"],{cwd:repo});fs.writeFileSync(path.join(repo,"tracked.txt"),"gvisor\n");timed("git.add","git",["add","tracked.txt"],{cwd:repo});timed("git.commit","git",["commit","-q","-m","probe"],{cwd:repo});timed("git.clone","git",["clone","-q",repo,path.join(root,"clone")]);timed("git.checkout","git",["checkout","-q","HEAD"],{cwd:path.join(root,"clone")});timed("git.status","git",["status","--porcelain"],{cwd:path.join(root,"clone")});probes.git=true;
   write("node-probe.js",'process.stdout.write("node-ok")');if(timed("compile.node","node",[path.join(root,"node-probe.js")])!=="node-ok")throw new Error("node");probes.node=true;
   write("bun-probe.ts",'process.stdout.write("bun-ok")');if(timed("compile.bun","bun",["run",path.join(root,"bun-probe.ts")])!=="bun-ok")throw new Error("bun");probes.bun=true;

@@ -4294,6 +4294,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(command.startswith("/usr/local/bin/node -e '"))
         self.assertLess(len(command.encode("utf-8")), 64 << 10)
         self.assertNotIn("SYNARA_GVISOR_COMPATIBILITY_FAILED_V1", command)
+        encoded_script = command.split('Buffer.from("', 1)[1].split('"', 1)[0]
+        implementation = base64.b64decode(encoded_script).decode("utf-8")
+        self.assertIn('const versionArgs={go:["version"]}', implementation)
+        self.assertIn('versionArgs[tool]||["--version"]', implementation)
 
         payload = {
             "schemaVersion": 1,
