@@ -123,6 +123,7 @@ STAGE5_MALICIOUS_ISSUE_COMMAND = (
 )
 GVISOR_COMPATIBILITY_OUTPUT_PREFIX = "SYNARA_GVISOR_COMPATIBILITY_V1:"
 GVISOR_COMPATIBILITY_FAILURE_SENTINEL = "SYNARA_GVISOR_COMPATIBILITY_FAILED_V1"
+GVISOR_RUNTIME_VERIFY_ARGUMENT = "--verify-gvisor-runtime"
 GVISOR_COMPATIBILITY_REQUIRED_TOOLS = (
     "git",
     "node",
@@ -7525,6 +7526,12 @@ class KubernetesDriver(ManagedWorkerDriver):
             image=self.image,
         )
         self._wait_and_label_namespace(self.target_namespace)
+        gvisor_readiness = self._wait_gvisor_target_ready(
+            tenant_id,
+            target_id,
+            namespace=self.target_namespace,
+            image=self.image,
+        )
         return {
             **target,
             "driverEvidence": {
@@ -7536,6 +7543,11 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "nodeName": self.options.kubernetes_node_name,
                 "networkPolicyImplementation": "cluster-dependent",
                 "resourceOwner": self.resource_owner,
+                **(
+                    {"gvisorReadiness": gvisor_readiness}
+                    if gvisor_readiness is not None
+                    else {}
+                ),
             },
         }
 
@@ -7569,6 +7581,12 @@ class KubernetesDriver(ManagedWorkerDriver):
             image=self.canary_image,
         )
         self._wait_and_label_namespace(self.canary_namespace)
+        gvisor_readiness = self._wait_gvisor_target_ready(
+            tenant_id,
+            target_id,
+            namespace=self.canary_namespace,
+            image=self.canary_image,
+        )
         return {
             **target,
             "driverEvidence": {
@@ -7579,6 +7597,178 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "imagePullPolicy": self.image_pull_policy,
                 "resourceOwner": self.resource_owner,
                 "imagePreparation": image_evidence,
+                **(
+                    {"gvisorReadiness": gvisor_readiness}
+                    if gvisor_readiness is not None
+                    else {}
+                ),
+            },
+        }
+
+    def _wait_gvisor_target_ready(
+        self,
+        tenant_id: str,
+        target_id: str,
+        *,
+        namespace: str,
+        image: str,
+    ) -> Mapping[str, Any] | None:
+        runtime_class = self.options.kubernetes_runtime_class
+        if runtime_class is None:
+            return None
+        if self.api is None:
+            raise AcceptanceError(
+                "runner.api_unavailable",
+                "The Kubernetes Target readiness probe requires the user API.",
+            )
+        selector = f"synara.io/gvisor-canary-target-id={target_id}"
+
+        def canary_probe() -> dict[str, Any] | None:
+            try:
+                payload = json.loads(
+                    self._kubectl_read_command(
+                        [
+                            "-n",
+                            namespace,
+                            "get",
+                            "pods",
+                            "-l",
+                            selector,
+                            "-o",
+                            "json",
+                        ]
+                    )
+                )
+            except json.JSONDecodeError:
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_invalid",
+                    "The gVisor readiness canary inventory was invalid JSON.",
+                ) from None
+            pods = json_items(payload, "gVisor readiness canaries")
+            if not pods:
+                return None
+            if len(pods) != 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_invalid",
+                    "The exact Kubernetes Target had more than one gVisor readiness canary.",
+                    {"targetId": target_id, "canaryCount": len(pods)},
+                )
+            pod = pods[0]
+            metadata = json_object(pod.get("metadata"), "gVisor readiness canary metadata")
+            spec = json_object(pod.get("spec"), "gVisor readiness canary spec")
+            status = json_object(pod.get("status"), "gVisor readiness canary status")
+            labels = json_object(metadata.get("labels"), "gVisor readiness canary labels")
+            containers = json_object_array(spec.get("containers"), "gVisor readiness canary containers")
+            if len(containers) != 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_invalid",
+                    "The gVisor readiness canary did not contain exactly one container.",
+                )
+            container = containers[0]
+            expected_node = self.options.kubernetes_node_name
+            if (
+                labels.get("synara.io/gvisor-canary-target-id") != target_id
+                or spec.get("runtimeClassName") != runtime_class
+                or (expected_node is not None and spec.get("nodeName") != expected_node)
+                or container.get("image") != image
+                or container.get("command")
+                != ["/usr/local/bin/synara-agentd", GVISOR_RUNTIME_VERIFY_ARGUMENT]
+            ):
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_invalid",
+                    "The gVisor readiness canary did not retain the exact Target runtime boundary.",
+                    {
+                        "targetId": target_id,
+                        "runtimeClassName": spec.get("runtimeClassName"),
+                        "nodeName": spec.get("nodeName"),
+                    },
+                )
+            phase = status.get("phase")
+            if phase == "Failed":
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_failed",
+                    "The exact Kubernetes Target gVisor readiness canary failed.",
+                    {
+                        "targetId": target_id,
+                        "canaryName": metadata.get("name"),
+                        "reason": status.get("reason"),
+                    },
+                )
+            if phase != "Succeeded":
+                return None
+            container_statuses = json_object_array(
+                status.get("containerStatuses"),
+                "gVisor readiness canary container statuses",
+            )
+            if len(container_statuses) != 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_invalid",
+                    "The completed gVisor readiness canary omitted its container status.",
+                )
+            state = json_object(
+                container_statuses[0].get("state"),
+                "gVisor readiness canary container state",
+            )
+            terminated = json_object(
+                state.get("terminated"),
+                "gVisor readiness canary termination",
+            )
+            if terminated.get("exitCode") != 0:
+                raise AcceptanceError(
+                    "runner.kubernetes_gvisor_canary_failed",
+                    "The completed gVisor readiness canary did not exit successfully.",
+                    {
+                        "targetId": target_id,
+                        "canaryName": metadata.get("name"),
+                        "exitCode": terminated.get("exitCode"),
+                    },
+                )
+            return {
+                "name": metadata.get("name"),
+                "uid": metadata.get("uid"),
+                "phase": phase,
+                "nodeName": spec.get("nodeName"),
+                "runtimeClassName": runtime_class,
+                "image": image,
+                "exitCode": 0,
+            }
+
+        canary = self.api.wait_until(
+            f"the exact gVisor readiness canary for Kubernetes Target {target_id}",
+            canary_probe,
+            interval=0.2,
+        )
+
+        def active_target_probe() -> dict[str, Any] | None:
+            targets = json_items(
+                self.api.request(
+                    "GET",
+                    f"/v1/tenants/{tenant_id}/execution-targets",
+                ),
+                "execution-targets",
+            )
+            matching = [target for target in targets if target.get("id") == target_id]
+            if len(matching) > 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_target_status_invalid",
+                    "The user API returned a duplicate Kubernetes Target identity.",
+                    {"targetId": target_id},
+                )
+            if not matching or matching[0].get("status") != "active":
+                return None
+            return matching[0]
+
+        active_target = self.api.wait_until(
+            f"Kubernetes Target {target_id} to become active after its gVisor canary",
+            active_target_probe,
+            interval=0.2,
+        )
+        return {
+            "canary": canary,
+            "target": {
+                "id": active_target.get("id"),
+                "kind": active_target.get("kind"),
+                "status": active_target.get("status"),
             },
         }
 

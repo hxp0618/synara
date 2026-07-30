@@ -10157,6 +10157,142 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             },
         )
 
+    def test_gvisor_target_readiness_waits_for_exact_canary_and_active_target(self) -> None:
+        target_id = "11111111-2222-3333-4444-555555555555"
+        image = "registry.example.test/synara/worker@sha256:" + "a" * 64
+
+        def canary(phase: str) -> str:
+            status: dict[str, Any] = {"phase": phase}
+            if phase == "Succeeded":
+                status["containerStatuses"] = [
+                    {"state": {"terminated": {"exitCode": 0}}}
+                ]
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {
+                                "name": "synara-gvisor-canary-fixture",
+                                "uid": "canary-uid",
+                                "labels": {
+                                    "synara.io/gvisor-canary-target-id": target_id,
+                                },
+                            },
+                            "spec": {
+                                "nodeName": "worker-a.example",
+                                "runtimeClassName": "synara-gvisor",
+                                "containers": [
+                                    {
+                                        "image": image,
+                                        "command": [
+                                            "/usr/local/bin/synara-agentd",
+                                            acceptance.GVISOR_RUNTIME_VERIFY_ARGUMENT,
+                                        ],
+                                    }
+                                ],
+                            },
+                            "status": status,
+                        }
+                    ]
+                }
+            )
+
+        class ReadinessAPI:
+            def __init__(inner_self) -> None:
+                inner_self.target_statuses = iter(("offline", "active"))
+                inner_self.target_reads = 0
+
+            def wait_until(
+                inner_self,
+                _description: str,
+                probe: Callable[[], Any],
+                *,
+                interval: float = 0.1,
+                timeout_seconds: float | None = None,
+            ) -> Any:
+                del interval, timeout_seconds
+                for _ in range(4):
+                    observed = probe()
+                    if observed is not None:
+                        return observed
+                raise AssertionError("readiness probe did not complete")
+
+            def request(
+                inner_self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del payload, expected, maximum_timeout
+                self.assertEqual(method, "GET")
+                self.assertEqual(path, "/v1/tenants/tenant-id/execution-targets")
+                inner_self.target_reads += 1
+                return {
+                    "items": [
+                        {
+                            "id": target_id,
+                            "kind": "kubernetes",
+                            "status": next(inner_self.target_statuses),
+                        }
+                    ]
+                }
+
+        class ReadinessDriver(acceptance.KubernetesDriver):
+            def __init__(inner_self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                inner_self.canaries = iter((canary("Running"), canary("Succeeded")))
+                inner_self.canary_commands: list[list[str]] = []
+
+            def _kubectl_read_command(
+                inner_self,
+                arguments: Sequence[str],
+                *,
+                command_timeout: float | None = None,
+            ) -> str:
+                del command_timeout
+                inner_self.canary_commands.append(list(arguments))
+                return next(inner_self.canaries)
+
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="managed",
+            kubernetes_worker_image=image,
+            kubernetes_skip_worker_build=True,
+            kubernetes_node_name="worker-a.example",
+            kubernetes_runtime_class="synara-gvisor",
+        )
+        driver = ReadinessDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        readiness_api = ReadinessAPI()
+        driver.api = readiness_api  # type: ignore[assignment]
+
+        evidence = driver._wait_gvisor_target_ready(
+            "tenant-id",
+            target_id,
+            namespace="gvisor-namespace",
+            image=image,
+        )
+
+        assert evidence is not None
+        self.assertEqual(evidence["canary"]["phase"], "Succeeded")
+        self.assertEqual(evidence["canary"]["nodeName"], "worker-a.example")
+        self.assertEqual(evidence["target"]["status"], "active")
+        self.assertEqual(len(driver.canary_commands), 2)
+        self.assertIn(
+            f"synara.io/gvisor-canary-target-id={target_id}",
+            driver.canary_commands[0],
+        )
+        self.assertEqual(readiness_api.target_reads, 2)
+
     def test_kubernetes_node_name_option_is_target_scoped_and_canonical(self) -> None:
         options = acceptance.parse_args(
             [
