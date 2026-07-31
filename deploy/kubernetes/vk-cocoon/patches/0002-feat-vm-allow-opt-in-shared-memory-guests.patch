@@ -1,0 +1,170 @@
+From 1ed11770be7ab04d3db0e124130887a14ae30a86 Mon Sep 17 00:00:00 2001
+From: hxp0618 <1169924772@qq.com>
+Date: Wed, 29 Jul 2026 23:13:17 +0800
+Subject: [PATCH 2/2] feat(vm): allow opt-in shared memory guests
+
+---
+ provider/cocoon/create.go      | 29 ++++++++++++++++-------
+ provider/cocoon/create_test.go | 43 ++++++++++++++++++++++++++++++++++
+ vm/cocoon_cli.go               |  3 +++
+ vm/cocoon_cli_test.go          | 10 ++++++++
+ vm/runtime.go                  |  3 +++
+ 5 files changed, 79 insertions(+), 9 deletions(-)
+
+diff --git a/provider/cocoon/create.go b/provider/cocoon/create.go
+index d2e9c1b..ffe4fe6 100644
+--- a/provider/cocoon/create.go
++++ b/provider/cocoon/create.go
+@@ -28,6 +28,12 @@ import (
+ // individual caller, so a stalled registry stream needs a deadline of its own.
+ const importDetachTimeout = 30 * time.Minute
+ 
++// annotationSharedMemory is intentionally a Pod-level runtime contract rather
++// than a cocoon-common VMOptions field: callers that need post-boot virtiofs
++// must opt in before vk-cocoon creates the VM. It is immutable for that VM
++// lifetime and currently supported only by run-mode Cloud Hypervisor guests.
++const annotationSharedMemory = "vm.cocoonstack.io/shared-memory"
++
+ func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
+ 	logger := log.WithFunc("Provider.CreatePod")
+ 	logger.Infof(ctx, "create pod %s/%s", pod.Namespace, pod.Name)
+@@ -208,6 +214,10 @@ func (p *Provider) bringUpVM(ctx context.Context, pod *corev1.Pod, spec meta.VMS
+ 	backend := spec.Backend
+ 	noDirectIO := spec.NoDirectIO
+ 	mode := strings.ToLower(spec.Mode)
++	sharedMemory := strings.EqualFold(strings.TrimSpace(pod.Annotations[annotationSharedMemory]), "true")
++	if sharedMemory && (mode != string(cocoonv1.AgentModeRun) || backend == vm.BackendFirecracker) {
++		return nil, "", fmt.Errorf("annotation %s requires mode=run with Cloud Hypervisor", annotationSharedMemory)
++	}
+ 	fromDir, err := parseCloneFromDirAnnotation(pod)
+ 	if err != nil {
+ 		return nil, "", err
+@@ -271,15 +281,16 @@ func (p *Provider) bringUpVM(ctx context.Context, pod *corev1.Pod, spec meta.VMS
+ 		}
+ 		cpu, memory := vmResourceOverrides(pod)
+ 		v, err := p.Runtime.Run(ctx, vm.RunOptions{
+-			Image:      runImage,
+-			Name:       spec.VMName,
+-			CPU:        cpu,
+-			Memory:     memory,
+-			Network:    spec.Network,
+-			Storage:    spec.Storage,
+-			OS:         spec.OS,
+-			Backend:    backend,
+-			NoDirectIO: noDirectIO,
++			Image:        runImage,
++			Name:         spec.VMName,
++			CPU:          cpu,
++			Memory:       memory,
++			Network:      spec.Network,
++			Storage:      spec.Storage,
++			OS:           spec.OS,
++			Backend:      backend,
++			NoDirectIO:   noDirectIO,
++			SharedMemory: sharedMemory,
+ 		})
+ 		if err != nil {
+ 			return nil, "", fmt.Errorf("run vm %s: %w", spec.VMName, err)
+diff --git a/provider/cocoon/create_test.go b/provider/cocoon/create_test.go
+index 2f5e378..c06444c 100644
+--- a/provider/cocoon/create_test.go
++++ b/provider/cocoon/create_test.go
+@@ -557,6 +557,49 @@ func TestCreatePodRunMode(t *testing.T) {
+ 	}
+ }
+ 
++func TestCreatePodRunModeEnablesAttestedVirtioFSPrerequisite(t *testing.T) {
++	rt := &fakeRuntime{}
++	p := newTestProvider(t)
++	p.Runtime = rt
++	pod := newPodWithSpec(meta.VMSpec{
++		VMName: "vk-ns-synara", Image: "ghcr.io/synara/guest:1", Mode: "run", Backend: "cloud-hypervisor",
++	})
++	pod.Annotations[annotationSharedMemory] = "true"
++	if err := p.CreatePod(t.Context(), pod); err != nil {
++		t.Fatal(err)
++	}
++	if rt.ran == nil || !rt.ran.SharedMemory {
++		t.Fatalf("Run options did not preserve the shared-memory prerequisite: %#v", rt.ran)
++	}
++}
++
++func TestCreatePodRejectsSharedMemoryOutsideRunModeCloudHypervisor(t *testing.T) {
++	for _, test := range []struct {
++		name    string
++		mode    string
++		backend string
++	}{
++		{name: "clone", mode: "clone", backend: "cloud-hypervisor"},
++		{name: "firecracker", mode: "run", backend: "firecracker"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			rt := &fakeRuntime{}
++			p := newTestProvider(t)
++			p.Runtime = rt
++			pod := newPodWithSpec(meta.VMSpec{
++				VMName: "vk-ns-invalid-shared", Image: "ghcr.io/synara/guest:1", Mode: test.mode, Backend: test.backend,
++			})
++			pod.Annotations[annotationSharedMemory] = "true"
++			if err := p.CreatePod(t.Context(), pod); err == nil || !strings.Contains(err.Error(), annotationSharedMemory) {
++				t.Fatalf("invalid shared-memory contract returned %v", err)
++			}
++			if rt.ran != nil || rt.cloned != nil {
++				t.Fatalf("runtime mutated before shared-memory rejection: ran=%#v cloned=%#v", rt.ran, rt.cloned)
++			}
++		})
++	}
++}
++
+ func TestLocalSnapshotName(t *testing.T) {
+ 	tests := []struct {
+ 		repo, tag, want string
+diff --git a/vm/cocoon_cli.go b/vm/cocoon_cli.go
+index 71e22b5..fccddbc 100644
+--- a/vm/cocoon_cli.go
++++ b/vm/cocoon_cli.go
+@@ -478,6 +478,9 @@ func buildRunArgs(opts RunOptions) []string {
+ 	if opts.NoDirectIO {
+ 		args = append(args, "--no-direct-io")
+ 	}
++	if opts.SharedMemory && opts.Backend != BackendFirecracker {
++		args = append(args, "--shared-memory")
++	}
+ 	args = append(args, opts.Image)
+ 	return args
+ }
+diff --git a/vm/cocoon_cli_test.go b/vm/cocoon_cli_test.go
+index 6e20566..cb38173 100644
+--- a/vm/cocoon_cli_test.go
++++ b/vm/cocoon_cli_test.go
+@@ -316,6 +316,16 @@ func TestBuildRunArgs(t *testing.T) {
+ 			opts: RunOptions{Image: "ghcr.io/x/y:1", Name: "vm-e", NoDirectIO: true},
+ 			want: []string{"vm", "run", "--output", "json", "--name", "vm-e", "--no-direct-io", "ghcr.io/x/y:1"},
+ 		},
++		{
++			name: "shared memory is fixed at Cloud Hypervisor creation",
++			opts: RunOptions{Image: "ghcr.io/x/y:1", Name: "vm-shared", Backend: "cloud-hypervisor", SharedMemory: true},
++			want: []string{"vm", "run", "--output", "json", "--name", "vm-shared", "--shared-memory", "ghcr.io/x/y:1"},
++		},
++		{
++			name: "shared memory flag is not forwarded to Firecracker",
++			opts: RunOptions{Image: "ghcr.io/x/y:1", Name: "vm-fc-shared", Backend: "firecracker", SharedMemory: true},
++			want: []string{"vm", "run", "--output", "json", "--name", "vm-fc-shared", "--fc", "ghcr.io/x/y:1"},
++		},
+ 		{
+ 			name: "k8s quantities normalized to byte counts",
+ 			opts: RunOptions{Image: "ghcr.io/x/y:1", Name: "vm-f", CPU: 2, Memory: "4Gi", Storage: "20Gi", Network: "cocoon-dhcp"},
+diff --git a/vm/runtime.go b/vm/runtime.go
+index 6e278d5..201678f 100644
+--- a/vm/runtime.go
++++ b/vm/runtime.go
+@@ -129,6 +129,9 @@ type RunOptions struct {
+ 	OS         string
+ 	Backend    string
+ 	NoDirectIO bool
++	// SharedMemory enables Cloud Hypervisor memory.shared, which must be
++	// fixed at VM creation before a vhost-user-fs device can be attached.
++	SharedMemory bool
+ }
+ 
+ // VMEvent is a single event from the cocoon event stream.

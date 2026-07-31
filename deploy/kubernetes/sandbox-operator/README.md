@@ -20,7 +20,11 @@ members: Cocoon's empty-policy default snapshots on delete, and a real
 two-host loss run blocked cleanup while uploading an approximately 1 GiB
 snapshot. Durable workload checkpointing needs a separate template and
 lifecycle contract. Target acceptance fails closed when this cleanup policy is
-missing. It also requires the template to
+missing. Keep `vm.cocoonstack.io/shared-memory: "true"` on the template because
+the host-supervised virtiofs workspace must be fixed before the guest boots.
+The pinned, reproducible vk-cocoon patch set that implements this annotation
+and fences intentional VM deletion is documented under
+`deploy/kubernetes/vk-cocoon/`. It also requires the template to
 select only virtual nodes carrying the complete KVM/supervisor/vsock/isolation
 labels and to tolerate only the exact Cocoon virtual-kubelet taint. The two
 physical-host acceptance uses an explicit node-loss hook and fenced Generation

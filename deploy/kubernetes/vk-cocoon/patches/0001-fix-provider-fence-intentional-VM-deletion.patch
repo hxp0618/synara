@@ -1,0 +1,232 @@
+From d4150eaf838b959f32f67151dd2b1c257e89b918 Mon Sep 17 00:00:00 2001
+From: hxp0618 <1169924772@qq.com>
+Date: Wed, 29 Jul 2026 21:33:09 +0800
+Subject: [PATCH 1/2] fix(provider): fence intentional VM deletion
+
+---
+ provider/cocoon/create_test.go |  4 ++-
+ provider/cocoon/delete.go      |  9 ++++++-
+ provider/cocoon/delete_test.go | 48 +++++++++++++++++++++++++++++++++-
+ provider/cocoon/provider.go    | 27 +++++++++++++++++++
+ vm/cocoon_cli.go               |  3 +++
+ vm/cocoon_cli_test.go          | 11 ++++++++
+ 6 files changed, 99 insertions(+), 3 deletions(-)
+
+diff --git a/provider/cocoon/create_test.go b/provider/cocoon/create_test.go
+index 34e9da7..2f5e378 100644
+--- a/provider/cocoon/create_test.go
++++ b/provider/cocoon/create_test.go
+@@ -1715,6 +1715,7 @@ type fakeRuntime struct {
+ 	// onExec, when set, fires at Exec entry — lets tests block or mutate state mid-exec.
+ 	onExec          func()
+ 	removeErr       error
++	removeCtxErr    error
+ 	snapshotSaveErr error
+ 	// snapshotSaveHook runs at SnapshotSave entry so a test can hold it in-flight.
+ 	snapshotSaveHook func()
+@@ -1774,7 +1775,8 @@ func (f *fakeRuntime) Inspect(_ context.Context, _ string) (*vm.VM, error) {
+ 
+ func (f *fakeRuntime) List(_ context.Context) ([]vm.VM, error) { return f.listVMs, nil }
+ 
+-func (f *fakeRuntime) Remove(_ context.Context, vmID string) error {
++func (f *fakeRuntime) Remove(ctx context.Context, vmID string) error {
++	f.removeCtxErr = ctx.Err()
+ 	if f.onRemove != nil {
+ 		f.onRemove()
+ 	}
+diff --git a/provider/cocoon/delete.go b/provider/cocoon/delete.go
+index a6c9b9c..3013bc8 100644
+--- a/provider/cocoon/delete.go
++++ b/provider/cocoon/delete.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/projecteru2/core/log"
+ 	corev1 "k8s.io/api/core/v1"
+@@ -13,6 +14,8 @@ import (
+ 	"github.com/cocoonstack/vk-cocoon/metrics"
+ )
+ 
++const vmDeleteTimeout = 30 * time.Second
++
+ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+ 	logger := log.WithFunc("Provider.DeletePod")
+ 	logger.Infof(ctx, "delete pod %s/%s", pod.Namespace, pod.Name)
+@@ -34,7 +37,11 @@ func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+ 		p.saveAndPushSnapshot(ctx, v.Name, v.ID, meta.DefaultSnapshotTag, spec.Image)
+ 	}
+ 
+-	if err := p.Runtime.Remove(ctx, v.ID); err != nil {
++	unmarkDeleting := p.markVMDeleting(v.ID)
++	defer unmarkDeleting()
++	deleteCtx, cancelDelete := context.WithTimeout(context.WithoutCancel(ctx), vmDeleteTimeout)
++	defer cancelDelete()
++	if err := p.Runtime.Remove(deleteCtx, v.ID); err != nil {
+ 		metrics.PodLifecycleTotal.WithLabelValues("delete", "failed", "").Inc()
+ 		return fmt.Errorf("remove vm %s: %w", v.ID, err)
+ 	}
+diff --git a/provider/cocoon/delete_test.go b/provider/cocoon/delete_test.go
+index 2f2eb9c..4b216c7 100644
+--- a/provider/cocoon/delete_test.go
++++ b/provider/cocoon/delete_test.go
+@@ -1,11 +1,12 @@
+ package cocoon
+ 
+ import (
++	"context"
+ 	"strings"
++	"sync"
+ 	"testing"
+ 
+ 	"github.com/cocoonstack/cocoon-common/meta"
+-
+ 	"github.com/cocoonstack/vk-cocoon/vm"
+ )
+ 
+@@ -64,3 +65,48 @@ func TestDeletePodBacksOffWhileResumeInFlight(t *testing.T) {
+ 		t.Errorf("delete should proceed after release, removed %q", rt.removedID)
+ 	}
+ }
++
++func TestDeletePodDetachesVMRemovalFromRequestCancellation(t *testing.T) {
++	rt := &fakeRuntime{}
++	p := newTestProvider(t)
++	p.Runtime = rt
++	pod := newPodWithSpec(meta.VMSpec{VMName: "vk-ns-demo-0", SnapshotPolicy: "never"})
++	p.trackPod(pod, &vm.VM{ID: "vmid-del", Name: "vk-ns-demo-0"})
++
++	ctx, cancel := context.WithCancel(t.Context())
++	cancel()
++	if err := p.DeletePod(ctx, pod); err != nil {
++		t.Fatalf("DeletePod: %v", err)
++	}
++	if rt.removeCtxErr != nil {
++		t.Fatalf("Runtime.Remove context was already canceled: %v", rt.removeCtxErr)
++	}
++}
++
++func TestHandleVMGoneSkipsIntentionalDeleteInFlight(t *testing.T) {
++	rt := &fakeRuntime{}
++	p := newTestProvider(t)
++	p.Runtime = rt
++	pod := newPodWithSpec(meta.VMSpec{VMName: "vk-ns-demo-0", SnapshotPolicy: "never"})
++	p.trackPod(pod, &vm.VM{ID: "vmid-del", Name: "vk-ns-demo-0"})
++
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	var once sync.Once
++	rt.onRemove = func() {
++		once.Do(func() { close(entered) })
++		<-release
++	}
++	done := make(chan error, 1)
++	go func() { done <- p.DeletePod(t.Context(), pod) }()
++	<-entered
++
++	p.handleVMGone(t.Context(), &vm.VM{ID: "vmid-del", Name: "vk-ns-demo-0"})
++	if rt.inspectN != 0 {
++		t.Fatalf("intentional delete event triggered %d inspect calls", rt.inspectN)
++	}
++	close(release)
++	if err := <-done; err != nil {
++		t.Fatalf("DeletePod: %v", err)
++	}
++}
+diff --git a/provider/cocoon/provider.go b/provider/cocoon/provider.go
+index 43e8e3f..f8d5518 100644
+--- a/provider/cocoon/provider.go
++++ b/provider/cocoon/provider.go
+@@ -101,6 +101,7 @@ type Provider struct {
+ 	lastRestart    map[string]time.Time // key=vmID, cooldown for restart loops
+ 	pendingRecheck map[string]struct{}  // key=vmID, dedup for deferred recheck goroutines
+ 	resumedOps     map[string]struct{}  // key=pod, full ops resumed by dispatchOwedWork; UpdatePod backs off
++	deletingVMs    map[string]int       // key=vmID, active intentional DeletePod calls
+ 	recheckWG      sync.WaitGroup       // tracks deferred recheck goroutines so Close can await them
+ 	bgWG           sync.WaitGroup       // tracks per-pod async goroutines (post-clone exec, static-IP) so Close can await them
+ 	forkSnapshotSF singleflight.Group   // dedups concurrent fork-base snapshot creation (self-synchronized)
+@@ -149,6 +150,7 @@ func NewProvider(ctx context.Context) *Provider {
+ 		lastRestart:      map[string]time.Time{},
+ 		pendingRecheck:   map[string]struct{}{},
+ 		resumedOps:       map[string]struct{}{},
++		deletingVMs:      map[string]int{},
+ 		lifecycleIntent:  map[string]meta.LifecycleStatus{},
+ 		lifecycleFlushed: map[string]string{},
+ 	}
+@@ -340,6 +342,26 @@ func (p *Provider) vmForPod(namespace, name string) *vm.VM {
+ 	return p.vmsByPod[meta.PodKey(namespace, name)]
+ }
+ 
++func (p *Provider) markVMDeleting(vmID string) func() {
++	p.mu.Lock()
++	p.deletingVMs[vmID]++
++	p.mu.Unlock()
++	return func() {
++		p.mu.Lock()
++		if p.deletingVMs[vmID]--; p.deletingVMs[vmID] == 0 {
++			delete(p.deletingVMs, vmID)
++		}
++		p.mu.Unlock()
++	}
++}
++
++func (p *Provider) vmDeleting(vmID string) bool {
++	p.mu.RLock()
++	deleting := p.deletingVMs[vmID] > 0
++	p.mu.RUnlock()
++	return deleting
++}
++
+ // setVMIP updates the tracked VM's IP (copy-on-write for concurrency safety).
+ func (p *Provider) setVMIP(namespace, name, vmID, ip string) bool {
+ 	p.mu.Lock()
+@@ -472,6 +494,11 @@ func (p *Provider) handleVMGone(ctx context.Context, eventVM *vm.VM) {
+ 	if affectedKey == "" || affectedPod == nil {
+ 		return
+ 	}
++	if p.vmDeleting(trackedID) {
++		logger.Infof(ctx, "vm %s pod %s/%s is being deleted, skipping VM-gone handler",
++			trackedID, affectedPod.Namespace, affectedPod.Name)
++		return
++	}
+ 
+ 	// Hibernate's own Runtime.Remove triggers this event; restarting would race the cleanup.
+ 	if meta.ReadHibernateState(affectedPod) {
+diff --git a/vm/cocoon_cli.go b/vm/cocoon_cli.go
+index e45f9f1..71e22b5 100644
+--- a/vm/cocoon_cli.go
++++ b/vm/cocoon_cli.go
+@@ -204,6 +204,9 @@ func (c *CocoonCLI) Exec(ctx context.Context, vmID string, argv []string, env ma
+ func (c *CocoonCLI) Remove(ctx context.Context, vmID string) error {
+ 	cmd := c.command(ctx, "vm", "rm", "--force", vmID)
+ 	if out, err := cmd.CombinedOutput(); err != nil {
++		if isCocoonNotFound(cocoonCmdError("vm rm", vmID, err, out)) {
++			return nil
++		}
+ 		return cocoonCmdError("vm rm", vmID, err, out)
+ 	}
+ 	return nil
+diff --git a/vm/cocoon_cli_test.go b/vm/cocoon_cli_test.go
+index 9089052..6e20566 100644
+--- a/vm/cocoon_cli_test.go
++++ b/vm/cocoon_cli_test.go
+@@ -104,6 +104,17 @@ func TestSnapshotNameHolderID(t *testing.T) {
+ 	}
+ }
+ 
++func TestRemoveIsIdempotentWhenVMIsAlreadyGone(t *testing.T) {
++	script := filepath.Join(t.TempDir(), "cocoon")
++	payload := "#!/bin/sh\necho 'Error: vm not found' >&2\nexit 1\n"
++	if err := os.WriteFile(script, []byte(payload), 0o755); err != nil {
++		t.Fatalf("write fake cocoon: %v", err)
++	}
++	if err := NewCocoonCLI(script).Remove(t.Context(), "missing-vm"); err != nil {
++		t.Fatalf("Remove missing VM: %v", err)
++	}
++}
++
+ func TestIsCocoonSnapshotNotFound(t *testing.T) {
+ 	t.Parallel()
+ 

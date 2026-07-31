@@ -11,6 +11,7 @@ spec:
       annotations:
         cocoonset.cocoonstack.io/snapshot-policy: never
         sandbox.cocoonstack.io/runtime: vk-cocoon
+        vm.cocoonstack.io/shared-memory: "true"
       labels:
         synara.io/managed: "true"
         synara.io/execution-target-id: REPLACE_TARGET_UUID
