@@ -25,6 +25,130 @@ import type { WhatsNewEntry } from "./logic";
 
 export const WHATS_NEW_ENTRIES: readonly WhatsNewEntry[] = [
   {
+    version: "0.6.5",
+    date: "Aug 2",
+    features: [
+      {
+        id: "sidebar-activity-inbox",
+        title: "See what needs attention from one Activity view",
+        description:
+          "Switch the sidebar to a compact task inbox that keeps running work, input requests, failures, and recently finished tasks easy to scan.",
+        details:
+          "Activity groups tasks by urgency and recency, keeps important pinned work visible, supports project-scoped filtering, and opens new chats in the latest relevant project. Status indicators settle predictably, stale filters recover to all projects, and the selected view stays in sync across tabs.",
+      },
+      {
+        id: "reliable-task-lifecycle",
+        title: "Tasks settle and recover more reliably",
+        description:
+          "Conversation state now stays closer to the provider's real lifecycle through starts, reconnects, handoffs, and delayed events.",
+        details:
+          "Session orchestration now fences more stale updates, repairs workspace metadata immediately after a worktree handoff, keeps runtime activity attributed to the correct task, and strengthens recovery when provider or projection state arrives out of order.",
+      },
+      {
+        id: "calmer-transcript-control",
+        title: "Take back scroll control instantly",
+        description:
+          "Touching the transcript during an automatic jump now stops smooth scrolling at the current position instead of fighting your input.",
+        details:
+          "The transcript cancels both native and virtual-list scroll state at the visible offset, guards late tail-settle work after user takeover or task replacement, and preserves the simpler non-virtualized path for ordinary conversation sizes.",
+      },
+      {
+        id: "safer-composer-images",
+        title: "Image attachments fail more safely",
+        description:
+          "Large or awkward images are prepared more defensively before they enter a prompt, with clearer limits and fewer browser-worker edge cases.",
+        details:
+          "Composer image handling now bounds resize attempts, keeps worker communication scoped correctly, and hardens attachment intake so unsupported or oversized payloads fail predictably instead of destabilizing the draft.",
+      },
+      {
+        id: "sidebar-and-tool-polish",
+        title: "Sidebar and tool details are easier to read",
+        description:
+          "Surface switching, task hover cards, browser tool rows, and active states received a focused visual and accessibility pass.",
+        details:
+          "The sidebar surface picker has calmer styling, thread cards keep their active state while hovered, browser actions use clearer presentation, Search is located by its accessible name, and urgent or completed states stay legible in dense task lists.",
+      },
+    ],
+  },
+  {
+    version: "0.6.4",
+    date: "Aug 1",
+    features: [
+      {
+        id: "visible-browser-control",
+        title: "Agents can use the visible browser",
+        description:
+          "Let supported agents navigate and operate the same browser surface you can see, with tabs, snapshots, screenshots, input, dialogs, and workspace-safe file transfer.",
+        details:
+          "The browser bridge is provider-agnostic and session-scoped: it reuses Synara's visible Electron WebView, cookies, and authenticated state instead of creating a hidden browser. Agents get bounded semantic snapshots, trusted clicks, typing, key presses, scrolling, selection, dragging, waits, and page diagnostics, while navigation, target refs, timeouts, popup sign-in, uploads, and download approval boundaries stay explicit.",
+      },
+      {
+        id: "browser-dom-annotations",
+        title: "Annotate the page before you ask",
+        description:
+          "Select elements in the visible browser and send compact, redacted annotations with your message so an agent knows exactly what you mean.",
+        details:
+          "Annotations preserve bounded element role, name, text, selector, and page context, support multiple marks with a compact overflow row, survive drafts and transcript rendering, and keep exact-page affinity local. Untrusted page data is clearly separated from user instructions and document-only metadata is removed before provider injection.",
+      },
+      {
+        id: "runtime-modes-and-autonomy",
+        title: "Choose how much autonomy each run has",
+        description:
+          "Pick Approval required, Auto, or Full access when the selected provider and model support it, with clearer model, effort, and approval controls.",
+        details:
+          "Runtime mode is validated before dispatch, and automation or delegated work cannot silently escalate its privilege. Codex and Claude Code expose Auto only when capability is confirmed; unsupported or unknown capabilities fail closed to approval-required. The composer and model pickers now explain the effective mode and pending approvals more clearly.",
+      },
+      {
+        id: "native-turn-steering",
+        title: "Steer live turns without breaking the transcript",
+        description:
+          "Send guidance into a running Codex or Claude turn, or keep follow-ups queued, while the current task remains correctly attributed.",
+        details:
+          "Native steer calls travel through provider-aware command handling, runtime activity projection, and lifecycle fencing. Sent user messages, live assistant answers, child work, and terminal events stay attached to the right turn across late or replayed updates, interruptions, and provider restarts.",
+      },
+      {
+        id: "stable-streaming-chat",
+        title: "Streaming conversations stay anchored",
+        description:
+          "Long or fast responses no longer yank the viewport away from the point you are reading.",
+        details:
+          "Tail following now uses one shared anchor path across estimated and virtualized rows, sent-message reveals, and native browser end-space. New real transcript messages drive auto-follow; tool rows, buffering, measurements, and reconnect-only updates no longer impersonate user-visible message arrivals.",
+      },
+      {
+        id: "lighter-reconnects",
+        title: "Reconnects use less bandwidth and recover more state",
+        description:
+          "Synara negotiates one authenticated connection, compresses large traffic, and resumes thread detail from a cursor when possible.",
+        details:
+          "A single handshake negotiates compatibility and permessage-deflate; delta-capable subscriptions replay from safe cursors with conservative snapshot fallback; precompressed web assets and cache headers speed first loads. Hydration also reads durable projections directly, retries missing snapshots after timed-out starts, and keeps provider notification drains alive until sessions settle.",
+      },
+      {
+        id: "right-dock-launcher",
+        title: "Open workspace tools from one right dock",
+        description:
+          "A new launcher puts review, terminal, browser, files, side chat, and source control one click away without crowding the composer.",
+        details:
+          "Dock panes open at a stable half-shell split, keep live terminal state mounted when switching, and gate tools on the current project and repository. Missed draft promotions are recovered during event routing, so a message is less likely to disappear when the dock or task changes.",
+      },
+      {
+        id: "provider-capability-clarity",
+        title: "Provider choices show their real capabilities",
+        description:
+          "Model discovery and runtime menus stay useful across cold starts, Claude capabilities, and mixed provider sessions.",
+        details:
+          "Claude models can be discovered on a cold start, model and effort options use capability-aware ordering and labels, and thread hover cards expose the active provider and model context. Unknown provider update statuses no longer break self-update flows, and Antigravity returns a decision for inactive hook requests instead of launching Synara.",
+      },
+      {
+        id: "repository-aware-git-workflows",
+        title: "Git workflows explain what needs attention",
+        description:
+          "When a branch is behind upstream, Environment surfaces Pull before risky actions, and generated PR bodies can follow repository templates.",
+        details:
+          "Git action availability now uses one consistent upstream and working-tree state model. PR generation discovers applicable `.github` templates, removes boilerplate instructions, and asks the selected provider to fill the repository's own sections while preserving the fallback body when none exists.",
+      },
+    ],
+  },
+  {
     version: "0.6.3",
     date: "Jul 27",
     features: [

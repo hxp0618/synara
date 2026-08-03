@@ -14,12 +14,14 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationThread,
   type OrchestrationThreadShell,
+  type ProviderKind,
   type ProviderRuntimeEvent,
   type RuntimeMode,
 } from "@synara/contracts";
 import { Cache, Cause, Deferred, Duration, Effect, Layer, Option, Ref, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 import { makeDrainableWorker, startDrainableWorkerProducers } from "@synara/shared/DrainableWorker";
+import { providerSupportsNativeTurnSteering } from "@synara/shared/providerMetadata";
 import {
   buildSubagentIdentityDirectory,
   collectSubagentProviderThreadIds,
@@ -1694,6 +1696,20 @@ const make = Effect.gen(function* () {
               : undefined;
 
           if (Option.isNone(existingThread)) {
+            // The read above hides soft-deleted threads, but `thread.create` is
+            // decided against a tombstone-inclusive read model, so re-creating a
+            // deleted child is rejected — durably, by command id. Replaying that
+            // event (startup open-turn rebuild, journal retry) would then keep
+            // failing on the stored rejection. A deleted subagent thread stays
+            // deleted: drop this child's projection instead of resurrecting it.
+            if (yield* projectionSnapshotQuery.threadIdExistsIncludingDeleted(childThreadId)) {
+              yield* Effect.logDebug("provider runtime ingestion skipped deleted subagent thread", {
+                eventId: event.eventId,
+                eventType: event.type,
+                threadId: childThreadId,
+              });
+              return undefined;
+            }
             const slot = yield* claimNativeChildSlot(parentThread.id, sourceTurnId, childThreadId);
             if (!slot.admitted) {
               const overflowId = EventId.makeUnsafe(
@@ -2455,11 +2471,16 @@ const make = Effect.gen(function* () {
       const thread = Option.getOrUndefined(
         yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId),
       );
-      const isCodexSteer =
+      // A native steer rides the live turn, so no later turn.started will
+      // arrive to match a pending delivery-mode request — bind to the live
+      // turn immediately instead.
+      const steerProvider = thread?.session?.providerName ?? thread?.modelSelection.provider;
+      const isNativeSteer =
         event.payload.dispatchMode === "steer" &&
-        (thread?.session?.providerName ?? thread?.modelSelection.provider) === "codex";
+        steerProvider !== undefined &&
+        providerSupportsNativeTurnSteering(steerProvider);
       let deliveryTurnId: TurnId | undefined;
-      if (isCodexSteer) {
+      if (isNativeSteer) {
         let activeTurnId = thread?.session?.activeTurnId ?? undefined;
         if (!activeTurnId) {
           const runtimeSession = (yield* providerService.listSessions()).find(
@@ -2489,8 +2510,7 @@ const make = Effect.gen(function* () {
       const flushEvent: ProviderRuntimeEvent = {
         type: "turn.started",
         eventId: event.eventId,
-        provider:
-          isCodexSteer || thread?.session?.providerName !== "claudeAgent" ? "codex" : "claudeAgent",
+        provider: (steerProvider ?? "codex") as ProviderKind,
         createdAt: event.payload.createdAt,
         threadId: event.payload.threadId,
         turnId: deliveryTurnId,
@@ -2687,6 +2707,28 @@ const make = Effect.gen(function* () {
     );
   });
 
+  // This rebuild only restores bounded process-local caches — the durable
+  // effects it re-derives are already committed and deduplicated by command
+  // receipt. It also runs inside `start`, which is on the server's boot path
+  // and dies on failure, so a single unreplayable row (a stored command
+  // rejection, a decode failure) must degrade this thread's caches rather than
+  // make the backend unbootable: the state is rebuildable, the boot loop is not
+  // recoverable without deleting user data.
+  const rebuildAcceptedOpenTurnStateForEvent = (event: ProviderRuntimeEvent) =>
+    prepareAcceptedRuntimeEventReplay(event).pipe(
+      Effect.andThen(processRuntimeEvent(event)),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider runtime ingestion failed to rebuild open-turn state", {
+              eventId: event.eventId,
+              eventType: event.type,
+              threadId: event.threadId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+
   // Accepted open-turn rows may have updated only bounded process-local
   // aggregation state. Re-run them before new output; stable command receipts
   // deduplicate durable effects while the caches are rebuilt in event order.
@@ -2700,8 +2742,7 @@ const make = Effect.gen(function* () {
       });
       if (page.length === 0) return;
       for (const entry of page) {
-        yield* prepareAcceptedRuntimeEventReplay(entry.event);
-        yield* processRuntimeEvent(entry.event);
+        yield* rebuildAcceptedOpenTurnStateForEvent(entry.event);
         sequence = entry.sequence;
       }
       if (page.length < PROVIDER_RUNTIME_REPLAY_PAGE_SIZE) return;

@@ -50,6 +50,7 @@ import {
   resolveQueuedSteerGateTransition,
   resolveRuntimeModeAfterApprovalDecision,
   resolveThreadDetailHydration,
+  resolveThreadArtifactWorkspaceRoot,
   QUEUED_STEER_GATE_TIMEOUT_MS,
   sanitizeVoiceErrorMessage,
   buildExpiredTerminalContextToastCopy,
@@ -186,15 +187,47 @@ describe("server thread model switching availability", () => {
   });
 });
 
+describe("thread artifact workspace root", () => {
+  it("uses a materialized worktree for file previews", () => {
+    expect(
+      resolveThreadArtifactWorkspaceRoot({
+        isStudioContainer: false,
+        projectCwd: "/repo/project",
+        threadWorkspaceCwd: "/repo/worktrees/feature",
+      }),
+    ).toBe("/repo/worktrees/feature");
+  });
+
+  it("keeps the project fallback while a normal thread worktree is pending", () => {
+    expect(
+      resolveThreadArtifactWorkspaceRoot({
+        isStudioContainer: false,
+        projectCwd: "/repo/project",
+        threadWorkspaceCwd: null,
+      }),
+    ).toBe("/repo/project");
+  });
+
+  it("does not escape a Studio thread's selected working directory", () => {
+    expect(
+      resolveThreadArtifactWorkspaceRoot({
+        isStudioContainer: true,
+        projectCwd: "/studio/root",
+        threadWorkspaceCwd: null,
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("transcript auto-follow signal", () => {
   it("stays stable when only non-message turn activity changes", () => {
     const before = buildTranscriptAutoFollowSignal({
       messageCount: 3,
-      tailKey: "assistant-3:assistant:streaming:content",
+      tailKey: "assistant-3:assistant:streaming:content:120",
     });
     const afterWorkRow = buildTranscriptAutoFollowSignal({
       messageCount: 3,
-      tailKey: "assistant-3:assistant:streaming:content",
+      tailKey: "assistant-3:assistant:streaming:content:120",
     });
 
     expect(afterWorkRow).toBe(before);
@@ -203,21 +236,34 @@ describe("transcript auto-follow signal", () => {
   it("changes for a real transcript append or tail lifecycle change", () => {
     const streaming = buildTranscriptAutoFollowSignal({
       messageCount: 3,
-      tailKey: "assistant-3:assistant:streaming:content",
+      tailKey: "assistant-3:assistant:streaming:content:120",
     });
 
     expect(
       buildTranscriptAutoFollowSignal({
         messageCount: 4,
-        tailKey: "user-4:user:settled:content",
+        tailKey: "user-4:user:settled:content:24",
       }),
     ).not.toBe(streaming);
     expect(
       buildTranscriptAutoFollowSignal({
         messageCount: 3,
-        tailKey: "assistant-3:assistant:settled:content",
+        tailKey: "assistant-3:assistant:settled:content:120",
       }),
     ).not.toBe(streaming);
+  });
+
+  it("changes as the streaming assistant tail grows", () => {
+    const firstChunk = buildTranscriptAutoFollowSignal({
+      messageCount: 3,
+      tailKey: "assistant-3:assistant:streaming:content:120",
+    });
+    const nextChunk = buildTranscriptAutoFollowSignal({
+      messageCount: 3,
+      tailKey: "assistant-3:assistant:streaming:content:240",
+    });
+
+    expect(nextChunk).not.toBe(firstChunk);
   });
 });
 
@@ -1860,6 +1906,7 @@ describe("worktree setup snapshots", () => {
     const current: LocalDispatchSnapshot = {
       startedAt: "2026-04-13T00:00:00.000Z",
       worktreeSetup: failWorktreeSetupSnapshot(createWorktreeSetupSnapshot("create-worktree")),
+      expectedUserMessageId: null,
       latestTurnTurnId: null,
       latestTurnRequestedAt: null,
       latestTurnStartedAt: null,
@@ -1881,6 +1928,7 @@ describe("worktree setup snapshots", () => {
     const current: LocalDispatchSnapshot = {
       startedAt: "2026-04-13T00:00:00.000Z",
       worktreeSetup: failWorktreeSetupSnapshot(createWorktreeSetupSnapshot("create-worktree")),
+      expectedUserMessageId: null,
       latestTurnTurnId: null,
       latestTurnRequestedAt: null,
       latestTurnStartedAt: null,
@@ -1908,6 +1956,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
   const localDispatch: LocalDispatchSnapshot = {
     startedAt: "2026-04-13T00:00:00.000Z",
     worktreeSetup: null,
+    expectedUserMessageId: "message-for-dispatch" as never,
     latestTurnTurnId: null,
     latestTurnRequestedAt: null,
     latestTurnStartedAt: null,
@@ -1918,6 +1967,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
   const firstTurnLocalDispatch: LocalDispatchSnapshot = {
     startedAt: "2026-04-13T00:00:00.000Z",
     worktreeSetup: null,
+    expectedUserMessageId: "message-first-send" as never,
     latestTurnTurnId: null,
     latestTurnRequestedAt: null,
     latestTurnStartedAt: null,
@@ -1932,6 +1982,15 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         localDispatch,
         phase: "ready",
         latestTurn: null,
+        messages: [
+          {
+            id: "message-before-dispatch" as never,
+            role: "user",
+            text: "an unrelated message",
+            createdAt: "2026-04-13T00:00:00.000Z",
+            streaming: false,
+          },
+        ],
         session: {
           provider: "codex",
           status: "ready",
@@ -1960,6 +2019,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
           assistantMessageId: null,
           sourceProposedPlan: undefined,
         },
+        messages: [],
         session: {
           provider: "codex",
           status: "ready",
@@ -1980,6 +2040,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         localDispatch: firstTurnLocalDispatch,
         phase: "ready",
         latestTurn: null,
+        messages: [],
         session: {
           provider: "claudeAgent",
           status: "ready",
@@ -1994,12 +2055,42 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     ).toBe(false);
   });
 
+  it("acknowledges a first send when its user message becomes durable", () => {
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch: firstTurnLocalDispatch,
+        phase: "ready",
+        latestTurn: null,
+        messages: [
+          {
+            id: "message-first-send" as never,
+            role: "user",
+            text: "the submitted message",
+            createdAt: "2026-04-13T00:00:01.000Z",
+            streaming: false,
+          },
+        ],
+        session: {
+          provider: "claudeAgent",
+          status: "ready",
+          orchestrationStatus: "ready",
+          createdAt: "2026-04-13T00:00:00.000Z",
+          updatedAt: "2026-04-13T00:00:01.000Z",
+        },
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(true);
+  });
+
   it("still acknowledges non-ready session transitions without a latest turn snapshot", () => {
     expect(
       hasServerAcknowledgedLocalDispatch({
         localDispatch: firstTurnLocalDispatch,
         phase: "disconnected",
         latestTurn: null,
+        messages: [],
         session: null,
         hasPendingApproval: false,
         hasPendingUserInput: false,

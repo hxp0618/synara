@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.6.5 - 2026-08-02
+
+### Added
+
+- Added a sidebar Activity view that acts as a compact task inbox for running work, input requests, failures, and recently settled tasks, with project grouping, project-scoped filters, pinned rows, urgency-aware ordering, and a persistent cross-tab view preference.
+- Added focused transcript-scroll cancellation coverage so user input can stop both native smooth scrolling and virtual-list bookkeeping at the currently visible offset.
+
+### Changed
+
+- Refined Activity rows into a denser two-line presentation, renamed settled work to Done, kept urgent state visible on completed rows, and made new-chat creation use the latest project relevant to the current Activity scope.
+- Improved session orchestration, runtime activity attribution, workspace-root resolution, and worktree handoff metadata so conversation and cwd-bound surfaces converge sooner after delayed lifecycle events or repository changes.
+- Improved browser tool presentation, sidebar surface-picker styling, thread hover-card active states, and accessible Search targeting.
+- Bumped Synara release package versions to `0.6.5` across the server, desktop, web, and contracts packages.
+
+### Fixed
+
+- Fixed transcript auto-scroll continuing after user takeover, late smooth-scroll completion snapping a replaced conversation, and tail settling fighting direct viewport input.
+- Fixed Activity ordering and status indicators drifting as tasks settle, stale project scopes hiding available work, pinned rows ignoring the active project filter, and empty states retaining expired settle overrides.
+- Fixed composer image preparation edge cases by bounding resize attempts, correcting worker message handling, and hardening unsupported or oversized attachment intake.
+- Fixed worktree handoffs briefly leaving file preview, explorer, or terminal surfaces pointed at the previous checkout.
+- Fixed thread hover cards losing their active treatment while hovered and improved dense sidebar state readability.
+
+### Verification
+
+- `bun run fmt:check` passed across 15,678 files after formatting three release-delta files.
+- `bun run lint` passed with 364 warnings and 0 errors.
+- `bun run typecheck` passed across all 7 packages after fixing two release-blocking exact-optional/narrowing errors; only existing informational and deprecation notices remained.
+- `bun run release:smoke` passed across the 1,448-package dependency graph. Its first sandboxed attempt was blocked from writing a temporary package workspace; the unrestricted rerun passed.
+- `bun run build` passed with all 5 Turbo tasks successful; existing Astro/Vite deprecations and plugin timing notices remained non-blocking.
+- Full `bun run test` passed with all 8 Turbo tasks successful in 3m4.522s. The first sandboxed run failed four `packages/shared/src/Net.test.ts` cases because loopback binding returned `EPERM` and then terminated sibling workers; the complete unrestricted rerun passed. Web passed 279 files / 3,442 tests; server/CLI passed 292 files / 3,193 tests with 2 skipped files / 7 skipped tests. No flaky product test was identified.
+
+## 0.6.4 - 2026-08-01
+
+### Added
+
+- Added provider-agnostic browser automation backed by Synara's shared visible Electron WebView. Supported agents can inspect bounded semantic snapshots, capture screenshots and diagnostics, navigate tabs, click, hover, drag, type, select, press keys, scroll, wait for page conditions, evaluate bounded expressions, handle dialogs, upload workspace-relative files, and observe explicit popup, download, timeout, and host-boundary states without creating a hidden browser.
+- Added DOM annotations for the visible browser so users can select one or more page elements, attach optional comments, and send precise, compact context through the composer. Annotation transport is versioned, count- and field-bounded, keeps exact-page affinity local, and strips document-only metadata before provider injection.
+- Added provider-aware runtime modes and Auto/auto-approval support across the orchestration, automation, gateway, Codex, Claude, and ACP paths. Approval-required, Auto, and Full access selections now carry capability checks, privilege limits, and explicit pending-approval state.
+- Added a right-dock launcher for opening Review, Terminal, Browser, Files, Side chat, and Source control panes from one place, with keep-mounted live panes and project/repository-aware availability.
+- Added negotiated transport capabilities: a single connect handshake, authenticated WebSocket `permessage-deflate`, cursor-resumable delta subscriptions with safe snapshot fallback, and precompressed web assets with cache headers and identity fallback.
+- Added repository PR-template discovery so generated pull-request bodies can follow the selected repository's `.github` template while retaining the existing fallback format when no applicable template exists.
+
+### Changed
+
+- Reworked transcript tail following around one shared anchor path for estimated and virtualized rows, sent-message reveals, native browser end-space, and fast streaming. Auto-follow is now driven by real transcript messages rather than tool rows, measurements, buffering, or reconnect-only activity.
+- Added native turn steering for Codex and Claude while preserving queued follow-ups as an explicit alternative. Provider commands, lifecycle generations, runtime activity, child work, sent messages, live answers, and terminal events now retain the correct turn identity through late, replayed, interrupted, and restarted sessions.
+- Changed thread hydration and reconnect behavior to use durable projections directly, resume detail from high-water cursors when safe, re-arm refreshes after snapshot races, retry missing snapshots after timed-out turn starts, and keep provider notification drains alive until a session settles.
+- Improved runtime-mode and model pickers with capability-aware options, clearer effort labels, Claude model discovery on cold starts, and thread hover-card details for the active provider and model.
+- Changed Environment and Git action presentation so branches behind upstream surface Pull before commit, push, or PR actions, using one consistent working-tree and upstream state model.
+- Recovered missed draft promotions during event routing and capped stacked composer panels so large agent fleets cannot hide the composer.
+- Bumped Synara release package versions to `0.6.4` across the server, desktop, web, and contracts packages, and refreshed `bun.lock` workspace metadata.
+
+### Fixed
+
+- Fixed tail-anchor overshoot, sent-message jumps, stale estimated-row offsets, and viewport loss while virtualized messages reveal or provider responses stream.
+- Fixed native steering activity projection and turn settlement when provider updates arrive late, are replayed, or use an unknown self-update status.
+- Fixed session startup and local dispatch acknowledgement races, hydration recovery that could render an empty visible task, and timed-out turn starts that failed to retry a missing snapshot.
+- Fixed provider notification pumps that could be disposed too early, leaving later session events unobserved, and fixed Antigravity inactive `PreToolUse` hooks that did not receive a decision.
+- Fixed runtime stalls that could kill active turns, including provider lifecycle and browser-host boundary cases; bounded browser input, navigation, semantic snapshot, file-transfer, and teardown paths so failures remain attributable to the correct tab and task.
+- Fixed browser annotation metadata handling, stale annotation validators, contenteditable descendant redaction, id-less timeline estimates, draft promotion, and browser-to-composer contract gaps.
+- Fixed Tailwind scanning for utility-class overrides and updated browser/desktop protocol boundaries so the visible browser cannot be mistaken for a separate or privileged host surface.
+- Fixed right-dock activation and pane-state races that could lose a draft or unmount live terminal state when switching tools.
+
+### Verification
+
+- `bun run fmt:check` passed across 15,652 files.
+- `bun run lint` passed with 350 warnings and 0 errors.
+- `bun run typecheck` passed across all 7 packages; only existing TS44 informational schema messages and Astro/Vite deprecation notices remained.
+- `bun run release:smoke` passed across the 1,448-package dependency graph.
+- `bun run build` passed with all 5 Turbo tasks successful; existing Astro/Vite deprecations, plugin-timing notices, and large-chunk warnings remained non-blocking.
+- Full `bun run test` passed with all 8 Turbo tasks successful in 2m48.35s. Web passed 274 files / 3,378 tests; server/CLI passed 290 files / 3,185 tests with 2 skipped files / 7 skipped tests; desktop passed 55 files / 525 tests with 1 skipped file / 5 skipped tests; shared passed 47 files / 467 tests with 1 skipped test; contracts passed 17 files / 189 tests; scripts passed 13 files / 84 tests. No targeted reruns or flaky failures were needed.
+
 ## 0.6.3 - 2026-07-27
 
 ### Added

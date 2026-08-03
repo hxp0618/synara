@@ -36,13 +36,15 @@ import {
   resolvePullRequestReviewBadge,
   resolveSidebarThreadListPaging,
   resolveProjectEmptyState,
-  resolvePendingSidebarViewSelection,
   resolveSettingsBackTarget,
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadEnvMode,
   resolveThreadHoverCardMetadata,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
+  resolveThreadStatusTrailingIndicator,
+  isUrgentThreadStatusPill,
+  type ThreadStatusPill,
   shouldShowDebugFeatureFlagsMenu,
   shouldPrunePinnedThreads,
   shouldClearThreadSelectionOnMouseDown,
@@ -71,16 +73,6 @@ function makeLatestTurn(overrides?: {
     completedAt: overrides?.completedAt ?? "2026-03-09T10:05:00.000Z",
   };
 }
-
-describe("resolvePendingSidebarViewSelection", () => {
-  it("optimistically follows a destination segment", () => {
-    expect(resolvePendingSidebarViewSelection("threads", "studio")).toBe("studio");
-  });
-
-  it("clears the optimistic segment when the user returns to the active view", () => {
-    expect(resolvePendingSidebarViewSelection("threads", "threads")).toBeNull();
-  });
-});
 
 describe("isProjectsSidebarSurface", () => {
   it("enables Space shortcuts only where the Space switcher is visible", () => {
@@ -219,6 +211,7 @@ describe("resolveThreadHoverCardMetadata", () => {
         associatedWorktreeBranch: "codex/synara-mobile",
       }),
       project: {
+        kind: "project",
         name: "synara-mobile",
         folderName: "Remodex",
         cwd: "/Users/me/Developer/Remodex",
@@ -240,6 +233,7 @@ describe("resolveThreadHoverCardMetadata", () => {
         branch: "main",
       }),
       project: {
+        kind: "project",
         name: "synara",
         folderName: "synara",
         cwd: "/Users/me/Developer/synara",
@@ -253,6 +247,20 @@ describe("resolveThreadHoverCardMetadata", () => {
       branch: "main",
       worktreeName: null,
     });
+  });
+
+  it("labels project-less chat containers as Synara instead of the slug folder", () => {
+    const metadata = resolveThreadHoverCardMetadata({
+      thread: makeSidebarThreadSummary({ branch: null }),
+      project: {
+        kind: "chat",
+        name: "open-the-browser-search-house-music",
+        folderName: "open-the-browser-search-house-music",
+        cwd: "/Users/me/Documents/Synara/2026-08-01/open-the-browser-search-house-music",
+      },
+    });
+
+    expect(metadata.projectName).toBe("Synara");
   });
 });
 
@@ -650,9 +658,9 @@ describe("pin helpers", () => {
       makeThread("thread-2"),
     ];
 
-    // Pinning the parent must not orphan child-1 as a top-level project row
-    // (buildProjectThreadTree promotes children with missing parents) nor hide
-    // it entirely; the parent stays in the tree, children render under it.
+    // Pinning the parent must not hide child-1 entirely (buildProjectThreadTree
+    // hides children with missing parents); the parent stays in the tree,
+    // children render under it.
     expect(getUnpinnedThreadsForSidebar(threads, ["thread-1" as ThreadId])).toEqual(threads);
     // Childless pinned threads are still hidden from project lists.
     expect(getUnpinnedThreadsForSidebar(threads, ["thread-2" as ThreadId])).toEqual([
@@ -778,6 +786,51 @@ describe("pin helpers", () => {
         threadsHydrated: false,
       }),
     ).toBeNull();
+  });
+});
+
+function statusPill(label: ThreadStatusPill["label"]): ThreadStatusPill {
+  return { label, colorClass: "", dotClass: "", pulse: false };
+}
+
+describe("isUrgentThreadStatusPill", () => {
+  it("treats every status but a finished turn as urgent", () => {
+    expect(isUrgentThreadStatusPill(statusPill("Pending Approval"))).toBe(true);
+    expect(isUrgentThreadStatusPill(statusPill("Awaiting Input"))).toBe(true);
+    expect(isUrgentThreadStatusPill(statusPill("Plan Ready"))).toBe(true);
+    expect(isUrgentThreadStatusPill(statusPill("Working"))).toBe(true);
+    expect(isUrgentThreadStatusPill(statusPill("Connecting"))).toBe(true);
+    expect(isUrgentThreadStatusPill(statusPill("Completed"))).toBe(false);
+  });
+});
+
+describe("resolveThreadStatusTrailingIndicator", () => {
+  it("shows nothing when there is no status", () => {
+    expect(resolveThreadStatusTrailingIndicator({ status: null })).toBeNull();
+  });
+
+  it("yields the slot when another affordance owns it", () => {
+    expect(
+      resolveThreadStatusTrailingIndicator({
+        status: statusPill("Working"),
+        slotOccupied: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("hides an unread completion on the open thread but keeps it elsewhere", () => {
+    const completed = statusPill("Completed");
+    expect(resolveThreadStatusTrailingIndicator({ status: completed, isActive: true })).toBeNull();
+    expect(resolveThreadStatusTrailingIndicator({ status: completed, isActive: false })).toBe(
+      completed,
+    );
+  });
+
+  it("keeps live and actionable statuses on the open row", () => {
+    for (const label of ["Working", "Connecting", "Pending Approval", "Awaiting Input"] as const) {
+      const pill = statusPill(label);
+      expect(resolveThreadStatusTrailingIndicator({ status: pill, isActive: true })).toBe(pill);
+    }
   });
 });
 
@@ -1116,6 +1169,37 @@ describe("buildProjectThreadTree", () => {
     expect(rows).toEqual([
       expect.objectContaining({
         thread: expect.objectContaining({ id: ThreadId.makeUnsafe("thread-parent") }),
+        depth: 0,
+      }),
+    ]);
+  });
+
+  it("hides subagent subtrees whose parent is not in the list", () => {
+    // Regression: archiving (or deleting) a parent removes it from the sidebar
+    // list; its subagent children must stay hidden instead of surfacing as
+    // top-level rows (#488).
+    const rows = buildProjectThreadTree({
+      threads: [
+        makeThread({
+          id: ThreadId.makeUnsafe("thread-other"),
+          createdAt: "2026-03-09T10:03:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.makeUnsafe("thread-child"),
+          parentThreadId: ThreadId.makeUnsafe("thread-archived-parent"),
+          createdAt: "2026-03-09T10:02:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.makeUnsafe("thread-grandchild"),
+          parentThreadId: ThreadId.makeUnsafe("thread-child"),
+          createdAt: "2026-03-09T10:01:00.000Z",
+        }),
+      ],
+    });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        thread: expect.objectContaining({ id: ThreadId.makeUnsafe("thread-other") }),
         depth: 0,
       }),
     ]);

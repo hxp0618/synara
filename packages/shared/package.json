@@ -156,6 +156,10 @@
       "types": "./src/threadWorkspace.ts",
       "import": "./src/threadWorkspace.ts"
     },
+    "./threadHierarchy": {
+      "types": "./src/threadHierarchy.ts",
+      "import": "./src/threadHierarchy.ts"
+    },
     "./subagents": {
       "types": "./src/subagents.ts",
       "import": "./src/subagents.ts"
@@ -247,6 +251,10 @@
     "./browserAutomationCatalogue": {
       "types": "./src/browserAutomationCatalogue.ts",
       "import": "./src/browserAutomationCatalogue.ts"
+    },
+    "./browserAutomationPresentation": {
+      "types": "./src/browserAutomationPresentation.ts",
+      "import": "./src/browserAutomationPresentation.ts"
     },
     "./browserAutomationErrors": {
       "types": "./src/browserAutomationErrors.ts",

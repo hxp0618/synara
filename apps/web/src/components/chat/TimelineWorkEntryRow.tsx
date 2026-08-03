@@ -27,6 +27,7 @@ import {
   CircleQuestionIcon,
   EyeIcon,
   GitHubIcon,
+  GlobeIcon,
   HammerIcon,
   type LucideIcon,
   McpIcon,
@@ -64,19 +65,16 @@ import {
   isPrefixedToolArgumentSummary,
 } from "../../lib/toolArgumentSummary";
 import {
-  deriveReadableCommandDisplay,
+  deriveFriendlyCommandTarget,
   deriveSynaraMcpToolTitle,
   extractWebFetchUrl,
+  isSynaraBrowserToolCall,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
   sanitizeSynaraMcpToolPreview,
   type SynaraMcpToolStatus,
 } from "../../lib/toolCallLabel";
-import {
-  formatLiveActivityMeta,
-  formatLiveActivityPrimary,
-  useLiveActivityNow,
-} from "../../lib/liveActivityPresentation";
+import { formatLiveActivityMeta, useLiveActivityNow } from "../../lib/liveActivityPresentation";
 import { openWorkspaceFileReference, useWorkspaceFileOpener } from "../../lib/workspaceFileOpener";
 
 const TRANSCRIPT_DISCLOSURE_TRANSITION_MS = 220;
@@ -161,7 +159,9 @@ function workEntryPreview(workEntry: TimelineWorkEntry): string | null {
 
   if (workEntry.itemType === "command_execution" || workEntry.command || workEntry.rawCommand) {
     const command = workEntry.command ?? workEntry.rawCommand;
-    if (command) return deriveReadableCommandDisplay(command).target;
+    // Running and settled command rows share one target so the row text only
+    // swaps tense ("Searching for foo in src" → "Searched for foo in src").
+    if (command) return deriveFriendlyCommandTarget(command);
   }
 
   if (workEntry.preview) return workEntry.preview;
@@ -274,11 +274,12 @@ export function renderWorkEntryIcon(Icon: LucideIcon, className: string): ReactE
   return createElement(Icon, { className });
 }
 
-// The leading glyph for a tool row: provider-brand marks (GitHub, Synara, MCP)
-// win over the kind-derived entry icon. Shared with the collapsed tool-group
-// summary row, which borrows its first entry's icon.
+// The leading glyph for a tool row: recognizable product and surface icons win
+// over the kind-derived entry icon. Shared with the collapsed tool-group summary
+// row, which borrows its first entry's icon.
 export function workEntryLeftIcon(workEntry: TimelineWorkEntry): LucideIcon {
   if (isGitHubMcpToolCall(workEntry)) return GitHubIcon;
+  if (isSynaraBrowserWorkEntry(workEntry)) return GlobeIcon;
   if (isSynaraToolCall(workEntry)) return SynaraToolIcon;
   if (workEntry.itemType === "mcp_tool_call") return McpIcon;
   return workEntryIcon(workEntry);
@@ -299,6 +300,15 @@ function toolWorkEntryStatus(workEntry: TimelineWorkEntry): SynaraMcpToolStatus 
   return workEntry.activityKind !== undefined && workEntry.activityKind !== "tool.completed"
     ? "running"
     : "completed";
+}
+
+function isSynaraBrowserWorkEntry(workEntry: TimelineWorkEntry): boolean {
+  return isSynaraBrowserToolCall({
+    toolName: workEntry.toolName,
+    title: workEntry.toolTitle,
+    fallbackLabel: workEntry.label,
+    status: toolWorkEntryStatus(workEntry),
+  });
 }
 
 function isSynaraToolCall(workEntry: TimelineWorkEntry): boolean {
@@ -468,29 +478,40 @@ export const TimelineWorkEntryRow = memo(function TimelineWorkEntryRow(props: {
   // Standard tool rows keep one discoverable left glyph. Codex status rows
   // deliberately skip it and reuse only the shared tool-label typography.
   const isGitHubToolRow = isGitHubMcpToolCall(workEntry);
-  const isSynaraToolRow = !isGitHubToolRow && isSynaraToolCall(workEntry);
+  const isSynaraBrowserToolRow = !isGitHubToolRow && isSynaraBrowserWorkEntry(workEntry);
+  const isSynaraToolRow =
+    !isGitHubToolRow && !isSynaraBrowserToolRow && isSynaraToolCall(workEntry);
   const isMcpToolRow =
-    workEntry.itemType === "mcp_tool_call" && !isGitHubToolRow && !isSynaraToolRow;
+    workEntry.itemType === "mcp_tool_call" &&
+    !isGitHubToolRow &&
+    !isSynaraBrowserToolRow &&
+    !isSynaraToolRow;
   const LeftIcon = workEntryLeftIcon(workEntry);
   const leftIconKind = webFetchUrl
     ? "web-fetch"
     : isGitHubToolRow || EntryIcon === GitHubIcon
       ? "github"
-      : isSynaraToolRow
-        ? "synara"
-        : isMcpToolRow
-          ? "mcp"
-          : undefined;
+      : isSynaraBrowserToolRow
+        ? "browser"
+        : isSynaraToolRow
+          ? "synara"
+          : isMcpToolRow
+            ? "mcp"
+            : undefined;
   const heading = toolWorkEntryHeading(workEntry);
   const rawPreview = workEntryPreview(workEntry);
-  const preview = isSynaraToolRow
-    ? sanitizeSynaraMcpToolPreview({
-        preview: rawPreview,
-        heading,
-        status: toolWorkEntryStatus(workEntry),
-      })
-    : rawPreview;
-  const defaultDisplayText = webFetchUrl
+  const preview =
+    isSynaraBrowserToolRow || isSynaraToolRow
+      ? sanitizeSynaraMcpToolPreview({
+          preview: rawPreview,
+          heading,
+          status: toolWorkEntryStatus(workEntry),
+        })
+      : rawPreview;
+  // One sentence per row, live or settled: the tool's own verb plus what it acted
+  // on ("Searched for foo in src"). Lifecycle state is never spelled out here —
+  // the verb already carries the tense and `liveActivityMetaText` covers the rest.
+  const displayText = webFetchUrl
     ? describeLinkChip(webFetchUrl).label
     : isReasoningUpdateWorkEntry(workEntry) && preview
       ? preview
@@ -500,15 +521,6 @@ export const TimelineWorkEntryRow = memo(function TimelineWorkEntryRow(props: {
     Boolean(preview) &&
     normalizeToolTextForComparison(heading) !== normalizeToolTextForComparison(preview ?? "");
   const rawCommand = workEntry.rawCommand ?? workEntry.command;
-  const displayText = workEntry.liveActivity
-    ? formatLiveActivityPrimary({
-        activity: workEntry.liveActivity,
-        entry: workEntry,
-        heading,
-        displayTarget: showInlineAgentTaskPreview ? heading : defaultDisplayText,
-        rawCommand,
-      })
-    : defaultDisplayText;
   const hoverText =
     rawCommand ?? (showInlineAgentTaskPreview ? heading : (webFetchUrl ?? displayText));
   const changedFiles = workEntry.changedFiles ?? [];
@@ -680,9 +692,7 @@ export const TimelineWorkEntryRow = memo(function TimelineWorkEntryRow(props: {
                       className="truncate font-medium leading-5 text-muted-foreground/72"
                       style={{ fontSize: `${rowFontSizePx}px` }}
                     >
-                      <span data-work-entry-display-text="true">
-                        {workEntry.liveActivity ? displayText : heading}
-                      </span>
+                      <span data-work-entry-display-text="true">{heading}</span>
                       {liveActivityMetaText ? (
                         <span data-live-activity-meta="true"> · {liveActivityMetaText}</span>
                       ) : null}

@@ -13,6 +13,11 @@ import {
 } from "@synara/contracts";
 import { deriveThreadSummaryMetadata } from "@synara/shared/threadSummary";
 
+import {
+  clearThreadDetailResumeCursor,
+  resetThreadDetailResumeCursors,
+  retainThreadDetailResumeCursors,
+} from "./threadDetailResumeCursors";
 import { getThreadFromState, getThreadsFromState } from "./threadDerivation";
 import {
   arraysShallowEqual,
@@ -89,6 +94,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     error: thread.error,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt ?? null,
+    settledAt: thread.settledAt ?? null,
     updatedAt: thread.updatedAt,
     isPinned: thread.isPinned ?? false,
     envMode: thread.envMode,
@@ -335,6 +341,7 @@ function sidebarThreadSummariesEqual(
     left.session === right.session &&
     left.createdAt === right.createdAt &&
     (left.archivedAt ?? null) === (right.archivedAt ?? null) &&
+    (left.settledAt ?? null) === (right.settledAt ?? null) &&
     left.updatedAt === right.updatedAt &&
     (left.isPinned ?? false) === (right.isPinned ?? false) &&
     left.latestTurn === right.latestTurn &&
@@ -376,6 +383,7 @@ function buildSidebarThreadSummary(
     session: thread.session,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt ?? null,
+    settledAt: thread.settledAt ?? null,
     updatedAt: thread.updatedAt,
     isPinned: thread.isPinned ?? false,
     latestTurn: thread.latestTurn,
@@ -662,6 +670,14 @@ function writeThreadDetailSyncState(
 }
 
 function clearThreadDetailSyncState(state: AppState, threadId: ThreadId): AppState {
+  // Single-thread detail-wipe choke point: every transition that removes or
+  // invalidates a thread's cached detail (removeThreadState, eviction, sync
+  // failure reset) funnels through here, so this is where the resume-cursor
+  // invariant is enforced — wiped detail must never leave a cursor that would
+  // let a resubscribe gap-replay on top of missing history. The full-sync
+  // paths cover their bulk invalidations separately: the shell snapshot prunes
+  // with `retainThreadDetailResumeCursors`, the read-model resync resets all.
+  clearThreadDetailResumeCursor(threadId);
   if (
     state.threadDetailSyncById === undefined ||
     !Object.hasOwn(state.threadDetailSyncById, threadId)
@@ -1373,6 +1389,9 @@ export function syncServerShellSnapshot(
   const spaces = mapSpaces(snapshot.spaces ?? [], state.spaces ?? []);
   const projects = mapProjects(snapshotProjects, state.projects);
   const nextThreadIds = new Set(snapshotThreads.map((thread) => thread.id));
+  // The retains below prune detail slices down to the snapshot's threads; any
+  // resume cursor for a pruned thread must fall with its detail.
+  retainThreadDetailResumeCursors(nextThreadIds);
 
   const normalizedState: AppState = {
     ...state,
@@ -1550,6 +1569,12 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
       return normalizeThreadFromReadModel(thread, existing);
     });
   const nextThreadIds = new Set(nextThreads.map((thread) => thread.id));
+  // This full resync (including the "Repair local state" action) replaces
+  // every thread's detail wholesale: pruned threads lose their detail, and a
+  // surviving thread's cursor would vouch for history the replacement does not
+  // contain. No cursor survives — the next subscribe takes a snapshot and
+  // re-establishes one that matches what is actually cached.
+  resetThreadDetailResumeCursors();
   let normalizedState: AppState = {
     ...state,
     threadIds: reuseThreadIdRegistry(state.threadIds, nextThreadIds),

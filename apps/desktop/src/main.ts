@@ -235,6 +235,7 @@ import {
 import { DesktopSaaSConnectionError, DesktopSaaSConnectionManager } from "./desktopSaaSConnection";
 import { DesktopAppSnapManager } from "./appSnapManager";
 import { hardenBrowserAnnotationWebviewPreferences } from "./browserAnnotations/webviewSecurity";
+import { LOCAL_HTML_PREVIEW_SCHEME } from "./localHtmlPreviewProtocol";
 import {
   registerAppSnapIpcHandlers,
   sendAppSnapCaptured,
@@ -928,6 +929,14 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       corsEnabled: true,
+    },
+  },
+  {
+    scheme: LOCAL_HTML_PREVIEW_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
     },
   },
 ]);

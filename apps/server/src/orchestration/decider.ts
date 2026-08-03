@@ -22,7 +22,9 @@ import {
   workspaceRootsEqual,
 } from "@synara/shared/threadWorkspace";
 import { doThreadMarkerRangesOverlap } from "@synara/shared/threadMarkers";
+import { collectSubagentDescendants } from "@synara/shared/threadHierarchy";
 import { autoRuntimeModeSelectionIssue } from "@synara/shared/runtimeMode";
+import { providerSupportsNativeTurnSteering } from "@synara/shared/providerMetadata";
 import {
   collectTailTurnIds,
   resolveTailUserMessageEditTarget,
@@ -1157,20 +1159,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
+      // Subagent threads are only reachable through their parent, so archiving a
+      // thread archives its still-active subagent subtree with it. The commanded
+      // thread goes last: the command receipt records the final event's aggregate.
+      const subagentThreadIds = collectSubagentDescendants(readModel.threads, command.threadId)
+        .filter((thread) => thread.deletedAt === null && (thread.archivedAt ?? null) === null)
+        .map((thread) => thread.id);
+      return [...subagentThreadIds, command.threadId].map(
+        (threadId): Omit<OrchestrationEvent, "sequence"> => ({
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.archived",
+          payload: {
+            threadId,
+            archivedAt: occurredAt,
+            updatedAt: occurredAt,
+          },
         }),
-        type: "thread.archived",
-        payload: {
-          threadId: command.threadId,
-          archivedAt: occurredAt,
-          updatedAt: occurredAt,
-        },
-      };
+      );
     }
 
     case "thread.unarchive": {
@@ -1180,19 +1190,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
+      // Restoring a parent brings back the subagent subtree that was archived with
+      // it. The commanded thread goes last: the command receipt records the final
+      // event's aggregate.
+      const subagentThreadIds = collectSubagentDescendants(readModel.threads, command.threadId)
+        .filter((thread) => thread.deletedAt === null && (thread.archivedAt ?? null) !== null)
+        .map((thread) => thread.id);
+      return [...subagentThreadIds, command.threadId].map(
+        (threadId): Omit<OrchestrationEvent, "sequence"> => ({
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.unarchived",
+          payload: {
+            threadId,
+            updatedAt: occurredAt,
+          },
         }),
-        type: "thread.unarchived",
-        payload: {
-          threadId: command.threadId,
-          updatedAt: occurredAt,
-        },
-      };
+      );
     }
 
     case "thread.meta.update": {
@@ -1222,6 +1240,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...resolveThreadWorkspaceMetadataPatch(project?.kind, command, thread),
           ...(command.isPinned !== undefined ? { isPinned: command.isPinned } : {}),
+          ...(command.isSettled !== undefined
+            ? { settledAt: command.isSettled ? occurredAt : null }
+            : {}),
           ...(command.parentThreadId !== undefined
             ? { parentThreadId: command.parentThreadId }
             : {}),
@@ -1660,10 +1681,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // Subagent threads never queue: their messages steer the running child task
       // through the parent session, so deferring until the turn settles would
       // deliver the message only after the subagent already finished.
+      // Steers ride the live turn natively only on providers whose runtime can
+      // inject mid-turn input; everywhere else they queue and interrupt below.
       const shouldQueue =
         targetThread.parentThreadId === null &&
         isThreadRunning &&
-        (dispatchMode === "queue" || activeProvider !== "codex");
+        (dispatchMode === "queue" || !providerSupportsNativeTurnSteering(activeProvider));
       const queuedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -2083,11 +2106,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const sessionChanged =
+        (command.expectedSessionStatus !== undefined &&
+          thread.session?.status !== command.expectedSessionStatus) ||
+        (command.expectedSessionUpdatedAt !== undefined &&
+          thread.session?.updatedAt !== command.expectedSessionUpdatedAt);
+      if (sessionChanged) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' session changed before the conditional update.`,
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",

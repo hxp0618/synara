@@ -23,6 +23,7 @@ import {
   type ServerVoiceTranscriptionResult,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
+  EventId,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -31,17 +32,7 @@ import {
   ThreadId,
   TurnId,
 } from "@synara/contracts";
-import {
-  Cause,
-  Effect,
-  FileSystem,
-  Layer,
-  Option,
-  Queue,
-  Schema,
-  ServiceMap,
-  Stream,
-} from "effect";
+import { Cause, Effect, Layer, Option, Queue, Schema, ServiceMap, Stream } from "effect";
 
 import {
   ProviderAdapterProcessError,
@@ -65,7 +56,8 @@ import {
 } from "../acp/AcpTurnIdleWatchdog.ts";
 import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import { acquireAgentGatewaySessionLease } from "../../agentGateway/sessionLease.ts";
-import { loadProviderPromptImageBlocks } from "../promptAttachments.ts";
+import { filterProviderPromptImageAttachments } from "../promptAttachments.ts";
+import { resolveProviderAttachmentPath } from "../providerAttachmentPaths.ts";
 import {
   codexGeneratedImageArtifact,
   extractCodexGeneratedImageReference,
@@ -253,6 +245,11 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asTrimmedString(value: unknown): string | undefined {
+  const stringValue = asString(value)?.trim();
+  return stringValue ? stringValue : undefined;
 }
 
 function asArray(value: unknown): unknown[] | undefined {
@@ -1559,27 +1556,30 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "deprecationNotice") {
+    const details = asTrimmedString(payload?.details);
     return [
       {
         type: "deprecation.notice",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
-          summary: asString(payload?.summary) ?? "Deprecation notice",
-          ...(asString(payload?.details) ? { details: asString(payload?.details) } : {}),
+          summary: asTrimmedString(payload?.summary) ?? "Deprecation notice",
+          ...(details ? { details } : {}),
         },
       },
     ];
   }
 
   if (event.method === "configWarning") {
+    const details = asTrimmedString(payload?.details);
+    const path = asTrimmedString(payload?.path);
     return [
       {
         type: "config.warning",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
-          summary: asString(payload?.summary) ?? "Configuration warning",
-          ...(asString(payload?.details) ? { details: asString(payload?.details) } : {}),
-          ...(asString(payload?.path) ? { path: asString(payload?.path) } : {}),
+          summary: asTrimmedString(payload?.summary) ?? "Configuration warning",
+          ...(details ? { details } : {}),
+          ...(path ? { path } : {}),
           ...(payload?.range !== undefined ? { range: payload.range } : {}),
         },
       },
@@ -1753,7 +1753,6 @@ function mapToRuntimeEvents(
 
 const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
   Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
     const serverConfig = yield* Effect.service(ServerConfig);
     // Optional so adapter tests can run without the gateway layer; when
     // present, every session gets the synara_* MCP tools.
@@ -1790,6 +1789,10 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         );
       }),
       (manager) => Effect.promise(() => manager.stopAll()),
+    );
+
+    const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
+      PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
     );
 
     // Idle-progress backstop for codex turns. Same semantics as
@@ -1870,25 +1873,28 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       method: "turn/start" | "turn/steer",
     ): Effect.Effect<CodexAppServerSendTurnInput, ProviderAdapterRequestError> =>
       Effect.gen(function* () {
-        const imageBlocks = yield* loadProviderPromptImageBlocks({
-          attachments: input.attachments,
-          attachmentsDir: serverConfig.attachmentsDir,
-          provider: PROVIDER,
-          method,
-          readFile: (attachmentPath) => fileSystem.readFile(attachmentPath),
-          readErrorDetail: (cause) => toMessage(cause, "Failed to read attachment file."),
-          invalidAttachmentError: (_attachment, cause) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method,
-              detail: toMessage(cause, `${method} failed`),
-              cause,
-            }),
-        });
-        const nativeCodexAttachments = imageBlocks.map((attachment) => ({
-          type: "image" as const,
-          url: `data:${attachment.mimeType};base64,${attachment.data}`,
-        }));
+        const nativeCodexAttachments = yield* Effect.forEach(
+          filterProviderPromptImageAttachments(input.attachments),
+          (attachment) => {
+            const attachmentPath = resolveProviderAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment,
+            });
+            if (!attachmentPath) {
+              const cause = new Error(`Invalid attachment id '${attachment.id}'.`);
+              return Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method,
+                  detail: cause.message,
+                  cause,
+                }),
+              );
+            }
+            return Effect.succeed({ type: "localImage" as const, path: attachmentPath });
+          },
+          { concurrency: 1 },
+        );
         const composedInput = composeCodexInputWithFileAttachments({
           input: input.input,
           attachments: input.attachments,
@@ -1971,6 +1977,24 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           catch: (cause) => toRequestError(input.threadId, "turn/steer", cause),
         }).pipe(
           Effect.tap((result) => Effect.sync(() => armTurnWatchdog(input.threadId, result.turnId))),
+          // The `turn/steer` response carries no runtime event and the model
+          // only consumes injected input at its next turn boundary, so without
+          // this a landed steer is indistinguishable from a dropped one.
+          Effect.tap((result) => {
+            const message = input.input?.trim();
+            if (!message) {
+              return Effect.void;
+            }
+            return Queue.offer(runtimeEventQueue, {
+              type: "turn.steered",
+              eventId: EventId.makeUnsafe(crypto.randomUUID()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId: result.turnId,
+              createdAt: new Date().toISOString(),
+              payload: { message, target: "turn" },
+            });
+          }),
           Effect.map((result) => ({
             ...result,
             threadId: input.threadId,
@@ -2195,10 +2219,6 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       }).pipe(Effect.map((result) => result satisfies ServerVoiceTranscriptionResult));
 
     const commandOutputOffsets = new Map<string, number>();
-    const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
-      PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
-    );
-
     yield* Effect.acquireRelease(
       Effect.gen(function* () {
         const writeNativeEvent = (event: ProviderEvent) =>

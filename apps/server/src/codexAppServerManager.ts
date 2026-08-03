@@ -88,7 +88,11 @@ import {
   CodexJsonlFramer,
   CodexJsonlWriter,
 } from "./codexAppServerTransport.ts";
-import { buildCodexTurnInput, type CodexTurnInputItem } from "./codexTurnInput.ts";
+import {
+  buildCodexTurnInput,
+  type CodexImageInputItem,
+  type CodexTurnInputItem,
+} from "./codexTurnInput.ts";
 import {
   parseCodexModelListResponse,
   parseCodexPluginListResponse,
@@ -271,7 +275,7 @@ interface CodexVoiceTranscriptionAuthContext {
 export interface CodexAppServerSendTurnInput {
   readonly threadId: ThreadId;
   readonly input?: string;
-  readonly attachments?: ReadonlyArray<{ type: "image"; url: string }>;
+  readonly attachments?: ReadonlyArray<CodexImageInputItem>;
   readonly skills?: ReadonlyArray<ProviderSkillReference>;
   readonly mentions?: ReadonlyArray<ProviderMentionReference>;
   readonly model?: string;
@@ -1164,12 +1168,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         launch.expectedShellExcludedEnvVarNames,
       );
       await this.registerSynaraSkillsRoot(context);
-      try {
-        const modelListResponse = await this.sendRequest(context, "model/list", {});
-        log.info("model/list response", { modelListResponse });
-      } catch (error) {
-        log.warn("model/list failed", { error });
-      }
+      // Model discovery is lazy and cached by listModels(). Keeping model/list
+      // out of this serial cold-start path avoids an otherwise unused request
+      // with its own 20-second deadline.
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
         log.info("account/read response", { accountReadResponse });

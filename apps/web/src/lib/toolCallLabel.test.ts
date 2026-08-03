@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveFriendlyCommandTarget,
   deriveInlineCommandCall,
   deriveReadableCommandDisplay,
   deriveReadableToolTitle,
   deriveSynaraMcpToolTitle,
   extractWebFetchUrl,
   isInspectCommand,
+  isSynaraBrowserToolCall,
   normalizeCompactToolLabel,
   resolveCommandVisualKind,
   sanitizeSynaraMcpToolPreview,
@@ -60,6 +62,24 @@ describe("normalizeCompactToolLabel", () => {
 });
 
 describe("deriveSynaraMcpToolTitle", () => {
+  it("uses stable action-first names for Synara browser tools", () => {
+    for (const status of ["running", "completed", "failed"] as const) {
+      expect(
+        deriveSynaraMcpToolTitle({
+          toolName: "mcp__synara__browser_open",
+          status,
+        }),
+      ).toBe("Open browser tab");
+    }
+
+    expect(
+      deriveSynaraMcpToolTitle({
+        title: "Synara: Browser Snapshot",
+        status: "completed",
+      }),
+    ).toBe("Snapshot browser page");
+  });
+
   it("has intentional running and completed copy for every Synara gateway action", () => {
     const cases = [
       ["synara_context", "Synara is checking its context", "Synara checked its context"],
@@ -244,6 +264,14 @@ describe("deriveSynaraMcpToolTitle", () => {
         status: "failed",
       }),
     ).toBe('Unexpected key "reasoningEffort" for Claude Agent');
+  });
+});
+
+describe("isSynaraBrowserToolCall", () => {
+  it("recognizes canonical presentation titles without a tool identifier", () => {
+    expect(isSynaraBrowserToolCall({ title: "Open browser tab" })).toBe(true);
+    expect(isSynaraBrowserToolCall({ fallbackLabel: "Snapshot browser page" })).toBe(true);
+    expect(isSynaraBrowserToolCall({ title: "Synara listed threads" })).toBe(false);
   });
 });
 
@@ -478,6 +506,28 @@ describe("deriveReadableCommandDisplay", () => {
       target: "in src/lib",
       fullCommand: `rg -n . src/lib`,
     });
+  });
+});
+
+describe("deriveFriendlyCommandTarget", () => {
+  it("uses a friendly shell name instead of leaking the full wrapper command", () => {
+    expect(
+      deriveFriendlyCommandTarget(
+        '"C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "powershell -NoProfile -Command \\"1..8\\""',
+      ),
+    ).toBe("PowerShell");
+  });
+
+  it("reads as the object of the row's sentence", () => {
+    expect(deriveFriendlyCommandTarget(`/bin/zsh -lc 'rg -n "tool call" apps/web/src'`)).toBe(
+      "for tool call in web/src",
+    );
+  });
+
+  it("keeps long targets short enough to sit inline", () => {
+    const target = deriveFriendlyCommandTarget(`echo ${"a".repeat(200)}`);
+    expect(target.length).toBeLessThanOrEqual(72);
+    expect(target.endsWith("…")).toBe(true);
   });
 });
 

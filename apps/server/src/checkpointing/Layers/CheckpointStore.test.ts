@@ -2,6 +2,10 @@
 // Purpose: Verifies filesystem checkpoint store behavior around expensive Git capture work.
 // Layer: Checkpointing tests.
 // Exports: Vitest coverage for CheckpointStoreLive.
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Fiber, Layer, ManagedRuntime, Option } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +42,9 @@ describe("CheckpointStoreLive", () => {
     });
     const execute = vi.fn<GitCoreShape["execute"]>((input) => {
       const args = input.args.join(" ");
+      if (args === "rev-parse --git-path index") {
+        return Effect.succeed({ code: 0, stdout: "/repo/.git/index\n", stderr: "" });
+      }
       if (args === "rev-parse --verify HEAD") {
         return Effect.succeed({ code: 1, stdout: "", stderr: "" });
       }
@@ -87,10 +94,82 @@ describe("CheckpointStoreLive", () => {
     );
   });
 
+  it("seeds a capture from the working index so Git can reuse its stat cache", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "synara-checkpoint-index-test-"));
+    const workingIndexPath = join(tempDir, "index");
+    writeFileSync(workingIndexPath, "working-index-stat-cache");
+    const workingIndexTime = new Date("2020-01-02T03:04:05.000Z");
+    utimesSync(workingIndexPath, workingIndexTime, workingIndexTime);
+    let capturedSeed = "";
+    let capturedIndexMtimeMs = 0;
+
+    const execute = vi.fn<GitCoreShape["execute"]>((input) => {
+      const args = input.args.join(" ");
+      if (args === "rev-parse --git-path index") {
+        return Effect.succeed({ code: 0, stdout: `${workingIndexPath}\n`, stderr: "" });
+      }
+      if (args === "update-index --really-refresh") {
+        const captureIndexPath = input.env?.GIT_INDEX_FILE ?? "";
+        const refreshTime = new Date("2025-01-02T03:04:05.000Z");
+        utimesSync(captureIndexPath, refreshTime, refreshTime);
+        return Effect.succeed({ code: 1, stdout: "", stderr: "README.md: needs update\n" });
+      }
+      if (args === "add -A -- .") {
+        const captureIndexPath = input.env?.GIT_INDEX_FILE ?? "";
+        capturedSeed = readFileSync(captureIndexPath, "utf8");
+        capturedIndexMtimeMs = statSync(captureIndexPath).mtimeMs;
+        return Effect.succeed({ code: 0, stdout: "", stderr: "" });
+      }
+      if (args === "write-tree") {
+        return Effect.succeed({ code: 0, stdout: "tree-oid\n", stderr: "" });
+      }
+      if (args.startsWith("commit-tree ")) {
+        return Effect.succeed({ code: 0, stdout: "commit-oid\n", stderr: "" });
+      }
+      if (args.startsWith("update-ref ")) {
+        return Effect.succeed({ code: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`Unexpected git args: ${args}`);
+    });
+    const layer = CheckpointStoreLive.pipe(
+      Layer.provide(Layer.succeed(GitCore, { execute } as unknown as GitCoreShape)),
+      Layer.provide(NodeServices.layer),
+    );
+    runtime = ManagedRuntime.make(layer);
+
+    try {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const store = yield* CheckpointStore;
+          yield* store.captureCheckpoint({
+            cwd: tempDir,
+            checkpointRef: CheckpointRef.makeUnsafe("refs/synara-checkpoints/thread/stat-cache"),
+          });
+        }),
+      );
+
+      expect(capturedSeed).toBe("working-index-stat-cache");
+      expect(capturedIndexMtimeMs).toBe(workingIndexTime.getTime());
+      expect(
+        execute.mock.calls.some(
+          ([call]) => call.args.join(" ") === "update-index --really-refresh",
+        ),
+      ).toBe(true);
+      expect(
+        execute.mock.calls.some(([call]) => call.args.join(" ") === "rev-parse --verify HEAD"),
+      ).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("clears in-flight capture state when the owner is interrupted", async () => {
     let addCalls = 0;
     const execute = vi.fn<GitCoreShape["execute"]>((input) => {
       const args = input.args.join(" ");
+      if (args === "rev-parse --git-path index") {
+        return Effect.succeed({ code: 0, stdout: "/repo/.git/index\n", stderr: "" });
+      }
       if (args === "rev-parse --verify HEAD") {
         return Effect.succeed({ code: 1, stdout: "", stderr: "" });
       }
@@ -160,6 +239,9 @@ describe("CheckpointStoreLive", () => {
       }
       if (args === `rev-parse --verify --quiet ${missingRef}^{commit}`) {
         return Effect.succeed({ code: 1, stdout: "", stderr: "" });
+      }
+      if (args === "rev-parse --git-path index") {
+        return Effect.succeed({ code: 0, stdout: "/repo/.git/index\n", stderr: "" });
       }
       if (args === "rev-parse --verify HEAD") {
         return Effect.succeed({ code: 1, stdout: "", stderr: "" });
