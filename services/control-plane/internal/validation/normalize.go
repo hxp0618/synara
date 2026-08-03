@@ -47,6 +47,23 @@ func Code(value, fallback, errorCode, label string) (string, error) {
 	return normalized, nil
 }
 
+// OpaqueIdentifier normalizes a bounded ASCII identifier that can safely cross
+// configuration, HTTP-header and audit boundaries without becoming display text.
+func OpaqueIdentifier(value string, minimum, maximum int) (string, bool) {
+	normalized := strings.TrimSpace(value)
+	if minimum < 1 || maximum < minimum || len(normalized) < minimum || len(normalized) > maximum {
+		return "", false
+	}
+	for index, character := range normalized {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || (index > 0 && strings.ContainsRune("._:/@+-", character)) {
+			continue
+		}
+		return "", false
+	}
+	return normalized, true
+}
+
 func itoa(value int) string {
 	if value == 0 {
 		return "0"

@@ -1,6 +1,6 @@
 # Stage 6 production rotation evidence
 
-The preferred preparer consumes a `synara.stage6-production-rotation-evidence-draft.v1` JSON document. It has the same
+The preferred preparer consumes a `synara.stage6-production-rotation-evidence-draft.v2` JSON document. It has the same
 fields as the v1 manifest except every control evidence value, `secretScan.evidence` and every approval evidence value is a
 path-only string relative to one private evidence root. The preparer computes all 49 SHA-256 references, scans the draft
 and attachments for high-confidence secret material, validates the fully materialized manifest, then publishes manifest,
@@ -16,7 +16,7 @@ bun run stage6:rotation:prepare -- \
 ```
 
 Use the exact candidate fields and nine-control inventory from
-`docs/contracts/production-rotation-acceptance-v1.md`. Each control's `evidence` object contains these path strings:
+`docs/contracts/production-rotation-acceptance-v2.md`. Each control's `evidence` object contains these path strings:
 `changeRecord`, `rolloutStatus`, `newPathProbe`, `oldPathFinalState`, and `rollbackResult`. Draft, evidence and output paths
 cannot traverse symlinks or leave the evidence root.
 

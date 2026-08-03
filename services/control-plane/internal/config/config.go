@@ -86,6 +86,7 @@ type Config struct {
 	PublicAdminURL                       string
 	InternalStatusBoardURL               string
 	InternalIncidentPublisherURL         string
+	InternalIncidentPublisherHMACKeyID   string
 	InternalIncidentPublisherHMACKey     []byte
 	InternalIncidentPublisherTimeout     time.Duration
 	CommercializationMode                string
@@ -343,6 +344,7 @@ func Load() (Config, error) {
 	}
 	cfg.InternalStatusBoardURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_STATUS_BOARD_URL")), "/")
 	cfg.InternalIncidentPublisherURL = strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL"))
+	cfg.InternalIncidentPublisherHMACKeyID = strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID"))
 	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")); encodedKey != "" {
 		cfg.InternalIncidentPublisherHMACKey, err = decodeKey(encodedKey, "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")
 		if err != nil {
@@ -830,15 +832,16 @@ func Load() (Config, error) {
 }
 
 func validateInternalIncidentPublisher(cfg Config) error {
-	configured := cfg.InternalIncidentPublisherURL != "" || len(cfg.InternalIncidentPublisherHMACKey) != 0
+	configured := cfg.InternalIncidentPublisherURL != "" || cfg.InternalIncidentPublisherHMACKeyID != "" || len(cfg.InternalIncidentPublisherHMACKey) != 0
 	if !configured {
 		if cfg.InternalStatusBoardURL != "" {
-			return errors.New("SYNARA_INTERNAL_STATUS_BOARD_URL requires SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")
+			return errors.New("SYNARA_INTERNAL_STATUS_BOARD_URL requires SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL, SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")
 		}
 		return nil
 	}
-	if cfg.InternalIncidentPublisherURL == "" || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
-		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY must be configured together")
+	_, keyIDValid := validation.OpaqueIdentifier(cfg.InternalIncidentPublisherHMACKeyID, 2, 200)
+	if cfg.InternalIncidentPublisherURL == "" || !keyIDValid || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL, SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY must be configured together")
 	}
 	if cfg.InternalStatusBoardURL == "" {
 		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL requires SYNARA_INTERNAL_STATUS_BOARD_URL")

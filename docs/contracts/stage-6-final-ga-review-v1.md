@@ -2,7 +2,7 @@
 
 ## Purpose and boundary
 
-The final archive closes the mechanical gap between an eligible internal-self-hosted Candidate v4 evidence bundle and the external GA decision.
+The final archive closes the mechanical gap between an eligible internal-self-hosted Candidate v5 evidence bundle and the external GA decision.
 It proves that the protected release approval, final public asset set, copied GA checklist, published-change record,
 Platform Audit export, functional decisions and residual-risk record all refer to one candidate and immutable byte
 references. It does not authenticate external evidence authority, corporate approver authority, external signatures or

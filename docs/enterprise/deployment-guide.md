@@ -44,7 +44,8 @@ origin. Every non-loopback production endpoint uses HTTPS and Secure cookies.
 
 After the independent internal Status Board and employee notification relay exist, set
 `SYNARA_INTERNAL_STATUS_BOARD_URL` and `SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL` to credential-free HTTPS URLs, and
-provide the relay's dedicated base64 32-byte `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY` through the Secret manager.
+provide an opaque `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID` and the relay's dedicated base64 32-byte
+`SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY` through the Secret manager.
 The publisher must use a different origin from the Control Plane and Admin. An empty Status Board value is reported
 explicitly as unconfigured; a populated link and webhook acceptance do not replace the paging and communication
 exercise or employee delivery evidence.
@@ -87,5 +88,5 @@ Before GA, copy [the Stage 6 checklist](../release-checklists/stage-6-enterprise
 for migration, compatibility, supply chain, role-based browser operations, 30-day SLO, capacity/soak, recovery, incident
 communication, key rotation and third-party penetration testing. Repository validators intentionally distinguish source or
 evidence-shape validation from a passed production control. Before final review, use the
-[candidate evidence bundle contract](../contracts/stage-6-candidate-evidence-bundle-v4.md) to prove every external receipt
+[candidate evidence bundle contract](../contracts/stage-6-candidate-evidence-bundle-v5.md) to prove the compatibility matrix and every external receipt
 belongs to the same clean commit, environment ID, origin, Migration tail, lockfile and Artifact set.

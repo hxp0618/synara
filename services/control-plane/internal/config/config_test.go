@@ -241,17 +241,26 @@ func TestLoadRequiresCompleteInternalIncidentDeliveryConfiguration(t *testing.T)
 
 	setBase()
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://notify.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID", "incident-hmac-v2")
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.InternalIncidentPublisherURL == "" || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
+	if cfg.InternalIncidentPublisherURL == "" || cfg.InternalIncidentPublisherHMACKeyID != "incident-hmac-v2" || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
 		t.Fatalf("unexpected incident publisher config: %#v", cfg)
 	}
 
 	setBase()
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://notify.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HMAC_KEY_ID") {
+		t.Fatalf("expected missing incident HMAC key ID rejection, got %v", err)
+	}
+
+	setBase()
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://control.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID", "incident-hmac-v2")
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "failure-independent") {
 		t.Fatalf("expected application-coupled publisher origin rejection, got %v", err)
@@ -262,6 +271,7 @@ func TestLoadValidatesIndependentInternalStatusBoardURL(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_INTERNAL_STATUS_BOARD_URL", "https://status.synara.example/history")
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://notify.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID", "incident-hmac-v2")
 	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	cfg, err := Load()
 	if err != nil {
@@ -1176,7 +1186,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_CREDENTIAL_KMS_TIMEOUT",
 		"SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", "SYNARA_OLD_CREDENTIAL_KEY",
 		"SYNARA_PUBLIC_CONTROL_PLANE_URL", "SYNARA_PUBLIC_ADMIN_URL", "SYNARA_INTERNAL_STATUS_BOARD_URL",
-		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY",
+		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID", "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY",
 		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_TIMEOUT",
 		"SYNARA_PUBLIC_STATUS_PAGE_URL",
 		"SYNARA_COMMERCIALIZATION_MODE", "SYNARA_COMMERCIAL_BILLING_PROVIDER", "SYNARA_COMMERCIAL_BILLING_RETURN_URL",

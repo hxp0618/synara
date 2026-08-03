@@ -52,7 +52,8 @@ payload. The Outbox row proves only that a durable notification intent was commi
 paging or employee-channel delivery. `incident.internal-update` is never acknowledged by the built-in database
 publisher. When `SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL` and its dedicated 32-byte HMAC key are configured, the Control
 Plane routes only this Topic to the failure-independent HTTPS receiver, sends the Outbox Message ID as
-`Idempotency-Key`, and signs the exact versioned JSON body as `X-Synara-Signature: v1=<hex-hmac-sha256>`.
+`Idempotency-Key`, identifies the active signing-key version through `X-Synara-Key-Id`, and signs the exact versioned JSON
+body as `X-Synara-Signature: v1=<hex-hmac-sha256>`. Key bytes may never change without a new Key ID.
 Redirects are not followed. A non-2xx response is retried through the normal Outbox policy and can dead-letter; without
 the adapter, the intent fails closed instead of being reported as published. A 2xx response proves receiver acceptance,
 not employee receipt, paging or Status Board publication, so the external system must retain its own delivery evidence

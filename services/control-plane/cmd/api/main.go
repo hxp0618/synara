@@ -149,6 +149,7 @@ func main() {
 	if cfg.InternalIncidentPublisherURL != "" {
 		incidentPublisher, err = outbox.NewIncidentWebhookPublisher(outbox.IncidentWebhookPublisherConfig{
 			Endpoint: cfg.InternalIncidentPublisherURL,
+			KeyID:    cfg.InternalIncidentPublisherHMACKeyID,
 			HMACKey:  cfg.InternalIncidentPublisherHMACKey,
 			Timeout:  cfg.InternalIncidentPublisherTimeout,
 		})

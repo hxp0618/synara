@@ -1,5 +1,9 @@
 # Production secret, certificate, domain and key rotation acceptance v1
 
+> Historical pre-internal-self-hosted schema. It used `billing-provider-credential`. New exercises use
+> [production rotation acceptance v2](production-rotation-acceptance-v2.md), which replaces that retired control with
+> versioned internal incident Publisher HMAC rotation.
+
 ## Authority and boundary
 
 This contract turns the Stage 6 production-rotation checklist item into candidate-bound, fail-closed evidence. It covers
@@ -91,4 +95,4 @@ python3 scripts/stage6-rotation/validate_production_rotation_evidence.py \
 `eligibleForHumanGateReview=true` proves only that all nine controls, the zero-finding scan and three decisions form one
 internally consistent candidate-bound evidence set. The receipt explicitly keeps external evidence authority, approver
 authority and cryptographic signatures unverified. Attach the exact receipt and sidecar to the copied GA checklist; do not
-add it to Candidate v4 or use it to bypass the separate protected release and Final Review decisions.
+add it to Candidate v5 or use it to bypass the separate protected release and Final Review decisions.

@@ -71,7 +71,8 @@ root origin served by the TLS-terminating reverse proxy; an empty value is treat
 remote-access policy remains fail-closed. For an isolated trusted-LAN acceptance run only, set
 `SYNARA_ALLOW_INSECURE_REMOTE=true` explicitly and keep the published port loopback-bound.
 
-Set `SYNARA_INTERNAL_STATUS_BOARD_URL`, `SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL`, and a dedicated base64 32-byte
+Set `SYNARA_INTERNAL_STATUS_BOARD_URL`, `SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL`, an opaque
+`SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID`, and a dedicated base64 32-byte
 `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY` together only after an internal Status Board and employee notification
 relay are live. The relay verifies the exact `v1` HMAC body, deduplicates by the Outbox Message ID, and returns 2xx only
 after durable acceptance; redirects and non-2xx responses fail closed into the existing retry/dead-letter path.

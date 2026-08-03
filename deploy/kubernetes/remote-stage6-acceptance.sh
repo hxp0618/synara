@@ -214,6 +214,7 @@ data:
   public-admin-url: http://127.0.0.1:3774
   internal-status-board-url: ""
   internal-incident-publisher-url: ""
+  internal-incident-publisher-hmac-key-id: ""
   commercialization-mode: internal-self-hosted
   platform-operator-tenant-id: ${operator_tenant_id}
   artifact-bucket: synara-artifacts
@@ -475,6 +476,11 @@ spec:
                 configMapKeyRef:
                   name: synara-stage6-config
                   key: internal-incident-publisher-url
+            - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-stage6-config
+                  key: internal-incident-publisher-hmac-key-id
             - name: SYNARA_COMMERCIALIZATION_MODE
               valueFrom:
                 configMapKeyRef:

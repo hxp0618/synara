@@ -64,7 +64,8 @@ Keep `internal-status-board-url` and `internal-incident-publisher-url` empty unt
 notification relay are operational. When present, both must be credential-free HTTPS on origins independent of the
 Control Plane and Admin. Materialize the relay's dedicated base64 32-byte HMAC key as
 `internal-incident-publisher-hmac-key` in the Control Plane Secret; never reuse another application key. The receiver
-must verify the exact body signature and deduplicate the Outbox Message ID before returning 2xx;
+must select it through the matching `internal-incident-publisher-hmac-key-id`, verify the exact body signature and
+deduplicate the Outbox Message ID before returning 2xx;
 the public Platform profile then projects it to the Web and Admin **Internal status** links. A configured
 link is product wiring, not proof that paging, internal employee updates, notification delivery, or resolution has been
 exercised.

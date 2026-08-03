@@ -127,9 +127,9 @@ Migration `000135` 再把 Final Review v1 接入 Platform Release Governance：�
 上传精确收据，Control Plane 重新校验候选身份、32 项 Control、分离的最终审批、Audit request ID、决定摘要、残余
 风险和外部权威边界并做 append-only 保存；未绑定或决定/风险不一致时，服务与 PostgreSQL/SQLite 都拒绝进入
 `released`。该产品门禁只证明内部记录一致，不替代真实 GA authority。
-Migration `000117` 新增 Platform Incident Governance：事件 identity、公开组件/Region、Commander/Communications/
-Security-Privacy 分权、独立 Status Board origin、外部公开更新顺序与节奏、关闭审批均为数据库约束；Admin 提供对应
-产品路径并记录 Audit。SQLite 与临时 PostgreSQL 17 已验证并发公开证据串行化和历史不可变，但该能力只记录外部
+Migration `000117` 新增 Platform Incident Governance：事件 identity、内部组件/Region、Commander/Communications/
+Security-Privacy 分权、独立 internal Status Board origin、员工更新顺序与节奏、关闭审批均为数据库约束；Admin 提供对应
+产品路径并记录 Audit。SQLite 与临时 PostgreSQL 17 已验证并发证据串行化和历史不可变，但该能力只记录外部
 发布证据，不能冒充真实 Status Board、值班链路、employee notification delivery 或 production-like 演练。
 Migration `000118` 又把离线 SLO 收据接入 Platform SLO Window Governance：精确 30 天收据字节/digest 与 Release
 candidate identity 不可变绑定，服务端重算四项 SLO 和 error-budget policy，失败窗口也必须保留；只有 receipt
@@ -165,11 +165,11 @@ Migration `000126` 再要求 Release Governance 在进入 approved 前消费同 
 服务、SQLite 与 PostgreSQL 都拒绝缺失、跨候选和数据库直写绕过，但不验证真实环境、遥测、签名、执行或外部审批权威。
 Migration `000127` 把 exact Incident exercise receipt 提升为 Platform Incident Exercise Governance：导入字节必须与
 candidate bundle 中的 SHA-256、Commit 和环境一致，服务端重算独立 HTTPS Status Board origin、六角色分权、SEV
-paging/ack/escalation、六个公开组件、公开时间线节奏、订阅者投递、恢复观察、复盘标志及 manifest/七份 evidence
+paging/ack/escalation、六个内部组件、内部时间线节奏、员工通道投递、恢复观察、复盘标志及 manifest/七份 evidence
 引用。只有不同 Operations/Communications `incident_exercise.*` 职能 authority 才能形成内部 approved；Admin 提供
 导入、投影与决策页面。Migration `000128` 再要求 Release Governance 在进入 approved 前消费同 candidate、同
 Operator Tenant 的上述记录；服务、SQLite 与 PostgreSQL 都拒绝缺失、跨候选和数据库直写绕过，但不验证真实
-Status Board、paging、订阅者投递、签名、执行或外部审批权威。
+Status Board、paging、员工通道投递、签名、执行或外部审批权威。
 Support Grant 现由 Migration `000110` 固定其 Platform Operator Tenant authority；每次客户读取、Tenant 列表与
 Session 认证都重验 requester 的 active Platform role 和 Operator Tenant 生命周期，离职/降权立即撤权，历史未绑定
 Grant fail closed。该边界已通过 SQLite、HTTP 及临时 PostgreSQL 17 的 authority 不可变和 offboarding 回归。
@@ -289,10 +289,10 @@ Migration `000125` 现把补全后的 exact receipt 与重算投影接入 Platfo
 把同候选内部批准接入 Release gate；两者仍不验证真实环境、遥测、签名、执行或外部审批权威。
 
 事件演练工程基线由 `docs/runbooks/enterprise-incident-response.md` 冻结，并由
-`scripts/stage6-incident/validate_incident_exercise_evidence.py` 校验独立 Status Board、角色分离、paging/公开节奏、
-订阅者投递、恢复观察与逐文件 hash；收据不自动声明 operations ready。Migration `000127` 将 exact receipt 与重算
+`scripts/stage6-incident/validate_incident_exercise_evidence.py` 校验独立 internal Status Board、角色分离、paging/内部更新节奏、
+员工通道投递、恢复观察与逐文件 hash；收据不自动声明 operations ready。Migration `000127` 将 exact receipt 与重算
 投影接入 Platform Incident Exercise Governance，Migration `000128` 把同候选内部批准接入 Release gate；两者仍不
-验证外部 Status Board/paging authority、真实投递、签名、执行或外部审批权威。
+验证真实 Status Board/paging authority、真实员工投递、签名、执行或外部审批权威。
 
 运营演练工程基线固定为 49 项内部 self-hosted 日常操作，不把“导入/审批本收据”的 Release 元治理动作加入被治理矩阵，避免
 自引用死锁。Migration `000129` 将 exact Operations browser exercise receipt、三类 Artifact、双 HTTPS origin、
@@ -313,15 +313,15 @@ Migration `000131`/`000132` 的 Billing Exercise Governance 与旧 Stripe 门禁
 错误预算公式、告警与 companion signal 复核；失败或 not-assessable 窗口会被保留，真实生产遥测与发布审批仍是
 外部 GA Gate。
 
-On-call 与公开事故沟通演练由 `scripts/stage6-incident/validate_incident_exercise_evidence.py` 固定独立 Status
-Page、角色分权、分页/首报/更新时限、六类公开组件、订阅者投递和恢复观察；tabletop 或失败演练只保留工程
+On-call 与内部员工事故沟通演练由 `scripts/stage6-incident/validate_incident_exercise_evidence.py` 固定独立 internal
+Status Board、角色分权、分页/首报/更新时限、六类内部组件、员工通道投递和恢复观察；tabletop 或失败演练只保留工程
 证据，真实外部配置、实名 rota 与审批仍是外部 GA Gate。
 
-各控制收据现在由 `docs/contracts/stage-6-candidate-evidence-bundle-v4.md` 再绑定到同一 clean commit、`bun.lock`、
+各控制收据现在由 `docs/contracts/stage-6-candidate-evidence-bundle-v5.md` 再绑定到同一 clean commit、`bun.lock`、
 环境 ID、HTTPS origins、Regions、Migration tail 和九类 Artifact digest。`bun run stage6:candidate:prepare -- ...`
-会从唯一证据根计算十一份输入摘要，在发布任何输出前完成 v3 语义校验，并拒绝覆盖既有候选文件、路径逃逸、
-符号链接、重复输入及跨候选拼接 Billing、Desktop、Operations、Incident、Recovery、Residency、SLO、Capacity、
-Penetration 与 Worker supply-chain 收据；其
+会从唯一证据根计算 Release Evidence、兼容矩阵与十份控制收据共十二份输入摘要，在发布任何输出前完成 v5
+语义校验，并拒绝覆盖既有候选文件、路径逃逸、符号链接、重复输入及跨候选拼接 Internal Cost、Desktop、
+Operations、Incident、Recovery、Residency、SLO、Capacity、Penetration 与 Worker supply-chain 收据；其
 `evidence-consistent-not-ga-approved` 结果只证明候选身份一致，不代表任一外部控制或最终 GA 已获批准。
 受保护发布侧的 `stage6-candidate-release-binding.v2` 不再只检查顶层 eligible 与 Worker 投影：它独立重验十份
 投影的 schema、固定 non-pass assessment、安全唯一路径、非零摘要、ready 和时间闭包，并校验候选 Artifact/

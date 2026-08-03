@@ -102,13 +102,31 @@ register, so pause autoscaling and keep warm/capacity headroom. Prove new regist
 denial, and no unexpected loss of existing Worker heartbeats. Revoke individual Worker identities through the authoritative
 revocation path; do not rotate the shared token as a substitute for Worker compromise containment.
 
-## Database, object storage, billing and telemetry credentials
+## Internal incident notification signing key
+
+The Control Plane signs each `incident.internal-update` body with the configured HMAC key and sends its opaque version in
+`X-Synara-Key-Id`. Rotate it without losing notification delivery:
+
+1. create a new dedicated 32-byte key and a new bounded Key ID; never reuse a KMS, Provider Cursor or cookie key;
+2. configure the failure-independent relay to accept both old and new Key IDs, with each ID mapped to exactly one key;
+3. roll the Control Plane to the new `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID` and matching base64
+   `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY`;
+4. publish an employee-safe synthetic incident update, verify the relay selected the new Key ID, validated the exact-body
+   signature, deduplicated the Outbox Message ID and durably accepted the update;
+5. exercise rollback to the old ID/key while the overlap remains, then return to the new version; and
+6. remove the old key from the relay and prove a controlled old-key signature is denied before retiring the Secret version.
+
+Changing key bytes without changing the Key ID is prohibited because it makes delivery/audit evidence ambiguous. A relay
+2xx still proves durable acceptance rather than employee receipt; retain relay audit ID, new-path publication, old-key
+denial and rollback evidence under `internal-incident-publisher-hmac-key`.
+
+## Database, object storage and telemetry credentials
 
 Prefer provider-issued overlapping credentials or workload identity:
 
 1. create the new credential with least privilege and the same Region/resource boundary;
 2. deploy it to one canary consumer, prove read/write/delete or read-only behavior as appropriate, then roll all consumers;
-3. verify PostgreSQL pool replacement, Artifact upload/download, billing import and OTLP export with synthetic data;
+3. verify PostgreSQL pool replacement, Artifact upload/download and OTLP export with synthetic data;
 4. revoke the old credential and prove its access is denied from a controlled client path; and
 5. retain provider audit IDs and secret-manager version metadata.
 
@@ -155,7 +173,7 @@ result and unresolved risks to `docs/release-checklists/stage-6-enterprise-ga.md
 production-equivalent exercise is approved.
 
 Materialize the nine-control manifest defined by
-[`production-rotation-acceptance-v1.md`](../contracts/production-rotation-acceptance-v1.md), keeping all evidence below one
+[`production-rotation-acceptance-v2.md`](../contracts/production-rotation-acceptance-v2.md), keeping all evidence below one
 private non-symlink directory. Use only opaque authority IDs and evidence hashes; never copy the credential itself into the
 manifest or attachments. Then run:
 

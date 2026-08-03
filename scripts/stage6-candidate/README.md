@@ -34,7 +34,7 @@ bun run stage6:candidate:prepare -- \
   --receipt-output candidate-bundle-receipt.json
 ```
 
-The lower-level validator remains available for offline revalidation and historical v2/v3 audit. Its requested output path
+The lower-level validator remains available for offline revalidation and historical v2/v3/v4 audit. Its requested output path
 must be new; the validation receipt and sidecar are published as exclusive `0600` files and never overwrite an earlier
 audit result:
 

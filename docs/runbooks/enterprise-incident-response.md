@@ -83,7 +83,8 @@ the PostgreSQL Outbox. The intent contains only sanitized Incident identity, sum
 credential-free Status Board references. Outbox persistence means the notification can be claimed, retried and audited;
 it is not delivery evidence. The configured Publisher remains responsible for the failure-independent Status Board or
 employee channel and must use the Outbox Message ID as its idempotency key. Configure
-`SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL`, `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY`, and the Status Board URL
+`SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL`, `SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID`,
+`SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY`, and the Status Board URL
 together. The endpoint must verify the `v1` HMAC over the exact request body before parsing it, deduplicate by
 `Idempotency-Key`, and return 2xx only after it has durably accepted responsibility for publication. The Control Plane
 does not follow redirects and no longer acknowledges this Topic through the database-only publisher.

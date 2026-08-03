@@ -159,7 +159,10 @@ class InternalSelfHostedBoundaryTest(unittest.TestCase):
     def test_requires_fail_closed_legacy_environment_rejection(self) -> None:
         config = self.root / "services/control-plane/internal/config/config.go"
         config.write_text("SYNARA_STRIPE_SECRET_KEY", encoding="utf-8")
-        with self.assertRaisesRegex(MODULE.BoundaryError, "no longer rejects legacy payment marker"):
+        with self.assertRaisesRegex(
+            MODULE.BoundaryError,
+            "no longer enforces required internal-self-hosted marker",
+        ):
             MODULE.validate(self.root)
 
 

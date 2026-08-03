@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
 const InternalIncidentUpdateTopic = "incident.internal-update"
@@ -35,6 +37,7 @@ func (p TopicPublisher) Publish(ctx context.Context, message Message) error {
 
 type IncidentWebhookPublisherConfig struct {
 	Endpoint string
+	KeyID    string
 	HMACKey  []byte
 	Timeout  time.Duration
 	Client   *http.Client
@@ -42,6 +45,7 @@ type IncidentWebhookPublisherConfig struct {
 
 type IncidentWebhookPublisher struct {
 	endpoint string
+	keyID    string
 	hmacKey  []byte
 	client   *http.Client
 }
@@ -64,6 +68,10 @@ func NewIncidentWebhookPublisher(cfg IncidentWebhookPublisherConfig) (*IncidentW
 	if len(cfg.HMACKey) != 32 {
 		return nil, errors.New("incident webhook HMAC key must contain exactly 32 bytes")
 	}
+	keyID, keyIDValid := validation.OpaqueIdentifier(cfg.KeyID, 2, 200)
+	if !keyIDValid {
+		return nil, errors.New("incident webhook key ID must be a bounded opaque identifier")
+	}
 	if cfg.Timeout <= 0 || cfg.Timeout > 30*time.Second {
 		return nil, errors.New("incident webhook timeout must be positive and at most 30 seconds")
 	}
@@ -76,6 +84,7 @@ func NewIncidentWebhookPublisher(cfg IncidentWebhookPublisherConfig) (*IncidentW
 	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &IncidentWebhookPublisher{
 		endpoint: parsed.String(),
+		keyID:    keyID,
 		hmacKey:  append([]byte(nil), cfg.HMACKey...),
 		client:   &clientCopy,
 	}, nil
@@ -106,6 +115,7 @@ func (p *IncidentWebhookPublisher) Publish(ctx context.Context, message Message)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", message.ID.String())
 	request.Header.Set("X-Synara-Topic", message.Topic)
+	request.Header.Set("X-Synara-Key-Id", p.keyID)
 	request.Header.Set("X-Synara-Signature", "v1="+hex.EncodeToString(signature.Sum(nil)))
 
 	response, err := p.client.Do(request)

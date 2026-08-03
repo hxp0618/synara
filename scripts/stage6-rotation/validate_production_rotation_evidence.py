@@ -24,14 +24,14 @@ from stage6_common.immutable_evidence_io import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = "synara.stage6-production-rotation-evidence.v1"
-RECEIPT_SCHEMA_VERSION = "synara.stage6-production-rotation-evidence-receipt.v1"
+SCHEMA_VERSION = "synara.stage6-production-rotation-evidence.v2"
+RECEIPT_SCHEMA_VERSION = "synara.stage6-production-rotation-evidence-receipt.v2"
 ASSESSMENT = "evidence-validated-not-production-rotation-passed"
 
 REQUIRED_CONTROLS = {
     "artifact-storage-credential",
-    "billing-provider-credential",
     "credential-envelope-kek",
+    "internal-incident-publisher-hmac-key",
     "postgresql-credential",
     "public-domain-dns",
     "public-tls-certificate",

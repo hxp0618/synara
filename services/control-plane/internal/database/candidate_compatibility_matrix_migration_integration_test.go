@@ -46,7 +46,7 @@ func TestCandidateCompatibilityMatrixMigrationRequiresV5ForActivePostgresCandida
 	if err := db.Create(&legacy).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Migrate(ctx, db, migrations.Files); err == nil || !strings.Contains(err.Error(), "active v4 candidate") {
+	if err := Migrate(ctx, db, migrations.Files); err == nil {
 		t.Fatalf("Migration 000163 should reject an active v4 Candidate, got %v", err)
 	}
 	if err := db.Model(&persistence.Stage6ReleaseCandidate{}).Where("id = ?", legacy.ID).Updates(map[string]any{

@@ -29,6 +29,9 @@ func TestIncidentWebhookPublisherSignsStableIdempotentEnvelope(t *testing.T) {
 		if request.Method != http.MethodPost || request.Header.Get("Idempotency-Key") != message.ID.String() {
 			t.Fatalf("unexpected request identity: %s %#v", request.Method, request.Header)
 		}
+		if request.Header.Get("X-Synara-Key-Id") != "incident-hmac-v2" {
+			t.Fatalf("unexpected signing key ID: %q", request.Header.Get("X-Synara-Key-Id"))
+		}
 		received, _ = io.ReadAll(request.Body)
 		signature := hmac.New(sha256.New, key)
 		_, _ = signature.Write(received)
@@ -40,7 +43,7 @@ func TestIncidentWebhookPublisherSignsStableIdempotentEnvelope(t *testing.T) {
 	defer server.Close()
 
 	publisher, err := NewIncidentWebhookPublisher(IncidentWebhookPublisherConfig{
-		Endpoint: server.URL, HMACKey: key, Timeout: time.Second, Client: server.Client(),
+		Endpoint: server.URL, KeyID: "incident-hmac-v2", HMACKey: key, Timeout: time.Second, Client: server.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,16 +66,19 @@ func TestIncidentWebhookPublisherFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		endpoint string
+		keyID    string
 		key      []byte
 	}{
-		{name: "http", endpoint: "http://notify.example.test/hook", key: key},
-		{name: "credential", endpoint: "https://user:secret@notify.example.test/hook", key: key},
-		{name: "query", endpoint: "https://notify.example.test/hook?token=secret", key: key},
-		{name: "short key", endpoint: "https://notify.example.test/hook", key: []byte("short")},
+		{name: "http", endpoint: "http://notify.example.test/hook", keyID: "incident-v2", key: key},
+		{name: "credential", endpoint: "https://user:secret@notify.example.test/hook", keyID: "incident-v2", key: key},
+		{name: "query", endpoint: "https://notify.example.test/hook?token=secret", keyID: "incident-v2", key: key},
+		{name: "missing key ID", endpoint: "https://notify.example.test/hook", key: key},
+		{name: "invalid key ID", endpoint: "https://notify.example.test/hook", keyID: "incident key", key: key},
+		{name: "short key", endpoint: "https://notify.example.test/hook", keyID: "incident-v2", key: []byte("short")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := NewIncidentWebhookPublisher(IncidentWebhookPublisherConfig{
-				Endpoint: test.endpoint, HMACKey: test.key, Timeout: time.Second,
+				Endpoint: test.endpoint, KeyID: test.keyID, HMACKey: test.key, Timeout: time.Second,
 			}); err == nil {
 				t.Fatal("expected invalid publisher configuration")
 			}
@@ -93,7 +99,7 @@ func TestIncidentWebhookPublisherDoesNotFollowRedirect(t *testing.T) {
 	defer server.Close()
 
 	publisher, err := NewIncidentWebhookPublisher(IncidentWebhookPublisherConfig{
-		Endpoint: server.URL, HMACKey: key, Timeout: time.Second, Client: server.Client(),
+		Endpoint: server.URL, KeyID: "incident-hmac-v2", HMACKey: key, Timeout: time.Second, Client: server.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)

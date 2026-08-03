@@ -116,8 +116,8 @@ URL-only legacy records do not count.
 - [ ] Migration × Protocol × Worker Image × Web compatibility matrix and rollback exercise passed.
 - [ ] Production secrets, certificates, domains and key-rotation runbooks were exercised.
       Validate the same-candidate exercise under
-      [`production-rotation-acceptance-v1.md`](../contracts/production-rotation-acceptance-v1.md). Attach the immutable
-      `synara.stage6-production-rotation-evidence-receipt.v1` receipt and sidecar; its assessment must remain
+      [`production-rotation-acceptance-v2.md`](../contracts/production-rotation-acceptance-v2.md). Attach the immutable
+      `synara.stage6-production-rotation-evidence-receipt.v2` receipt and sidecar; its assessment must remain
       `evidence-validated-not-production-rotation-passed`. `eligibleForHumanGateReview=true` does not authenticate the
       provider evidence, operators, approvers or signatures, so those authorities must still be checked before marking
       this row complete.
@@ -208,7 +208,7 @@ review can check the item. Each Engineering/Product/Security approval must bind 
 nonzero lowercase SHA-256; Migration `000144` supersedes URL-only history and reopens the engagement until all three
 replacement decisions are active.
 
-The checked-in Candidate v4 preparer requires an exact-candidate internal usage/cost receipt covering Token totals,
+The checked-in Candidate v5 preparer requires the exact source-current compatibility matrix and an exact-candidate internal usage/cost receipt covering Token totals,
 Provider cost coverage, actual-over-estimated platform allocation and currency-safe known-cost totals. It rejects payment
 semantics and cannot consume the historical Stripe Billing receipt. Candidate/Release ingestion and both database paths
 require the approved two-role internal cost review; this structural gate does not substitute for real source authority or
@@ -253,7 +253,7 @@ After every row above is decided, validate the frozen archive with
 `docs/contracts/stage-6-final-ga-review-v1.md` and the fail-closed `bun run stage6:final:prepare -- ...` path. Supply only
 relative evidence paths in the draft; the preparer computes hashes, validates the complete materialized manifest and then
 publishes the immutable manifest/receipt pairs. The archive binds this completed copy, the completed change notice,
-Candidate v4 receipt, protected release approval, canonical final asset set, Platform Audit request IDs, all 32 functional
+Candidate v5 receipt, protected release approval, canonical final asset set, Platform Audit request IDs, all 32 functional
 control decisions, final role decisions and residual risks. Its receipt must remain
 `final-review-consistent-not-ga-authority-verified`; external evidence and approver authority still require the real GA
 authority's acceptance.

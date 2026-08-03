@@ -415,6 +415,7 @@ database_url="postgres://synara:$postgres_password@synara-stage2-postgres.$names
   --from-literal=public-admin-url=https://admin.synara-control-plane.test \
   --from-literal=internal-status-board-url= \
   --from-literal=internal-incident-publisher-url= \
+  --from-literal=internal-incident-publisher-hmac-key-id= \
   --from-literal=otel-exporter-otlp-endpoint= \
   --from-literal=otel-exporter-otlp-protocol=http/protobuf \
   --from-literal=otel-exporter-otlp-certificate= \

@@ -127,6 +127,8 @@ class ValidateProductionRotationEvidenceTest(unittest.TestCase):
         self.assertEqual(receipt["assessment"], MODULE.ASSESSMENT)
         self.assertEqual(receipt["controlCounts"], {"passed": len(MODULE.REQUIRED_CONTROLS)})
         self.assertEqual(receipt["evidenceFileCount"], len(MODULE.REQUIRED_CONTROLS) * 5 + 4)
+        self.assertIn("internal-incident-publisher-hmac-key", receipt["requiredControlIds"])
+        self.assertNotIn("billing-provider-credential", receipt["requiredControlIds"])
         self.assertFalse(receipt["externalEvidenceAuthorityVerified"])
         self.assertFalse(receipt["approverAuthorityVerified"])
         self.assertFalse(receipt["cryptographicSignaturesVerified"])
@@ -156,6 +158,17 @@ class ValidateProductionRotationEvidenceTest(unittest.TestCase):
 
         self.payload["controls"].append(removed)
         self.payload["controls"][1]["id"] = self.payload["controls"][0]["id"]
+        result = self.run_validator()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("every required rotation control exactly once", result.stderr)
+
+    def test_rejects_historical_billing_control_in_active_v2_manifest(self) -> None:
+        incident = next(
+            control
+            for control in self.payload["controls"]
+            if control["id"] == "internal-incident-publisher-hmac-key"
+        )
+        incident["id"] = "billing-provider-credential"
         result = self.run_validator()
         self.assertEqual(result.returncode, 2)
         self.assertIn("every required rotation control exactly once", result.stderr)

@@ -1762,7 +1762,7 @@
       "family": "Stage 6 internal usage and cost governance",
       "boundary": "exact-candidate-token-provider-cost-platform-allocation-and-two-separated-authorities",
       "operations": [
-        "bind exact Candidate v4 internalCost receipt bytes and migration tail",
+        "bind exact Candidate v5 compatibility matrix, internalCost receipt bytes and migration tail",
         "reconcile Token totals and Provider cost availability coverage",
         "require actual platform allocation to override estimates without double counting",
         "aggregate known cost independently by currency",

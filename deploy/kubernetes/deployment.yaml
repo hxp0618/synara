@@ -86,6 +86,11 @@ spec:
                 configMapKeyRef:
                   name: synara-control-plane-config
                   key: internal-incident-publisher-url
+            - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: internal-incident-publisher-hmac-key-id
             - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY
               valueFrom:
                 secretKeyRef:

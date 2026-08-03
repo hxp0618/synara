@@ -257,8 +257,10 @@ REQUIRED_CONFIG_MARKERS = (
     "SYNARA_PUBLIC_STATUS_PAGE_URL",
     "SYNARA_INTERNAL_STATUS_BOARD_URL",
     "SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL",
+    "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID",
     "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY",
-    "internal incident publisher is not configured",
+    "SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL, SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY_ID and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY must be configured together",
+    "must use a failure-independent origin from Synara application services",
     "internal incident communications",
 )
 
@@ -321,7 +323,9 @@ def validate(root: pathlib.Path) -> dict[str, object]:
     config_text = config_path.read_text(encoding="utf-8")
     for marker in REQUIRED_CONFIG_MARKERS:
         if marker not in config_text:
-            raise BoundaryError(f"configuration no longer rejects legacy payment marker {marker!r}")
+            raise BoundaryError(
+                f"configuration no longer enforces required internal-self-hosted marker {marker!r}"
+            )
     digests[config_path.relative_to(root).as_posix()] = "sha256:" + hashlib.sha256(
         config_path.read_bytes()
     ).hexdigest()

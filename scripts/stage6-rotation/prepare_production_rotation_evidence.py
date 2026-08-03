@@ -39,7 +39,7 @@ from stage6_common.immutable_evidence_io import (  # noqa: E402
 )
 
 
-DRAFT_SCHEMA_VERSION = "synara.stage6-production-rotation-evidence-draft.v1"
+DRAFT_SCHEMA_VERSION = "synara.stage6-production-rotation-evidence-draft.v2"
 
 
 class RotationPreparationError(Exception):

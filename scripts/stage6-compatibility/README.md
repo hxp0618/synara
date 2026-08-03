@@ -11,6 +11,8 @@ bun run stage6:compatibility:check
 
 A successful result is `source-compatible-not-release-approved`. Release approval still requires exact artifact digests,
 clean commit evidence, prior-build forward-schema proof, Worker canary/promote/rollback evidence, and SLO/Audit review.
+Candidate v5 captures the exact matrix bytes, reruns this checker, and binds the resulting source inventory and Migration
+tail through the protected release verifier and Migration 000163 database authority.
 The validator stable-reads the matrix, eight package manifests, protocol/API sources and every migration in the numeric
 lineage as bounded regular non-symlink files. It rejects duplicate JSON fields and prohibited secret material, uses the
 same captured bytes for source interpretation and the migration-tail digest, and reports the total file/byte inventory.

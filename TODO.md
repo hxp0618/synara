@@ -1007,7 +1007,7 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
       API key path/ID/issuer 与 Team ID，拒绝缺失/格式错误、symlink、非当前用户所有或 group/other 可读的公证
       私钥；release workflow 从创建 `.p8` 起即使用 `0600`，预检 JSON 只输出结构布尔值。该预检不解析
       `CSC_LINK` 内证书，也不替代构建后的 Developer ID/Gatekeeper/公证/架构/Team ID 验证。
-      Candidate v4 现在还会独立重验上述四平台投影并派生 `desktopEnrollmentEvidenceSetSha256`；受保护发布侧要求
+      Candidate v5 现在还会独立重验上述四平台投影并派生 `desktopEnrollmentEvidenceSetSha256`；受保护发布侧要求
       该集合摘要非零，因此旧形状或只伪造顶层 eligible 的 Desktop receipt 不能进入 Environment 审批。
       `stage6:desktop:enrollment:prepare` 已把 native harness capture 收口为经同一语义校验、URL 归一化、`0600`
       且不可覆盖的 evidence/sidecar，失败不留下半发布文件；真实四平台 harness 仍需在签名候选上执行。
@@ -1155,9 +1155,9 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
       Confidentiality），同步 ISO 27001 control mapping；`scripts/stage6-evidence/collect_release_evidence.py`
       已能从与当前 HEAD 精确一致的 clean commit 固定 `bun.lock`、五类 self-hosted service Artifact digest、四个平台/架构
       Desktop digest、环境 ID/HTTPS origins、Region、全部 Migration checksum 与逐控制证据 hash，并拒绝任意历史
-      SHA 或 symlink 证据绕过；`bun run stage6:candidate:prepare -- ...` 再将 Billing、Desktop、Operations、Incident、
-      Recovery、Residency、SLO、Capacity、Penetration 与 Worker supply-chain 十份收据绑定到同一候选，机器计算
-      全部输入摘要并在发布前完成 v3 语义校验，拒绝覆盖、路径逃逸、重复输入以及 commit、环境、origin、Region、
+      SHA 或 symlink 证据绕过；`bun run stage6:candidate:prepare -- ...` 再将 Internal Cost、Desktop、Operations、Incident、
+      Recovery、Residency、SLO、Capacity、Penetration 与 Worker supply-chain 十份收据及 source-current 兼容矩阵绑定到同一候选，机器计算
+      Release Evidence、兼容矩阵与十份收据共十二份输入摘要并在发布前完成 v5 语义校验，拒绝覆盖、路径逃逸、重复输入以及 commit、环境、origin、Region、
       Migration 或 Artifact 混用。Release Evidence collector 还会在哈希后复核 HEAD/clean 状态，以不可覆盖
       `0600` manifest+sidecar 发布并在 sidecar 失败时回滚，候选根身份不能被覆盖或半发布。两层收据都明确不自动判定 passed。当前仍缺外部审计机构合同、批准 scope/观察期、控制 Owner
       与正式证据库，故认证路径尚未达到 active gate，本项保持未完成。
@@ -1339,7 +1339,7 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
       提升为 Platform Billing Exercise Governance；Finance/Security/Release 三个不同的 `billing_exercise.*`
       职能审批才能形成内部 approved。Migration `000132` 要求 Release candidate 消费同候选记录；服务、SQLite
       与临时 PostgreSQL 17 已验证三职能并发收敛、不可变历史、缺失/伪造/跨候选门禁和数据库直写绕过阻断。
-      该门禁现仅为迁移兼容记录，不属于 `internal-self-hosted` 产品或当前 GA 证据。Candidate v4 已由
+      该门禁现仅为迁移兼容记录，不属于 `internal-self-hosted` 产品或当前 GA 证据。Candidate v5 已由
       Migration `000152`/`000153` 切换为内部用量/成本收据；Stripe 记录只允许历史 v2/v3 离线审计读取。
       Migration `000148` 进一步要求 Finance/Security/Release 三份审批各自保存所审外部证据精确字节的非零
       小写 SHA-256；历史 URL-only 决策会被 supersede，原 approved Exercise 重开，Release 的
@@ -1396,15 +1396,18 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
       写入经认证 Key ID，并在线 CAS 重加密 usable Provider Cursor 与 Target Configuration；逐 Tenant Audit、
       platform Target 全局不可变 entry、可恢复 run、收敛 receipt 和旧 Key 缺失 fail-closed 均已覆盖。SQLite
       端到端和 PostgreSQL 16 迁移/收据封闭性实测通过。现又新增
-      `production-rotation-acceptance-v1.md` 与 `validate_production_rotation_evidence.py`，把同候选/Migration/Region
-      身份、Credential KEK、runtime key、Worker registration、PostgreSQL、Artifact、Billing、OTLP relay、TLS、DNS
+      `production-rotation-acceptance-v2.md` 与 `validate_production_rotation_evidence.py`，把同候选/Migration/Region
+      身份、Credential KEK、runtime key、Worker registration、PostgreSQL、Artifact、Incident Publisher HMAC、OTLP relay、TLS、DNS
       九类轮换，逐项 owner/approver 分离、五份唯一 evidence、新路径、旧 authority 最终状态、rollback、零风险、
       Secret scan 与 Security/Operations/Release 三方决定冻结为不可覆盖 `0600` 收据；明显 private key、live
       provider key、Bearer 和带凭据 URL 会在不回显值的前提下失败。收据固定为
       `evidence-validated-not-production-rotation-passed`，不验证外部 provider/人员/签名 authority；真实生产演练
       证据仍缺，故本项保持未完成。`stage6:rotation:prepare` 又将运营输入降为只含相对路径的 draft，自动计算
       49 份 evidence 摘要、完整校验后才原子发布 manifest/receipt 四文件；第二对发布失败会回滚第一对，避免
-      人工抄 hash 或留下半套 GA 证据。
+      人工抄 hash 或留下半套 GA 证据。历史 `billing-provider-credential` 控制已从活动 self-hosted 轮换矩阵删除，
+      由 `internal-incident-publisher-hmac-key` 取代；Control Plane 现在要求 key bytes 与独立 bounded Key ID 同时
+      配置，并通过 `X-Synara-Key-Id` 让 relay 在 old+new overlap 期间精确选择验证 key。Runbook 已冻结 relay
+      双读、Control Plane 单写切换、新路径、rollback、旧签名拒绝与旧 Secret 退役顺序；真实 relay/生产轮换仍需执行。
 - [x] 建立数据库 Migration、协议版本、Worker Image 和前端的**跨组件兼容发布矩阵**。注意去重：
       Worker Release 的 canary/promote/rollback **机制**已由 Stage 3 完成并落在
       `internal/workerreleases`（含 `auto_rollback.go`、`scheduling.go` 与对应 API 路由），
