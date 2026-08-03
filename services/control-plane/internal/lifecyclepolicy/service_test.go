@@ -17,6 +17,40 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestLifecyclePoliciesRejectInactiveTenantBeforeStorageAccess(t *testing.T) {
+	service, err := NewService(nil, DefaultConfig(platform.ProfilePersonal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	projectID := uuid.New()
+
+	for name, operation := range map[string]func() error{
+		"get Tenant policy": func() error {
+			_, err := service.GetTenant(context.Background(), principal, requestedTenantID)
+			return err
+		},
+		"update Tenant policy": func() error {
+			_, err := service.UpdateTenant(context.Background(), principal, requestedTenantID, UpdateInput{}, "inactive-tenant", "127.0.0.1")
+			return err
+		},
+		"get Project policy": func() error {
+			_, err := service.GetProject(context.Background(), principal, requestedTenantID, projectID)
+			return err
+		},
+		"update Project policy": func() error {
+			_, err := service.UpdateProject(context.Background(), principal, requestedTenantID, projectID, UpdateInput{}, "inactive-project", "127.0.0.1")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPolicyProblem(t, operation(), "tenant_not_found")
+		})
+	}
+}
+
 func TestLifecyclePolicyHierarchyBoundsAndOptimisticConcurrency(t *testing.T) {
 	ctx := context.Background()
 	platformConfig, err := platform.Defaults(platform.ProfilePersonal)

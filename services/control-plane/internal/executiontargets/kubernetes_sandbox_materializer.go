@@ -94,7 +94,7 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 			503, "kubernetes_sandbox_client_unavailable", "The Kubernetes client does not support SandboxClaim materialization.",
 		)
 	}
-	observedAcceptance, err := sandboxClient.ObserveSandboxAcceptance(ctx, configuration)
+	observedAcceptance, err := sandboxClient.ObserveSandboxAcceptance(ctx, target.ID, configuration)
 	if err != nil {
 		return kubernetesSandboxMaterializationResult{}, problem.Wrap(
 			503, "kubernetes_sandbox_acceptance_unavailable", "Sandbox operator target acceptance could not be observed.", err,
@@ -104,7 +104,8 @@ func (r *KubernetesReconciler) reconcileSandboxAllocations(
 	if configuration.AllocationBackend == string(kubernetesAllocationBackendSandboxOperatorCocoon) {
 		templateReady = templateReady && observedAcceptance.TemplateSandboxRuntimeImage != ""
 	} else {
-		templateReady = templateReady && observedAcceptance.AssignedExecutionFieldRefReady
+		templateReady = templateReady && observedAcceptance.AssignedExecutionFieldRefReady &&
+			observedAcceptance.TemplateObservabilityReady
 	}
 	acceptanceObservation := KubernetesAllocationAcceptanceObservation{
 		SandboxAPIReady:            observedAcceptance.SandboxAPIReady,

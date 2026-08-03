@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/databasetime"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -96,8 +97,8 @@ func (s *Service) ListWorkerManifests(
 	principal identity.Principal,
 	tenantID uuid.UUID,
 ) ([]WorkerManifestProjection, error) {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return nil, problem.New(404, "tenant_not_found", "Tenant not found.")
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
 		return nil, err
@@ -271,19 +272,9 @@ func workerManifestHeartbeatTime(value sql.NullString) (time.Time, error) {
 	if !value.Valid {
 		return time.Time{}, invalidStoredWorkerManifest()
 	}
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05.999999999Z07:00",
-		"2006-01-02 15:04:05Z07:00",
-		"2006-01-02 15:04:05.999999999Z07",
-		"2006-01-02 15:04:05Z07",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
-	} {
-		parsed, err := time.Parse(layout, value.String)
-		if err == nil {
-			return parsed.UTC(), nil
-		}
+	parsed, err := databasetime.Parse(value.String)
+	if err == nil {
+		return parsed, nil
 	}
 	return time.Time{}, invalidStoredWorkerManifest()
 }

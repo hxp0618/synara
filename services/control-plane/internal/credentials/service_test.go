@@ -25,6 +25,35 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestCredentialOperationsRejectInactiveTenantBeforeSecretsOrStorage(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil, nil)
+
+	_, err := service.Create(ctx, principal, requestedTenantID, CreateInput{}, "credential-inactive-create", "127.0.0.1")
+	assertCredentialProblemCode(t, err, "tenant_not_found")
+	_, err = service.Rotate(
+		ctx, principal, requestedTenantID, uuid.New(), RotateInput{},
+		"credential-inactive-rotate", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "tenant_not_found")
+	_, err = service.SetAutoSelect(
+		ctx, principal, requestedTenantID, uuid.New(), SetAutoSelectInput{Enabled: true},
+		"credential-inactive-auto-select", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "tenant_not_found")
+	_, err = service.GetScopePolicy(ctx, principal, requestedTenantID)
+	assertCredentialProblemCode(t, err, "tenant_not_found")
+	_, err = service.UpdateScopePolicy(
+		ctx, principal, requestedTenantID,
+		UpdateScopePolicyInput{PlatformCredentialAutoSelect: true},
+		"credential-inactive-scope-policy", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "tenant_not_found")
+}
+
 func TestCredentialAccessAndMetadataDoNotExposePayload(t *testing.T) {
 	fixture := newCredentialFixture(t)
 	ctx := context.Background()
@@ -105,7 +134,7 @@ func TestCredentialCiphertextIsBoundToCredentialAAD(t *testing.T) {
 	altered := firstModel
 	modelSelector := "different-model"
 	altered.SelectorModel = &modelSelector
-	aad, err := credentialAAD(altered)
+	aad, err := EnvelopeAAD(altered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +191,7 @@ func TestCredentialLegacyAADRemainsReadableAndRotationUpgradesToScopeAwareV3(t *
 				AADVersion: test.aadVersion, Version: 1,
 				CreatedBy: fixture.owner.UserID, UpdatedBy: fixture.owner.UserID,
 			}
-			aad, err := credentialAAD(model)
+			aad, err := EnvelopeAAD(model)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,8 +327,14 @@ func TestCredentialScopePolicyRequiresEnterpriseEntitlementAndAuthorizedUpdate(t
 	)
 	assertCredentialProblemCode(t, err, "invalid_credential_scope_policy")
 
-	if err := fixture.db.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
-		Update("plan_code", "enterprise").Error; err != nil {
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
+			Update("plan_code", "enterprise").Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.TenantSubscription{}).Where("tenant_id = ?", fixture.tenantID).
+			Updates(map[string]any{"plan_code": "enterprise", "status": "active"}).Error
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Model(&persistence.PlatformInstallation{}).Where("key = ?", "control-plane").

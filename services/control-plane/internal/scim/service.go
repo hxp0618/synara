@@ -14,6 +14,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/serviceaccounts"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenantuseraccess"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -209,6 +210,7 @@ func (s *Service) ReplaceUser(ctx context.Context, principal serviceaccounts.Pri
 	if err != nil {
 		return User{}, err
 	}
+	var suspension tenantuseraccess.SuspensionResult
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		var membership persistence.TenantMembership
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("tenant_id = ? AND user_id = ?", principal.TenantID, userID).Take(&membership).Error; errors.Is(err, gorm.ErrRecordNotFound) {
@@ -236,17 +238,27 @@ func (s *Service) ReplaceUser(ctx context.Context, principal serviceaccounts.Pri
 			return err
 		}
 		if !active {
-			if err := tx.Model(&persistence.OrganizationMembership{}).Where("tenant_id = ? AND user_id = ?", principal.TenantID, userID).Update("status", "suspended").Error; err != nil {
+			var err error
+			suspension, err = tenantuseraccess.Suspend(ctx, tx, principal.TenantID, userID, userID, s.now())
+			if err != nil {
 				return err
 			}
 		}
-		if err := tx.Model(&persistence.UserIdentity{}).Where("user_id = ? AND provider = ? AND issuer = ?", userID, "scim", scimIssuer(principal.TenantID)).Update("profile", map[string]any{"externalId": externalID}).Error; err != nil {
+		if err := tx.Model(&persistence.UserIdentity{}).
+			Where("user_id = ? AND provider = ? AND issuer = ?", userID, "scim", scimIssuer(principal.TenantID)).
+			Updates(persistence.UserIdentity{Profile: map[string]any{"externalId": externalID}}).Error; err != nil {
 			return err
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: principal.TenantID, ActorType: "service_account", ActorID: &principal.ID,
 			Action: "scim.user.updated", ResourceType: "user", ResourceID: &userID,
-			RequestID: requestID, IPAddress: ipAddress, Metadata: map[string]any{"active": active},
+			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"active":                        active,
+				"revokedSessionCount":           suspension.RevokedSessionCount,
+				"revokedCredentialCount":        suspension.RevokedCredentialCount,
+				"revokedDesktopEnrollmentCount": suspension.RevokedDesktopEnrollmentCount,
+			},
 		})
 	})
 	if err != nil {

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { ControlPlaneArtifact } from "~/lib/controlPlaneClient";
+import type { ControlPlaneArtifact } from "@synara/control-plane-client";
 import { ControlPlaneSessionArtifacts } from "./ControlPlaneSessionArtifacts";
 
 function artifact(input: {

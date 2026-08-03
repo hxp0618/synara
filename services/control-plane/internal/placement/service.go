@@ -140,7 +140,7 @@ func NewService(db *gorm.DB) *Service {
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, tenantID, targetID uuid.UUID) (State, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return State{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -164,7 +164,7 @@ func (s *Service) UpdatePolicy(
 	tenantID, targetID uuid.UUID,
 	input UpdatePolicyInput,
 ) (State, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return State{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -246,7 +246,7 @@ func (s *Service) CreatePool(
 	tenantID, targetID uuid.UUID,
 	input CreatePoolInput,
 ) (Pool, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Pool{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -307,7 +307,7 @@ func (s *Service) UpdatePool(
 	tenantID, targetID, poolID uuid.UUID,
 	input UpdatePoolInput,
 ) (Pool, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Pool{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -924,11 +924,4 @@ func nonNilDB(tx, fallback *gorm.DB) *gorm.DB {
 		return tx
 	}
 	return fallback
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }

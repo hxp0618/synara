@@ -12,7 +12,7 @@
 
 - [x] Queueing messages
 
-## SaaS product roadmap
+## Enterprise self-hosted product roadmap
 
 > 这里的 Stage 是产品路线阶段，不等同于
 > `docs/plans/saas-tenancy-organization-user-plan.md` 中的技术 Phase 0-6。
@@ -21,17 +21,17 @@
 > Artifact、Credential 和企业身份基础实现。下面的 TODO 表示生产化与产品收口目标；执行每个
 > Stage 前必须先做差距审计，禁止按旧计划重复实现已有模块。
 
-| Stage   | 目标                                            | 状态                | 依赖             |
-| ------- | ----------------------------------------------- | ------------------- | ---------------- |
-| Stage 1 | 定义 SaaS 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
-| Stage 2 | Go Control Plane 收口与生产化                   | 仓库内完成 / 已验收 | Stage 1          |
-| Stage 3 | Provider Runtime 与远程 Worker 产品化           | 已完成 / 已验收     | Stage 2          |
-| Stage 4 | 分布式执行平台和 K8s 多集群生产化               | COMPLETE            | Stage 2、Stage 3 |
-| Stage 5 | Provider 沙箱与运行时隔离加固                   | IN PROGRESS         | Stage 3、Stage 4 |
-| Stage 6 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-5        |
-| Stage 7 | 对外 SDK 与开发者平台                           | TODO                | Stage 2、5、6    |
-| Stage 8 | 组织内协作与 Agent/人统一提及                   | TODO                | Stage 6、Stage 7 |
-| Stage 9 | 开发者工作流集成与自动化                        | TODO                | Stage 4、5、8    |
+| Stage   | 目标                                                     | 状态                | 依赖             |
+| ------- | -------------------------------------------------------- | ------------------- | ---------------- |
+| Stage 1 | 定义 Control Plane 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
+| Stage 2 | Go Control Plane 收口与生产化                            | 仓库内完成 / 已验收 | Stage 1          |
+| Stage 3 | Provider Runtime 与远程 Worker 产品化                    | 已完成 / 已验收     | Stage 2          |
+| Stage 4 | 分布式执行平台和 K8s 多集群生产化                        | COMPLETE            | Stage 2、Stage 3 |
+| Stage 5 | Provider 沙箱与运行时隔离加固                            | IN PROGRESS         | Stage 3、Stage 4 |
+| Stage 6 | 企业 Self-hosted GA、运营、安全与成本治理                | TODO                | Stage 2-5        |
+| Stage 7 | 对外 SDK 与开发者平台                                    | TODO                | Stage 2、5、6    |
+| Stage 8 | 组织内协作与 Agent/人统一提及                            | TODO                | Stage 6、Stage 7 |
+| Stage 9 | 开发者工作流集成与自动化                                 | TODO                | Stage 4、5、8    |
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
@@ -92,7 +92,7 @@ Stage 7 > Stage 8 > Stage 9 其余。
 
 - Control Plane 只依赖稳定的 Worker/Provider Host Contract，不依赖 Provider SDK 细节。
 - 所有正式支持的 Provider 在 Local、SSH、Docker、Kubernetes Target 中具有一致的核心行为。
-- TypeScript 本地 Orchestration 不再与 Go Agent Session 同时充当 SaaS 权威状态。
+- TypeScript 本地 Orchestration 不再与 Go Agent Session 同时充当 Control Plane 权威状态。
 - Worker 可以升级、Drain、重连和恢复，不丢失 Session、Event、Artifact 或审批状态。
 - Worker canary/promoted 观察窗口可自动判定并触发安全回滚；第三方 Provider 鉴权、限流和网络故障不作为
   Worker Release 回滚信号。
@@ -118,7 +118,7 @@ Stage 7 > Stage 8 > Stage 9 其余。
 - [x] 建立 Worker/Provider Host 的 Graceful Shutdown、Drain 和正在执行任务交接协议。
 - [x] 增加 Worker Image 与 Provider CLI/SDK 的版本清单和可重复构建机制。
 - [x] 增加 Worker 自动升级、回滚和不兼容版本隔离能力。
-- [x] 建立应用级 Control Plane Context 和 SaaS Session Projection Adapter。
+- [x] 建立应用级 Control Plane Context 和 Session Projection Adapter。
 - [x] 将主聊天创建 Project/Session/Turn 的权威写入切换到 Go Control Plane。
 - [x] 保留未配置 Control Plane 时的本地个人模式，避免维护两套领域模型。
 - [x] 为 Local、SSH、Docker、Kubernetes 分别建立相同的 Provider Acceptance Suite。
@@ -127,7 +127,7 @@ Stage 7 > Stage 8 > Stage 9 其余。
 #### 完成条件
 
 - [x] 所有正式支持 Provider 的核心能力矩阵有自动化验证。
-- [x] Web 主流程只存在一个 SaaS Session 权威来源。
+- [x] Web 主流程只存在一个 Control Plane Session 权威来源。
 - [x] Worker/Provider Host 升级不需要迁移业务数据库结构。
 - [x] 不同 Execution Target 使用相同 Worker Protocol 和 Runtime Event Contract。
 - [x] Pod/Worker 替换后可以继续后续 Turn，并保持有序 Event 历史。
@@ -390,7 +390,7 @@ Stage 7 > Stage 8 > Stage 9 其余。
       provider 与 parser format 现已强绑定并在配置加载期 fail closed，错误云归属不会进入对象读取或导入。
       `estimateAfterImport` 已使用显式 tenant-owned Target scope 的
       durable/idempotent Worker-fact sweeper，invoice replay 可补偿 import 后崩溃窗口。shared global tariff catalog
-      的追加 API 还要求显式 platform tariff-operator Tenant，不能由普通租户 `billing.manage` 越权改写；PG/SQLite
+      的追加 API 还要求显式 platform tariff-operator Tenant，不能由普通租户 `cost.manage` 越权改写；PG/SQLite
       都在 DB 层拒绝重叠区间，PG 额外串行化并发写。新的 authoritative Worker claim ledger 已支持完整 incarnation
       的 per-period request delta；同 request ID 的 Execution/Cleanup 并发 claim 已在真实 PostgreSQL 证明只写一次
       ledger/receipt，OrbStack final5 也已现场确认 Migration 68 的表、业务唯一索引和权威触发器。Migration `000075`
@@ -404,7 +404,7 @@ Stage 7 > Stage 8 > Stage 9 其余。
       补齐 priced resource 缺失 fail closed、terminal-only 右边界、隐藏 fallback boundary 合并、Target scope 更新
       保护、semantic Slice 唯一、Tariff/资源快照绑定和 exact-region precedence。OrbStack PostgreSQL
       [`final4`](docs/reports/stage-4-shared-cost-allocation-orbstack-pg-20260726-final4.md) 已通过两 Tenant、两段 tariff、
-      终止点=tariff end Request、并发首次写及四条 DB negative gate。platform billing operator 现可通过原子 API
+      终止点=tariff end Request、并发首次写及四条 DB negative gate。platform cost-accounting operator 现可通过原子 API
       封存 Coverage，并对显式闭合账期执行 replay-safe shared sweep；单 Worker 失败不回滚其他持久化 Run/Slice，
       返回 `retry-required` 和 bounded failure，重复调用只补偿失败项；OrbStack PostgreSQL
       [`final2`](docs/reports/stage-4-shared-cost-management-orbstack-pg-20260726-final2.md) 已验证并发 seal 只有一条
@@ -798,23 +798,27 @@ Stage 9 上线前完成，不能延后。
       无人值守权限条目），而不是用不存在的 Stage 9 功能反向阻塞 Stage 5。任何 Stage 9 adapter 在该门禁
       通过前不得上线。
 
-### Stage 6：企业 SaaS GA、运营、安全与商业化
+### Stage 6：企业 Self-hosted GA、运营、安全与成本治理
 
-状态：TODO。本节于 2026-07-27 重做：原版写于 Stage 5/7/8 存在之前，是 28 条平铺清单，既未核对
+状态：IN PROGRESS。本节于 2026-07-27 重做：原版写于 Stage 5/7/8 存在之前，是 28 条平铺清单，既未核对
 仓库现状，也与新阶段多处重叠。本次补齐现状基线、标注跨阶段归属、按主题分组，并补入同类产品
 已成常识而本路线缺失的能力。
 
 现状基线（避免重复实现已有模块）：OIDC、SAML、SCIM、Service Account、Audit、Quota、Retention、
 KMS 与基础 Observability 已存在；Stage 4 已落地 requested-resource-seconds 成本代理、versioned
-tariff、三云账单只读导入与幂等对账、shared Target 成本分摊。因此本阶段的计费工作是**产品化与
-对外收口**，不是从零建计量。
+tariff、三云成本账单只读导入与幂等对账、shared Target 成本分摊。因此本阶段的成本工作是**内部用量与
+成本治理收口**，不是从零建计量，也不建立支付或对外结算产品面。
 
-2026-07-27 逐条核查后，下列条目已在正文标注"现状核查"，指出其中哪些子项**已有 API 实现**、
-真实缺口是什么——按原措辞执行会重建已有模块。当前确认完全缺失的是：Legal Hold、Domain
-Verification、SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环。执行本阶段前应对
-其余条目重复同样的核查，而不是照单开工。已核查条目的确认缺失项：Legal Hold、Domain Verification、
+2026-07-27 初始逐条核查后，下列条目已在正文标注"现状核查"，指出其中哪些子项**已有 API 实现**、
+真实缺口是什么——按原措辞执行会重建已有模块。初始确认的缺失项包括 Legal Hold、Domain Verification、
 SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式 Tracing、用户自助数据导出与
-单用户删除、隐私请求（DSAR）受理流程。
+单用户删除、隐私请求（DSAR）受理流程；截至 2026-07-30，这些工程缺口已在下文对应条目中实现并记录
+技术验证。组织级 Legal/Privacy、审计认证、真实生产 SLO/恢复、内部 Status Board、渗透/长稳与 GA 审批仍是开放门禁。
+
+**产品边界更新（2026-08-02）**：当前定位为企业内部平台，不向外部客户提供付费服务。Stage 6 暂不做
+支付、Checkout、税务、退款、dunning 或外部订阅结算；“商业化”按内部成本中心/部门分摊、Provider 使用授权
+与成本治理验收。运行配置固定为 `internal-self-hosted`，拒绝启用 Stripe；支付实现不得进入 UI 或成为当前 GA
+候选的必需证据。
 
 跨阶段归属（本阶段不重复实现，只做集成与验收）：
 
@@ -824,119 +828,842 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
 - 跨 Tenant 越权、SSRF、容器逃逸的**修复**归 **Stage 5**；本阶段只负责第三方渗透验收，不接受
   用本阶段测试替代 Stage 5 的修复。
 - 协作内容的保留、导出与 Legal Hold 边界由 **Stage 8** 接入本阶段的数据治理策略，不建旁路。
-- 免费层/试用的配额形状已在 Stage 7 的 D8 冻结；本阶段负责其 Plan/Entitlement 落地与自助开通。
+- Standard/Enterprise entitlement profile 的配额形状由本阶段落地；evaluation 仅是内部启用前评估状态，
+  不构成免费层、试用或对外订阅产品。
 
 #### 目标
 
-- 产品可以面向多家公司正式提供服务，而不依赖人工数据库操作和开发模式配置。
+- 产品可在企业内部 self-host 环境正式运行，不依赖人工数据库操作、开发模式配置或支付系统。
 - Tenant 生命周期、用户生命周期、用量、成本、配额、安全、审计和支持流程形成闭环。
 - 建立明确的 SLO、发布、备份恢复、安全响应和数据治理制度。
 - 用户能自己解释"这次花了多少、为什么"，而不是只有平台方看得到成本。
 
 #### TODO — 租户与身份生命周期
 
-- [ ] 完成 Tenant 注册、试用、启用、暂停、关闭、删除和恢复状态机。
-- [ ] 完成企业邀请、OIDC/SAML、SCIM、Group Mapping 和离职回收闭环。**现状核查（2026-07-27）**：
+- [x] 完成 Tenant 注册、试用、启用、暂停、关闭、删除和恢复状态机。Migration `000095` 冻结
+      数据库兼容状态 `trialing | active | suspended | closed | deleting`、生命周期版本与时间戳形状；公开 API/UI
+      使用 `evaluation | active | suspended | closed | deleting`；转换、版本冲突、
+      活跃 Execution/Workspace cleanup 门禁、删除恢复与审计均由服务端权威执行。试用到期在 Login、
+      SSO、Turn/高级操作与 Worker Claim 路径 fail closed。SQLite 聚焦矩阵与一次性 PostgreSQL 16
+      双连接竞争（恰好一个成功、一个 version conflict）已通过。Web Settings 现暴露 owner-only 的版本化
+      activate/suspend/close 与关闭后删除请求；独立 `GET /v1/tenants/deletion-requests` 只列出当前 Owner 的
+      soft-deleted Tenant，使刷新页面或失去 active Tenant 后仍可经 UI 恢复为 closed，不再依赖数据库或记忆 ID。
+      注册路径也已分权：普通已登录用户只能经 Web/`POST /v1/tenants` 创建 active Standard Tenant，服务端拒绝
+      client-supplied Enterprise/evaluation；Platform Operator Tenant 的 Owner/Admin 可经独立 Platform UI/API 为已有
+      active internal account 开通 Standard/Enterprise 或 evaluation Tenant，且 operator 不获得 Tenant Membership。两条
+      路径均原子创建 root Organization、内部 entitlement assignment、Owner Membership 与 Audit。
+- [x] 完成企业邀请、OIDC/SAML、SCIM、Group Mapping 和离职回收闭环。**现状核查（2026-07-27）**：
       邀请（`POST /v1/tenants/{id}/invitations`、`POST /v1/invitations/{token}/accept`）、SSO 登录、
       SCIM、Group Mapping 的 API 均已存在；实际缺口是**离职回收闭环**——从 IdP 侧停用到平台侧
-      Session/Credential/Grant 全链路回收的端到端保证。不要重建已有部分。
-- [ ] 支持多个 Identity Connection、Domain Verification 和 SSO Enforcement。**现状核查**：多
+      Session/Credential/Grant 全链路回收的端到端保证。Migration `000096` 后，SCIM 停用会在同一
+      事务暂停 Tenant/Organization Membership、撤销该 Tenant Login Session、撤销并取消自动选择
+      用户 BYOK；不可变 Execution Grant 的每次 resolve/refresh 仍重查 Membership 与 Credential，
+      因而不能复活。人工成员暂停/移除现与 SCIM 共用 `internal/tenantuseraccess` offboarding 原语，避免管理后台
+      成为较弱旁路；重新启用只恢复 Tenant Membership，不静默恢复 Organization 或 Credential。SSO 登录也
+      不再自动恢复 suspended Membership，只能由 IdP/SCIM active 更新恢复。
+- [x] 支持多个 Identity Connection、Domain Verification 和 SSO Enforcement。**现状核查**：多
       Identity Connection 的增删禁用 API 已存在；`domainVerification` 与 `ssoEnforcement` 全仓库
-      无实现，是本条的真实缺口。
-- [ ] 评估是否需要自定义 Role；若不需要，冻结固定 RBAC v1（Stage 7 的 API Key 权限语言依赖
-      此决策，应优先给出结论）。
-- [ ] 完成 User、Service Account、Credential 和 API Token 的生命周期管理（实体与 scope 由
-      Stage 7 定义，本阶段负责管理后台与治理视图）。
-- [ ] 实现 Provider BYOK、企业统一 Credential 和用户 Credential 的策略与优先级。
-- [ ] 完成 Credential Rotation、KMS Key Rotation、Re-encryption 和应急撤销 Runbook。
+      无实现，是本条的真实缺口。Migration `000096` 与 Identity API 已增加只存哈希的 DNS TXT challenge、
+      全局唯一活动 Domain claim、验证/撤销审计，以及 versioned `optional | required` SSO policy。
+      `required` 必须同时具有 verified Domain、active Connection 与 recovery Owner；启用时撤销非 SSO
+      Session，且不能撤销最后 Domain 或禁用最后 Connection。SQLite 产品路径与一次性 PostgreSQL 16
+      数据库约束均已通过。Tenant Identity 设置页已提供 Domain challenge/verify/revoke 与 versioned
+      `optional | required` 策略，读者角色只读，Owner/Admin 写操作仍由 typed client 与服务端 RBAC 双重约束。
+- [x] 评估是否需要自定义 Role；当前不引入，冻结固定 RBAC v1。Tenant Role 保持
+      `owner | admin | security_admin | cost_admin | auditor | member`，Organization Role 保持
+      `owner | admin | agent_operator | member | viewer`；Stage 7 API Key 使用独立资源 scope，不允许
+      自定义 Role 绕过这套服务端权限矩阵。若未来引入自定义 Role，必须作为 versioned policy language
+      单独设计和迁移，不能把自由字符串塞入现有 role 字段。
+- [x] 完成 User、Service Account、Credential 的生命周期管理后台与治理视图；API Token 的资源级实体/scope
+      仍按边界归 Stage 7。成员页现支持固定 RBAC 调岗、暂停/重启、Tenant Session 主动撤销与受约束移除；人工
+      暂停和 SCIM 共用事务化 offboarding，撤销用户 Credential 与自动选择。Service Account 支持一次显示 token、
+      rotate/revoke；Credential 支持 user/organization/tenant/platform scope、rotate/revoke/expiry 与 selector。
+      自操作被 UI 拒绝，Owner 管理保持 owner-only，数据库最后 Owner/依赖约束继续 fail closed。
+- [x] 实现 Provider BYOK、企业统一 Credential 和用户 Credential 的策略与优先级。显式 Session binding 永不
+      fallback；自动选择固定为 `user > organization > tenant > platform`，同一优先级多匹配会拒绝并要求显式
+      选择。User scope 每次重查 active Membership，Tenant 可按 Organization/Model selector；Platform fallback
+      同时要求 enterprise deployment、enterprise Plan、Tenant enable 与独立 auto-select opt-in。Settings 已提供
+      scope、selector、显式/自动策略及 Platform policy 管理，resolver/Grant 测试覆盖歧义、停用与 entitlement 丢失。
+- [x] 完成 Credential Rotation、KMS Key Rotation、Re-encryption 和应急撤销 Runbook。Credential 本身已有
+      versioned rotate/revoke；Migration `000105`、`internal/kmsrotation` 与 `control-plane-metadata rewrap-kms`
+      实现 Provider Credential、OIDC/SAML Secret 和 Login Attempt 的在线 envelope rewrap，只更换 wrapped
+      data key，不改业务密文或版本。Migration `000106`、`internal/runtimesecretrotation` 与
+      `rekey-runtime-secrets` 覆盖 Provider Cursor/Execution Target runtime secret 的具名 Key ID、兼容读取、CAS
+      重加密、逐 Tenant Audit、不可变 entry/receipt、断点续跑与最终零旧 Key inventory。两阶段 keyring、
+      应急 revoke、证书/Domain 联动与回滚停止条件统一记录在
+      `docs/runbooks/production-secret-certificate-domain-rotation.md`；SQLite 与 PostgreSQL 16 产品路径已验证。
+      每个真实生产环境的轮换演练仍由后文独立 GA Gate 验收，不反向取消本项的工程闭环。
 
-#### TODO — 计划、配额与计费
+#### TODO — Entitlement、配额与内部成本治理
 
-- [ ] 建立 Tenant Plan、Entitlement、Quota 和 Feature Flag 模型。**现状核查**：Quota 已有
-      `GET|PUT /v1/tenants/{id}/quota` 与 `internal/quotas`；Plan、Entitlement、Feature Flag 均无
-      实现，是本条的真实缺口，且 Stage 7 的自助免费层依赖它们。
-- [ ] 记录 Token、Execution Time、CPU、Memory、Storage、Network 和 Provider Cost 用量（Stage 4
-      已有 requested-resource-seconds 与云账单导入，本条聚焦缺口：Token 与 Network 维度）。
-- [ ] 实现用量聚合、账单周期、超限行为和管理员报表。
-- [ ] 如需要对外收费，接入 Billing Provider；内部平台则接入成本中心/部门分摊。
-- [ ] 【新增】实现面向最终用户的用量与成本可见性：per-Session / per-Turn 的 token、执行时长与
+- [x] 建立 Tenant Entitlement Profile、Quota 和 Feature Flag 模型。**现状核查**：Quota 已有
+      `GET|PUT /v1/tenants/{id}/quota` 与 `internal/quotas`；Entitlement Profile、Feature Flag 均无
+      实现，是本条的真实缺口。Migration `000097` 已冻结历史 profile code、typed Entitlement assignment、
+      Feature Flag 与带过期时间的 Tenant Override；`internal/entitlements` 提供租户读模型和 Platform
+      Authority 的版本化 profile/Flag 变更，且 PostgreSQL
+      16 双连接竞争验证为恰好一个成功、一个 version conflict。现有 Quota 继续作为执行准入权威，
+      没有复制第二套并发配额机制。Platform Admin UI/API 现以 entitlement profile version CAS 执行
+      Standard/Enterprise active/evaluation 变更并写 Audit；数据库保留的历史 Subscription 表只承载兼容状态，
+      暂停/关闭继续走 Tenant lifecycle，避免第二套状态冒充执行门禁。
+- [x] 记录 Token、Execution Time、CPU、Memory、Storage、Network 和 Provider Cost 用量（Stage 4
+      已有 requested-resource-seconds、Artifact bytes 与云账单导入，本条聚焦缺口：Token 与 Network 维度）。
+      Migration `000098` 将 input/cached/output/reasoning/total token、duration、ingress/egress bytes、Provider
+      cost/currency 按 Tenant/Session/Turn/Execution/Generation 持久化；Runtime Event 投影使用单调 max 防重放，
+      agentd usage report 以 report sequence/CAS 拒绝计数回退。Stage 4 的 Worker/Pod requested CPU/Memory/
+      ephemeral-storage seconds、Artifact ready bytes 与云实际/估算成本保持各自权威，不伪装成同一来源。
+- [x] 实现用量聚合、reporting period、超限行为和管理员报表。`internal/usage` 以 versioned entitlement assignment 的
+      reporting period 聚合 Token、Network、Execution seconds 与按 currency Provider cost，关联 Stage 4
+      shared charge slice；Migration `000099` 将 80%/100% 阈值做成 period/metric 唯一的持久告警，明确
+      `enforcement=soft`、`hardStop=false`，已有硬并发 Quota 仍是 admission 权威。Tenant Settings 提供当前
+      周期管理员报表，Session/Turn 页面提供用户级解释，不再依赖数据库查询。当前周期聚合不再把历史 Usage
+      Generation 与可变的 Execution 当前 Generation 等值连接；恢复推进 Generation 后，历史 Token、Network、
+      Provider cost 与内部成本归属仍保留。SQLite 回归和真实 PostgreSQL Compose 的 generation 恢复链路均已通过，
+      证据见 [`stage-6-self-hosted-usage-failure-acceptance-20260802.md`](docs/reports/stage-6-self-hosted-usage-failure-acceptance-20260802.md)。
+- [x] 完成内部成本中心/部门分摊闭环；当前不接 Billing Provider 或支付。Provider cost、共享 Target 估算分摊与
+      已导入云账单的实际分摊必须按 Tenant/周期可解释，实际分摊存在时替代对应估算而不能重复相加，并能导出给
+      企业既有财务流程。Session/Tenant 投影已实现实际分摊优先于对应估算、来源标记与已知多币种小计，并在
+      SQLite/PostgreSQL 17 验证不重复计数。运行配置固定 `internal-self-hosted`、强制 payment provider disabled，
+      Platform Profile 不暴露支付 capability，Tenant UI 不挂载支付组件，标准 Compose/Kubernetes 也不注入 Stripe
+      配置或 Secret。历史 Migration `000109`/`000131`/`000132` 仅为只读迁移兼容保留；Migration `000160`
+      自动撤销历史 active Billing-exercise authority、保留 revoked 审计记录并禁止新建。Migration `000159`、
+      `internal/usage/cost_allocation.go` 与 `/cost-accounting/report|export.csv|projects/{projectID}` 已补齐 Project →
+      成本中心/部门的版本化 CAS 归属、未分摊显式标记、Token/Network/Provider/平台成本周期报表、按 Project/币种
+      分行且不重复用量的 CSV，以及归属/导出 Audit。Tenant Usage UI 支持 `cost_admin` 分配与下载；SQLite 和
+      PostgreSQL 17 共用端到端用例验证 actual 替代 estimate、已知成本 24,000 micros、不完整 Provider coverage、
+      stale version 拒绝和 CSV 24 列形状。Candidate/Release 已由 Migration `000152`/`000153` 改为内部成本门禁。
+      `stage6:cost:prepare` 进一步从只含相对路径的 draft 稳定读取四类内部证据，自动计算摘要并拒绝 symlink、
+      重复 JSON、明显凭据、payment 语义、coverage/多币种算术漂移；完整验证后才以 `0600` 原子发布
+      manifest/receipt 四文件，第二对失败会回滚第一对。该闭环证明产品工程能力，不宣称企业外部财务系统已实际
+      导入 CSV，也不替代 Operations 与成本 Owner 对真实来源和报告周期完整性的审批。
+- [x] 【新增】实现面向最终用户的用量与成本可见性：per-Session / per-Turn 的 token、执行时长与
       估算成本，可回答"这次为什么贵"。Stage 4 建的是平台侧成本权威，用户侧可见性是另一件事，
       当前完全缺失；同类 agent 产品已把它当作基础能力，缺失会直接导致用量投诉与信任流失。
-- [ ] 【新增】实现软性配额预警：接近上限时先告警与降级提示，而非直接硬停。硬停无预警是自助
-      产品最常见的差评来源，且与 Stage 7 免费层的低门槛注册叠加后影响面更大。
+      Migration `000098` 与 Runtime Event/Worker report 投影记录每个 Execution generation 的 token、
+      时长、Provider cost 与 Network counters；`GET /v1/sessions/{id}/usage` 将其与 Stage 4 的 shared
+      cost slice 关联。Web Environment 面板按 Turn 汇总重试/generation，展示 token、时长、Provider
+      与已分摊平台成本；当前解释投影进一步分列 Provider/平台 charge、多币种总额、charge kind、Network
+      ingress/egress 和非 final 状态，Session 行按相同口径汇总且不跨币种相加；Tenant 设置页同时展示当前 reporting period 总量。
+      Migration `000150` 进一步以单调 `provider_cost_reported` 区分 Provider 明确报告的零成本与价格缺失；历史
+      正成本回填为 reported，历史零值保持 unavailable，Session/Turn/Tenant 聚合排除未知金额并显示缺失数量。
+- [x] 【新增】实现软性配额预警：接近上限时先告警与降级提示，而非直接硬停。硬停无预警是自助
+      产品最常见的差评来源，且与 Stage 7 免费层的低门槛注册叠加后影响面更大。Migration `000099`
+      把 Standard profile 的 20 execution-hours/月与 80% warning 冻结为 Entitlement，并持久化 80%/100%
+      语义唯一告警；读模型明确返回 `enforcement=soft`、`hardStop=false` 与降级建议，不进入 Execution
+      admission。SQLite 阈值矩阵及 PostgreSQL 16 双连接并发投影（最终恰好两条阈值告警）已通过。
 
 #### TODO — 运营与支持
 
-- [ ] 建立 Tenant/Organization 管理后台和 Platform Admin 后台。
-- [ ] 实现 Worker、Execution、Queue、Artifact、Credential 和 Identity Connection 运维视图。
-- [ ] 【新增】实现受控的支持态 impersonation：支持工程师在排障时以租户视角只读访问，必须填写
+- [ ] 按 ADR 0004 建立共享 Tenant 管理面与独立 `apps/admin` Platform 后台。原先把客户 Tenant 设置和
+      Platform Tenant overview/四眼 Support Access 放在同一聚合页的实现不再算完成证据。Phase A 已建立
+      `apps/web/src/features/enterprise` 静态注册边界，把客户入口拆为 Organization overview、Members & roles、
+      Identity & access、Credentials、Usage & limits、Data & compliance、Support 七个普通 Settings 目的地；
+      目的地在 Control Plane 返回认证上下文后按 capability 过滤，本地模式不注册 Cloud Panel 页面，旧
+      `?section=tenancy` 兼容跳到 overview。客户组合已不再挂载 Platform 操作组件。Phase B 也已将 typed
+      models、HTTP/cookie transport、稳定错误、Artifact helper 与可续传 SSE 迁到
+      `packages/control-plane-client`；Web 消费方只引用 `@synara/control-plane-client` 公开 API，Desktop 的
+      私有 URL bridge 通过 host resolver 注入，HTTP(S) 浏览器仍强制同源。Phase C 也已将完整 Tenant
+      destination renderer、登录/上下文呈现、capability 解析及身份、凭证、生命周期、用量与合规组件迁入
+      `@synara/enterprise-ui`；Web 只通过显式 Control Plane runtime、设计系统与两个 Overview extension slots
+      接入，不存在 Web route、Electron 或应用 singleton 私有依赖。企业 UI 包 22 文件/59 测试与 ESM/CJS/d.ts
+      构建、Web 301 文件/3502 测试、Chromium narrow/density/keyboard/reduced-motion 4 条用例及隔离七目的地
+      浏览器验收通过；真实 Session 还验证并修复 lifecycle version/时间戳投影，Owner 写控件不再误禁用。
+      Phase D 已新增独立 `apps/admin`：独立 SSO/Operator Tenant 门禁、常驻 Platform authority/Tenant context、
+      Owner/Admin/Security 权限面、Tenant triage/provisioning/versioned entitlement/四眼 Support Access 已挂载；
+      Compose/Kustomize 与兼容矩阵已纳入 Admin，旧 Web 停放组件已删除。隔离真实 Owner、第二 Admin、Security、
+      support*readonly 会话验证了成功、四眼、403 写拒绝与 Audit request ID。Phase E 的单次短时、
+      device-bound Desktop Enrollment 已完成 Migration `000108`、服务端原子生命周期、Admin 自助签发/撤销、
+      Electron allowlist Deep Link、OS 凭据适配、完整 hydration 后提交及 rollback/disconnect；SQLite 与真实
+      PostgreSQL 双连接兑换/rotation 竞争通过。macOS arm64 最终本地包又完成 LaunchServices 协议唤起、allowlist
+      拒绝、Keychain-backed 密文、共享 Enterprise UI hydration、重启 rotation、UI disconnect、可信 CORS 与双向
+      自动重载，且保留本地 SQLite；x64/Rosetta 本地安装态也跑通同一连接闭环。后续修复了无连接启动提前打开
+      `safeStorage`、x64/Mach-O 架构名映射和跨架构 staging 沿用构建机原生依赖的问题；原生 arm64 build 10 已
+      安装到 `~/Applications/Synara.app`，隔离 HOME 与实际安装启动均不再出现钥匙串或 Intel 兼容提示。边界报告为
+      `docs/reports/stage-6-desktop-macos-arm64-local-acceptance-20260731.md`、
+      `docs/reports/stage-6-desktop-macos-x64-rosetta-local-acceptance-20260731.md` 与
+      `docs/reports/stage-6-desktop-macos-arm64-local-install-fix-20260731.md`。但这些 app 仅用 Apple Development
+      签名，Gatekeeper 拒绝且无 stapled ticket；Rosetta 也不等于原生 Intel 主机。Developer ID 签名/公证的
+      macOS arm64/x64 以及 Windows/Linux 协议唤起、真实 OS Credential Store 与候选部署端到端验收仍未完成，
+      因此整条 ADR 项继续保持未勾选，不能把本地开发签名证据冒充四目标候选发布验收。机器合同与运行手册
+      已新增 `desktop-installed-acceptance-v1.md` / `desktop-native-release-acceptance.md`；部署态校验器直接读取四份
+      workflow provenance，要求原生 host、Developer ID+公证/Authenticode/CI attestation、系统凭据、完整
+      Enrollment 与 Secret scan、Engineering/Security/Release 三方审批。macOS signed provenance 现还会重新展开
+      update ZIP、只读挂载最终 DMG，要求两侧唯一真实 `Synara.app` 的全部 Mach-O 都满足目标架构、deep signing
+      与同一 Team ID。当前没有可提交的合格四平台 manifest。
+      Desktop 运行模式也已从“无连接即默认本地”改为显式持久化状态机：全新 profile 在启动 backend 前选择
+      local/Cloud Panel；不存在 mode 记录时，即使残留受保护 Cloud 连接、legacy local SQLite 或显式 Enrollment
+      Link 也不得替用户推断模式。非首次只按持久化 mode 恢复；local 收到 Enrollment Link 时必须再次确认切换。
+      Cloud→local 停止远程注入但不删除凭据，local→Cloud 重新 hydration/rotation，只有 disconnect 才撤销设备。
+      四平台 validator 已要求首次选择、双向切换、两种模式重启恢复、local 零 Cloud 流量与凭据保留；其
+      Enrollment evidence 不再只是任意哈希文件，而必须使用 `synara.stage6-desktop-enrollment-runtime-evidence.v1`
+      绑定候选/环境/URL/runner/原生目标与时间闭包，并由六段有序转换、请求计数和凭据摘要连续性派生模式结果，
+      外层 manifest 与结构化收据漂移会直接失败。本地 arm64 Electron 首启/Local 重启恢复的运行态边界报告见
+      `docs/reports/stage-6-desktop-connection-mode-local-runtime-20260801.md`，仍不替代四平台签名候选验收。
+      当前安装到 `/Applications` 的 Apple Development `.12` arm64 包也已用空 `SYNARA_HOME` 实测：选择前 backend
+      不启动，Local 选择写入 `0600` 状态且不创建 Cloud 连接文件，重启直接恢复 Local；DMG 内 ASAR 与安装态逐字
+      一致、26 个 Mach-O 均为 arm64 且 Team ID 一致。证据见
+      `docs/reports/stage-6-desktop-connection-mode-installed-local-20260802.md`。该包仍被 Gatekeeper 拒绝且无 stapled
+      ticket，因此只增强本地安装态证据，不改变 Developer ID/公证及四平台候选门禁。
+      Signed macOS 构建现又在 staging 前执行无泄露分发预检：要求 Developer ID credential source、密码、Apple
+      API key path/ID/issuer 与 Team ID，拒绝缺失/格式错误、symlink、非当前用户所有或 group/other 可读的公证
+      私钥；release workflow 从创建 `.p8` 起即使用 `0600`，预检 JSON 只输出结构布尔值。该预检不解析
+      `CSC_LINK` 内证书，也不替代构建后的 Developer ID/Gatekeeper/公证/架构/Team ID 验证。
+      Candidate v4 现在还会独立重验上述四平台投影并派生 `desktopEnrollmentEvidenceSetSha256`；受保护发布侧要求
+      该集合摘要非零，因此旧形状或只伪造顶层 eligible 的 Desktop receipt 不能进入 Environment 审批。
+      `stage6:desktop:enrollment:prepare` 已把 native harness capture 收口为经同一语义校验、URL 归一化、`0600`
+      且不可覆盖的 evidence/sidecar，失败不留下半发布文件；真实四平台 harness 仍需在签名候选上执行。
+      `stage6:desktop:native:prepare` 现从 path-only draft 稳定读取并 secret-scan 四平台 35 份附件，自动派生全部
+      引用摘要，在同一份字节上完成 provenance/attestation/Enrollment 语义校验，并以不可覆盖的 `0600`
+      manifest/receipt+sidecar 发布；重复 JSON、symlink、超限输入、摘要后换包及半发布均 fail-closed。
+      该工具只消除了人工拼 manifest 的证据完整性缺口，仍没有生成 Developer ID+公证、原生 Intel、Windows
+      Authenticode 或 Linux CI attestation 候选，故四平台 Desktop GA 项保持未完成。
+      当前产品定位也已从用户可见 `SaaS` 术语统一为 Local / Cloud Panel / Control Plane：独立 Admin 与共享
+      Tenant UI 的真实 Chromium 验收确认不存在 Payments/Billing exercises 入口，内部成本审查明确不含 payment、
+      invoice 或 Checkout state，390×844 无横向溢出且控制台无 error/warn。部署配置由
+      `SYNARA*BILLING\**`迁移为`SYNARA*COST\*ACCOUNTING\**`，旧名启动即返回明确替代项；Compose、Kubernetes
+ ConfigMap、运行合同与校验器使用同一名称。当前 `/cost-accounting/\_`Problem Code 使用
+`cost*accounting*\_`，新审计 action/resource 使用 `cost*accounting.*`/`cost*accounting\*_`；历史表名、Go 包名
+ 与既有 `billing._`审计行仅作为不可改写的兼容证据保留。Kubernetes base 继续要求`synara-control-plane`Workload
+ Identity 并显式禁止 Artifact static access/secret key。上述是本地 production-like 源码与浏览器证据，
+      不替代正式候选、真实 SSO、多角色部署态 49 项演练或外部签署。
+      路由安全扫描又把 payment-path 禁止项从固定字符串扩大为 `/billing`、`/commercial-billing`、`/checkout`、
+      `/payment(s)`、`/stripe` 路径模式；`/cost-accounting/_/actual-invoices/_` 明确保留为内部成本事实导入，
+      不属于支付收款能力。
+      self-hosted boundary validator 现在还扫描所有非测试 Control Plane Go 源文件：历史支付类型/表名只能出现在
+      SQLite 锁定、治理权限清理和持久化兼容 seam，新的活动服务引用会 fail closed；这保留升级历史可读性但不让
+      Checkout/Provider event/Billing exercise 重新成为运行时能力。
+      Desktop 断开审计理由与设置搜索入口也已统一为 Cloud Panel / Usage & internal cost，避免用户可见语义回到 SaaS
+      或 billing；内部 IPC 兼容标识保持不变。
+      租户用量页也已从`Plan usage`收口为`Usage & internal cost`，软配额建议只允许请求内部管理员调整
+ entitlement profile；Platform Admin 的筛选、provisioning、生命周期和 entitlement 表单把保留的
+ 数据库保留 `free | enterprise | trialing` 兼容码，公开 API/UI 只使用 Standard/Enterprise profile 与
+      evaluation，并不再出现升级 Plan 或 Subscription 定位。真实 Chromium 已完成内部 Tenant 创建 → Entitlements
+      交互，页面/控制台通过；该本地
+      bootstrap 演练仍不替代真实身份源或完整候选运维演练。
+- [x] 收紧 Artifact 对象存储的源码与单节点部署边界。Enterprise endpoint 只接受无凭据 HTTPS origin，远程
+      presign 最长 15 分钟，静态 key 必须是带 session token 的临时凭据；Kubernetes base 不携带 Artifact key，
+      生产 overlay 必须把 `synara-control-plane` ServiceAccount 绑定到 `tenants/*` bucket scope 的 workload identity。
+      Compose 用 pinned MinIO client bootstrap 独立非 root 用户、private bucket、精确 CORS 与最小 policy；本地运行
+      已通过 presigned lifecycle，并拒绝前缀外写入、建桶和 Admin API。静态收据仍明确为
+      `artifact-storage-deployment-wiring-validated-not-cloud-iam-accepted`，候选云 IAM/KMS/Region/Network 仍是外部门禁。
+- [x] 实现 Worker、Execution、Queue、Artifact、Credential 和 Identity Connection 运维视图。
+      `GET /v1/platform/tenants` 每 30 秒生成租户级运维快照：Target/Worker 与离线数、Execution 活跃/
+      排队/最老等待/24 小时失败、Artifact 数量/待上传/容量、Credential active/unavailable、Identity
+      Connection active/disabled；平台页直接展示这些信号，需查看租户内详情时必须走只读 Support Access。
+      Web capability 已拆分 `canReadCredentials` 与 `canManageCredentials`：`support_readonly` 可查看脱敏 Credential
+      scope/version/expiry/状态与 Platform policy，但不会渲染 create/rotate/revoke/auto-select 写控件。
+      Delivery Outbox 也已接入 Settings：只返回 topic/key/status/attempt/时间戳的脱敏 API，隐藏 payload/header/
+      原始错误；Support 只读，Owner/Admin 才能执行逐条受审计 dead-letter replay。
+      `docs/release-matrices/stage-6-operations-ui-v1.json` v2 与校验器固定 49 项日常操作的 UI → typed client →
+      authenticated route 链路，并额外验证产品 surface/host seam：20 项 Tenant Web 与 29 项 Platform Admin
+      操作均已 `reachable`，旧 Web 死代码组件已删除。隔离 Control Plane 的 Admin 实测完成 internal Tenant
+      provisioning、entitlement profile version 2 写入、Owner 请求/另一 Admin 批准、Security 写入口缺失与直接 403、
+      support_readonly 写阻断，并关联 Audit request ID；源码收据仍固定为 not-operations-passed，不替代候选部署
+      的 49 项全矩阵与签署证据。部署态 `validate_operations_exercise_evidence.py` 已把候选 digest/origin、
+      十一个分离角色、逐行正向/固定负向浏览器证据、全局唯一 request ID、Support 四眼/只读/撤销/Audit 与
+      Operations/Security 双审批冻结为 fail-closed manifest；失败或使用 CLI/数据库/开发者工具的行只会得到
+      ineligible receipt。`stage6:operations:prepare` 现将运营 draft 中 99 份相对证据路径自动收口为稳定、限大小、
+      拒绝 symlink/复用/明显凭据的 SHA-256 引用；完整验证后才以 `0600` 原子发布 manifest/receipt 四文件，第二对
+      发布失败会回滚第一对。该工具不推断 SSO/MFA、浏览器动作、request ID 或审批 authority，真实
+      production-like 执行仍未发生。
+      SQLite 聚合夹具覆盖全部资源维度，共享数据库时间解析同时保持 PostgreSQL/SQLite 返回形态一致。
+- [x] 【新增】实现受控的支持态 impersonation：支持工程师在排障时以租户视角只读访问，必须填写
       理由、有时限、全程审计、对租户管理员可见，且租户可整体关闭该能力。没有它，支持只能靠
       直连数据库（更危险）；有它但不受控则是最典型的内部越权事故来源，两者都不可接受。
-- [ ] 【新增】建立公开 Status Page 与事故对外沟通流程（事件分级、发布时机、事后复盘公开范围）。
-      当前已规划 On-call 与告警，但缺少对外一侧；企业客户在采购阶段就会检查它是否存在。
+      Migration `000100` 与 `internal/supportaccess` 将其实现为独立于目标 Tenant Membership 的
+      `support_readonly` 授权：Tenant 默认关闭并可立即撤销，Support Engineer 提交 5 分钟至 4 小时
+      请求，必须由另一名 Platform Admin 四眼批准。HTTP 中间件在每次请求前写入目标 Tenant Audit，
+      并额外阻断除退出支持态/登出之外的所有非 GET 操作；Tenant 管理员可查看历史和撤销，支持人员
+      的 Session 在撤销/过期后自动清除活跃 Tenant。Migration `000110` 又把每份新 Grant 绑定到不可变
+      Platform Operator Tenant，并在每次目标 Tenant 授权、Tenant 列表和 Session 认证时重验 requester 仍是 active
+      `owner|admin|security_admin`、Operator Tenant 仍 active；支持人员离职/降权会立即失去目标 Tenant 读取并清除旧
+      Session context，历史未绑定 Grant fail closed。SQLite 全状态矩阵、HTTP 写阻断测试和 PostgreSQL 17
+      双连接并发批准、authority 不可变及离职撤权均已通过；实现不伪造客户 User 身份。
+- [ ] 【定位修订】建立内部 Status Board 与员工事故沟通流程（事件分级、发布时机、事后复盘范围）。
+      `docs/runbooks/enterprise-incident-response.md` 已冻结 SEV-0..3、角色、15/30 分钟发布时限、更新节奏、
+      复盘范围与内部组件契约；`scripts/stage6-incident/validate_incident_exercise_evidence.py` 会固定独立 Status
+      Board、角色分权、primary/secondary paging、ack/首报/更新节奏、六类内部组件、员工通知投递、恢复观察与七份
+      证据 hash，收据固定为 `evidence-validated-not-operations-ready`。Control Plane 现已支持严格校验的
+      `SYNARA_INTERNAL_STATUS_BOARD_URL`，应用 Profile 在未配置时明确返回 `configured: false`，配置后 Web/Admin
+      才显示 Internal status；该 URL 必须是不带凭据/query/fragment、且与 Control Plane/Admin 故障域分离的 HTTPS。
+      Migration `000161` 将活动收据升级为 v2 内部通信词汇，同时保留历史数据库列名。
+      `stage6:incident:prepare` 现从 path-only draft 稳定读取七份证据，自动计算摘要并拒绝 symlink、重复 JSON、
+      超限输入和明显凭据；完整验证后才原子发布 `0600` manifest/receipt 四文件，失败演练保持为 ineligible
+      receipt，第二对发布失败会回滚第一对。该工具不验证外部分页/Status Board/员工通知或人员 authority。
+      当前仍没有真实部署的 Internal Status Board URL，尚未配置实际 On-call 人员/通道，也没有完成员工收到通知的
+      端到端演练，因此本项保持未完成。源码投递边界现已补齐：`incident.internal-update` 不再被 database-only
+      Publisher 伪标记为 published；配置独立 HTTPS relay 与专用 32-byte HMAC key 后，Control Plane 以 Outbox Message
+      ID 幂等、精确字节签名和禁止 redirect 的 webhook 投递，非 2xx 进入既有 retry/dead-letter，未配置则 fail closed。
+      relay 的 2xx 仍只代表耐久接收，不代表员工实际收到通知，真实演练边界不变。
 
 #### TODO — 数据治理与合规
 
-- [ ] 建立 Audit Search、Export、Legal Hold 和保留策略（需覆盖 Stage 8 的协作内容）。**现状
+- [x] 建立 Audit Search、Export、Legal Hold 和保留策略（需覆盖 Stage 8 的协作内容）。**现状
       核查**：Audit Search（`GET .../audit-logs`）、Export（`GET .../audit-logs/export`）与 Retention
       Policy（`GET|PUT .../retention-policy`）的 API 均已存在；`legalHold` 全仓库无实现，是本条的
-      真实缺口。本阶段应聚焦 Legal Hold，以及把 Stage 8 协作内容纳入既有保留策略。
-- [ ] 完成数据导出、Tenant 删除、用户删除和隐私请求流程。**现状核查**：Tenant 删除已有
-      `deleting` 状态与 `internal/retention` 的清除链路（Stage 4 的 Credential 下发也已按
-      `deleting` 停止）；用户自助数据导出、单用户删除与隐私请求（DSAR）受理流程均无实现，
-      是本条的真实缺口。
-- [ ] 明确 Provider 许可、账号共享、数据使用、隐私和企业合规要求。
+      真实缺口。Migration `000101` 与 `internal/legalholds` 已增加不可变、versioned、单向 release 的
+      Tenant/User/Organization/Project/Session scope；active Hold 会在同一权威查询边界挡住 Session 归档、
+      Workspace/Checkpoint 清理、Artifact 物理删除和 Tenant 删除，并写入创建/释放 Audit。SQLite
+      端到端验证 Hold 前后破坏路径；PostgreSQL 16 验证 scope trigger、不可变证据与双连接并发 release
+      恰好一个成功、一个 version conflict。Stage 8 新协作内容必须绑定既有 Project/Session/Artifact
+      scope，不得另建旁路 retention 或 hold 表。
+- [x] 完成数据导出、Tenant 删除、用户删除和隐私请求流程。Tenant 删除沿用 `deleting` 状态与
+      `internal/retention` 清除链路，并受 active Legal Hold 阻断。Migration `000102` 与
+      `internal/privacy` 增加 30 天到期、versioned 不可变历史的 DSAR 状态机：Subject 可自助请求并下载
+      Tenant-scoped 个人数据，隐私管理员核验/批准后执行单用户擦除；active Hold、active Execution 与
+      最后一个 Owner 均 fail closed。擦除删除用户 Artifact payload、撤销 Login/BYOK、移除成员关系并
+      脱敏协作内容，同时显式保留不可变 Audit/Memory/Checkpoint 证据。Migration `000103` 再增加管理员
+      Tenant JSON 快照导出与不可变 SHA-256/字节数/行数收据，明确排除 Credential、SSO、KMS Secret 与
+      Artifact 下载 URL。SQLite 端到端覆盖导出、Hold 阻断、擦除和收据不可变；PostgreSQL 16 覆盖状态
+      并发单胜者、repeatable-read Tenant 快照及收据 UPDATE/DELETE 拒绝。
+- [ ] 明确 Provider 许可、账号共享、数据使用、隐私和企业合规要求。工程基线已冻结在
+      `docs/contracts/provider-commercial-use-v1.md`：Hosted 禁止共享消费者登录/Session/API Key，
+      `local-only` Provider 不得进入远程 Target，`experimental` 仍需显式 Target enablement；逐 Provider
+      记录商业/API 凭据、训练/数据使用、DPA/Region 与下游模型边界。当前仍缺 Legal/Privacy 对签约实体、
+      Order Form/DPA 和具体 Hosted 用例的审批证据，因此本项保持未完成，不能用技术 enablement 代替授权。
+      Migration `000113`、`internal/providercommercial` 与 Platform Admin → Provider use 现将精确 Provider product、
+      account type、contracting entity、customer BYOK/platform-managed credential scope、Region、training/data-use、
+      retention、terms/agreement/DPA、prohibited use、termination runbook 与最长 180 天 review 固定为不可变授权。
+      创建者不能审批，Legal/Privacy/Security/Product 四角色必须由不同 active operator append-only 决策；拒绝原子
+      终止，撤销/到期立即阻断新的 Enterprise remote claim。claim 在 Worker lease/Provider Credential Grant 前重查
+      exact Provider、placement/home Region、Credential Tenant/version/mode/scope；Personal/local 不启用 hosted gate，
+      catalog `local-only` 仍独立 fail closed。运行手册见 `docs/runbooks/provider-commercial-authorization.md`。
+      真实签约实体、协议签名和 Legal/Privacy authority 仍需外部证据，因此本项继续保持未勾选。
+      Migration `000114` 又新增 Owner 管理、最长 366 天的精确职能授权；Provider commercial 的 Legal/Privacy/
+      Security/Product 角色现在由服务与数据库在写决策时实时重验，不能再靠请求体自报。相同权威同时覆盖
+      Release 与 Compliance 决策，运行手册见 `docs/runbooks/stage-6-governance-authority.md`。
+      Migration `000140` 进一步要求所有治理职能授权绑定 exact corporate-delegation evidence 的非零
+      `sha256:`；升级会原子撤销旧 active URL-only grant 并保留版本化历史，新授权缺失/伪造摘要或摘要篡改在
+      服务、SQLite/PostgreSQL、typed client 与 Platform Admin 同步 fail closed。内部记录仍不验证真实雇佣、
+      公司委任或外部仓库 authority。
+      Migration `000136` 进一步修复“不可变记录仍指向可漂移 URL”的缺口：terms、执行协议/Order Form、DPA 与
+      termination Runbook 均必须绑定非零 `sha256:`；服务、SQLite/PostgreSQL trigger、typed client 与 Platform
+      Admin 同步要求并展示四份摘要，运行时 hosted claim 只接受摘要完整的 active record。升级会把旧 URL-only
+      非终态记录原子转为 `revoked` 历史，不能静默沿用；document URL 或 bytes 变化都必须新建记录并重新四方审批。
+      Migration `000137` 又要求 Legal/Privacy/Security/Product 每一条 approval evidence 都绑定独立非零
+      `sha256:`；服务、SQLite/PostgreSQL trigger、typed client、Platform Admin、activation 与运行时 claim
+      同步 fail closed，升级会撤销含旧 URL-only decision 的非终态授权，审批证据 bytes 变化也必须重建授权并
+      重新四方审批。
+      Migration `000138` 继续关闭 Release 与运行时授权脱节：带 `provider_commercial` impact 的候选在 draft
+      创建时必须选择一个或多个 exact active Authorization ID/version；绑定不可变，缺失、到期、撤销或版本漂移
+      会在服务、SQLite/PostgreSQL、readiness 与 Platform Admin 同步阻断 review 及后续正向转换，Release 的
+      Privacy/Legal 决策不能再用任意商业材料替代真正授权。
+      这仍只证明审批对象字节未漂移，不验证签约实体、外部仓库或 Legal/Privacy authority，因此本项继续未勾选。
 - [ ] 【新增】确定合规认证路径（SOC 2 Type II / ISO 27001 择一或并行），并把证据采集自动化接到
       既有 Audit 与发布流程上。"满足合规要求"与"拿到可出示的认证"是两件事，后者是企业采购的
-      硬门槛，且准备周期以季度计，必须尽早启动而不是 GA 前补。
+      硬门槛，且准备周期以季度计，必须尽早启动而不是 GA 前补。工程决策已记录在
+      `docs/plans/stage-6-compliance-evidence-plan.md`：先做 SOC 2 Type II（Security + Availability +
+      Confidentiality），同步 ISO 27001 control mapping；`scripts/stage6-evidence/collect_release_evidence.py`
+      已能从与当前 HEAD 精确一致的 clean commit 固定 `bun.lock`、五类 self-hosted service Artifact digest、四个平台/架构
+      Desktop digest、环境 ID/HTTPS origins、Region、全部 Migration checksum 与逐控制证据 hash，并拒绝任意历史
+      SHA 或 symlink 证据绕过；`bun run stage6:candidate:prepare -- ...` 再将 Billing、Desktop、Operations、Incident、
+      Recovery、Residency、SLO、Capacity、Penetration 与 Worker supply-chain 十份收据绑定到同一候选，机器计算
+      全部输入摘要并在发布前完成 v3 语义校验，拒绝覆盖、路径逃逸、重复输入以及 commit、环境、origin、Region、
+      Migration 或 Artifact 混用。Release Evidence collector 还会在哈希后复核 HEAD/clean 状态，以不可覆盖
+      `0600` manifest+sidecar 发布并在 sidecar 失败时回滚，候选根身份不能被覆盖或半发布。两层收据都明确不自动判定 passed。当前仍缺外部审计机构合同、批准 scope/观察期、控制 Owner
+      与正式证据库，故认证路径尚未达到 active gate，本项保持未完成。
+      Migration `000112`、`internal/compliancegovernance` 与 Platform Admin → Compliance 现已把 program scope、
+      executive sponsor、auditor engagement、observation window、evidence repository/access/retention policy、七类
+      control owner、append-only evidence digest/reference、独立 evidence review 及 Security/Operations/Legal-Privacy/
+      Executive 四人 start-gate decision 纳入 Platform 权威和 Audit。创建者不能审批，同一人员不能占两个角色，
+      evidence submitter 不能自审；`record_complete` 必须拥有七类 control、四项批准和 accepted release manifest，
+      且永久返回 `record-complete-not-audit-active`。Migration `000141` 又要求 accepted manifest review 与四类
+      start-gate decision 分别绑定 exact external evidence bytes 的非零 `sha256:`；旧 URL-only 行保留为 superseded
+      history，但不再计入 readiness，且可由新的 byte-bound active review/decision 替换。运行手册见
+      `docs/runbooks/compliance-control-evidence-governance.md`。真实 auditor authority、WORM repository enforcement、
+      正式观察期和报告仍需外部完成，因此本项继续保持未勾选。
 - [ ] 【新增】将数据驻留从调度能力提升为产品承诺：租户可选择 Region 并获得书面边界说明。
       Stage 4 已具备跨 Region/Cluster 路由与 evacuation 能力，但没有对租户的可承诺语义；
-      欧盟与金融客户会把它作为准入条件。
+      欧盟与金融客户会把它作为准入条件。当前 Settings 已接入 versioned Tenant Execution Scheduling Policy
+      的 Region allow-list，并可从服务端 `GET /v1/tenants/{tenantID}/data-residency-statement` 下载带 policy
+      version/digest、SHA-256/字节数头和 Tenant Audit 收据的 `synara-data-residency-statement-v1`；candidate
+      selection 与 placement commit 都 fail closed，home Region 更新也不能逃逸已生效边界。边界合同见
+      `docs/contracts/data-residency-v1.md`。`scripts/stage6-residency/validate_data_residency_evidence.py` 已用完整
+      processing-plane inventory、同 policy head 的 failover/evacuation、越界目标拒绝、三方分离审批与逐文件 hash
+      生成永久非批准收据；八份附件现必须是共享 Tenant/candidate/policy subject 的严格 JSON，Annex/runtime inventory
+      逐 plane 一致，browser statement、双演练及三方审批逐层绑定，并以 `evidenceSetSha256` 进入 v2 candidate bundle。
+      `stage6:residency:prepare` 进一步从同一 evidence root 的 path-only draft 稳定有界读取八份最终附件，拒绝
+      Secret、重复 JSON、symlink/traversal 与输出碰撞，自动生成摘要并以 `0600` 原子发布 manifest/receipt 四文件；
+      receipt 发布失败会回滚 manifest，失败演练仍保留为不可评审收据。收据明确不声称已验证密码学签名或部署
+      authority。但 PostgreSQL、Artifact、KMS、备份、日志、Support 与 Provider
+      处理 Region 仍需逐部署签署 annex 并用真实 failover/evacuation 报告核对，所以目前只能承诺 execution
+      placement，不能宣称全数据驻留，本项保持未完成。
 
 #### TODO — 可靠性、发布与安全验收
 
-- [ ] 定义 PostgreSQL、S3、KMS、Queue 的备份、恢复和 RPO/RTO。
-- [ ] 定期执行数据库恢复、对象恢复和区域灾备演练。
-- [ ] 定义 Availability、API Latency、Execution Start Delay、Event Delay 等 SLO（交互式冷启动
+- [x] 定义 PostgreSQL、S3、KMS、Queue 的备份、恢复和 RPO/RTO。合同
+      `docs/contracts/backup-recovery-rpo-rto-v1.md` 冻结 PostgreSQL PITR（5m/60m）、对象版本副本
+      （15m/120m）、cloud multi-Region KMS（0/60m）或 Vault Raft snapshot（24h/120m），以及以 PostgreSQL
+      Outbox 为权威的 Queue replay（5m/60m）。它明确不把逻辑 dump、备份成功或 broker 快照当恢复证据，
+      也不把不同数据类别混成一个更好看的平台 RPO。
+- [ ] 定期执行数据库恢复、对象恢复和区域灾备演练。Recovery v2 收据现已绑定完整 candidate、lockfile、
+      Regions、origins、全部 Artifact、Migration tail 与恢复后的 release identity，并以单一 subject 约束 Database、
+      KMS、Operations、Security、Storage 五个分离角色审批及完整时间窗口；它仍明确不验证真实备份 authority、
+      审批人 authority 或密码学签名，不能替代生产恢复演练。
+      `stage6:recovery:prepare` 现强制采用 path-only `subject` → `final` 两阶段：先以空 approvals 冻结四组件证据
+      subject，再由五份独立审批绑定该摘要，最后原子发布 `0600` manifest/结果及 sidecar；稳定有界读取、重复
+      JSON、symlink/traversal、常见凭据扫描及第二对文件发布失败回滚均有回归测试，但这仍只是证据采集门禁。
+      Migration `000121`、`internal/recoverygovernance` 与 Platform Admin → Recovery drills 已把 exact receipt、四组件
+      重算投影、失败收据保留及五个 `recovery.*` Platform 职能审批固化为服务和 PostgreSQL/SQLite 权威；Migration
+      `000143` 又要求五项审批分别绑定 exact external evidence bytes 的非零 `sha256:`，将旧 URL-only decision
+      supersede、重开其曾批准的 Drill，并在 Recovery 与 Release 两层 forward gate 重验五项摘要；内部
+      approved 仍不把尚未执行的真实生产恢复升级为通过，因此本项继续保持未完成。
+- [x] 定义 Availability、API Latency、Execution Start Delay、Event Delay 等 SLO（交互式冷启动
       SLO 由 Stage 4 与 fast-provision 提案定义，本阶段负责对外承诺口径）。
-- [ ] 建立错误预算、告警分级、On-call 和事故响应流程。
+      `docs/contracts/enterprise-service-level-objectives-v1.md` 冻结 30 天窗口、99.9% 外部 Availability、
+      99%/2.5s API、99%/60s Provider-ready 与 99.9%/1s Event append；Prometheus 已增加 good ratio、样本量、
+      error budget 与 5m/1h fast-burn 规则。`scripts/stage6-slo/validate_slo_evidence.py` 进一步重算预算、校验
+      三 Region/30 秒探针覆盖、四类最小样本、告警/companion review 与六份证据 hash；无外部 probe/样本不足
+      只能是 not-assessable，收据固定为 `evidence-validated-not-slo-passed`，不能报通过。
+      `stage6:slo:prepare` 现从 path-only draft 对六份来源执行稳定有界读取、Secret/重复 JSON/路径安全检查，
+      自动派生 hash，并原子发布 `0600` manifest/receipt 与 sidecar；失败窗口仍被保留，第二对发布失败会回滚
+      manifest。这补齐了真实 30 天窗口的安全采集入口，但不等于已有真实生产窗口。
+- [ ] 建立错误预算、告警分级、On-call 和事故响应流程。错误预算公式、25%/0% 发布限制、SEV 分级、角色、
+      响应/内部通告时限与演练频率已落在 SLO 合同、`docs/runbooks/slo-error-budget-report.md` 和
+      `docs/runbooks/enterprise-incident-response.md`。Migration `000118`、`internal/slogovernance` 与 Platform Admin →
+      SLO windows 已将 exact receipt、四项预算投影、失败窗口、Engineering/Operations/Security/Product 分权审批及
+      Audit 产品化，并在临时 PostgreSQL 17 验证并发收敛与不可变历史；Migration `000142` 又要求四项审批各自
+      绑定 exact external evidence bytes 的非零 `sha256:`，将旧 URL-only 决策标记为 superseded，并把它们曾
+      授权的 Window 重新打开为 `recorded`；SLO 与 Release 两层 forward gate 都重验四项 byte-bound 决策。
+      当前仍缺每个生产部署的实名 primary/secondary rota、
+      Paging/Status Board 配置、真实 30 天生产窗口及演练证据。SLO 与事故演练校验器只能固定这些外部证据，
+      不能替代其执行，故本项保持未完成。
 - [ ] 完成结构化日志、Tracing、Metrics 与 Tenant 安全边界审计。**现状核查（2026-07-27）**：
       结构化日志（slog）与 Metrics（Stage 4 已建大量 bounded 指标与滚动预聚合）已具备；
-      分布式 Tracing 实质缺失——仅 `httpapi/server.go` 发出 `Traceparent`/`X-Trace-ID` 响应头，
-      控制面内部包无 OpenTelemetry 接入，跨 Control Plane → Worker → Provider 的链路无法串联。
-      本条的真实缺口是 Tracing 落地与 Tenant 边界审计。
+      Migration `000104` 与 `internal/tracing` 已接通 OTLP/W3C：HTTP server span 在 Execution 创建时冻结
+      不可变 traceparent，Worker claim 交给 agentd 延续 `worker.execution`/`provider.run`，Provider Host 收到
+      只读 `SYNARA_TRACEPARENT`；跨 Target successor 继承源 Execution parent。无 exporter 时保持 correlation，
+      有 endpoint 时按 parent-based ratio export；PostgreSQL 16 与 SQLite 均验证格式/不可变边界。Trace ID
+      明确不参与授权、幂等、fencing 或调度，也不得附带 Prompt/Secret/Provider payload。企业 Control Plane
+      exporter 现会在启动前强制绝对 HTTPS OTLP/HTTP endpoint、完整 mTLS client identity、bounded collector Region
+      与 1–90 天 retention 声明；非 Local agentd 使用独立的无凭据策略，只允许 credential-free HTTPS 或带显式端口的
+      IP-loopback relay，拒绝 Header、client certificate/key 和 insecure override。URL credential/query/fragment、
+      相对 certificate path、协议漂移和缺项均 fail closed。Region/retention 会成为 bounded resource metadata，但不
+      冒充 collector 的实际 IAM、Network、落盘 Region 或删除执行证据。Kubernetes 主生产清单现也以默认关闭的
+      ConfigMap endpoint/protocol/Region/retention 和只读 Secret mTLS volume 装配 Control Plane 策略；Stage 6 静态门禁会拒绝
+      默认启用 endpoint、可写 identity、缺少数据策略或暴露 insecure/header-auth override。动态 native/Warm Worker
+      Pod 与 sandbox-operator standard 模板只从 Target Namespace 按完整 Target UUID 命名、可选的 operator-owned ConfigMap 读取
+      无凭据 exporter 配置，避免共享 Namespace 的 Target 共用 policy；Pod identity 会拒绝资源改名、必需引用、Header/client identity/insecure 注入；Collector identity 由 agentd 文件系统之外的 relay/service mesh 持有。
+      Docker 与 SSH agentd 现从 Control Plane operator-only 根目录派生 Target UUID 子目录：Docker 只读 bind、SSH
+      只传派生远端路径，agentd 在 tracing 前以白名单解析并拒绝 symlink、可写 authority、Header/insecure、冲突值和
+      server-CA 路径逃逸与 client identity；Target JSON 不能选择宿主机路径。Cocoon guest 仍由其 Target-local 部署 authority 配置。当前剩余缺口是完整 Tenant 安全边界审计
+      与生产 collector 的真实访问、Retention/Region 验收，因此本项保持未完成。
+      `scripts/stage6-security/validate_route_auth_boundaries.py` 现会枚举 304 个 ServeMux route，确保 122 个显式
+      Tenant route 全部处于 Login Session 外层，并对 Platform signature、Worker、SCIM 与 Artifact content token
+      入口 fail closed；但它明确不能证明对象 ownership/SQL predicate，剩余审计矩阵见
+      `docs/plans/stage-6-tenant-security-boundary-audit.md`。聚焦机器矩阵现固定 112 条高风险证据、620 个操作组、
+      47 个 Go package 与 79 个测试源文件；95 条无环境依赖的本地可执行证据通过，17 条 PostgreSQL 环境门槛
+      在常规收据中继续明确为 source-only。2026-08-01 新增显式 `--run-postgres-tests` 路径：要求单一
+      PostgreSQL URL authority，将两套历史测试环境变量统一到同一值，逐测试使用独立且自动清理的 schema，
+      并把 skip/missing/fail 全部视为失败；2026-08-02 临时 PostgreSQL 17 已统一执行 17/17 条通过且无 schema 残留。
+      收据仍把数据库标记为 operator-supplied/not-attested，因此该结果不冒充生产 Tenant 安全审计。
+      本轮环境、命令、矩阵摘要和证据边界记录在
+      [`stage-6-tenant-isolation-local-postgres-20260802.md`](docs/reports/stage-6-tenant-isolation-local-postgres-20260802.md)。
+      Prometheus 的唯一 label serializer 现也在运行时拒绝 Tenant/User/Session/Execution/Credential/Trace 等
+      标识型 key、任意 `*_id|*_uuid|*_digest|*_token|*_secret` 以及 UUID、Commit/Digest、URL、Email、常见
+      Credential 形状和超长值；histogram/quantile 的追加标签走同一门禁，拒绝 panic 不回显被拒值。
+      身份矩阵又逐条枚举 122 条显式 Tenant route：有效 Support Grant 的 GET 可达且每次写 Audit，所有写路由
+      在 handler 前返回 `support_access_read_only`；仍属于 Platform Operator Tenant、但没有 Grant 的账号在所有
+      非恢复路由被清除客户上下文并返回 `tenant_not_found`，唯一 middleware 恢复例外也由真实 Owner handler 拒绝。
+      Worker request receipt 现经 Migration `000133` 持久绑定 Tenant、Execution、Generation 与 Target；所有
+      Execution lease 相关幂等重放会先锁定并复验这组权威字段以及 Session 当前 Target，旧 incarnation、successor
+      Generation 或 Session Target 迁移后的请求不再返回历史成功响应，Workspace cleanup 等独立 fenced queue
+      仍使用自己的 dispatch authority。临时 PostgreSQL 17 已执行 Migration `000133` 并分别通过 successor
+      Generation 与真实 Session Target move 两条 replay 门禁；每个测试 schema 均自动清理且容器已删除。
+      适用于成员离职的身份矩阵也已闭合：人工/SCIM offboarding 在同一事务撤销 Web/Desktop Session、用户
+      Credential 与待兑换 Desktop Enrollment，分别写入 Audit 计数；成员重新启用不会恢复旧 Enrollment、
+      Session、Organization Membership 或 Credential。跨 Tenant 的 user-global Device 注册不授予独立访问，
+      只允许 Platform Admin 或用户认证后的 Disconnect 撤销，客户 Tenant offboarding 不越权修改。SQLite 产品
+      路径及 PostgreSQL 17 连接态/待兑换链接用例均通过；Service Account/Worker 继续使用独立 Tenant-owned
+      生命周期，Artifact content token/对象存储 presign 作为有界 capability 留在资源与对象存储审计门禁。
+      2026-07-31 已另用临时 PostgreSQL 17 执行三条精确门禁并通过；该次运行同时修正 interaction 测试的合法
+      时间线、确保已 sweep 的请求稳定返回 `interaction_expired`，并验证 Support authority 不可变和离职撤权。
+      2026-08-01 又在精确命名并自动清理的临时 PostgreSQL 17 上执行 Migration `000112`，验证七类 Control、
+      accepted release manifest、四角色并发 start-gate decision、`record_complete` 以及 Program/Evidence 防篡改。
+      同日 Migration `000113` 也在独立临时 PostgreSQL 17 上验证四角色并发 Provider 商业审批、active Hosted
+      fence 以及 Authorization/Approval 防篡改；常规无环境收据仍保留 source-only 标记。
+      Migration `000114` 随后在四个隔离 PostgreSQL 17 数据库验证职能授权并发单胜者、撤销即时生效、Release/
+      Compliance/Provider 决策数据库门禁与历史防篡改；常规矩阵把该环境测试作为第 7 条 source-only 证据。
+      Migration `000115` 又在独立 PostgreSQL 17 数据库验证影响域不可变、商业影响候选五角色并发审批及
+      Privacy/Legal 缺失时的数据库阻断；Migration `000116` 再要求候选保存 exact-byte v2 evidence receipt，
+      服务端重算摘要并核对九类 review-ready 证据及 candidate/commit/lockfile/environment/Desktop artifact-set，
+      PostgreSQL/SQLite 拒绝跨候选复用和直接篡改。该结果仍是本地数据库门禁证据，不替代真实公司审批。
+      Migration `000117` 同日在临时 PostgreSQL 17 上验证事件通告证据并发串行化、固定 Status Board origin 和
+      事件/内部时间线不可变；常规矩阵仍将该 PostgreSQL 行保留为 source-only。
+      Migration `000118` 随后验证 exact SLO window receipt、四职能并发审批收敛与历史不可变；常规矩阵同样
+      将该 PostgreSQL 行保留为 source-only。
+      Migration `000119` 又在全新 PostgreSQL 17 验证完整九类投影候选可进入分权审批、空 projected control
+      receipt 不能绕过服务经数据库直写；SQLite trigger 也执行同一空投影阻断。该结果仍不验证外部签名或控制执行。
+      Migration `000120` 进一步要求 Release candidate 在进入 approved 前已经拥有同候选、同 Operator Tenant、
+      eligible 且四职能内部批准的不可变 SLO window；服务、SQLite 与 PostgreSQL 均阻断缺失或跨候选 SLO 门禁。
+      这只组合产品内审批权威，仍不替代真实 30 天生产窗口或外部 SLO 证明。
+      Migration `000121` 又在全新 PostgreSQL 17 验证 exact Recovery v2 receipt 导入、五职能并发审批收敛以及
+      receipt/组件/审批历史不可变；SQLite 执行相同投影与职能 authority 门禁。该结果仍不替代真实生产备份恢复。
+      Migration `000122` 进一步要求 Release candidate 在进入 approved 前已经拥有同候选、同 Operator Tenant、
+      eligible、四组件目标与 canary 通过、五份来源决策通过且外部权威边界未弱化的内部 approved Recovery drill；
+      服务、SQLite 与全新 PostgreSQL 17 均阻断缺失、跨候选及数据库直写绕过。该门禁仍不替代真实生产恢复证明。
+      Migration `000123` 又将 candidate bundle 引用的 exact Penetration receipt、Commit、环境、四类 Artifact、
+      Stage 5 依赖、独立性声明、六类攻击面、方法论及 High/Critical projection 固定为服务和数据库权威；
+      Engineering/Product/Security 三个不同 `penetration.*` 职能审批才能形成内部 approved。Migration `000124`
+      再要求 Release candidate 消费同候选、同 Operator Tenant 的上述批准记录；服务、SQLite 与全新 PostgreSQL
+      17 已验证三职能并发收敛、不可变历史，以及 Release 缺失门禁和数据库直写绕过阻断。该门禁仍明确不验证
+      第三方身份、签署报告、密码学签名或真实执行。Migration `000144` 进一步要求三份内部审批各自保存所审
+      外部证据精确字节的非零小写 SHA-256；历史 URL-only 决策会被 supersede，原 approved Engagement 重开，
+      Release 的 approved/deploying/observing/released 状态都按三份 active byte-bound 决策 fail-closed 重验。
+      Migration `000125` 继续将 exact Capacity/soak receipt、24/72 小时连续窗口、forecast+headroom、五阶段、
+      五类扰动、三 Region 探针以及 SLO/饱和度/Tenant fairness 投影提升为 Platform Capacity Governance；
+      Engineering/Operations 两个不同 `capacity.*` 职能审批才能形成内部 approved。Migration `000126` 要求
+      Release candidate 消费同候选、同 Operator Tenant 的批准记录；服务、SQLite 与临时 PostgreSQL 17 已验证
+      两职能并发收敛、不可变历史、缺失门禁和数据库直写绕过阻断。该门禁不验证真实环境、遥测、签名、
+      外部审批权威或长稳执行。
+      Migration `000127` 进一步把 exact Incident exercise receipt、独立 HTTPS Status Board origin、六角色分权、
+      SEV paging/ack/escalation、六个内部组件、内部时间线节奏、员工通知投递、恢复观察、复盘标志以及 manifest/
+      七份 evidence 引用提升为 Platform Incident Exercise Governance；Operations/Communications 两个不同的
+      `incident_exercise.*` 职能审批才能形成内部 approved。Migration `000128` 要求 Release candidate 消费同候选、
+      同 Operator Tenant 的上述记录；服务、SQLite 与临时 PostgreSQL 17 已验证两职能并发收敛、不可变历史、
+      缺失/跨候选门禁和数据库直写绕过阻断。该门禁不验证真实 Status Board、paging、员工通知投递、签名、执行或
+      外部审批权威。Migration `000146` 进一步要求 Operations/Communications 两份审批各自保存所审外部证据
+      精确字节的非零小写 SHA-256；历史 URL-only 决策会被 supersede，原 approved Exercise 重开，Release 的
+      approved/deploying/observing/released 状态都按两份 active byte-bound 决策 fail-closed 重验。
+      Migration `000129` 又把 exact Operations browser exercise receipt、Control Plane/Web/Admin Artifact、双 HTTPS
+      origin、11 个分离账号、48 项正向/固定负向角色、全局唯一 request ID、零开发工具回退、Support 四眼闭环及
+      原始 Operations/Security 签署提升为 Platform Operations Exercise Governance；两个不同的
+      `operations_exercise.*` 职能审批才能形成内部 approved。Migration `000130` 要求 Release candidate 消费同候选、
+      同 Operator Tenant 的上述记录；服务、SQLite 与临时 PostgreSQL 17 已验证两职能并发收敛、不可变历史、
+      缺失/跨候选门禁和数据库直写绕过阻断。Operations 收据自身的导入/审批属于 Release 元治理，不加入其治理的 48 项演练矩阵，
+      避免收据自引用死锁；内部状态仍不验证真实部署、浏览器 Session、Audit/evidence authority、签名或执行。
+      Migration `000147` 进一步要求 Operations/Security 两份审批各自保存所审外部证据精确字节的非零小写
+      SHA-256；历史 URL-only 决策会被 supersede，原 approved Exercise 重开，Release 的
+      approved/deploying/observing/released 状态都按两份 active byte-bound 决策 fail-closed 重验。
+      历史 Migration `000131` 随后把 exact Billing exercise receipt、同候选/Migration/Artifact/origin 身份、Stripe live
+      mode/API version、固定 10 场景与 24 份唯一证据、金额/税额/settlement cardinality、数据边界和来源三签署
+      提升为 Platform Billing Exercise Governance；Finance/Security/Release 三个不同的 `billing_exercise.*`
+      职能审批才能形成内部 approved。Migration `000132` 要求 Release candidate 消费同候选记录；服务、SQLite
+      与临时 PostgreSQL 17 已验证三职能并发收敛、不可变历史、缺失/伪造/跨候选门禁和数据库直写绕过阻断。
+      该门禁现仅为迁移兼容记录，不属于 `internal-self-hosted` 产品或当前 GA 证据。Candidate v4 已由
+      Migration `000152`/`000153` 切换为内部用量/成本收据；Stripe 记录只允许历史 v2/v3 离线审计读取。
+      Migration `000148` 进一步要求 Finance/Security/Release 三份审批各自保存所审外部证据精确字节的非零
+      小写 SHA-256；历史 URL-only 决策会被 supersede，原 approved Exercise 重开，Release 的
+      approved/deploying/observing/released 状态都按三份 active byte-bound 决策 fail-closed 重验。
+      全部 26 个直接接受 `identity.Principal` 的生产服务包现至少有一条分类证据，未来新增未分类包会让校验器
+      失败。方法级清单另枚举 175 个导出 `Service` 入口：174 个
+      已映射到直接调用它们的聚焦测试，1 个已授权且持锁的内部事务 hook 以源码契约单列，未分类数为 0；该方法
+      清单闭合仍不等于分支、身份、并发与部署边界的操作级穷尽。登录中间件
+      在 handler/body 之前统一拒绝 121 条非恢复显式 Tenant 路由的活动上下文替换。其收据仍明确为
+      not-audit-passed，尚未覆盖每个资源族/身份/部署面。
 - [ ] 执行跨 Tenant 越权、SSRF、命令注入、路径穿越、供应链和容器逃逸测试（**验收 Stage 5 的
-      修复成果**；Stage 5 未完成前本条不得开始，否则只会重复记录已知缺口）。
-- [ ] 对 Worker Image、Provider CLI、依赖和 SBOM 建立签名与漏洞扫描。
-- [ ] 完成 Secret 管理、生产配置、证书、域名和密钥轮换流程。
-- [ ] 建立数据库 Migration、协议版本、Worker Image 和前端的**跨组件兼容发布矩阵**。注意去重：
+      修复成果**；Stage 5 未完成前本条不得开始，否则只会重复记录已知缺口）。验收合同与运行手册已落在
+      `docs/contracts/third-party-penetration-acceptance-v1.md`、`docs/runbooks/third-party-penetration-test.md`；
+      `scripts/stage6-penetration/validate_penetration_evidence.py` 会固定 Stage 5 精确部署面、独立评估方、Web/API/
+      Worker/Provider Host 候选 Artifact、六类必测攻击面、发现项状态、Critical 必须复测关闭、High 最长 30 天
+      双人风险接受及九份独立证据 hash。开放高危和范围缺口会被保留为失败收据，收据固定为
+      `evidence-validated-not-penetration-passed`。Migration `000123`、`internal/penetrationgovernance` 与 Platform Admin →
+      Penetration reviews 已把 exact receipt、候选 Artifact 投影及 Engineering/Product/Security 分权审批产品化；
+      `stage6:penetration:prepare` 现从 path-only draft 对九份来源执行稳定有界读取、Secret/重复 JSON/路径安全
+      检查，自动派生 hash，并原子发布 `0600` manifest/receipt 与 sidecar；开放 High 仍产生不可评审收据，第二对
+      文件发布失败会回滚 manifest。这只补齐证据采集完整性，不证明第三方实际执行或签名真实性。
+      Migration `000124` 同时把同候选内部 approved 状态接入 Release gate。当前仍缺真实第三方授权、执行、
+      签署报告与外部 Security 评审，故本项保持未完成。
+- [x] 对 Worker Image、Provider CLI、依赖和 SBOM 建立签名与漏洞扫描。复用 Stage 3 已完成的正式供应链，
+      不复制第二套：Provider CLI/Claude SDK、APK、Base Image、BuildKit frontend/SBOM generator 均由 lock 或
+      digest 固定；Worker manifest 产出规范化 SPDX SBOM；production profile 使用 Vault Transit KMS Cosign、
+      Rekor inclusion proof 与 Kyverno fail-closed admission；Trivy 同时扫描 vuln/secret，阻断未豁免
+      HIGH/CRITICAL、Secret、EOSL 和超过 24h 的 DB，例外必须有 owner/reason/expiry 且 unused/expired 也失败。
+      当前聚焦回归为 registry supply-chain `49/49`、Worker image manifest `2/2` 通过。此勾选只表示机制已
+      建立；每个 GA candidate 的真实双架构 digest、SBOM、扫描、签名、tlog 和 admission 证据仍必须在
+      release checklist 单独通过。Stage 6 已增加 `validate_worker_supply_chain_evidence.py`，用 exact-byte Registry
+      report hash、clean commit 与 Worker digest 把 release manifest、Registry gate 和 Vault/KMS admission 报告绑定，
+      三份输入均以稳定有界 regular-file 读取，同一字节用于 Secret/重复 JSON 检查、语义验证和 hash，拒绝 symlink
+      与读取期漂移；收据以 `evidence-validated-not-worker-supply-chain-approved` 明确保留外部 authority/人工审批边界。
+      candidate bundle
+      已显式升级为 v3，第十份收据同时接入受保护发布、Release Governance 与 PostgreSQL/SQLite Migration `000134`；
+      v2 仅保留历史读取，不能授权新的或活动中的发布候选。Migration `000135` 又把 Final Review v1 精确收据
+      作为 `observing -> released` 的强制门禁：服务与 PostgreSQL/SQLite 均要求 append-only 绑定，并逐字匹配最终
+      决定摘要和规范化残余风险。数据库触发器还独立重验 32 个唯一 Control/Owner、非空 JSON array、分离角色/
+      approver、时间闭包、Audit request UUID 与 evidence/risk 结构；重新计算摘要的重复 Control 直写在 SQLite 与
+      临时 PostgreSQL 17 均被拒绝。SQLite 现通过连接级 deterministic `synara_sha256(blob)` 重算精确收据摘要，
+      不再只检查 32 字节长度；合法绑定/发布/不可变历史链路通过。Platform Admin 的 released 转换直接只读复用
+      收据绑定的决定摘要和风险清单，不再让操作者二次抄写；readiness API 在既有九项 approved 门禁之外单独返回
+      `finalReviewGate` 和 `releaseTransitionEligible`，页面明确区分内部审批完成与可进入 released。内部 eligibility
+      仍不冒充外部 GA authority。
+- [ ] 完成 Secret 管理、生产配置、证书、域名和密钥轮换流程。工程基线已新增 Migration `000105`、
+      `internal/kmsrotation` 与 `control-plane-metadata rewrap-kms`：Provider Credential、OIDC/SAML Secret 和登录
+      Attempt 共享 primary+decrypt-only keyring，rewrap 只换 wrapped data key、不改业务密文/版本，并以精确
+      数据库授权、逐 Tenant Audit、不可变 run/entry/receipt、断点续跑与最终零旧 Key inventory fail closed；
+      Local/AWS KMS 的两阶段 rolling bridge、Secret/Worker/存储/证书/域名步骤见
+      `docs/contracts/credential-kms-rotation-v1.md` 与
+      `docs/runbooks/production-secret-certificate-domain-rotation.md`。Migration `000106`、具名 runtime keyring 与
+      `control-plane-metadata rekey-runtime-secrets` 进一步为 Cursor v2/Target legacy 密文提供兼容读取，为新密文
+      写入经认证 Key ID，并在线 CAS 重加密 usable Provider Cursor 与 Target Configuration；逐 Tenant Audit、
+      platform Target 全局不可变 entry、可恢复 run、收敛 receipt 和旧 Key 缺失 fail-closed 均已覆盖。SQLite
+      端到端和 PostgreSQL 16 迁移/收据封闭性实测通过。现又新增
+      `production-rotation-acceptance-v1.md` 与 `validate_production_rotation_evidence.py`，把同候选/Migration/Region
+      身份、Credential KEK、runtime key、Worker registration、PostgreSQL、Artifact、Billing、OTLP relay、TLS、DNS
+      九类轮换，逐项 owner/approver 分离、五份唯一 evidence、新路径、旧 authority 最终状态、rollback、零风险、
+      Secret scan 与 Security/Operations/Release 三方决定冻结为不可覆盖 `0600` 收据；明显 private key、live
+      provider key、Bearer 和带凭据 URL 会在不回显值的前提下失败。收据固定为
+      `evidence-validated-not-production-rotation-passed`，不验证外部 provider/人员/签名 authority；真实生产演练
+      证据仍缺，故本项保持未完成。`stage6:rotation:prepare` 又将运营输入降为只含相对路径的 draft，自动计算
+      49 份 evidence 摘要、完整校验后才原子发布 manifest/receipt 四文件；第二对发布失败会回滚第一对，避免
+      人工抄 hash 或留下半套 GA 证据。
+- [x] 建立数据库 Migration、协议版本、Worker Image 和前端的**跨组件兼容发布矩阵**。注意去重：
       Worker Release 的 canary/promote/rollback **机制**已由 Stage 3 完成并落在
       `internal/workerreleases`（含 `auto_rollback.go`、`scheduling.go` 与对应 API 路由），
       Worker/Pod Drain 与滚动升级也已由 Stage 4 完成。本阶段**不重复实现这些机制**，只负责它们
-      之间的兼容矩阵。
-- [ ] 建立发布评审、审批与对外变更通告流程：谁批准、按哪份 checklist 门禁、如何对外公告，与
+      之间的兼容矩阵。机器基线 `docs/release-matrices/stage-6-compatibility-v1.json` 冻结 Migration `000163`
+      checksum、API v1、Web/Admin/Desktop/Server/Contracts `0.6.3`、Worker Protocol 2、Runtime Event read 1..2/write 2、
+      Provider Host accepted 2.1+/produced 2.2 与 Worker Manifest schema 3；
+      `scripts/stage6-compatibility/validate_compatibility_matrix.py` 会直接读取源码常量、包版本和 Migration
+      尾部 fail closed，并拒绝同一数字版本对应不同文件；现进一步对 matrix、8 个 package manifest、协议/API
+      源码与完整 Migration lineage 做稳定有界非 symlink 读取，拒绝重复 JSON/明显凭据，并用同一捕获字节解释
+      源码和计算尾部摘要，收据记录精确源文件/字节数量。并行 runtime-isolation 分支占用已进入 HEAD 的
+      `000107` 后，未部署的 Desktop Enrollment 已改号为 `000108`；全新 PostgreSQL 17 数据库实际记录了
+      `107=execution_runtime_isolation_decisions` 与 `108=desktop_enrollment`，Schema readiness 和 Desktop
+      并发兑换/rotation 均通过；`000109=commercial_subscription_billing` 现仅作为历史迁移保留，当前
+      `internal-self-hosted` runtime 不包含支付 provider、Checkout/Portal API、客户端方法、UI、监控或部署配置。
+      `000154` 进一步清空 Subscription 的历史 provider 字段并将 Migration `000109` 的支付表冻结为只读；
+      `000155` 将已有 `billing_admin` 归一为 `cost_admin`，`000156` 验证新角色约束。当前权限固定为
+      `cost.manage`，公开内部成本核算路由固定为 `/v1/tenants/{tenantID}/cost-accounting/*`。
+      `000157` 再将新的 Operations exercise 固定到 48 项 `internal-self-hosted-v4` 矩阵，把内部成本收据导入与
+      分权审批纳入浏览器运营证据；历史 46 项 v3 和支付时代 v2 记录仅保留审计读取。
+      `000162` 再将当前 Operations 收据升级为 v2，要求逐 Grant 撤销与系统到期两类 Audit 证据；历史收据字节
+      保持不可变，但 v1 决定失去正向 Candidate/Release authority。临时 PostgreSQL 17 已验证 161→162 重开、
+      supersede、v1 再审批拒绝及新 v2 双审批闭环。
+      Migration `000163` 与 Candidate v5 进一步关闭“合同要求复制兼容矩阵、候选却未绑定其字节”的发布旁路：
+      preparer 接受独立 compatibility matrix 输入，Python 会对捕获字节重新执行 source checker，并要求其 Migration
+      tail 与 Release Evidence 一致；受保护 TypeScript、Go 服务、PostgreSQL 和 SQLite 均重验 schema/version、非零
+      摘要、source inventory、唯一路径与 exact Migration tail。活动 v4 Candidate 必须关闭或重建，终态 v2-v4
+      仅保留审计历史。该开发闭环仍不替代在真实完整发布中执行 previous-build forward-schema、Worker
+      canary/promote/rollback 与观察窗口，因此完成条件继续保持未勾选。
+      `000158` 将历史 Billing exercise 及审批在 PostgreSQL/SQLite 全部冻结为只读，并删除未注册但仍可调用的
+      Go 服务包与 Stripe 收据夹具；当前源码仅保留迁移兼容读取和候选 v2/v3 离线审计解析。
+      `000110=support_access_operator_authority` 再把 Support Grant 固定到 Platform Operator Tenant，旧的未绑定
+      pending/active Grant 不会被授权，并已在临时 PostgreSQL 17 验证双连接批准、authority 不可变与离职撤权。
+      `000111=stage6_release_governance` 固定精确发布候选与分离审批，`000112=stage6_compliance_governance`
+      固定控制 Owner、证据摘要/复核和合规 start-gate；两者均已在临时 PostgreSQL 17 验证并发及不可变约束。
+      `000113=provider_commercial_authorization` 再把 Hosted Provider 商业授权、四角色审批与 Enterprise remote
+      claim gate 固定到同一兼容尾部。
+      `000114=stage6_governance_authority` 将 Release、Compliance 与 Provider commercial 的职能角色从自报字符串
+      提升为 Owner 授予、限时、可撤销且受 offboarding 实时约束的 Platform 权威。
+      `000115=stage6_release_impact_scope` 再冻结发布影响域，并由服务与数据库推导条件式 Privacy/Legal 第五审批；
+      商业、隐私、Residency、受监管客户或安全事件候选缺少该审批时不能进入 approved。
+      `000116=stage6_release_evidence_receipt_binding` 将候选 receipt 从手工摘要升级为 exact-byte 上传与不可变数据库
+      证据；摘要、schema、eligibility、九类 receipt、候选身份和 Desktop artifact-set 任一不符都不能进入 review。
+      `000117=stage6_incident_governance` 再将事件 identity、角色分离、独立 Status Board origin、内部更新顺序/节奏与
+      Security/Privacy 关闭审批固定为数据库权威；临时 PostgreSQL 17 已验证 Migration、并发证据串行化与历史不可变。
+      `000149=stage6_incident_resolution_approval_evidence_digest` 进一步要求关闭审批绑定所审 containment/recovery
+      证据精确字节的非零小写 SHA-256；URL-only 历史决策会被 supersede，已结束事件不改写，仍在 monitoring
+      的事件必须补录 active byte-bound decision 才能进入 resolved。
+      `000161=internal_incident_communications` 将活动 API、候选收据和发布投影切换为内部 Status Board、员工通知和
+      internal-user-path 词汇；历史列名保持兼容。它只保存内部通告证据，不会代替真实部署、值班或候选环境演练。
+      `000118=stage6_slo_window_governance` 将 exact 30 天 SLO receipt、四项 budget projection、失败窗口和四个分离
+      职能审批固化为产品/数据库权威；它不把内部 approved 状态冒充生产 SLO claim。
+      `000119=stage6_release_receipt_projection_guard` 再使九类 projected receipt、候选 Artifact/Region/origin/Migration、
+      manifest/release-evidence reference、Desktop artifact-set 与 Recovery/Residency 外部权威边界由服务和数据库
+      双重校验；空对象、schema 漂移、路径复用或弱化验证边界不能进入发布人工审批。该门禁不验证外部签名或真实执行。
+      `000120=stage6_release_slo_approval_gate` 要求候选绑定的 eligible SLO window 已经通过四个分离职能的内部审批，
+      才允许 Release Governance 进入 approved；服务和两种数据库都拒绝缺失或跨候选的 SLO 门禁，且不将其表述为生产 SLO。
+      `000121=stage6_recovery_governance` 将完整 Recovery v2 receipt、恢复 identity、四组件投影和五个来源决策
+      接入 Platform Recovery Governance，并要求 Database/KMS/Operations/Security/Storage 五个不同职能 authority；
+      服务与两种数据库保留不可变历史，但不验证外部 backup authority、审批身份或签名。
+      `000122=stage6_release_recovery_approval_gate` 要求候选绑定的 eligible Recovery drill 已经通过五个分离职能的
+      内部审批，且外部权威边界保持显式，才允许 Release Governance 进入 approved；服务和两种数据库都拒绝
+      缺失、跨候选或弱化边界的 Recovery 门禁，且不将其表述为真实生产恢复证明。
+      `000123=stage6_penetration_governance` 将 candidate bundle 精确引用的渗透 receipt、候选 Commit/环境/四类
+      Artifact、Stage 5 依赖、独立性、六类范围、方法论和发现项投影接入 Platform 权威，并要求不同的
+      Engineering/Product/Security 职能审批；`000124=stage6_release_penetration_approval_gate` 再要求 Release
+      approved 消费同候选的内部批准记录。两者都保留外部 assessor/report/signature/execution 边界。
+      `000125=stage6_capacity_governance` 将 exact Capacity receipt 与 24/72 小时、headroom、阶段、扰动、探针、
+      SLO/饱和度/公平性投影接入 Platform 权威，并要求不同的 Engineering/Operations 职能审批；
+      `000126=stage6_release_capacity_approval_gate` 再要求 Release approved 消费同候选的内部批准记录。
+      两者都保留真实环境、遥测、签名、执行和外部审批权威边界。Migration `000145` 进一步要求 Engineering/
+      Operations 两份审批各自保存所审外部证据精确字节的非零小写 SHA-256；历史 URL-only 决策会被 supersede，
+      原 approved Capacity Run 重开，Release 的 approved/deploying/observing/released 状态都按两份 active
+      byte-bound 决策 fail-closed 重验。
+      收据只标记 source-compatible，真实 rollout/rollback 仍由每次 GA checklist 验收。
+- [x] 建立发布评审、审批与对外变更通告流程：谁批准、按哪份 checklist 门禁、如何对外公告，与
       产品内更新日志及 Stage 7 的 `Deprecation`/`Sunset` 政策共用同一发布节奏。
-- [ ] 完成用户文档、管理员文档、部署文档和故障排查文档（API 与开发者文档归 Stage 7）。
-- [ ] 【新增】建立产品内更新日志与破坏性变更通告通道，与 Stage 7 的 `Deprecation`/`Sunset`
-      政策共用同一发布节奏，避免对外承诺与产品内公告不一致。
-- [ ] 完成容量测试、长时间稳定性测试、渗透测试和上线评审。
-- [ ] 【新增】编写 `docs/release-checklists/stage-6-enterprise-ga.md`，沿用既有约定（每次发布复制
+      `docs/runbooks/enterprise-release-governance.md` 已冻结 Release Manager、Engineering、Operations、Security、
+      Product、Comms 与条件式 Privacy/Legal 的职责/分权，定义 draft→review→approved→deploying→observing→
+      released/rollback 状态，复用 Stage 6 checklist/evidence、兼容矩阵与 Stage 3/4 Worker rollout。
+      `stage-6-candidate-evidence-bundle-v3` 现强制十份最终外部控制收据使用同一 commit、环境 ID、origin、Region、
+      Migration、lockfile 与 Artifact 集合，包含 Worker supply-chain，避免不同 RC 的成功证据被拼成一次发布结论；
+      准备器先完整校验再以不可覆盖文件发布 manifest/receipt 及 sidecar，一致性收据仍不替代角色审批。
+      十类外部 validator 的 receipt/sidecar 现全部为不可覆盖 `0600` 双文件；除 Billing 的等价加固实现外，其余
+      九类共用同一经覆盖拒绝和 sidecar 回滚测试的 immutable I/O 模块，候选准备器不会消费半发布收据。
+      Desktop Enterprise GA 模式进一步在同一 `release.yml` run 内先生成四平台签名包、等待受保护 environment
+      验收审批，再发布同一批字节并创建 tag；受保护 job 会读取实际 v3 receipt、重算 hash 并校验 eligibility/
+      candidate/commit/lockfile/artifact-set，孤立的合法格式 hash 不再能授权。它还读取当前 environment 与 run approval
+      history，要求禁用管理员 bypass、阻止 self-review、实际 reviewer 与 workflow actor 分离、精确结构化评论且仅允许首轮 run。
+      受保护侧 `stage6-candidate-release-binding.v2` 还独立重验十份 projected receipt 的 schema、固定 non-pass
+      assessment、安全唯一路径、非零摘要、ready 与时间闭包，以及完整 candidate/Release Evidence/Recovery/
+      Residency 结构；此前前九份投影可为空对象而只依赖顶层 eligible 的缺口已由负向及 Python→TypeScript
+      跨语言契约测试关闭。
+      `stage6:environment:prepare` 再把 verified receipt 与独立 candidate/commit/run ID 收口为不可覆盖的 `0600`
+      配置及 sidecar，机器派生五个 Environment 变量、receipt base64 secret 和结构化审批 comment，避免人工重算/
+      转录；`stage6:environment:apply` 进一步要求 GitHub Environment 已由管理员在 UI 禁用 bypass，未满足时零写入，
+      并向 GitHub 重验 exact first-attempt active release.yml run、仓库、commit 与 source branch protection；分支必须
+      enforce admin、dismiss stale review、至少一票审批、strict status checks 且禁止 force-push/delete。随后才以两到
+      六个唯一 User/Team ID 配置 prevent-self-review 与 protected-branch-only，通过 stdin 写 secret，并回读 Environment、
+      五个变量与 secret presence 后生成私有、不可覆盖的 application receipt。GitHub 不允许回读 secret 值，因此该
+      收据明确只证明配置应用，不冒充环境审批或 secret 内容的远端回读证明。
+      受保护 release job 不信任应用器收据，还会独立下载 exact run 与 branch protection 响应；v2 Environment approval
+      与 v4 Release approval 固定 source commit/branch，并拒绝 workflow ref、仓库或分支保护漂移。
+      候选 ID、commit、run ID 与 receipt 任一不符都会失败，
+      四份 provenance 的稳定 artifact-set SHA 还会在受保护 environment 放行后、授权记录写入前与发布前分别
+      重算，避免 build-only 验收后重建或
+      同一 run 重跑得到不同签名/公证字节却沿用旧收据。
+      Updater manifest 的 merge/copy/delete 也已前移到独立 `finalize_release_assets` job；canonical
+      `release-final-asset-set.json` 覆盖最终公开 installer、blockmap、YAML、provenance 与 attestation，受保护审批与
+      发布前均重验。Updater verifier 还把 default/channel alias、版本、架构、basename、size、SHA-512 与 Windows
+      blockmap 对到真实 payload；branded raw→final verifier 要求除预定义 YAML 变换外的每个公开字节都与获批 raw
+      candidate 一致，发布 job 不再在验签/审批后改写公开字节。
+      Release workflow 默认 token 也已收敛为 `contents: read`：构建仅获得 attestation/OIDC 写权，只有 GitHub
+      Release job 获得 `contents: write`，版本提交使用独立 Release App token；全部远程 Action 固定 full commit SHA，
+      除显式 App push 外的 checkout 均不持久化凭据。
+      2026-08-02 对当前 `origin` fork `hxp0618/synara` 的只读远端核查显示：repository secret 名称、变量、
+      Environment 和 `release.yml` run 均为空，`main` 返回 `Branch not protected`；本地 Stage 6 分支还领先远端
+      15 个 commit 且工作树未收口。因此远端当前不能生成受保护签名候选，详见
+      `docs/reports/stage-6-github-release-environment-readiness-20260802.md`。该状态必须在真实 candidate 前通过明确
+      release repository、clean source、branch protection、protected Environment、分离 reviewer 与签名/公证配置
+      关闭，不能以本地工程门禁替代。
+      `stage6:github:readiness` 已把这次人工核查固化为只读机器投影：从本地 `release.yml` 提取固定 secret/variable
+      名称，Secret 永远只读名称；唯一读取的值是非敏感 repository variable `SYNARA_FINALIZE_RELEASE`，且必须精确
+      为 `1`，错误只报告变量名、不回显值。Windows 未签名例外按 candidate version 命中，readiness 在未知候选版本
+      时不猜测遗留值是否安全，而要求 `SYNARA_ALLOW_UNSIGNED_WINDOWS_RELEASE` 完全不存在；CLI 发布开关仍可选。
+      投影区分 repository 与 candidate Environment 输入，并检查管理员 bypass、
+      self-review、2–6 个有效 `User|Team` reviewer、protected-branch-only 及完整 source branch protection；branch 名
+      会 URL 编码，404 记为缺失而 403 保持权限错误。Organization owner 因未核对组织级 secret visibility 而
+      fail closed；即使全绿也只返回 `github-release-inputs-ready-not-ga-approved`。
+      `stage6:branch-protection` 又补齐该门禁此前缺少的安全配置入口：默认只生成绑定 repository、branch、精确
+      HEAD 与真实 CI job 名称的 canonical plan；只有重复相同输入、显式 `--apply` 且确认 plan SHA-256 才能写入。
+      写前重验 Admin 权限、HEAD 与既有策略，写后重验管理员强制、过期 review 驳回、last-push approval、strict
+      checks、会话解决、线性历史及禁止 force-push/delete；404 可配置而 403 不会伪装成缺失，已合规时幂等不写。
+      该工具只关闭 GitHub 分支保护配置缺口，不会自动修改当前 fork，也不等于候选发布获批。
+      `stage6:environment:baseline` 继续补齐 Environment 不存在时的引导：默认计划绑定 repository、protected branch、
+      HEAD 与 2–6 个 numeric User/Team reviewer，摘要确认后才可创建/加固 `stage6-enterprise-ga`，并回读禁止自审、
+      protected-branch-only 与 reviewer 精确集合；既有 wait timer 或不同 reviewer 不会被静默覆盖。GitHub 官方 REST
+      与当前 GraphQL schema 都不提供 administrator bypass 写入，因此收据在该设置仍开启时固定返回
+      `environment-baseline-applied-manual-admin-bypass-required`；只有授权管理员在 Settings 关闭后再次验证，才返回
+      `environment-baseline-ready-not-release-approved`。该人工边界不能被本地工具伪造成完成。
+      `release.yml` 现又把 `publish_cli` 限定为非 Enterprise GA candidate：npm Trusted Publishing 虽使用 OIDC，
+      但 CLI package 不在 Desktop artifact-set、candidate v3 十份收据或 Final Review archive 中，不能借同一
+      `stage6_enterprise_approval` 被顺带发布。普通发布仍可用 `SYNARA_PUBLISH_CLI=1`；Stage 6 CLI 发布须另行建立
+      自己的证据与审批边界。
+      Migration `000111` 与 `internal/releasegovernance` 现把同一 candidate/tag、commit、lockfile、candidate receipt、
+      final asset set 与 environment ID 固定为不可变 Platform 权威；创建者不能自批，同一人员不能占用两个审批角色，
+      Engineering/Operations/Security/Product 四类 append-only 决策缺一不可，任何拒绝都原子终止候选。Admin 的
+      Release governance 页面以 version CAS 推进 draft→review→approved→deploying→observing→released/rollback，
+      released 必须显式记录最终决定以及 `none|accepted` 残余风险处置；accepted 风险必须带 owner、未来 due date、
+      理由和 HTTPS 证据。每一步写入 Operator Tenant Audit，但它不会把缺失的外部证据或人工权限伪造成 GA 通过。
+      Migration `000139` 进一步要求上述五类 Release decision 的每条 evidence URL 都绑定非零 `sha256:`；服务、
+      SQLite/PostgreSQL trigger、typed client、Platform Admin、Audit 与 readiness 同步要求，旧 URL-only 决策保留历史
+      但不再计入任何正向转换，append-only role 已占用时必须重建候选而不能覆盖旧证据。
+      Migration `000140` 又把所有 `release.*` 及共用的 Compliance/Provider/Recovery/Penetration/Capacity/Incident/
+      Operations/Internal Cost 职能授权根证据升级为 SHA-256 字节绑定；旧 active URL-only grant 原子撤销，新决策必须
+      使用重新签发且 byte-bound 的当前 grant。
+      页面另通过只读 exact-candidate readiness API 一次投影候选 evidence、Provider commercial authorization、
+      影响域审批、SLO、Recovery、Penetration、Capacity、Incident、Operations 与 Internal Cost 十项门禁；该 API 与进入 approved 的 transition 复用同一服务判定，
+      避免页面状态和写门禁漂移。每一项都固定展示仍需外部验证的执行、签名、证据和组织权威边界，内部全绿只表示
+      product transition eligible，不产生 GA passed 声明。
+      `docs/release-checklists/stage-6-change-notice.md` 是 release note、管理员通知、Support brief、员工通知与
+      产品内 changelog 的单一内容源。每次真实发布的审批/投递证据仍必须在复制的 checklist 中完成。
+- [x] 完成用户文档、管理员文档、部署文档和故障排查文档（API 与开发者文档归 Stage 7）。
+      `docs/enterprise/` 已按最终用户、Tenant 管理员、部署运维与支持排障拆分入口，并链接权威合同、部署说明与
+      深度 Runbook。`stage-6-documentation-v1.json` 和 validator 固定五份必需页面、章节 marker、本地链接与
+      内容 hash；`stage6:documentation:validate` 现对 matrix/Markdown 执行稳定有界非 symlink 读取、重复 JSON 与
+      明显凭据拒绝、总字节上限，并用同一份捕获字节做 marker/link 语义检查和摘要，避免摘要后换包。收据始终为
+      `source-documentation-validated-not-release-verified`。每个真实候选仍须用部署后的
+      角色、UI label、镜像配置与签署承诺复核后，才能勾选 GA checklist 的 release-specific 文档项。文档源码、
+      Operations UI 源码、Candidate bundle 和 downstream Final GA Review 四类辅助验证收据现与十类外部收据一致
+      使用不可覆盖 `0600` 双文件发布；源码回归门禁会拒绝恢复直接写最终输出的实现。Final Review v1 进一步把
+      完成后的清单/通告、protected approval、final asset set、Platform Audit request ID、32 项职能控制、四方及
+      条件式 Privacy/Legal 决策与残余风险固定到同一候选；fail-closed preparer 从 path-only draft 稳定读取并计算
+      全部摘要，完整语义校验后才发布 manifest/receipt 四文件，冲突或失败不留半成品，但永久保留外部证据和审批
+      权威未由 Synara 验证的边界。Platform Admin 已提供 observing 状态的 Final Review 上传绑定，Migration
+      `000136` 与 SQLite safety trigger 又要求 Provider commercial 四类文档摘要并撤销旧 URL-only 授权；
+      `000137` 继续要求四个角色的 approval evidence 摘要并撤销含 URL-only decision 的旧授权；`000138`
+      再把 exact active Provider Authorization ID/version 绑定到商业影响 Release candidate 并在全正向状态转换
+      重验；`000139` 继续要求 Release 五类角色决策 evidence 摘要并让旧 URL-only 决策失去正向授权，兼容矩阵以
+      `000161` 为当前尾部：`000140` 要求所有治理职能 grant 的委任证据摘要并撤销旧 URL-only active grant，
+      `000141` 让 Compliance accepted manifest review 与四方 start-gate decision 的 URL-only 历史记录失去
+      `record_complete` 授权并允许提交 byte-bound replacement，`000142` 同样收紧四方 SLO decision、重开旧
+      approved Window，并在所有 Release 正向状态重验其摘要；`000143`–`000160` 继续收紧 Recovery、
+      Penetration、Capacity、Incident、Operations、内部成本及历史支付兼容边界，`000161` 将活动事故通告切换为
+      Internal Status Board 与员工通知契约。`000135` 继续阻断未绑定或决定/风险漂移的
+      `released` 转换。
+- [x] 【新增】建立产品内更新日志与破坏性变更通告通道，与 Stage 7 的 `Deprecation`/`Sunset`
+      政策共用同一发布节奏，避免对外承诺与产品内公告不一致。复用 Web 现有的一次性升级提示与
+      Settings → Release history，两者读取同一 `whatsNew/entries.ts`。typed `notices` 把管理员动作、
+      破坏性变更和紧急安全例外置于普通功能卡片之前，并强制 audience/action/effective/first-published；
+      breaking change 必须有 migration guide，单测验证 30/90 天窗口及紧急例外 expiry。真实候选版本的
+      发布可见性、受众和内容 hash 仍由 change-notice/GA checklist 留证，源码存在不算投递完成。
+- [ ] 完成容量测试、长时间稳定性测试、渗透测试和上线评审。容量/长稳合同与运行手册已落在
+      `docs/contracts/capacity-long-duration-acceptance-v1.md`、`docs/runbooks/capacity-long-duration-test.md`；
+      `scripts/stage6-capacity/validate_capacity_evidence.py` 对 forecast+至少 20% headroom、production 72h /
+      production-like 24h、五个必需阶段、三 Region 外部探针 95% coverage、四类 SLO 样本/比例、CPU/Memory/DB
+      80% headroom、Queue/Outbox、warm deficit、OOM/dead-letter/restart、Tenant fairness 与七份独立证据 hash
+      fail closed；path-only preparer 又以稳定受限读取、重复 JSON/秘密/路径检查、自动 hash、`0600` 不可覆盖
+      双文件发布和 receipt 失败回滚消除手工摘要与半发布风险，且收据固定为
+      `evidence-validated-not-capacity-passed`。第三方渗透的独立合同、运行手册与校验器
+      同样已建立但不冒充真实执行。Migration `000125`、`internal/capacitygovernance` 与 Platform Admin → Capacity
+      reviews 已将补全后的 exact receipt、候选绑定、机器重算和 Engineering/Operations 分权审批固化；Migration
+      `000126` 又把同候选内部 approved 状态接入 Release gate，但不会把内部批准冒充真实长稳通过。当前仍缺真实
+      production-like 长稳、第三方渗透与正式上线评审，故本项保持
+      未完成。
+- [x] 【新增】编写 `docs/release-checklists/stage-6-enterprise-ga.md`，沿用既有约定（每次发布复制
       一份，记录 Commit、镜像 Digest、Migration、执行人、时间与证据链接；未满足项保持未勾选，不
-      接受 fixture 或静态检查替代真实发布证据）。当前"GA Release Checklist 全部通过"被列为完成
-      条件，但该清单从未被定义，而 Stage 2/3 都已有对应文件——这是一个悬空的验收门禁。
+      接受 fixture 或静态检查替代真实发布证据）。模板、证据索引及各外部验证器的非通过收据语义均已定义；
+      真实候选版本仍必须复制模板并逐项附证，不能把仓库模板本身视为 GA 通过。
 
 #### 完成条件
 
-- [ ] 新 Tenant 可以不经人工数据库操作完成注册或企业开通。
-- [ ] 用户入职、调岗、离职和 Credential 回收有完整审计链路。
-- [ ] 用量、配额、成本和超限策略可解释且并发安全；用户可自助查到单次 Session/Turn 的成本构成。
-      并发安全以真实 PostgreSQL 双连接实测为准（沿用 Stage 4 既有的并发验证方式），不接受
-      仅代码审查。
+- [x] 新 Tenant 可以不经人工数据库操作完成注册或企业开通。Standard-profile 自助路径与 Platform Admin 企业开通路径
+      均有 Web → typed client → authenticated route，服务端按 authority 分离 entitlement profile/状态能力；企业初始 Owner 必须
+      已有 active account，找不到时返回稳定错误而不是要求直接写用户或 Membership 表。
+- [x] 用户入职、调岗、离职和 Credential 回收有完整审计链路。邀请/接受、角色调岗、暂停与移除写入稳定
+      Audit action；暂停与移除在同一事务撤销 Tenant Login Session、Organization Membership 与 user-scoped
+      Credential，并记录撤销数量。Tenant `admin | owner` 自动获得的 root Organization 同级角色会在降级时
+      原子撤销，但独立调整过的 Organization role 不会被误删；聚焦链路测试覆盖完整 actor/request/resource/
+      role delta 与 Credential/Session 最终状态。
+- [x] 用量、配额、成本和超限策略可解释且并发安全；用户可自助查到单次 Session/Turn 的成本构成。
+      `ExecutionUsageSummary` 以 Execution/Generation 单调投影 token、时长、Network 与 Provider cost，Tenant
+      周期汇总关联 entitlement profile assignment、软配额告警与 Stage 4 分摊成本；Web Session/Turn Environment 面板和 Tenant
+      Usage 设置页均使用 typed API 展示来源与 coverage。SQLite 阈值/解释测试与真实 PostgreSQL 双连接并发
+      投影已验证 80%/100% 告警各一条、重复执行不增生；隔离 Compose 又验证无支付产品档案、180 Token、
+      Provider cost、Network 与恢复后的历史 Generation 汇总，见
+      [`stage-6-self-hosted-usage-failure-acceptance-20260802.md`](docs/reports/stage-6-self-hosted-usage-failure-acceptance-20260802.md)。
+      硬并发 Quota 继续作为独立 admission 权威。
 - [ ] 支持人员无需直连生产数据库即可完成排障，且每次 impersonation 可审计、租户可见。判定方式：
       列出支持团队的日常操作清单，逐项验证可在管理后台完成，不依赖 CLI 或数据库客户端。
-- [ ] 生产环境有明确 SLO、告警、值班、对外 Status Page 和事故处理流程。
+      49 项源码操作矩阵已完成，但部署环境中的 Authenticated User/Owner/Admin/Security/Cost/Auditor/Support
+      角色浏览器演练、拒绝用例与对应 Audit 证据尚未执行，因此完成条件保持未勾选。隔离 Personal
+      Control Plane 的 Owner 浏览器验证和 Owner/`security_admin`/Support View 聚焦渲染测试只能证明
+      本地 UI/角色逻辑，不能把该项升级为生产运营通过。部署态证据校验器已经就绪，但只有真实
+      production/production-like manifest 的 49 项正向、49 项固定角色拒绝、Support 闭环和双审批全部通过后，
+      才能把其 `eligibleForHumanGateReview` 收据交给 GA 审批。Support Grant 的显式撤销、Tenant 策略关闭触发的
+      逐 Grant 撤销和自动到期现在分别写入 Grant-correlated Tenant Audit；状态与审计处于同一事务，审计失败会
+      回滚终态转换。Migration `000162` 将部署证据升级为 Operations v2，分别绑定
+      `support.access_revoked`/`support.access_expired` 及其 Tenant 可见结果；v1 审批被 supersede、Exercise 重开，
+      且不能再授权 Candidate 或 Release。新增 `GET /v1/tenants/{tenantID}/support-diagnostic.json`，把脱敏的
+      Tenant 运维聚合、Token/Network、Provider 成本覆盖与内部平台分摊以 exact-byte、可审计 JSON 快照提供给
+      Tenant Support；客户端会重算 SHA-256，且不包含 Credential payload、Artifact 内容或 Execution prompt。
+      该源码闭环仍不能代替部署态浏览器与真实 Audit authority 验收。
+- [ ] 生产环境有明确 SLO、告警、值班、内部 Status Board 和事故处理流程。Migration `000117`、
+      `internal/incidentgovernance` 与 Platform Admin → Incidents 已实现事件 identity、Commander/Communications/
+      Security-Privacy 分权、独立 Status Board origin、内部更新顺序/节奏、关闭审批和 Audit；SQLite、HTTP 与临时
+      PostgreSQL 17 的并发/不可变门禁已通过。但源码不会代替内部 Status Board 部署，当前仍缺真实 rota、paging、
+      employee notification delivery、internal-user-path recovery observation 与 production-like live exercise。Migration `000118`
+      又提供 exact SLO window 与四职能内部审批；path-only SLO preparer 已能安全固化窗口证据，但当前没有真实
+      30 天生产窗口，故本项保持未完成。
 - [ ] 备份恢复与区域灾备经过真实演练。判定方式：从生产备份实际恢复到可服务状态，测得 RTO/RPO
-      并与承诺值比对——执行备份脚本成功不算通过，必须完成恢复侧验证。
+      并与承诺值比对——执行备份脚本成功不算通过，必须完成恢复侧验证。恢复 Runbook 与四组件证据
+      manifest 已定义；`scripts/stage6-recovery/validate_recovery_evidence.py` 会从时间戳计算 RPO/RTO、校验
+      独立 failure domain、真实客户端 canary 声明及证据文件 hash；v2 收据还把完整候选、恢复后的 release
+      identity、单一 recovery subject、五个分离角色审批及 drill/component/approval/validation 时间闭包固定下来，
+      path-only 两阶段 preparer 进一步阻止在 subject 冻结前生成最终审批，并对来源文件执行稳定有界读取、
+      Secret/重复字段/路径安全检查和不可变原子发布；
+      同时明确真实备份 authority、审批 authority 与密码学签名仍需外部复核。收据固定标记
+      `evidence-validated-not-control-passed`，不能替代尚未执行的生产恢复。
 - [ ] 第三方渗透测试没有未接受的高危问题，且 Stage 5 的沙箱修复已先行完成。
 - [ ] 跨组件发布（Migration × 协议版本 × Worker Image × 前端）有明确兼容矩阵与审批流程。Worker
       侧灰度与回滚的机制正确性由 Stage 3/4 保证，本阶段只验收其在完整发布流程中被正确使用。
@@ -1076,7 +1803,7 @@ IM 天然做不到的"对话与执行同处一个权威状态机"。
 `AutomationWorktreeMode`、`approval-required` 运行模式与 standalone/heartbeat/dedicated 模式，
 `pullRequests.ts` 也有完整的 PR 状态与合并动作模型。但 **Go 控制面没有任何 automation /
 trigger / webhook 实现**（`schedulingdecision` 与 `schedulingpolicy` 是执行放置决策，不是用户侧
-自动化）。Stage 3 已把 Session 权威迁到控制面，而这两块能力留在本地，等于 SaaS 版本缺少个人版
+自动化）。Stage 3 已把 Session 权威迁到控制面，而这两块能力留在本地，等于 Control Plane 模式缺少个人版
 已有的功能。这直接触碰 Roadmap-wide rule "Personal、Single-node、Enterprise 保持同一领域模型，
 不维护独立产品分支"——放任下去会分叉成两个产品，是本阶段最优先要止损的问题。
 
@@ -1093,7 +1820,7 @@ GitHub/GitLab App 参与开发流"——没有安装式授权、没有入站事�
 
 #### 目标
 
-- 个人版与 SaaS 版共用同一 Automation 领域模型，不存在"本地有、云端没有"的能力。
+- 个人版与 Control Plane 模式共用同一 Automation 领域模型，不存在“本地有、远程没有”的能力。
 - 用户可以从既有开发流（PR、Issue、提交）直接触发 agent，不必手工搬运上下文。
 - 无人值守执行的安全边界明确：自动化不得成为绕过审批与沙箱的通道。
 
@@ -1142,7 +1869,7 @@ GitHub/GitLab App 参与开发流"——没有安装式授权、没有入站事�
 
 #### 完成条件
 
-- [ ] 个人版与 SaaS 版的 Automation 使用同一领域模型与同一契约，无独立分支。
+- [ ] 个人版与 Control Plane 模式的 Automation 使用同一领域模型与同一契约，无独立分支。
 - [ ] 定时与事件触发的 Execution 具备幂等性。判定方式：对同一 VCS 事件重复投递（含 VCS 平台的
       自动重试与人工重放）不产生第二次 Execution，也不产生重复的 PR 评论或 Check Run。
 - [ ] 自动化执行的权限不超过其创建者，且无人值守路径不能绕过审批与沙箱边界。

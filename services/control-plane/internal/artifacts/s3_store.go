@@ -78,7 +78,7 @@ func normalizeS3Endpoint(raw string) (string, bool, error) {
 		raw = "https://" + raw
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", false, fmt.Errorf("SYNARA_ARTIFACT_ENDPOINT must be an HTTP(S) origin without a path")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {

@@ -1,0 +1,35 @@
+{
+  "name": "@synara/admin",
+  "version": "0.6.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server.mjs",
+    "test": "vitest run",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@synara/control-plane-client": "workspace:*",
+    "@synara/shared": "workspace:*",
+    "@tabler/icons-react": "^3.44.0",
+    "@tanstack/react-query": "^5.90.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "@vitest/browser-playwright": "^4.1.10",
+    "playwright": "^1.58.2",
+    "typescript": "catalog:",
+    "vite": "^8.1.4",
+    "vitest": "catalog:",
+    "vitest-browser-react": "^2.0.5"
+  }
+}

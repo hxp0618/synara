@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { availableApprovalActions } from "./ComposerPendingApprovalPanel";
 
 describe("availableApprovalActions", () => {
-  it("hides unsupported Session-wide approval in SaaS mode", () => {
+  it("hides unsupported Session-wide approval in Control Plane mode", () => {
     expect(availableApprovalActions(false).map((action) => action.decision)).toEqual([
       "accept",
       "decline",

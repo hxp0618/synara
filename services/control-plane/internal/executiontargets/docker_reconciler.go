@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -40,7 +41,7 @@ const (
 	dockerIndexLabel           = "synara.io/worker-index"
 	dockerReleaseRevisionLabel = "synara.io/worker-release-revision-id"
 	dockerReleaseChannelLabel  = "synara.io/worker-release-channel"
-	dockerContainerSpecVersion = 5
+	dockerContainerSpecVersion = 6
 
 	ManagedDockerDrainReasonStaleSpec = "managed-docker-stale-spec"
 	ManagedDockerDrainReasonScaleDown = "managed-docker-scale-down"
@@ -86,6 +87,7 @@ type DockerPoolReconcilerConfig struct {
 	Interval              time.Duration
 	Observer              BackgroundObserver
 	ResolveImagePull      ImagePullCredentialResolver
+	ObservabilityRoot     string
 }
 
 type BackgroundObserver interface {
@@ -686,6 +688,19 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
 		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
 	}
+	observabilitySource := ""
+	observabilityDestination := ""
+	if root := strings.TrimSpace(r.config.ObservabilityRoot); root != "" {
+		if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+			return nil, "", problem.New(500, "docker_worker_observability_authority_invalid", "Docker Worker observability root must be a non-root absolute directory.")
+		}
+		observabilitySource = filepath.Join(root, target.ID.String())
+		observabilityDestination = "/etc/synara/targets/" + target.ID.String()
+		baseEnvironment = append(
+			baseEnvironment,
+			"SYNARA_AGENTD_OBSERVABILITY_ENV_FILE="+observabilityDestination+"/observability.env",
+		)
+	}
 	releasePlan, err := loadManagedReleasePlan(ctx, r.targets.db, target.ID, configuration.Image)
 	if err != nil {
 		return nil, "", err
@@ -700,14 +715,15 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		}
 	}
 	hashPayload, err := json.Marshal(struct {
-		SpecVersion     int
-		Configuration   dockerTargetConfiguration
-		RuntimeDecision *runtimeIsolationDecision
-		Capabilities    json.RawMessage
-		TokenHash       [32]byte
-		ReleasePlan     *managedReleasePlan
-		LeaseRenew      time.Duration
-	}{dockerContainerSpecVersion, configuration, configuration.RuntimeIsolationDecision, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
+		SpecVersion       int
+		Configuration     dockerTargetConfiguration
+		RuntimeDecision   *runtimeIsolationDecision
+		Capabilities      json.RawMessage
+		TokenHash         [32]byte
+		ReleasePlan       *managedReleasePlan
+		LeaseRenew        time.Duration
+		ObservabilityRoot string
+	}{dockerContainerSpecVersion, configuration, configuration.RuntimeIsolationDecision, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL), strings.TrimSpace(r.config.ObservabilityRoot)})
 	if err != nil {
 		return nil, "", err
 	}
@@ -741,6 +757,12 @@ func (r *DockerPoolReconciler) desiredSpecs(
 			User: configuration.User, WorkingDir: configuration.WorkspaceMount,
 			Binds: []string{configuration.WorkspaceVolume + ":" + configuration.WorkspaceMount}, ExtraHosts: extraHosts,
 			NetworkMode: configuration.NetworkMode, MemoryBytes: configuration.MemoryBytes, NanoCPUs: configuration.NanoCPUs,
+		}
+		if observabilitySource != "" {
+			specs[index].Binds = append(
+				specs[index].Binds,
+				observabilitySource+":"+observabilityDestination+":ro",
+			)
 		}
 		if configuration.RuntimeIsolationDecision != nil &&
 			configuration.RuntimeIsolationDecision.EffectiveRuntime == runtimeIsolationGVisor {

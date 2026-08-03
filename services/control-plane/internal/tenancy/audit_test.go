@@ -81,7 +81,7 @@ func TestAuditLogFilteringPaginationExportAndIsolation(t *testing.T) {
 	})
 	assertAuditProblemCode(t, err, "invalid_audit_cursor")
 	_, err = service.ListAuditLogs(ctx, owner, otherTenant.ID, AuditLogQuery{Limit: 2, Cursor: *first.NextCursor})
-	assertAuditProblemCode(t, err, "invalid_audit_cursor")
+	assertAuditProblemCode(t, err, "tenant_not_found")
 
 	filtered, err := service.ListAuditLogs(ctx, owner, domain.TenantID, AuditLogQuery{Action: "session.created"})
 	if err != nil {

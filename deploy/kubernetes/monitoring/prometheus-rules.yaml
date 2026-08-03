@@ -208,3 +208,119 @@ spec:
           annotations:
             summary: A guaranteed warm floor is unmet
             description: The guaranteed warm floor has remained unmet for this capacity class for at least ten minutes; inspect target Pod budget, scheduling, and Worker readiness.
+    - name: synara-enterprise-slo.recording
+      interval: 1m
+      rules:
+        - record: synara:slo_availability_good:ratio_30d
+          expr: avg(avg_over_time(probe_success{job="synara-public-readiness"}[30d]))
+        - record: synara:slo_availability_samples:count_30d
+          expr: sum(count_over_time(probe_success{job="synara-public-readiness"}[30d]))
+        - record: synara:slo_availability_error_budget_remaining:ratio_30d
+          expr: clamp_max(clamp_min(1 - ((1 - synara:slo_availability_good:ratio_30d) / 0.001), 0), 1)
+        - record: synara:slo_api_latency_good:ratio_30d
+          expr: |
+            sum(increase(synara_http_request_duration_seconds_bucket{route!~"^/(health|ready|metrics)$",le="2.5"}[30d]))
+              /
+            sum(increase(synara_http_request_duration_seconds_count{route!~"^/(health|ready|metrics)$"}[30d]))
+        - record: synara:slo_api_latency_samples:count_30d
+          expr: sum(increase(synara_http_request_duration_seconds_count{route!~"^/(health|ready|metrics)$"}[30d]))
+        - record: synara:slo_api_latency_error_budget_remaining:ratio_30d
+          expr: clamp_max(clamp_min(1 - ((1 - synara:slo_api_latency_good:ratio_30d) / 0.01), 0), 1)
+        - record: synara:slo_execution_start_good:ratio_30d
+          expr: |
+            sum(increase(synara_execution_generation_provider_ready_duration_seconds_bucket{recovery_reason="initial-claim",le="60"}[30d]))
+              /
+            sum(increase(synara_execution_generation_provider_ready_duration_seconds_count{recovery_reason="initial-claim"}[30d]))
+        - record: synara:slo_execution_start_samples:count_30d
+          expr: sum(increase(synara_execution_generation_provider_ready_duration_seconds_count{recovery_reason="initial-claim"}[30d]))
+        - record: synara:slo_execution_start_error_budget_remaining:ratio_30d
+          expr: clamp_max(clamp_min(1 - ((1 - synara:slo_execution_start_good:ratio_30d) / 0.01), 0), 1)
+        - record: synara:slo_event_delay_good:ratio_30d
+          expr: |
+            sum(increase(synara_session_event_append_duration_seconds_bucket{result="success",le="1"}[30d]))
+              /
+            sum(increase(synara_session_event_append_duration_seconds_count{result="success"}[30d]))
+        - record: synara:slo_event_delay_samples:count_30d
+          expr: sum(increase(synara_session_event_append_duration_seconds_count{result="success"}[30d]))
+        - record: synara:slo_event_delay_error_budget_remaining:ratio_30d
+          expr: clamp_max(clamp_min(1 - ((1 - synara:slo_event_delay_good:ratio_30d) / 0.001), 0), 1)
+    - name: synara-enterprise-slo.alerts
+      rules:
+        - alert: SynaraPublicReadinessProbeMissing
+          expr: absent(probe_success{job="synara-public-readiness"})
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: Public readiness probes are missing
+            description: No external public-readiness probe series has been observed for fifteen minutes; Availability is not assessable and cannot be reported as passing.
+        - alert: SynaraAvailabilityFastBudgetBurn
+          expr: |
+            (
+              (1 - avg(avg_over_time(probe_success{job="synara-public-readiness"}[5m]))) / 0.001 > 14.4
+            )
+              and
+            (
+              (1 - avg(avg_over_time(probe_success{job="synara-public-readiness"}[1h]))) / 0.001 > 14.4
+            )
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Availability error budget is burning rapidly
+            description: Both the five-minute and one-hour public-readiness burn rates exceed 14.4 times the 99.9 percent Availability budget.
+        - alert: SynaraAPILatencyFastBudgetBurn
+          expr: |
+            (
+              1 - (
+                sum(rate(synara_http_request_duration_seconds_bucket{route!~"^/(health|ready|metrics)$",le="2.5"}[5m]))
+                  /
+                sum(rate(synara_http_request_duration_seconds_count{route!~"^/(health|ready|metrics)$"}[5m]))
+              )
+            ) / 0.01 > 14.4
+              and
+            (
+              1 - (
+                sum(rate(synara_http_request_duration_seconds_bucket{route!~"^/(health|ready|metrics)$",le="2.5"}[1h]))
+                  /
+                sum(rate(synara_http_request_duration_seconds_count{route!~"^/(health|ready|metrics)$"}[1h]))
+              )
+            ) / 0.01 > 14.4
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: API latency error budget is burning rapidly
+            description: Both the five-minute and one-hour API latency burn rates exceed 14.4 times the 99 percent latency budget.
+        - alert: SynaraAvailabilityBudgetLow
+          expr: synara:slo_availability_error_budget_remaining:ratio_30d <= 0.25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Availability error budget is at or below 25 percent
+            description: Pause nonessential risky rollout and assign a recovery owner under the Stage 6 error-budget policy.
+        - alert: SynaraAPILatencyBudgetLow
+          expr: synara:slo_api_latency_error_budget_remaining:ratio_30d <= 0.25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: API latency error budget is at or below 25 percent
+            description: Pause nonessential risky rollout and assign a recovery owner under the Stage 6 error-budget policy.
+        - alert: SynaraExecutionStartBudgetLow
+          expr: synara:slo_execution_start_error_budget_remaining:ratio_30d <= 0.25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution Start Delay error budget is at or below 25 percent
+            description: Review queue age and terminal-before-ready outcomes, pause risky rollout, and assign a recovery owner.
+        - alert: SynaraEventDelayBudgetLow
+          expr: synara:slo_event_delay_error_budget_remaining:ratio_30d <= 0.25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Event Delay error budget is at or below 25 percent
+            description: Review append, Outbox, and SSE companion signals, pause risky rollout, and assign a recovery owner.

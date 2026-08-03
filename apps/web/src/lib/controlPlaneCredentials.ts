@@ -1,4 +1,7 @@
-import type { ControlPlaneCredential, ControlPlaneCredentialPurpose } from "./controlPlaneClient";
+import type {
+  ControlPlaneCredential,
+  ControlPlaneCredentialPurpose,
+} from "@synara/control-plane-client";
 import { normalizeControlPlaneProviderCode } from "./controlPlaneProviderCode";
 
 export function listUsableControlPlaneCredentials(

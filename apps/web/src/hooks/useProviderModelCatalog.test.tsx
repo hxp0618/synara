@@ -204,6 +204,20 @@ describe("useProviderModelCatalog", () => {
     expect(readModelQueryEnabled("antigravity")).toBe(true);
   });
 
+  it("does not prefetch Cursor when another provider's picker opens", () => {
+    readCatalogRenders({ selectedProvider: "codex", discoveryEnabled: true });
+
+    expect(readModelQueryEnabled("codex")).toBe(true);
+    expect(readModelQueryEnabled("cursor")).toBe(false);
+    expect(readModelQueryEnabled("antigravity")).toBe(true);
+  });
+
+  it("discovers Cursor when it is explicitly selected", () => {
+    readCatalogRenders({ selectedProvider: "cursor", discoveryEnabled: false });
+
+    expect(readModelQueryEnabled("cursor")).toBe(true);
+  });
+
   it("keeps an enabled selected provider discoverable when it is hidden", () => {
     mocks.useAppSettings.mockReturnValue({
       settings: { ...SETTINGS, hiddenProviders: ["cursor"] },

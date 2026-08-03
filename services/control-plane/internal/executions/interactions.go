@@ -505,7 +505,7 @@ func (s *Service) updateInteractionResolutionDelivery(
 			400, "invalid_interaction_resolution_command_id", "resolutionCommandId is invalid.",
 		)
 	}
-	return runIdempotent(ctx, s, worker, requestID, "interaction.resolution."+targetStatus, struct {
+	return runExecutionIdempotent(ctx, s, worker, requestID, "interaction.resolution."+targetStatus, executionID, input.LeaseInput, struct {
 		ExecutionID   uuid.UUID                          `json:"executionId"`
 		InteractionID uuid.UUID                          `json:"interactionId"`
 		Input         InteractionResolutionDeliveryInput `json:"input"`
@@ -1025,6 +1025,9 @@ func (s *Service) resolveInteraction(
 				return Interaction{}, problem.New(409, "interaction_resolution_conflict", "The execution interaction was already resolved differently.")
 			}
 			return toInteraction(interaction), nil
+		}
+		if interaction.Status == "expired" {
+			return Interaction{}, problem.New(409, "interaction_expired", "The execution interaction expired before it was resolved.")
 		}
 		if interaction.Status != "pending" {
 			return Interaction{}, problem.New(409, "interaction_not_pending", "The execution interaction is no longer pending.")

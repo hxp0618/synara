@@ -98,6 +98,16 @@ describe("mac-update-zip", () => {
     );
   });
 
+  it("allows no macOS update manifest when updater publishing is disabled", () => {
+    assert.deepStrictEqual(
+      resolveMacUpdateManifestFileNames(
+        ["Synara-0.1.5-arm64.dmg", "Synara-0.1.5-arm64.zip"],
+        false,
+      ),
+      [],
+    );
+  });
+
   it("updates the macOS zip file entry and matching top-level sha", () => {
     const manifest = `version: 0.1.4
 files:

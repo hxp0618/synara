@@ -271,6 +271,10 @@
     "./browserAnnotations": {
       "types": "./src/browserAnnotations.ts",
       "import": "./src/browserAnnotations.ts"
+    },
+    "./brand": {
+      "types": "./src/brand.ts",
+      "import": "./src/brand.ts"
     }
   },
   "scripts": {

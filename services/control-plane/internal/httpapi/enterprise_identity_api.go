@@ -12,6 +12,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
+const platformAdminSSOReturnTo = "/__synara/platform-admin"
+
 func (s *Server) listPublicIdentityConnections(w http.ResponseWriter, r *http.Request) {
 	items, err := s.enterpriseIdentity.ListPublic(r.Context(), r.URL.Query().Get("tenantSlug"))
 	if err != nil {
@@ -64,7 +66,22 @@ func (s *Server) completeSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, result.Session.Token)
-	http.Redirect(w, r, result.ReturnTo, http.StatusSeeOther)
+	http.Redirect(
+		w,
+		r,
+		resolveSSOReturnLocation(result.ReturnTo, s.config.PublicAdminURL),
+		http.StatusSeeOther,
+	)
+}
+
+func resolveSSOReturnLocation(returnTo, publicAdminURL string) string {
+	if returnTo != platformAdminSSOReturnTo {
+		return returnTo
+	}
+	if resolved := strings.TrimSpace(publicAdminURL); resolved != "" {
+		return resolved
+	}
+	return "/"
 }
 
 func (s *Server) samlMetadata(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +150,101 @@ func (s *Server) disableIdentityConnection(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listIdentityDomains(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	items, err := s.enterpriseIdentity.ListDomains(r.Context(), mustPrincipal(r), tenantID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) createIdentityDomain(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	var input enterpriseidentity.CreateDomainInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.enterpriseIdentity.CreateDomain(r.Context(), mustPrincipal(r), tenantID, input, requestID(r), clientIP(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) verifyIdentityDomain(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	domainID, ok := s.pathUUID(w, r, "domainID")
+	if !ok {
+		return
+	}
+	item, err := s.enterpriseIdentity.VerifyDomain(r.Context(), mustPrincipal(r), tenantID, domainID, requestID(r), clientIP(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) revokeIdentityDomain(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	domainID, ok := s.pathUUID(w, r, "domainID")
+	if !ok {
+		return
+	}
+	if err := s.enterpriseIdentity.RevokeDomain(r.Context(), mustPrincipal(r), tenantID, domainID, requestID(r), clientIP(r)); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getTenantIdentityPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	item, err := s.enterpriseIdentity.GetIdentityPolicy(r.Context(), mustPrincipal(r), tenantID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) putTenantIdentityPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	var input enterpriseidentity.UpdateIdentityPolicyInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.enterpriseIdentity.UpdateIdentityPolicy(r.Context(), mustPrincipal(r), tenantID, input, requestID(r), clientIP(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) listIdentityGroupMappings(w http.ResponseWriter, r *http.Request) {

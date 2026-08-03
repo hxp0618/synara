@@ -16,8 +16,40 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
+
+func TestNamedProviderCursorKeyIsPersistedAndAuthenticatedOnSQLite(t *testing.T) {
+	ctx := context.Background()
+	db, service, worker, fixture := sqliteProviderCursorPolicyFixture(t)
+	keyring, err := secret.NewCursorCipherWithKeyring(secret.CipherKey{
+		ID: "runtime-v2", Key: bytes.Repeat([]byte{0x73}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.cursorCipher = keyring
+	seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, "named-key-cursor")
+	stored := loadProviderCursorSessionForTest(t, db, fixture)
+	if stored.ProviderResumeCursorKeyID == nil || *stored.ProviderResumeCursorKeyID != "runtime-v2" {
+		t.Fatalf("named Provider Cursor key was not persisted: %#v", stored.ProviderResumeCursorKeyID)
+	}
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	binding, ok := ProviderCursorBindingFromExecution(execution)
+	if !ok {
+		t.Fatal("fixture Provider Cursor binding is unavailable")
+	}
+	plain, status, metadata, err := keyring.OpenV2WithMetadata(
+		stored.ProviderResumeCursorEncrypted, binding.Version, binding.Digest,
+	)
+	if err != nil || status != secret.CursorOpenValid || !metadata.Primary || !metadata.Keyed || len(plain) == 0 {
+		t.Fatalf("named Provider Cursor envelope = %q, %s, %#v, %v", plain, status, metadata, err)
+	}
+}
 
 func TestExpiredProviderCursorFallsBackToAuditedAuthoritativeHistoryOnSQLite(t *testing.T) {
 	ctx := context.Background()

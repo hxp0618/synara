@@ -1,4 +1,4 @@
-# SaaS API conventions v1
+# Control Plane API conventions v1
 
 ## Transport
 
@@ -37,6 +37,25 @@ for programmatic branching.
 - Client-supplied tenant headers never grant access.
 - State-changing requests require JSON content types and same-origin deployment through the
   Synara proxy for v1. External API clients use bearer sessions in a later phase.
+- Historical payment-provider routes are not registered by the `internal-self-hosted` product runtime.
+
+## Internal entitlement vocabulary
+
+The public API models internal capacity and feature assignment, not commercial plans or subscriptions:
+
+- Tenant and session responses use `entitlementProfileCode` with `standard | enterprise` and
+  `evaluationExpiresAt`; lifecycle status uses `evaluation`, never the retained database value `trialing`.
+- `GET /v1/platform/tenants/{tenantId}/entitlements` returns `profile` and `profileAssignment` with
+  `evaluationEndsAt`, `reportingPeriodStart`, `reportingPeriodEnd`, and a version for optimistic concurrency.
+- `PUT /v1/platform/tenants/{tenantId}/entitlement-profile` accepts the same vocabulary and is the only
+  Platform Admin write route for profile assignment.
+- Usage and internal-cost reports expose `entitlementProfileVersion` so an export can be reconciled to the
+  assignment that selected its reporting period.
+
+The database retains historical `plan_code`, `trialing`, and `tenant_subscriptions` identifiers for migration
+compatibility. They are not public JSON fields, routes, audit vocabulary, or product positioning.
+Tenant data exports carrying the public entitlement vocabulary use schema version `synara-tenant-export-v2`;
+consumers must not parse a v2 bundle with the v1 field map.
 
 ## Idempotency
 
@@ -98,5 +117,20 @@ POST /v1/tenants/{tenantId}/execution-targets
 GET  /v1/tenants/{tenantId}/execution-targets/{executionTargetId}
 ```
 
-The platform profile endpoint is public and contains only safe capability declarations. Execution
-target responses never include encrypted configuration or connection secrets.
+The platform profile endpoint is public and contains only safe capability declarations. Its
+`internalStatusBoard` object is always present: `configured` is `false` and `url` is omitted until an
+operator sets `SYNARA_INTERNAL_STATUS_BOARD_URL` together with the signed failure-independent incident publisher; a
+configured value is a credential-free HTTPS URL without query or fragment on a failure-independent origin. The endpoint
+never exposes paging providers,
+contacts, employee-recipient data, or incident-drafting authority. It exposes no external Status Page,
+payment-provider, or commercial-billing capability object.
+Execution target responses never include encrypted configuration or connection secrets.
+
+Broad-impact incident APIs use `internalImpactSummary`, `broadInternalImpact`,
+`internalStatusBoardIncidentReference`, `internalUpdates`, and the read-only
+`internalNotifications` Outbox status projection. The notification projection exposes only Message ID, update kind,
+pending/retrying/published/dead-letter state, attempts and timestamps; it never exposes Outbox payload or credentials.
+Current write routes are
+`/v1/platform/incidents/{incidentId}/status-board` and
+`/v1/platform/incidents/{incidentId}/internal-updates`; customer-facing Status Page routes are not
+registered by the internal-self-hosted runtime.

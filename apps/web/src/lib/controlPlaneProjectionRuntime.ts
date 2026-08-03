@@ -2,7 +2,7 @@ import type {
   ControlPlaneAgentSession,
   ControlPlaneSessionEvent,
   ControlPlaneSessionEventPage,
-} from "./controlPlaneClient";
+} from "@synara/control-plane-client";
 import {
   applyControlPlaneSessionEvent,
   createControlPlaneSessionProjection,

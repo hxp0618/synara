@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var ErrInvoiceNotFound = errors.New("billing invoice not found")
+var ErrInvoiceNotFound = errors.New("provider cost invoice not found")
 
 type Adapter interface {
 	FetchActualInvoice(context.Context, ImportActualInvoiceRequest) (ImportedActualInvoice, error)

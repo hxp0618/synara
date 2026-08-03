@@ -27,6 +27,21 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestRetentionPolicyRejectsInactiveTenantBeforeStorageAccess(t *testing.T) {
+	service := NewService(nil, nil, nil, nil, time.Hour, slog.Default())
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+
+	_, err := service.Get(context.Background(), principal, requestedTenantID)
+	assertRetentionProblemCode(t, err, "tenant_not_found")
+	_, err = service.Update(
+		context.Background(), principal, requestedTenantID, UpdateInput{},
+		"inactive-retention", "127.0.0.1",
+	)
+	assertRetentionProblemCode(t, err, "tenant_not_found")
+}
+
 func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *testing.T) {
 	ctx := context.Background()
 	platformConfig, err := platform.Defaults(platform.ProfilePersonal)

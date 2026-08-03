@@ -107,12 +107,15 @@ WORKDIR /app
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json bun.lock bunfig.toml turbo.json tsconfig.base.json ./
+COPY apps/admin/package.json ./apps/admin/package.json
 COPY apps/desktop/package.json ./apps/desktop/package.json
 COPY apps/marketing/package.json ./apps/marketing/package.json
 COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
+COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
@@ -120,7 +123,10 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile
 
 COPY . .
-RUN bun run --cwd apps/web build \
+ARG SYNARA_ADMIN_ENABLE_DEV_LOGIN=false
+RUN VITE_ENABLE_DEV_LOGIN="${SYNARA_ADMIN_ENABLE_DEV_LOGIN}" \
+  bun run --cwd apps/admin build \
+  && bun run --cwd apps/web build \
   && bun run --cwd apps/server build
 RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun scripts/prepare-server-runtime-package.ts /runtime \
@@ -150,6 +156,23 @@ EXPOSE 3773
 
 ENTRYPOINT ["/usr/local/bin/tini", "--"]
 CMD ["node", "/app/apps/server/dist/index.mjs"]
+
+FROM ${SERVER_RUNTIME_IMAGE} AS admin-runtime
+
+WORKDIR /app
+COPY --from=build /app/apps/admin/dist ./dist
+COPY --from=build /app/apps/admin/server.mjs ./server.mjs
+COPY --from=build /app/apps/admin/controlPlaneProxyTarget.mjs ./controlPlaneProxyTarget.mjs
+
+ENV SYNARA_ADMIN_HOST=0.0.0.0 \
+  SYNARA_ADMIN_PORT=3774 \
+  SYNARA_CONTROL_PLANE_URL=http://127.0.0.1:3780 \
+  SYNARA_TENANT_APP_URL=http://127.0.0.1:3773 \
+  NODE_ENV=production
+
+USER node
+EXPOSE 3774
+CMD ["node", "/app/server.mjs"]
 
 FROM ${AGENTD_BUILD_IMAGE} AS agentd-build
 
@@ -192,12 +215,15 @@ ARG SOURCE_DATE_EPOCH=0
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml ./
+COPY apps/admin/package.json ./apps/admin/package.json
 COPY apps/desktop/package.json ./apps/desktop/package.json
 COPY apps/marketing/package.json ./apps/marketing/package.json
 COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
+COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches

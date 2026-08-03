@@ -2,6 +2,8 @@ package authorization
 
 type Permission string
 
+const SupportReadOnlyRole = "support_readonly"
+
 const (
 	TenantRead             Permission = "tenant.read"
 	TenantUpdate           Permission = "tenant.update"
@@ -35,7 +37,7 @@ const (
 	WorkerRead             Permission = "worker.read"
 	WorkerManage           Permission = "worker.manage"
 	AuditRead              Permission = "audit.read"
-	BillingManage          Permission = "billing.manage"
+	CostManage             Permission = "cost.manage"
 	QuotaRead              Permission = "quota.read"
 	QuotaManage            Permission = "quota.manage"
 	RetentionRead          Permission = "retention.read"
@@ -61,7 +63,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		SessionCreate, SessionRead, SessionShare, SessionArchive, SessionDelete,
 		ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete,
-		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, BillingManage,
+		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, CostManage,
 		QuotaRead, QuotaManage, RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
 		SchedulingPolicyRead, SchedulingPolicyManage,
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
@@ -87,9 +89,15 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead,
 	),
-	"billing_admin": permissionSet(TenantRead, TenantMembersRead, BillingManage, QuotaRead, QuotaManage),
-	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, LifecycleRead, SchedulingPolicyRead, OutboxRead),
-	"member":        permissionSet(TenantRead),
+	"cost_admin": permissionSet(TenantRead, TenantMembersRead, CostManage, QuotaRead, QuotaManage),
+	"auditor":    permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, LifecycleRead, SchedulingPolicyRead, OutboxRead),
+	"member":     permissionSet(TenantRead),
+	SupportReadOnlyRole: permissionSet(
+		TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead,
+		ExecutionReadLogs, ArtifactRead, CredentialsRead, WorkerRead, AuditRead,
+		QuotaRead, RetentionRead, LifecycleRead, SchedulingPolicyRead, IdentityRead,
+		ServiceAccountsRead, OutboxRead,
+	),
 }
 
 var organizationRolePermissions = map[string]map[Permission]struct{}{

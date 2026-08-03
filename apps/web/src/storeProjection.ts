@@ -1353,7 +1353,7 @@ export function syncServerShellSnapshot(
   state: AppState,
   snapshot: OrchestrationShellSnapshot,
 ): AppState {
-  // Control Plane projection owns this state in SaaS mode, and a snapshot
+  // Control Plane projection owns this state in Cloud Panel mode, and a snapshot
   // older than what has already been applied must never resurrect rows.
   if (controlPlaneProjectionActive(state) || isStaleSnapshot(state, snapshot.snapshotSequence)) {
     return state;

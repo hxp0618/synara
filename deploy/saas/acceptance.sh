@@ -17,6 +17,7 @@ cleanup() {
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
+trap 'status=$?; printf "Self-hosted acceptance stopped at line %s with status %s\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 request_json() {
   local cookie_jar="$1"
@@ -24,14 +25,22 @@ request_json() {
   local path="$3"
   local body="${4:-}"
   local idempotency_key="${5:-}"
-  local args=(-sS -b "$cookie_jar" -c "$cookie_jar" -X "$method")
+  local args=(-sS --fail-with-body -b "$cookie_jar" -c "$cookie_jar" -X "$method")
   if [[ -n "$idempotency_key" ]]; then
     args+=(-H "Idempotency-Key: $idempotency_key")
   fi
   if [[ -n "$body" ]]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
-  curl "${args[@]}" "$base_url$path"
+  local response_file
+  response_file="$(mktemp "$work_dir/http-response.XXXXXX")"
+  if ! curl "${args[@]}" -o "$response_file" "$base_url$path"; then
+    sed 's/^/HTTP error response: /' "$response_file" >&2
+    rm -f "$response_file"
+    return 1
+  fi
+  cat "$response_file"
+  rm -f "$response_file"
 }
 
 worker_json() {
@@ -40,11 +49,19 @@ worker_json() {
   local method="$3"
   local path="$4"
   local body="${5:-}"
-  local args=(-sS -X "$method" -H "Authorization: Bearer $token" -H "X-Request-ID: $request_id")
+  local args=(-sS --fail-with-body -X "$method" -H "Authorization: Bearer $token" -H "X-Request-ID: $request_id")
   if [[ -n "$body" ]]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
-  curl "${args[@]}" "$base_url$path"
+  local response_file
+  response_file="$(mktemp "$work_dir/worker-response.XXXXXX")"
+  if ! curl "${args[@]}" -o "$response_file" "$base_url$path"; then
+    sed 's/^/Worker HTTP error response: /' "$response_file" >&2
+    rm -f "$response_file"
+    return 1
+  fi
+  cat "$response_file"
+  rm -f "$response_file"
 }
 
 new_uuid() {
@@ -58,14 +75,38 @@ owner_cookie="$work_dir/owner.cookie"
 member_cookie="$work_dir/member.cookie"
 outsider_cookie="$work_dir/outsider.cookie"
 
+platform_profile="$(curl -sS --fail "$base_url/v1/platform/profile")"
+jq -e '
+  .commercializationMode == "internal-self-hosted" and
+  (.internalStatusBoard.configured | type == "boolean") and
+  (has("commercialBilling") | not) and
+  (has("paymentProvider") | not) and
+  (has("payment") | not) and
+  (has("checkout") | not) and
+  (has("stripe") | not) and
+  (has("billing") | not) and
+  (has("statusPage") | not)
+' <<<"$platform_profile" >/dev/null
+
 owner_session="$(request_json "$owner_cookie" POST /v1/auth/dev-login \
   "{\"email\":\"owner-$run_id@example.com\",\"displayName\":\"Acceptance Owner\"}")"
-tenant_id="$(jq -er '.user.activeTenantId' <<<"$owner_session")"
 owner_id="$(jq -er '.user.userId' <<<"$owner_session")"
+tenant="$(request_json "$owner_cookie" POST /v1/tenants \
+  "{\"slug\":\"acceptance-tenant-$run_id\",\"name\":\"Acceptance Internal Tenant\",\"region\":\"local\"}")"
+tenant_id="$(jq -er '.id' <<<"$tenant")"
+jq -e '.entitlementProfileCode == "standard" and .status == "active" and .role == "owner"' \
+  <<<"$tenant" >/dev/null
+request_json "$owner_cookie" PUT /v1/auth/active-tenant "{\"tenantId\":\"$tenant_id\"}" >/dev/null
 
 organization="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/organizations" \
   "{\"slug\":\"acceptance-$run_id\",\"name\":\"Acceptance Engineering\",\"kind\":\"department\",\"settings\":{}}")"
 organization_id="$(jq -er '.id' <<<"$organization")"
+
+execution_target="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/execution-targets" \
+  "{\"organizationId\":\"$organization_id\",\"kind\":\"local\",\"name\":\"Acceptance Local Target\",\"configuration\":{},\"capabilities\":{\"workspaceModes\":[\"local\",\"worktree\"],\"providerPolicy\":{\"experimentalProviders\":[\"codex\",\"claudeAgent\"]}}}")"
+created_execution_target_id="$(jq -er '.id' <<<"$execution_target")"
+jq -e '.kind == "local" and .status == "active" and .productBoundary == "single-tenant-trusted"' \
+  <<<"$execution_target" >/dev/null
 
 project="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/organizations/$organization_id/projects" \
   "{\"name\":\"Acceptance Project\",\"repositoryUrl\":\"https://example.com/synara.git\",\"defaultBranch\":\"main\",\"visibility\":\"organization\"}")"
@@ -75,6 +116,7 @@ agent_session="$(request_json "$owner_cookie" POST "/v1/projects/$project_id/ses
   '{"title":"Acceptance Session","visibility":"project","provider":"codex","model":"gpt-5.6-sol"}')"
 session_id="$(jq -er '.id' <<<"$agent_session")"
 execution_target_id="$(jq -er '.executionTargetId' <<<"$agent_session")"
+[[ "$execution_target_id" == "$created_execution_target_id" ]]
 execution_target="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/execution-targets/$execution_target_id")"
 target_kind="$(jq -er '.kind' <<<"$execution_target")"
 worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
@@ -135,6 +177,14 @@ worker_json "$worker_token" "start-first-$run_id" POST "/v1/workers/executions/$
 runtime_event_id="$(new_uuid)"
 worker_json "$worker_token" "event-first-$run_id" POST "/v1/workers/executions/$first_execution_id/events" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$first_generation,\"leaseToken\":\"$first_lease_token\",\"eventId\":\"$runtime_event_id\",\"eventVersion\":1,\"eventType\":\"runtime.output.delta\",\"payload\":{\"text\":\"acceptance output\"},\"occurredAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
+token_usage_event_id="$(new_uuid)"
+worker_json "$worker_token" "token-usage-first-$run_id" POST "/v1/workers/executions/$first_execution_id/events" \
+  "{\"tenantId\":\"$tenant_id\",\"generation\":$first_generation,\"leaseToken\":\"$first_lease_token\",\"eventId\":\"$token_usage_event_id\",\"eventVersion\":2,\"eventType\":\"thread.token-usage.updated\",\"payload\":{\"usage\":{\"usedTokens\":180,\"lastUsedTokens\":180,\"lastInputTokens\":120,\"lastCachedInputTokens\":40,\"lastOutputTokens\":60,\"lastReasoningOutputTokens\":20,\"durationMs\":2500}},\"occurredAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
+turn_completed_event_id="$(new_uuid)"
+worker_json "$worker_token" "turn-completed-first-$run_id" POST "/v1/workers/executions/$first_execution_id/events" \
+  "{\"tenantId\":\"$tenant_id\",\"generation\":$first_generation,\"leaseToken\":\"$first_lease_token\",\"eventId\":\"$turn_completed_event_id\",\"eventVersion\":2,\"eventType\":\"turn.completed\",\"payload\":{\"state\":\"completed\",\"totalCostUsd\":0.012345},\"occurredAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
+worker_json "$worker_token" "usage-first-$run_id" POST "/v1/workers/executions/$first_execution_id/usage" \
+  "{\"tenantId\":\"$tenant_id\",\"generation\":$first_generation,\"leaseToken\":\"$first_lease_token\",\"reportSequence\":1,\"networkIngressBytes\":4096,\"networkEgressBytes\":2048}" >/dev/null
 worker_json "$worker_token" "renew-first-$run_id" POST "/v1/workers/executions/$first_execution_id/renew" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$first_generation,\"leaseToken\":\"$first_lease_token\",\"providerResumeCursor\":\"acceptance-resume-cursor\"}" >/dev/null
 worker_json "$worker_token" "release-first-$run_id" POST "/v1/workers/executions/$first_execution_id/release" \
@@ -157,7 +207,7 @@ worker_json "$worker_token" "complete-first-$run_id" POST "/v1/workers/execution
 curl -sS -N --max-time 1 -b "$owner_cookie" -H 'Last-Event-ID: 2' \
   "$base_url/v1/sessions/$session_id/events/stream" >"$work_dir/reconnected-events.sse" 2>/dev/null || true
 grep -q '^id: 3$' "$work_dir/reconnected-events.sse"
-grep -q '^id: 9$' "$work_dir/reconnected-events.sse"
+grep -q '^id: 11$' "$work_dir/reconnected-events.sse"
 if grep -q '^id: 2$' "$work_dir/reconnected-events.sse"; then
   printf 'SSE reconnect replayed an already acknowledged event\n' >&2
   exit 1
@@ -167,13 +217,13 @@ model_switch_key="model-switch-$run_id"
 model_switch_body='{"model":"gpt-5.4","expectedModel":"gpt-5.6-sol"}'
 switched_session="$(request_json "$owner_cookie" POST "/v1/sessions/$session_id/model-switch" \
   "$model_switch_body" "$model_switch_key")"
-jq -e '.model == "gpt-5.4" and .lastEventSequence == 10' <<<"$switched_session" >/dev/null
+jq -e '.model == "gpt-5.4" and .lastEventSequence == 12' <<<"$switched_session" >/dev/null
 curl -sS -D "$work_dir/model-switch-replay.headers" -o "$work_dir/model-switch-replay.json" \
   -b "$owner_cookie" -c "$owner_cookie" -X POST -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $model_switch_key" -d "$model_switch_body" \
   "$base_url/v1/sessions/$session_id/model-switch"
 tr -d '\r' <"$work_dir/model-switch-replay.headers" | grep -qi '^Idempotency-Replayed: true$'
-jq -e '.model == "gpt-5.4" and .lastEventSequence == 10' \
+jq -e '.model == "gpt-5.4" and .lastEventSequence == 12' \
   "$work_dir/model-switch-replay.json" >/dev/null
 
 # A Session may only have one nonterminal Execution. The first Turn has completed,
@@ -199,10 +249,83 @@ worker_json "$worker_token" "fail-second-$run_id" POST "/v1/workers/executions/$
   "{\"tenantId\":\"$tenant_id\",\"generation\":$second_generation,\"leaseToken\":\"$second_lease_token\",\"failureCode\":\"acceptance_failure\",\"failureMessage\":\"Expected acceptance failure\"}" >/dev/null
 
 runtime_events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=2&limit=20")"
-jq -e '.lastSequence == 13 and
-  (.items | map(.sequence) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) and
-  (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "session.model.changed", "turn.created", "execution.leased", "execution.failed"])' \
+jq -e '.lastSequence == 15 and
+  (.items | map(.sequence) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]) and
+  (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "thread.token-usage.updated", "turn.completed", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "session.model.changed", "turn.created", "execution.leased", "execution.failed"])' \
   <<<"$runtime_events" >/dev/null
+
+session_usage="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/usage")"
+jq -e --arg execution_id "$first_execution_id" '
+  .items | any(
+    .executionId == $execution_id and .generation == 1 and
+    .inputTokens == 120 and .cachedInputTokens == 40 and .outputTokens == 60 and
+    .reasoningTokens == 20 and .totalTokens == 180 and .durationMillis == 2500 and
+    .networkIngressBytes == 4096 and .networkEgressBytes == 2048 and
+    .providerCostMicros == 12345 and .providerCostReported == true and
+    .providerCurrency == "USD" and .costCoverage != "provider-unavailable" and .final == true
+  )
+' <<<"$session_usage" >/dev/null
+tenant_usage="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/usage")"
+if ! jq -e '
+  .usage.inputTokens == 120 and .usage.cachedInputTokens == 40 and
+  .usage.outputTokens == 60 and .usage.reasoningTokens == 20 and .usage.totalTokens == 180 and
+  .usage.networkIngressBytes == 4096 and .usage.networkEgressBytes == 2048 and
+  .usage.providerCostByCurrency.USD == 12345 and .usage.providerCostReportedCount == 1 and
+  .usage.providerCostMissingCount == 0 and .usage.knownCostByCurrency.USD >= 12345 and
+  .softQuota.enforcement == "soft" and .softQuota.hardStop == false
+' <<<"$tenant_usage" >/dev/null; then
+  jq '{usage, softQuota}' <<<"$tenant_usage" >&2
+  exit 1
+fi
+
+# Internal self-hosted commercialization is usage/cost governance, not payment.
+# Exercise the project allocation CAS and the operator-facing CSV so a deployment
+# cannot claim cost visibility while only exposing an unallocated usage summary.
+cost_report="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/cost-accounting/report")"
+jq -e --arg tenant_id "$tenant_id" --arg project_id "$project_id" '
+  .tenantId == $tenant_id and
+  .unallocatedProjectCount >= 1 and
+  (.rows | any(
+    .projectId == $project_id and
+    .costCenterCode == "unallocated" and
+    .departmentCode == "unallocated" and
+    .totalTokens == 180 and
+    .providerCostByCurrency.USD == 12345 and
+    .knownCostByCurrency.USD >= 12345
+  ))
+' <<<"$cost_report" >/dev/null
+
+cost_allocation="$(request_json "$owner_cookie" PUT "/v1/tenants/$tenant_id/cost-accounting/projects/$project_id" \
+  '{"costCenterCode":"eng-platform","departmentCode":"internal-ai","expectedVersion":0}')"
+jq -e --arg project_id "$project_id" '
+  .projectId == $project_id and
+  .costCenterCode == "eng-platform" and
+  .departmentCode == "internal-ai" and
+  .version == 1
+' <<<"$cost_allocation" >/dev/null
+
+cost_report="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/cost-accounting/report")"
+jq -e --arg project_id "$project_id" '
+  .unallocatedProjectCount == 0 and
+  .knownCostByCurrency.USD >= 12345 and
+  (.rows | any(
+    .projectId == $project_id and
+    .costCenterCode == "eng-platform" and
+    .departmentCode == "internal-ai" and
+    .totalTokens == 180 and
+    .providerCostByCurrency.USD == 12345
+  ))
+' <<<"$cost_report" >/dev/null
+
+cost_csv="$work_dir/internal-cost.csv"
+curl -sS --fail -b "$owner_cookie" -H 'Accept: text/csv' \
+  "$base_url/v1/tenants/$tenant_id/cost-accounting/export.csv" >"$cost_csv"
+grep -q 'cost_center_code' "$cost_csv"
+grep -q 'department_code' "$cost_csv"
+if grep -Eiq 'checkout|stripe|payment' "$cost_csv"; then
+  printf 'Internal cost CSV exposed payment semantics\n' >&2
+  exit 1
+fi
 
 artifact_payload="$work_dir/acceptance-artifact.txt"
 artifact_download="$work_dir/acceptance-artifact.downloaded.txt"
@@ -293,7 +416,7 @@ jq -e '.items | length >= 4' <<<"$audit_logs" >/dev/null
 jq -e '.items | all(.occurredAt | startswith("0001-") | not)' <<<"$audit_logs" >/dev/null
 
 archived_session="$(request_json "$owner_cookie" POST "/v1/sessions/$session_id/archive")"
-jq -e '.status == "archived" and .lastEventSequence == 15 and .archivedAt != null' \
+jq -e '.status == "archived" and .lastEventSequence == 17 and .archivedAt != null' \
   <<<"$archived_session" >/dev/null
 request_json "$owner_cookie" DELETE "/v1/projects/$project_id" >/dev/null
 
@@ -313,5 +436,5 @@ for _ in {1..50}; do
 done
 [[ "$outbox_ready" == "1" ]]
 
-printf 'SaaS acceptance passed: tenant=%s organization=%s project=%s session=%s member=%s worker=%s\n' \
+printf 'Self-hosted acceptance passed: tenant=%s organization=%s project=%s session=%s member=%s worker=%s\n' \
   "$tenant_id" "$organization_id" "$project_id" "$session_id" "$member_id" "$worker_id"

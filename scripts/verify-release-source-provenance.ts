@@ -9,18 +9,31 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { serializeReleaseGithubOutput } from "./lib/release-github-output.ts";
+import { resolveReleaseSourceTagMode } from "./lib/release-source-tag-policy.ts";
 import { releasePackageFiles } from "./update-release-package-versions.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const [version, tag, publishRelease, expectedCommit, refType, refName] = process.argv.slice(2);
+const [version, tag, publishRelease, expectedCommit, refType, refName, enterpriseGaCandidate] =
+  process.argv.slice(2);
 
-if (!version || !tag || !publishRelease || !expectedCommit) {
+if (
+  !version ||
+  !tag ||
+  !publishRelease ||
+  !expectedCommit ||
+  !refType ||
+  !refName ||
+  !enterpriseGaCandidate
+) {
   throw new Error(
-    "Usage: node scripts/verify-release-source-provenance.ts <version> <tag> <publish:true|false> <expected-commit> [ref-type] [ref-name]",
+    "Usage: node scripts/verify-release-source-provenance.ts <version> <tag> <publish:true|false> <expected-commit> <ref-type> <ref-name> <enterprise-ga:true|false>",
   );
 }
 if (publishRelease !== "true" && publishRelease !== "false") {
   throw new Error(`Invalid publication mode: ${publishRelease}`);
+}
+if (enterpriseGaCandidate !== "true" && enterpriseGaCandidate !== "false") {
+  throw new Error(`Invalid Enterprise GA candidate mode: ${enterpriseGaCandidate}`);
 }
 if (!/^[0-9a-f]{40}$/i.test(expectedCommit)) {
   throw new Error(`Expected a full 40-character source commit, got ${expectedCommit}.`);
@@ -63,7 +76,14 @@ for (const relativePath of releasePackageFiles) {
 }
 
 let sourceTag = "";
-if (refType === "tag" && refName === tag) {
+const sourceTagMode = resolveReleaseSourceTagMode({
+  tag,
+  publishRelease: publishRelease === "true",
+  enterpriseGaCandidate: enterpriseGaCandidate === "true",
+  refType,
+  refName,
+});
+if (sourceTagMode === "existing-tag") {
   const tagCommitResult = spawnSync("git", ["rev-parse", `${tag}^{commit}`], {
     cwd: repoRoot,
     encoding: "utf8",
@@ -76,10 +96,26 @@ if (refType === "tag" && refName === tag) {
     throw new Error(`Release tag ${tag} points to ${tagCommit}, not ${sourceCommit}.`);
   }
   sourceTag = tag;
-} else if (publishRelease === "true") {
-  throw new Error(
-    `Publishing requires the workflow ref to be the exact release tag ${tag}; got ${refType || "<none>"}/${refName || "<none>"}.`,
+} else if (sourceTagMode === "planned-tag") {
+  const existingTag = spawnSync(
+    "git",
+    ["ls-remote", "--exit-code", "--tags", "origin", `refs/tags/${tag}`],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+    },
   );
+  if (existingTag.status === 0) {
+    throw new Error(
+      `Enterprise GA candidate tag ${tag} already exists; start from a new candidate ID so no tag-triggered publication races the protected gate.`,
+    );
+  }
+  if (existingTag.status !== 1) {
+    throw new Error(
+      `Unable to verify against origin that planned Enterprise GA tag ${tag} is absent.`,
+    );
+  }
+  sourceTag = tag;
 }
 
 const lockfileSha256 = createHash("sha256")

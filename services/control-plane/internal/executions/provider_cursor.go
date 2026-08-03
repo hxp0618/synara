@@ -34,7 +34,7 @@ type providerCursorPayloadV1 struct {
 	IssuedAt                     time.Time `json:"issuedAt"`
 }
 
-type providerCursorExecutionBinding struct {
+type ProviderCursorExecutionBinding struct {
 	Version byte
 	Digest  [32]byte
 }
@@ -116,7 +116,7 @@ func (s *Service) storeProviderCursor(
 	if err != nil {
 		return err
 	}
-	binding, available := providerCursorBindingFromExecution(execution)
+	binding, available := ProviderCursorBindingFromExecution(execution)
 	if !available || s.cursorCipher == nil {
 		return s.quarantineProviderCursor(ctx, tx, execution, session)
 	}
@@ -146,7 +146,9 @@ func (s *Service) storeProviderCursor(
 	if err != nil {
 		return nil
 	}
-	replaced, err := replaceProviderCursorCAS(ctx, tx, execution, session, encrypted, payloadModel)
+	replaced, err := replaceProviderCursorCAS(
+		ctx, tx, execution, session, encrypted, s.cursorCipher.PrimaryKeyID(), payloadModel,
+	)
 	if err != nil {
 		return err
 	}
@@ -206,7 +208,7 @@ func (s *Service) loadProviderCursor(
 		result.CursorState = providerCursorStateQuarantined
 		return result, nil
 	}
-	binding, available := providerCursorBindingFromExecution(execution)
+	binding, available := ProviderCursorBindingFromExecution(execution)
 	if !available {
 		result.ReasonCode = "cursor_binding_unavailable"
 		if err := s.quarantineProviderCursor(ctx, tx, execution, session); err != nil {
@@ -353,7 +355,7 @@ func (s *Service) loadReplayedProviderCursor(
 		*session.ProviderResumeCursorHistorySequence != *decision.CursorHistorySequence {
 		return nil, providerCursorReplayUnavailable()
 	}
-	binding, available := providerCursorBindingFromExecution(execution)
+	binding, available := ProviderCursorBindingFromExecution(execution)
 	if !available || s.cursorCipher == nil {
 		return nil, providerCursorReplayUnavailable()
 	}
@@ -449,14 +451,21 @@ func providerCursorPayloadMatchesSession(payload providerCursorPayloadV1, sessio
 		*session.ProviderResumeCursorHistorySequence == payload.AuthoritativeHistorySequence
 }
 
-func providerCursorBindingFromExecution(execution persistence.AgentExecution) (providerCursorExecutionBinding, bool) {
+// ProviderCursorBindingFromExecution exposes the immutable authenticated
+// binding needed by the runtime-secret re-encryption command. It does not
+// expose or interpret Provider Cursor plaintext.
+func ProviderCursorBindingFromExecution(execution persistence.AgentExecution) (ProviderCursorExecutionBinding, bool) {
 	if execution.ProviderResumeStrategySnapshot != "native-cursor" || execution.ProviderCursorBindingVersion == nil ||
 		*execution.ProviderCursorBindingVersion != providerCursorBindingVersion || len(execution.ProviderCursorBindingDigest) != 32 {
-		return providerCursorExecutionBinding{}, false
+		return ProviderCursorExecutionBinding{}, false
 	}
 	var digest [32]byte
 	copy(digest[:], execution.ProviderCursorBindingDigest)
-	return providerCursorExecutionBinding{Version: byte(*execution.ProviderCursorBindingVersion), Digest: digest}, true
+	return ProviderCursorExecutionBinding{Version: byte(*execution.ProviderCursorBindingVersion), Digest: digest}, true
+}
+
+func providerCursorBindingFromExecution(execution persistence.AgentExecution) (ProviderCursorExecutionBinding, bool) {
+	return ProviderCursorBindingFromExecution(execution)
 }
 
 func lockProviderCursorSession(
@@ -467,7 +476,7 @@ func lockProviderCursorSession(
 	var session persistence.AgentSession
 	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 		Select(
-			"id", "tenant_id", "provider_resume_cursor_encrypted", "provider_resume_cursor_state",
+			"id", "tenant_id", "provider_resume_cursor_encrypted", "provider_resume_cursor_key_id", "provider_resume_cursor_state",
 			"provider_resume_cursor_source_execution_id", "provider_resume_cursor_source_generation",
 			"provider_resume_cursor_history_sequence", "last_event_sequence",
 		).
@@ -484,6 +493,7 @@ func replaceProviderCursorCAS(
 	execution persistence.AgentExecution,
 	session persistence.AgentSession,
 	replacement []byte,
+	keyID string,
 	payload providerCursorPayloadV1,
 ) (bool, error) {
 	query := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
@@ -491,6 +501,7 @@ func replaceProviderCursorCAS(
 	query = providerCursorSessionCAS(query, session)
 	result := query.Updates(map[string]any{
 		"provider_resume_cursor_encrypted":           replacement,
+		"provider_resume_cursor_key_id":              nullableRuntimeKeyID(keyID),
 		"provider_resume_cursor_state":               providerCursorStateUsable,
 		"provider_resume_cursor_source_execution_id": payload.SourceExecutionID,
 		"provider_resume_cursor_source_generation":   payload.SourceGeneration,
@@ -537,6 +548,7 @@ func (s *Service) clearProviderCursor(
 		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID)
 	result := providerCursorSessionCAS(query, session).Updates(map[string]any{
 		"provider_resume_cursor_encrypted":           nil,
+		"provider_resume_cursor_key_id":              nil,
 		"provider_resume_cursor_state":               providerCursorStateAbsent,
 		"provider_resume_cursor_source_execution_id": nil,
 		"provider_resume_cursor_source_generation":   nil,
@@ -553,10 +565,22 @@ func (s *Service) clearProviderCursor(
 
 func providerCursorSessionCAS(query *gorm.DB, session persistence.AgentSession) *gorm.DB {
 	query = query.Where("provider_resume_cursor_state = ?", session.ProviderResumeCursorState)
+	if session.ProviderResumeCursorKeyID == nil {
+		query = query.Where("provider_resume_cursor_key_id IS NULL")
+	} else {
+		query = query.Where("provider_resume_cursor_key_id = ?", *session.ProviderResumeCursorKeyID)
+	}
 	if len(session.ProviderResumeCursorEncrypted) == 0 {
 		return query.Where("provider_resume_cursor_encrypted IS NULL OR length(provider_resume_cursor_encrypted) = 0")
 	}
 	return query.Where("provider_resume_cursor_encrypted = ?", session.ProviderResumeCursorEncrypted)
+}
+
+func nullableRuntimeKeyID(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func (s *Service) markProviderRuntimeBindingCursorUnavailable(

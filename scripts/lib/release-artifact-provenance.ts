@@ -7,16 +7,23 @@ import { createHash } from "node:crypto";
 import {
   createReadStream,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { matchesDistinguishedName } from "@synara/shared/windowsCertificate";
+
+import {
+  type MacArtifactArch,
+  verifyMacBundleArchitectures,
+  verifyMacBundleTeamIdentity,
+} from "./mac-bundle-validation.ts";
 
 export type ReleaseArtifactPlatform = "linux" | "mac" | "win";
 
@@ -44,9 +51,37 @@ export interface ReleaseArtifactDigest {
   readonly sha256: string;
 }
 
-interface CommandResult {
+export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
+}
+
+export interface MacDiskImageVerificationDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly runCommand?: (command: string, args: ReadonlyArray<string>) => CommandResult;
+  readonly verifyArchitectures?: (
+    appBundlePath: string,
+    expectedArch: MacArtifactArch,
+  ) => ReadonlyArray<string>;
+  readonly verifyTeamIdentity?: (appBundlePath: string, binaries: ReadonlyArray<string>) => string;
+}
+
+export interface MacDiskImagePayloadEvidence {
+  readonly appBundle: string;
+  readonly teamId: string;
+}
+
+export interface MacZipAppVerificationDependencies {
+  readonly verifyArchitectures?: (
+    appBundlePath: string,
+    expectedArch: MacArtifactArch,
+  ) => ReadonlyArray<string>;
+  readonly verifyTeamIdentity?: (appBundlePath: string, binaries: ReadonlyArray<string>) => string;
+}
+
+export interface MacZipAppEvidence {
+  readonly teamId: string;
+  readonly checks: ReadonlyArray<string>;
 }
 
 interface WindowsSignatureEvidence {
@@ -63,6 +98,7 @@ interface MacSignatureEvidence {
   readonly authorities: ReadonlyArray<string>;
   readonly appBundle: string;
   readonly diskImage: string;
+  readonly diskImageAppBundle: string;
 }
 
 type SigningEvidence =
@@ -159,8 +195,12 @@ export async function collectReleaseArtifactDigests(
   artifactFileNames?: ReadonlyArray<string>,
 ): Promise<ReadonlyArray<ReleaseArtifactDigest>> {
   const fileNames = (artifactFileNames ?? readdirSync(assetsDirectory))
-    .filter((fileName) => !fileName.endsWith(".provenance.json"))
-    .sort((left, right) => left.localeCompare(right));
+    .filter(
+      (fileName) =>
+        !fileName.endsWith(".provenance.json") &&
+        !/^latest(?:-[A-Za-z0-9_-]+)?\.yml$/.test(fileName),
+    )
+    .toSorted((left, right) => left.localeCompare(right));
   if (new Set(fileNames).size !== fileNames.length) {
     throw new Error("Release artifact file names must be unique.");
   }
@@ -198,6 +238,166 @@ function parseMacIdentity(output: string): {
   return { teamId, authorities };
 }
 
+function parseMacArtifactArch(arch: string): MacArtifactArch {
+  if (arch === "arm64" || arch === "x64" || arch === "universal") return arch;
+  throw new Error(`Unsupported macOS artifact architecture: ${arch}.`);
+}
+
+function resolveTopLevelSynaraApp(root: string, source: string): string {
+  const appEntries = readdirSync(root).filter((entry) => entry.endsWith(".app"));
+  if (appEntries.length !== 1) {
+    throw new Error(
+      `Expected exactly one top-level app bundle in ${source}, found ${appEntries.length}.`,
+    );
+  }
+  const appBundleName = appEntries[0]!;
+  if (appBundleName !== "Synara.app") {
+    throw new Error(`${source} app bundle must be Synara.app, found ${appBundleName}.`);
+  }
+
+  const appBundlePath = join(root, appBundleName);
+  const entry = lstatSync(appBundlePath);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error(
+      `${source} Synara.app must be a real directory, not a symlink or special file.`,
+    );
+  }
+
+  const realRoot = realpathSync(root);
+  const realAppBundlePath = realpathSync(appBundlePath);
+  const relativeAppPath = relative(realRoot, realAppBundlePath);
+  if (
+    relativeAppPath === "" ||
+    relativeAppPath === ".." ||
+    relativeAppPath.startsWith("../") ||
+    relativeAppPath.startsWith("..\\") ||
+    isAbsolute(relativeAppPath)
+  ) {
+    throw new Error(`${source} Synara.app resolves outside its bounded root.`);
+  }
+  return appBundlePath;
+}
+
+export function resolveMountedSynaraApp(mountPoint: string): string {
+  return resolveTopLevelSynaraApp(mountPoint, "mounted DMG");
+}
+
+export function resolveExtractedSynaraApp(extractionRoot: string): string {
+  return resolveTopLevelSynaraApp(extractionRoot, "extracted ZIP");
+}
+
+function detachDiskImage(
+  command: (command: string, args: ReadonlyArray<string>) => CommandResult,
+  mountPoint: string,
+): void {
+  try {
+    command("hdiutil", ["detach", mountPoint]);
+  } catch (normalDetachError) {
+    try {
+      command("hdiutil", ["detach", "-force", mountPoint]);
+    } catch (forceDetachError) {
+      const normalDetachMessage =
+        normalDetachError instanceof Error ? normalDetachError.message : String(normalDetachError);
+      throw new Error(
+        `Could not detach mounted DMG at ${mountPoint}; normal detach failed: ${normalDetachMessage}`,
+        { cause: forceDetachError },
+      );
+    }
+  }
+}
+
+export function verifyMacDiskImagePayload(
+  diskImagePath: string,
+  expectedArch: MacArtifactArch,
+  expectedTeamId: string,
+  dependencies: MacDiskImageVerificationDependencies = {},
+): MacDiskImagePayloadEvidence {
+  if ((dependencies.platform ?? process.platform) !== "darwin") {
+    throw new Error("macOS disk image payload verification must run on macOS.");
+  }
+  const command = dependencies.runCommand ?? runCommand;
+  const verifyArchitectures = dependencies.verifyArchitectures ?? verifyMacBundleArchitectures;
+  const verifyTeamIdentity = dependencies.verifyTeamIdentity ?? verifyMacBundleTeamIdentity;
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "synara-release-dmg-"));
+  const mountPoint = join(temporaryRoot, "volume");
+  mkdirSync(mountPoint);
+
+  let attached = false;
+  let payloadEvidence: MacDiskImagePayloadEvidence | undefined;
+  let verificationError: unknown;
+  try {
+    command("hdiutil", [
+      "attach",
+      "-readonly",
+      "-nobrowse",
+      "-noautoopen",
+      "-mountpoint",
+      mountPoint,
+      diskImagePath,
+    ]);
+    attached = true;
+    const appBundlePath = resolveMountedSynaraApp(mountPoint);
+    command("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appBundlePath]);
+    const binaries = verifyArchitectures(appBundlePath, expectedArch);
+    const teamId = verifyTeamIdentity(appBundlePath, binaries);
+    if (teamId !== expectedTeamId) {
+      throw new Error(
+        `macOS disk image app team ID ${teamId} does not match expected ${expectedTeamId}.`,
+      );
+    }
+    payloadEvidence = { appBundle: "Synara.app", teamId };
+  } catch (error) {
+    verificationError = error;
+  }
+
+  let detachError: unknown;
+  if (attached) {
+    try {
+      detachDiskImage(command, mountPoint);
+    } catch (error) {
+      detachError = error;
+    }
+  }
+  if (!attached || detachError === undefined) {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+
+  if (verificationError !== undefined && detachError !== undefined) {
+    throw new AggregateError(
+      [verificationError, detachError],
+      "macOS disk image payload verification and detach both failed.",
+    );
+  }
+  if (verificationError !== undefined) throw verificationError;
+  if (detachError !== undefined) throw detachError;
+  if (!payloadEvidence) {
+    throw new Error("macOS disk image payload verification produced no evidence.");
+  }
+  return payloadEvidence;
+}
+
+export function verifyMacZipApp(
+  appBundlePath: string,
+  expectedArch: MacArtifactArch,
+  expectedTeamId: string,
+  dependencies: MacZipAppVerificationDependencies = {},
+): MacZipAppEvidence {
+  const verifyArchitectures = dependencies.verifyArchitectures ?? verifyMacBundleArchitectures;
+  const verifyTeamIdentity = dependencies.verifyTeamIdentity ?? verifyMacBundleTeamIdentity;
+  const binaries = verifyArchitectures(appBundlePath, expectedArch);
+  const teamId = verifyTeamIdentity(appBundlePath, binaries);
+  if (teamId !== expectedTeamId) {
+    throw new Error(`macOS ZIP app team ID ${teamId} does not match expected ${expectedTeamId}.`);
+  }
+  return {
+    teamId,
+    checks: [
+      `Mach-O architecture ${expectedArch} in zip payload`,
+      "Team ID consistency in zip payload",
+    ],
+  };
+}
+
 function verifyMacSignatures(
   input: ReleaseArtifactProvenanceInput,
   artifacts: ReadonlyArray<ReleaseArtifactDigest>,
@@ -212,20 +412,14 @@ function verifyMacSignatures(
 
   const zip = requireSingleArtifact(artifacts, ".zip");
   const diskImage = requireSingleArtifact(artifacts, ".dmg");
+  const expectedArch = parseMacArtifactArch(input.arch);
   const extractionRoot = mkdtempSync(join(tmpdir(), "synara-release-provenance-"));
   try {
     runCommand("ditto", ["-x", "-k", join(input.assetsDirectory, zip.fileName), extractionRoot]);
-    const appBundles = readdirSync(extractionRoot).filter((entry) => {
-      const candidate = join(extractionRoot, entry);
-      return entry.endsWith(".app") && statSync(candidate).isDirectory();
-    });
-    if (appBundles.length !== 1) {
-      throw new Error(`Expected one top-level app bundle in ${zip.fileName}.`);
-    }
-
-    const appBundleName = appBundles[0]!;
-    const appBundlePath = join(extractionRoot, appBundleName);
+    const appBundlePath = resolveExtractedSynaraApp(extractionRoot);
+    const appBundleName = "Synara.app";
     runCommand("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appBundlePath]);
+    const zipApp = verifyMacZipApp(appBundlePath, expectedArch, expectedTeamId);
     const appIdentityOutput = runCommand("codesign", ["-d", "--verbose=4", appBundlePath]);
     const appIdentity = parseMacIdentity(
       `${appIdentityOutput.stdout}\n${appIdentityOutput.stderr}`,
@@ -259,6 +453,7 @@ function verifyMacSignatures(
       diskImagePath,
     ]);
     runCommand("xcrun", ["stapler", "validate", diskImagePath]);
+    const diskImagePayload = verifyMacDiskImagePayload(diskImagePath, expectedArch, expectedTeamId);
 
     return {
       status: "verified",
@@ -268,14 +463,20 @@ function verifyMacSignatures(
         authorities: appIdentity.authorities,
         appBundle: appBundleName,
         diskImage: diskImage.fileName,
+        diskImageAppBundle: diskImagePayload.appBundle,
       },
       checks: [
         "codesign --verify app",
+        ...zipApp.checks,
         "spctl --assess app",
         "stapler validate app",
         "codesign --verify dmg",
         "spctl --assess dmg",
         "stapler validate dmg",
+        "read-only mount dmg",
+        "codesign --verify dmg payload app",
+        `Mach-O architecture ${expectedArch} in dmg payload`,
+        "Team ID consistency in dmg payload",
       ],
     };
   } finally {

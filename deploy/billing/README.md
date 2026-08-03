@@ -28,12 +28,12 @@ Prerequisites are Docker, Go, `jq`, `openssl`, Python 3, and `shasum`. The outpu
 already exist:
 
 ```bash
-SYNARA_BILLING_ACCEPTANCE_EVIDENCE_FILE=docs/reports/stage-4-billing-postgres-minio-acceptance-local.json \
+SYNARA_COST_ACCOUNTING_ACCEPTANCE_EVIDENCE_FILE=docs/reports/stage-4-billing-postgres-minio-acceptance-local.json \
   deploy/billing/postgres-minio-acceptance.sh
 ```
 
 The default PostgreSQL, MinIO, MinIO Client, and Linux test-runtime references can be overridden with the corresponding
-`SYNARA_BILLING_ACCEPTANCE_*_IMAGE` variables. The script resolves each reference before creating a container and
+`SYNARA_COST_ACCOUNTING_ACCEPTANCE_*_IMAGE` variables. The script resolves each reference before creating a container and
 records the exact image ID used in the bounded JSON evidence. Because the repository may be dirty, it also records the
 host Go version plus SHA-256 values for the wrapper, billing service, three required integration-test sources,
 `blob_parsers.go`, `blob_source.go`, `cloud_sources.go`, and the compiled Linux test binary. The binary and the three

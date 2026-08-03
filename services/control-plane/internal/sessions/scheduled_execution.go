@@ -13,6 +13,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/schedulingdecision"
+	controltracing "github.com/synara-ai/synara/services/control-plane/internal/tracing"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
@@ -109,6 +110,11 @@ func CreateScheduledExecution(
 	execution.QueuePriority = queueSnapshot.Priority
 	execution.QuotaUnits = queueSnapshot.QuotaUnits
 	execution.AutomationID = queueSnapshot.AutomationID
+	if execution.Traceparent == nil {
+		if traceparent := controltracing.TraceparentFromContext(ctx); traceparent != "" {
+			execution.Traceparent = &traceparent
+		}
+	}
 
 	ApplyExecutionLaunchTarget(&execution, launchTarget)
 	releaseSelection, err := workerreleases.SelectExecution(ctx, tx, execution.ExecutionTargetID, execution.ID)

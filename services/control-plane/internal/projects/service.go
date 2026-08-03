@@ -112,6 +112,9 @@ func (s *Service) CreateWithIdempotency(
 	input CreateProjectInput,
 	idempotencyKey, requestID, ipAddress string,
 ) (Project, bool, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return Project{}, false, err
+	}
 	if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, organizationID, authorization.ProjectCreate); err != nil {
 		return Project{}, false, err
 	}
@@ -177,6 +180,9 @@ func (s *Service) List(
 	principal identity.Principal,
 	tenantID, organizationID uuid.UUID,
 ) ([]Project, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return nil, err
+	}
 	access, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, organizationID, authorization.ProjectRead)
 	if err != nil {
 		return nil, err
@@ -198,6 +204,9 @@ func (s *Service) Get(
 	principal identity.Principal,
 	tenantID, projectID uuid.UUID,
 ) (Project, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return Project{}, err
+	}
 	model, err := s.loadAuthorizedProjectModel(ctx, principal, tenantID, projectID)
 	if err != nil {
 		return Project{}, err
@@ -237,6 +246,9 @@ func (s *Service) Update(
 	input UpdateProjectInput,
 	requestID, ipAddress string,
 ) (Project, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return Project{}, err
+	}
 	currentModel, err := s.loadAuthorizedProjectModel(ctx, principal, tenantID, projectID)
 	if err != nil {
 		return Project{}, err
@@ -439,6 +451,9 @@ func (s *Service) Archive(
 	tenantID, projectID uuid.UUID,
 	requestID, ipAddress string,
 ) error {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return err
+	}
 	current, err := s.Get(ctx, principal, tenantID, projectID)
 	if err != nil {
 		return err

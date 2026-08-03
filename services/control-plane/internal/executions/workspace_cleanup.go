@@ -12,6 +12,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 )
 
@@ -38,7 +39,7 @@ func (s *Service) ReconcileWorkspaceCleanup(ctx context.Context, now time.Time, 
 	}
 
 	var candidateIDs []uuid.UUID
-	if err := s.db.WithContext(ctx).Table("workspace_materializations AS materialization").
+	candidateQuery := s.db.WithContext(ctx).Table("workspace_materializations AS materialization").
 		Select("materialization.id").
 		Joins("JOIN remote_workspaces AS workspace ON workspace.tenant_id = materialization.tenant_id AND workspace.id = materialization.workspace_id").
 		Where("materialization.state IN ?", []string{"active", "retired", "cleanup-pending"}).
@@ -51,8 +52,9 @@ func (s *Service) ReconcileWorkspaceCleanup(ctx context.Context, now time.Time, 
 			WHERE cleanup.tenant_id = materialization.tenant_id
 			  AND cleanup.materialization_id = materialization.id
 			  AND cleanup.status IN ('pending', 'leased', 'running')
-		)`).
-		Order("COALESCE(materialization.cleanup_requested_at, workspace.retention_until), materialization.updated_at, materialization.id").
+		)`)
+	candidateQuery = retentiongate.ExcludeWorkspaces(candidateQuery, "workspace")
+	if err := candidateQuery.Order("COALESCE(materialization.cleanup_requested_at, workspace.retention_until), materialization.updated_at, materialization.id").
 		Limit(limit).Scan(&candidateIDs).Error; err != nil {
 		return 0, problem.Wrap(500, "workspace_cleanup_candidates_load_failed", "Failed to load eligible Workspace cleanup intents.", err)
 	}
@@ -1121,6 +1123,16 @@ func workspaceCleanupBlocker(
 	}
 	if materialization.State == "cleaned" {
 		return "materialization-cleaned", nil
+	}
+	var unheld int64
+	holdQuery := tx.WithContext(ctx).Table("remote_workspaces AS workspace").
+		Where("workspace.tenant_id = ? AND workspace.id = ?", workspace.TenantID, workspace.ID)
+	holdQuery = retentiongate.ExcludeWorkspaces(holdQuery, "workspace")
+	if err := holdQuery.Count(&unheld).Error; err != nil {
+		return "", problem.Wrap(500, "workspace_legal_hold_check_failed", "Workspace Legal Hold could not be checked.", err)
+	}
+	if unheld == 0 {
+		return "legal-hold", nil
 	}
 	var count int64
 	if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).

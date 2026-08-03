@@ -22,6 +22,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	controltracing "github.com/synara-ai/synara/services/control-plane/internal/tracing"
 )
 
 type Client struct {
@@ -62,7 +63,8 @@ func isWorkerRevocationError(err error) bool {
 func NewClient(cfg Config) *Client {
 	return &Client{
 		baseURL: cfg.ControlPlaneURL, registrationToken: cfg.RegistrationToken,
-		http: &http.Client{Timeout: cfg.RequestTimeout}, uploadHTTP: &http.Client{Timeout: cfg.ArtifactTimeout},
+		http:       &http.Client{Transport: controltracing.NewHTTPTransport(nil), Timeout: cfg.RequestTimeout},
+		uploadHTTP: &http.Client{Timeout: cfg.ArtifactTimeout},
 	}
 }
 
@@ -387,6 +389,29 @@ func (c *Client) AppendEvent(ctx context.Context, executionID uuid.UUID, lease e
 		LeaseInput: executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
 		EventID:    eventID, EventVersion: eventVersion, EventType: message.EventType, Payload: message.Payload, OccurredAt: occurredAt,
 	}, nil)
+}
+
+func (c *Client) ReportExecutionUsage(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	reportSequence, networkIngressBytes, networkEgressBytes int64,
+) error {
+	return c.doJSON(
+		ctx,
+		http.MethodPost,
+		executionPath(executionID, "usage"),
+		c.workerToken,
+		uuid.NewString(),
+		executions.ExecutionUsageReportInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			ReportSequence: reportSequence, NetworkIngressBytes: networkIngressBytes,
+			NetworkEgressBytes: networkEgressBytes,
+		},
+		nil,
+	)
 }
 
 func (c *Client) PullInteractionResolutions(

@@ -36,7 +36,15 @@ func resolveOptions(values []Options) Options {
 
 func Open(ctx context.Context, databaseURL string, values ...Options) (*gorm.DB, error) {
 	options := resolveOptions(values)
-	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		DSN: databaseURL,
+		// Additive Stage 6 migrations extend tables while older replicas may still
+		// be reading them. pgx's implicit prepared-statement cache can retain a
+		// SELECT * result shape and fail after ADD COLUMN with "cached plan must
+		// not change result type". Simple protocol keeps those rolling migrations
+		// safe without requiring every query path to evict a connection-local plan.
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{
 		TranslateError:         true,
 		SkipDefaultTransaction: true,
 		Logger:                 gormLogger(),

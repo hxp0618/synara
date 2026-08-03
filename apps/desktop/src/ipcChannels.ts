@@ -32,6 +32,14 @@ export const DESKTOP_IPC_CHANNELS = {
     read: "desktop:storage-migration-read",
     acknowledge: "desktop:storage-migration-acknowledge",
   },
+  saas: {
+    getMode: "desktop:saas-get-mode",
+    setMode: "desktop:saas-set-mode",
+    mode: "desktop:saas-mode",
+    getState: "desktop:saas-get-state",
+    disconnect: "desktop:saas-disconnect",
+    state: "desktop:saas-state",
+  },
   appSnap: {
     getState: "desktop:appsnap-get-state",
     setEnabled: "desktop:appsnap-set-enabled",

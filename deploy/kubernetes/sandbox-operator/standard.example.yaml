@@ -67,6 +67,42 @@ spec:
               value: /data/workspaces
             - name: SYNARA_AGENTD_GIT_CACHE_ROOT
               value: /data/git-cache
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+                  optional: true
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: OTEL_EXPORTER_OTLP_PROTOCOL
+                  optional: true
+            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: OTEL_EXPORTER_OTLP_CERTIFICATE
+                  optional: true
+            - name: SYNARA_OTEL_TRACE_SAMPLE_RATIO
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: SYNARA_OTEL_TRACE_SAMPLE_RATIO
+                  optional: true
+            - name: SYNARA_OTEL_COLLECTOR_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: SYNARA_OTEL_COLLECTOR_REGION
+                  optional: true
+            - name: SYNARA_OTEL_TRACE_RETENTION_DAYS
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+                  key: SYNARA_OTEL_TRACE_RETENTION_DAYS
+                  optional: true
           resources:
             requests:
               cpu: 250m

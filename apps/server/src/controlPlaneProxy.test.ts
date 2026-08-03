@@ -5,14 +5,22 @@ import { describe, expect, it } from "vitest";
 
 import {
   bindControlPlaneProxyAbort,
+  buildControlPlaneProxyCorsHeaders,
   buildControlPlaneProxyRequestHeaders,
   buildControlPlaneProxyResponseHeaders,
   resolveControlPlaneTarget,
   shouldStreamControlPlaneResponse,
   streamControlPlaneResponseBody,
 } from "./controlPlaneProxy";
+import type { ServerConfigShape } from "./config";
 
 describe("resolveControlPlaneTarget", () => {
+  const localDesktopConfig = {
+    host: "127.0.0.1",
+    publicUrl: undefined,
+    devUrl: undefined,
+  } as ServerConfigShape;
+
   it("keeps the public path and query while replacing the internal origin", () => {
     expect(
       resolveControlPlaneTarget(
@@ -29,6 +37,15 @@ describe("resolveControlPlaneTarget", () => {
         new URL("https://synara.example/scim/v2/Users?count=100"),
       ).toString(),
     ).toBe("http://control-plane:3780/scim/v2/Users?count=100");
+  });
+
+  it("preserves a fixed Control Plane deployment base path", () => {
+    expect(
+      resolveControlPlaneTarget(
+        new URL("https://gateway.example/control-plane/"),
+        new URL("http://127.0.0.1:58180/v1/auth/session?refresh=1"),
+      ).toString(),
+    ).toBe("https://gateway.example/control-plane/v1/auth/session?refresh=1");
   });
 
   it("streams event-stream responses without buffering them", () => {
@@ -118,6 +135,41 @@ describe("resolveControlPlaneTarget", () => {
     expect(headers.get("x-forwarded-for")).toBeNull();
   });
 
+  it("allows the installed Desktop origin to read and mutate through the local proxy", () => {
+    expect(
+      buildControlPlaneProxyCorsHeaders({
+        rawOrigin: "synara://app",
+        requestOrigin: "http://127.0.0.1:58180",
+        config: localDesktopConfig,
+      }),
+    ).toMatchObject({
+      "Access-Control-Allow-Origin": "synara://app",
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Allow-Methods": expect.stringContaining("DELETE"),
+      "Access-Control-Allow-Headers": expect.stringContaining("Idempotency-Key"),
+    });
+  });
+
+  it("rejects an unrelated browser origin before forwarding Desktop credentials", () => {
+    expect(
+      buildControlPlaneProxyCorsHeaders({
+        rawOrigin: "https://attacker.example",
+        requestOrigin: "http://127.0.0.1:58180",
+        config: localDesktopConfig,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps non-browser proxy requests available without adding CORS headers", () => {
+    expect(
+      buildControlPlaneProxyCorsHeaders({
+        rawOrigin: undefined,
+        requestOrigin: "http://127.0.0.1:58180",
+        config: localDesktopConfig,
+      }),
+    ).toEqual({});
+  });
+
   it("preserves multiple login cookies from the Control Plane", () => {
     const upstreamHeaders = new Headers({ "Content-Type": "application/json" });
     upstreamHeaders.append("Set-Cookie", "session=one; Path=/; HttpOnly");
@@ -131,5 +183,18 @@ describe("resolveControlPlaneTarget", () => {
       "csrf=two; Path=/; SameSite=Lax",
     ]);
     expect(headers["content-type"]).toBe("application/json");
+  });
+
+  it("overrides upstream CORS policy while preserving its Vary dimensions", () => {
+    const headers = buildControlPlaneProxyResponseHeaders(
+      new Response("{}", { headers: { Vary: "Accept-Encoding" } }),
+      {
+        "Access-Control-Allow-Origin": "synara://app",
+        Vary: "Origin",
+      },
+    );
+
+    expect(headers["access-control-allow-origin"]).toBe("synara://app");
+    expect(headers.vary).toBe("Accept-Encoding, Origin");
   });
 });

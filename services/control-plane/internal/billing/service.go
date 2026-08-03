@@ -279,7 +279,7 @@ func (s *Service) EstimateUsageCharges(
 		return nil, err
 	}
 	if input.WorkerID == uuid.Nil || input.WorkerIncarnation <= 0 {
-		return nil, problem.New(400, "invalid_billing_worker", "workerId and workerIncarnation are required.")
+		return nil, problem.New(400, "invalid_cost_accounting_worker", "workerId and workerIncarnation are required.")
 	}
 
 	rows := make([]persistence.BillingEstimatedUsageCharge, 0)
@@ -289,7 +289,7 @@ func (s *Service) EstimateUsageCharges(
 			return loadErr
 		}
 		if fact.TenantID == nil {
-			return problem.New(409, "billing_worker_fact_tenant_unattributed", "The billing Worker incarnation fact is not attributed to a tenant.")
+			return problem.New(409, "cost_accounting_worker_fact_tenant_unattributed", "The cost-accounting Worker incarnation fact is not attributed to a tenant.")
 		}
 
 		usageStart := maxTime(periodStart, fact.RegisteredAt.UTC())
@@ -367,7 +367,7 @@ func (s *Service) EstimateUsageCharges(
 			if err := tx.WithContext(ctx).
 				Clauses(clause.OnConflict{DoNothing: true}).
 				Create(&row).Error; err != nil {
-				return problem.Wrap(409, "billing_estimate_create_failed", "The estimated billing usage charge could not be created.", err)
+				return problem.Wrap(409, "cost_accounting_estimate_create_failed", "The estimated usage cost could not be created.", err)
 			}
 			rows = append(rows, row)
 		}
@@ -425,19 +425,19 @@ func (s *Service) prepareActualInvoiceImport(
 	request.Provider = provider
 	request.ExternalImportID = strings.TrimSpace(request.ExternalImportID)
 	if request.ExternalImportID == "" {
-		return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_import", "externalImportId is required.")
+		return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_import", "externalImportId is required.")
 	}
 	if s.adapter == nil {
-		return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(500, "billing_adapter_unavailable", "The billing adapter is not configured.")
+		return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(500, "cost_accounting_adapter_unavailable", "The cost source adapter is not configured.")
 	}
 
 	imported, err := s.adapter.FetchActualInvoice(ctx, request)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvoiceNotFound):
-			return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(404, "billing_invoice_not_found", "The requested billing invoice import was not found.")
+			return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.New(404, "cost_accounting_invoice_not_found", "The requested provider cost invoice import was not found.")
 		default:
-			return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.Wrap(502, "billing_invoice_fetch_failed", "The billing invoice import could not be fetched.", err)
+			return ImportActualInvoiceRequest{}, ImportedActualInvoice{}, "", problem.Wrap(502, "cost_accounting_invoice_fetch_failed", "The provider cost invoice import could not be fetched.", err)
 		}
 	}
 
@@ -477,8 +477,8 @@ func (s *Service) importActualInvoiceTx(
 	); err != nil {
 		return importedInvoiceMutation{}, problem.Wrap(
 			500,
-			"billing_invoice_import_coordination_failed",
-			"The billing invoice import could not be coordinated.",
+			"cost_accounting_invoice_import_coordination_failed",
+			"The provider cost invoice import could not be coordinated.",
 			err,
 		)
 	}
@@ -490,7 +490,7 @@ func (s *Service) importActualInvoiceTx(
 	switch {
 	case existingErr == nil:
 		if existing.SourceChecksum != checksum {
-			return importedInvoiceMutation{}, problem.New(409, "billing_invoice_import_conflict", "The billing invoice import external ID is already bound to different contents.")
+			return importedInvoiceMutation{}, problem.New(409, "cost_accounting_invoice_import_conflict", "The provider cost invoice import external ID is already bound to different contents.")
 		}
 		lines, lineErr := loadActualInvoiceLines(ctx, tx, existing.TenantID, existing.ID)
 		if lineErr != nil {
@@ -500,11 +500,11 @@ func (s *Service) importActualInvoiceTx(
 			Import: existing, Lines: lines, SourceProvenance: cloneInvoiceSourceProvenance(normalizedInvoice.SourceProvenance),
 		}}, nil
 	case !errors.Is(existingErr, gorm.ErrRecordNotFound):
-		return importedInvoiceMutation{}, problem.Wrap(500, "billing_invoice_import_load_failed", "The billing invoice import could not be loaded.", existingErr)
+		return importedInvoiceMutation{}, problem.Wrap(500, "cost_accounting_invoice_import_load_failed", "The provider cost invoice import could not be loaded.", existingErr)
 	}
 
 	if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
-		return importedInvoiceMutation{}, problem.Wrap(409, "billing_invoice_import_create_failed", "The billing invoice import could not be created.", err)
+		return importedInvoiceMutation{}, problem.Wrap(409, "cost_accounting_invoice_import_create_failed", "The provider cost invoice import could not be created.", err)
 	}
 	lines := make([]persistence.BillingActualInvoiceLine, 0, len(normalizedInvoice.Lines))
 	for _, line := range normalizedInvoice.Lines {
@@ -528,7 +528,7 @@ func (s *Service) importActualInvoiceTx(
 	}
 	if len(lines) > 0 {
 		if err := tx.WithContext(ctx).Create(&lines).Error; err != nil {
-			return importedInvoiceMutation{}, problem.Wrap(409, "billing_invoice_line_create_failed", "The billing invoice lines could not be created.", err)
+			return importedInvoiceMutation{}, problem.Wrap(409, "cost_accounting_invoice_line_create_failed", "The provider cost invoice lines could not be created.", err)
 		}
 	}
 	return importedInvoiceMutation{
@@ -570,7 +570,7 @@ func (s *Service) ReconcileActualInvoiceImport(
 		return ReconciliationReport{}, err
 	}
 	if importID == uuid.Nil {
-		return ReconciliationReport{}, problem.New(400, "invalid_billing_invoice_import", "importId is required.")
+		return ReconciliationReport{}, problem.New(400, "invalid_cost_accounting_invoice_import", "importId is required.")
 	}
 
 	report := ReconciliationReport{}
@@ -596,9 +596,9 @@ func (s *Service) reconcileActualInvoiceImportTx(
 		Where("tenant_id = ? AND id = ?", tenantID, importID).
 		Take(&invoice).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return reconciliationMutation{}, problem.New(404, "billing_invoice_import_not_found", "The billing invoice import was not found.")
+			return reconciliationMutation{}, problem.New(404, "cost_accounting_invoice_import_not_found", "The provider cost invoice import was not found.")
 		}
-		return reconciliationMutation{}, problem.Wrap(500, "billing_invoice_import_load_failed", "The billing invoice import could not be loaded.", err)
+		return reconciliationMutation{}, problem.Wrap(500, "cost_accounting_invoice_import_load_failed", "The provider cost invoice import could not be loaded.", err)
 	}
 	lines, err := loadActualInvoiceLines(ctx, tx, invoice.TenantID, invoice.ID)
 	if err != nil {
@@ -650,7 +650,7 @@ func (s *Service) reconcileActualInvoiceImportTx(
 				Model(&persistence.BillingActualInvoiceLine{}).
 				Where("tenant_id = ? AND id = ?", invoice.TenantID, line.ID).
 				Updates(updates).Error; err != nil {
-				return reconciliationMutation{}, problem.Wrap(500, "billing_reconciliation_update_failed", "The billing invoice reconciliation state could not be updated.", err)
+				return reconciliationMutation{}, problem.Wrap(500, "cost_accounting_reconciliation_update_failed", "The provider cost invoice reconciliation state could not be updated.", err)
 			}
 			changed = true
 			line.ReconciledAt = &now
@@ -867,7 +867,7 @@ func buildChargeSegments(
 	tariffs []persistence.BillingProviderTariff,
 ) ([]chargeSegment, error) {
 	if len(tariffs) == 0 {
-		return nil, problem.New(409, "billing_tariff_missing", "No billing tariff covers the requested usage window.")
+		return nil, problem.New(409, "cost_accounting_tariff_missing", "No cost tariff covers the requested usage window.")
 	}
 
 	boundaries := []time.Time{usageStartAt, usageEndAt}
@@ -893,7 +893,7 @@ func buildChargeSegments(
 		}
 		tariff, ok := selectTariff(workerRegion, startAt, tariffs)
 		if !ok {
-			return nil, problem.New(409, "billing_tariff_missing", "A billing tariff gap exists inside the requested usage window.")
+			return nil, problem.New(409, "cost_accounting_tariff_missing", "A cost tariff gap exists inside the requested usage window.")
 		}
 		segments = append(segments, chargeSegment{StartAt: startAt, EndAt: endAt, Tariff: tariff})
 	}
@@ -944,7 +944,7 @@ func loadCandidateTariffs(
 	}
 	var tariffs []persistence.BillingProviderTariff
 	if err := query.Order("effective_start_at ASC, version ASC").Find(&tariffs).Error; err != nil {
-		return nil, problem.Wrap(500, "billing_tariff_load_failed", "The billing tariffs could not be loaded.", err)
+		return nil, problem.Wrap(500, "cost_accounting_tariff_load_failed", "The cost tariffs could not be loaded.", err)
 	}
 	return tariffs, nil
 }
@@ -967,8 +967,8 @@ func authoritativeRequestChargeClaimCount(
 		} else if *requestRate != rate {
 			return 0, false, problem.New(
 				409,
-				"billing_request_charge_delta_unavailable",
-				"The billing Worker incarnation fact does not provide authoritative per-period request charges across tariff changes.",
+				"cost_accounting_request_charge_delta_unavailable",
+				"The cost-accounting Worker incarnation fact does not provide authoritative per-period request charges across tariff changes.",
 			)
 		}
 		if rate > 0 {
@@ -981,8 +981,8 @@ func authoritativeRequestChargeClaimCount(
 	if fact.RegisteredAt.UTC().Before(billingPeriodStartAt) || fact.TerminatedAt == nil || fact.TerminatedAt.UTC().After(billingPeriodEndAt) {
 		return 0, false, problem.New(
 			409,
-			"billing_request_charge_delta_unavailable",
-			"The billing Worker incarnation fact does not provide authoritative per-period request charges outside a fully enclosed incarnation lifetime.",
+			"cost_accounting_request_charge_delta_unavailable",
+			"The cost-accounting Worker incarnation fact does not provide authoritative per-period request charges outside a fully enclosed incarnation lifetime.",
 		)
 	}
 	return fact.ClaimCount, true, nil
@@ -1024,8 +1024,8 @@ func buildRequestChargePlan(
 			if !ok {
 				return requestChargePlan{}, problem.New(
 					500,
-					"billing_request_claim_segment_missing",
-					"The authoritative Worker claim ledger row did not match any billing tariff segment.",
+					"cost_accounting_request_claim_segment_missing",
+					"The authoritative Worker claim ledger row did not match any cost tariff segment.",
 				)
 			}
 			plan.SegmentClaimCounts[index]++
@@ -1065,7 +1065,7 @@ func loadWorkerClaimFactsForBilling(
 		Count(&total).Error; err != nil {
 		return 0, nil, true, problem.Wrap(
 			500,
-			"billing_worker_claim_fact_count_failed",
+			"cost_accounting_worker_claim_fact_count_failed",
 			"The authoritative Worker claim ledger could not be counted.",
 			err,
 		)
@@ -1086,7 +1086,7 @@ func loadWorkerClaimFactsForBilling(
 	if err := query.Order("claimed_at ASC, id ASC").Find(&claims).Error; err != nil {
 		return 0, nil, true, problem.Wrap(
 			500,
-			"billing_worker_claim_fact_load_failed",
+			"cost_accounting_worker_claim_fact_load_failed",
 			"The authoritative Worker claim ledger could not be loaded.",
 			err,
 		)
@@ -1127,10 +1127,10 @@ func loadWorkerFactForBilling(
 		Where("worker_id = ? AND worker_incarnation = ?", workerID, workerIncarnation).
 		Take(&fact).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return persistence.WorkerIncarnationFact{}, problem.New(404, "billing_worker_fact_not_found", "The billing Worker incarnation fact was not found.")
+		return persistence.WorkerIncarnationFact{}, problem.New(404, "cost_accounting_worker_fact_not_found", "The cost-accounting Worker incarnation fact was not found.")
 	}
 	if err != nil {
-		return persistence.WorkerIncarnationFact{}, problem.Wrap(500, "billing_worker_fact_load_failed", "The billing Worker incarnation fact could not be loaded.", err)
+		return persistence.WorkerIncarnationFact{}, problem.Wrap(500, "cost_accounting_worker_fact_load_failed", "The cost-accounting Worker incarnation fact could not be loaded.", err)
 	}
 	return fact, nil
 }
@@ -1146,7 +1146,7 @@ func loadActualInvoiceLines(
 		Where("tenant_id = ? AND invoice_import_id = ?", tenantID, importID).
 		Order("external_line_id ASC").
 		Find(&lines).Error; err != nil {
-		return nil, problem.Wrap(500, "billing_invoice_line_load_failed", "The billing invoice lines could not be loaded.", err)
+		return nil, problem.Wrap(500, "cost_accounting_invoice_line_load_failed", "The provider cost invoice lines could not be loaded.", err)
 	}
 	return lines, nil
 }
@@ -1163,7 +1163,7 @@ func loadEstimateMatches(
 		Where("billing_period_start_at = ? AND billing_period_end_at = ?", line.BillingPeriodStartAt, line.BillingPeriodEndAt).
 		Order("usage_start_at ASC, id ASC").
 		Find(&estimates).Error; err != nil {
-		return nil, problem.Wrap(500, "billing_reconciliation_load_failed", "The estimated billing usage charges could not be loaded for reconciliation.", err)
+		return nil, problem.Wrap(500, "cost_accounting_reconciliation_load_failed", "The estimated usage costs could not be loaded for reconciliation.", err)
 	}
 	return estimates, nil
 }
@@ -1180,7 +1180,7 @@ func loadUnmatchedEstimates(
 		Where("billing_period_start_at = ? AND billing_period_end_at = ?", invoice.BillingPeriodStartAt, invoice.BillingPeriodEndAt).
 		Order("usage_start_at ASC, charge_kind ASC, id ASC").
 		Find(&estimates).Error; err != nil {
-		return nil, problem.Wrap(500, "billing_unmatched_estimate_load_failed", "The unmatched estimated billing usage charges could not be loaded.", err)
+		return nil, problem.Wrap(500, "cost_accounting_unmatched_estimate_load_failed", "The unmatched estimated usage costs could not be loaded.", err)
 	}
 	if len(matched) == 0 {
 		return estimates, nil
@@ -1210,10 +1210,10 @@ func normalizeTariffInput(input CreateTariffInput) (CreateTariffInput, error) {
 	}
 	startAt, endAt, err := normalizeOptionalEndInterval(input.EffectiveStartAt, input.EffectiveEndAt)
 	if err != nil {
-		return CreateTariffInput{}, problem.New(400, "invalid_billing_tariff_effective_interval", "effectiveStartAt and effectiveEndAt must form a non-empty interval.")
+		return CreateTariffInput{}, problem.New(400, "invalid_cost_accounting_tariff_effective_interval", "effectiveStartAt and effectiveEndAt must form a non-empty interval.")
 	}
 	if input.Version <= 0 {
-		return CreateTariffInput{}, problem.New(400, "invalid_billing_tariff_version", "version must be positive.")
+		return CreateTariffInput{}, problem.New(400, "invalid_cost_accounting_tariff_version", "version must be positive.")
 	}
 	for _, field := range []struct {
 		value int64
@@ -1226,7 +1226,7 @@ func normalizeTariffInput(input CreateTariffInput) (CreateTariffInput, error) {
 		{value: input.PodHourRateMicros, name: "podHourRateMicros"},
 	} {
 		if field.value < 0 {
-			return CreateTariffInput{}, problem.New(400, "invalid_billing_tariff_rate", field.name+" must be zero or positive.")
+			return CreateTariffInput{}, problem.New(400, "invalid_cost_accounting_tariff_rate", field.name+" must be zero or positive.")
 		}
 	}
 	input.Provider = provider
@@ -1276,11 +1276,11 @@ func normalizeImportedInvoice(
 		externalImportID = strings.TrimSpace(request.ExternalImportID)
 	}
 	if externalImportID == "" {
-		return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_import", "The billing invoice import is missing externalImportId.")
+		return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_import", "The provider cost invoice import is missing externalImportId.")
 	}
 	periodStart, periodEnd, err := normalizeClosedPeriod(imported.BillingPeriodStartAt, imported.BillingPeriodEndAt)
 	if err != nil {
-		return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_period", "The billing invoice import period is invalid.")
+		return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_period", "The provider cost invoice import period is invalid.")
 	}
 	currency, err := normalizeCurrency(imported.CurrencyCode)
 	if err != nil {
@@ -1290,7 +1290,7 @@ func normalizeImportedInvoice(
 		checksum := strings.ToLower(strings.TrimSpace(imported.SourceProvenance.BundleChecksum))
 		decoded, decodeErr := hex.DecodeString(checksum)
 		if decodeErr != nil || len(decoded) != sha256.Size || imported.SourceProvenance.FilteredAdjustmentCount < 0 {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_source_provenance", "Billing source provenance is invalid.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_source_provenance", "Cost source provenance is invalid.")
 		}
 		imported.SourceProvenance.BundleChecksum = checksum
 	}
@@ -1302,10 +1302,10 @@ func normalizeImportedInvoice(
 		line := rawLine
 		line.ExternalLineID = strings.TrimSpace(line.ExternalLineID)
 		if line.ExternalLineID == "" {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line", "Each billing invoice line must have externalLineId.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line", "Each provider cost invoice line must have externalLineId.")
 		}
 		if _, exists := lineIDs[line.ExternalLineID]; exists {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line", "Billing invoice lines must not repeat externalLineId.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line", "Provider cost invoice lines must not repeat externalLineId.")
 		}
 		lineIDs[line.ExternalLineID] = struct{}{}
 
@@ -1316,10 +1316,10 @@ func normalizeImportedInvoice(
 		line.ChargeKind = chargeKind
 		line.ResourceCorrelationKey = normalizeResourceCorrelationKey(line.ResourceCorrelationKey)
 		if line.ResourceCorrelationKey == "" {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_resource_correlation", "Billing invoice lines must include resourceCorrelationKey.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_resource_correlation", "Provider cost invoice lines must include resourceCorrelationKey.")
 		}
 		if len(line.ResourceCorrelationKey) > 512 {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_resource_correlation", "resourceCorrelationKey must not exceed 512 characters.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_resource_correlation", "resourceCorrelationKey must not exceed 512 characters.")
 		}
 		if line.BillingPeriodStartAt.IsZero() && line.BillingPeriodEndAt.IsZero() {
 			line.BillingPeriodStartAt = periodStart
@@ -1327,10 +1327,10 @@ func normalizeImportedInvoice(
 		}
 		lineStart, lineEnd, err := normalizeClosedPeriod(line.BillingPeriodStartAt, line.BillingPeriodEndAt)
 		if err != nil {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line_period", "The billing invoice line period is invalid.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line_period", "The provider cost invoice line period is invalid.")
 		}
 		if !lineStart.Equal(periodStart) || !lineEnd.Equal(periodEnd) {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line_period", "Billing invoice line periods must match the import billing period exactly.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line_period", "Provider cost invoice line periods must match the import period exactly.")
 		}
 		line.BillingPeriodStartAt = lineStart
 		line.BillingPeriodEndAt = lineEnd
@@ -1342,13 +1342,13 @@ func normalizeImportedInvoice(
 			return ImportedActualInvoice{}, "", err
 		}
 		if lineCurrency != currency {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line_currency", "Billing invoice line currency must match the import currency.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line_currency", "Provider cost invoice line currency must match the import currency.")
 		}
 		line.CurrencyCode = lineCurrency
 
 		deduplicationKey := line.ResourceCorrelationKey + "\x00" + line.ChargeKind + "\x00" + line.CurrencyCode
 		if _, exists := resourceKeys[deduplicationKey]; exists {
-			return ImportedActualInvoice{}, "", problem.New(400, "invalid_billing_invoice_line", "Billing invoice lines must not repeat resourceCorrelationKey and chargeKind inside one import.")
+			return ImportedActualInvoice{}, "", problem.New(400, "invalid_cost_accounting_invoice_line", "Provider cost invoice lines must not repeat resourceCorrelationKey and chargeKind inside one import.")
 		}
 		resourceKeys[deduplicationKey] = struct{}{}
 		lines = append(lines, line)
@@ -1423,7 +1423,7 @@ func billingTariffOverlaps(
 	}
 	var count int64
 	if err := query.Count(&count).Error; err != nil {
-		return false, problem.Wrap(500, "billing_tariff_overlap_probe_failed", "The billing tariff overlap check could not be completed.", err)
+		return false, problem.Wrap(500, "cost_accounting_tariff_overlap_probe_failed", "The cost tariff overlap check could not be completed.", err)
 	}
 	return count > 0, nil
 }
@@ -1473,7 +1473,7 @@ func deterministicLineID(tenantID uuid.UUID, importID uuid.UUID, externalLineID 
 
 func normalizeBillingTenantID(tenantID uuid.UUID) (uuid.UUID, error) {
 	if tenantID == uuid.Nil {
-		return uuid.Nil, problem.New(400, "invalid_billing_tenant", "tenantId is required.")
+		return uuid.Nil, problem.New(400, "invalid_cost_accounting_tenant", "tenantId is required.")
 	}
 	return tenantID, nil
 }
@@ -1481,7 +1481,7 @@ func normalizeBillingTenantID(tenantID uuid.UUID) (uuid.UUID, error) {
 func normalizeProvider(value string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	if normalized == "" || len(normalized) > 64 {
-		return "", problem.New(400, "invalid_billing_provider", "provider must be between 1 and 64 characters.")
+		return "", problem.New(400, "invalid_cost_accounting_provider", "provider must be between 1 and 64 characters.")
 	}
 	for _, character := range normalized {
 		switch {
@@ -1489,7 +1489,7 @@ func normalizeProvider(value string) (string, error) {
 			character >= '0' && character <= '9',
 			character == '-', character == '_':
 		default:
-			return "", problem.New(400, "invalid_billing_provider", "provider must use lowercase letters, digits, hyphen, or underscore.")
+			return "", problem.New(400, "invalid_cost_accounting_provider", "provider must use lowercase letters, digits, hyphen, or underscore.")
 		}
 	}
 	return normalized, nil
@@ -1498,11 +1498,11 @@ func normalizeProvider(value string) (string, error) {
 func normalizeCurrency(value string) (string, error) {
 	normalized := strings.ToUpper(strings.TrimSpace(value))
 	if len(normalized) != 3 {
-		return "", problem.New(400, "invalid_billing_currency", "currencyCode must be a 3-letter ISO currency code.")
+		return "", problem.New(400, "invalid_cost_accounting_currency", "currencyCode must be a 3-letter ISO currency code.")
 	}
 	for _, character := range normalized {
 		if character < 'A' || character > 'Z' {
-			return "", problem.New(400, "invalid_billing_currency", "currencyCode must be a 3-letter ISO currency code.")
+			return "", problem.New(400, "invalid_cost_accounting_currency", "currencyCode must be a 3-letter ISO currency code.")
 		}
 	}
 	return normalized, nil
@@ -1513,14 +1513,14 @@ func normalizeChargeKind(value string) (string, error) {
 	case ChargeKindCPU, ChargeKindMemory, ChargeKindEphemeralStorage, ChargeKindRequest, ChargeKindPod:
 		return strings.TrimSpace(value), nil
 	default:
-		return "", problem.New(400, "invalid_billing_charge_kind", "chargeKind must be one of cpu, memory, ephemeral-storage, request, or pod.")
+		return "", problem.New(400, "invalid_cost_accounting_charge_kind", "chargeKind must be one of cpu, memory, ephemeral-storage, request, or pod.")
 	}
 }
 
 func normalizeRegion(value string) (string, error) {
 	normalized := strings.TrimSpace(value)
 	if len(normalized) > 160 {
-		return "", problem.New(400, "invalid_billing_region", "region must be 160 characters or fewer.")
+		return "", problem.New(400, "invalid_cost_accounting_region", "region must be 160 characters or fewer.")
 	}
 	return normalized, nil
 }
@@ -1531,7 +1531,7 @@ func normalizeResourceCorrelationKey(value string) string {
 
 func normalizeOptionalEndInterval(startAt time.Time, endAt *time.Time) (time.Time, *time.Time, error) {
 	if startAt.IsZero() {
-		return time.Time{}, nil, problem.New(400, "invalid_billing_period", "startAt is required.")
+		return time.Time{}, nil, problem.New(400, "invalid_cost_accounting_period", "startAt is required.")
 	}
 	start := startAt.UTC()
 	if endAt == nil {
@@ -1539,19 +1539,19 @@ func normalizeOptionalEndInterval(startAt time.Time, endAt *time.Time) (time.Tim
 	}
 	end := endAt.UTC()
 	if !end.After(start) {
-		return time.Time{}, nil, problem.New(400, "invalid_billing_period", "endAt must be after startAt.")
+		return time.Time{}, nil, problem.New(400, "invalid_cost_accounting_period", "endAt must be after startAt.")
 	}
 	return start, &end, nil
 }
 
 func normalizeClosedPeriod(startAt, endAt time.Time) (time.Time, time.Time, error) {
 	if startAt.IsZero() || endAt.IsZero() {
-		return time.Time{}, time.Time{}, problem.New(400, "invalid_billing_period", "billingPeriodStartAt and billingPeriodEndAt are required.")
+		return time.Time{}, time.Time{}, problem.New(400, "invalid_cost_accounting_period", "billingPeriodStartAt and billingPeriodEndAt are required.")
 	}
 	start := startAt.UTC()
 	end := endAt.UTC()
 	if !end.After(start) {
-		return time.Time{}, time.Time{}, problem.New(400, "invalid_billing_period", "billingPeriodEndAt must be after billingPeriodStartAt.")
+		return time.Time{}, time.Time{}, problem.New(400, "invalid_cost_accounting_period", "billingPeriodEndAt must be after billingPeriodStartAt.")
 	}
 	return start, end, nil
 }
@@ -1645,7 +1645,7 @@ func cloneOptionalInt64(value *int64) *int64 {
 
 func multiplyDivideRound(parts []int64, denominator int64) (int64, error) {
 	if denominator <= 0 {
-		return 0, problem.New(500, "billing_amount_denominator_invalid", "The billing amount denominator is invalid.")
+		return 0, problem.New(500, "cost_accounting_amount_denominator_invalid", "The cost amount denominator is invalid.")
 	}
 	numerator := big.NewInt(1)
 	for _, part := range parts {
@@ -1666,7 +1666,7 @@ func multiplyDivideRound(parts []int64, denominator int64) (int64, error) {
 		quotient.Neg(quotient)
 	}
 	if !quotient.IsInt64() {
-		return 0, problem.New(409, "billing_amount_overflow", "The billing amount could not be represented safely.")
+		return 0, problem.New(409, "cost_accounting_amount_overflow", "The cost amount could not be represented safely.")
 	}
 	return quotient.Int64(), nil
 }
@@ -1675,7 +1675,7 @@ func addInt64Checked(left, right int64) (int64, error) {
 	sum := big.NewInt(left)
 	sum.Add(sum, big.NewInt(right))
 	if !sum.IsInt64() {
-		return 0, problem.New(409, "billing_amount_overflow", "The billing amount could not be represented safely.")
+		return 0, problem.New(409, "cost_accounting_amount_overflow", "The cost amount could not be represented safely.")
 	}
 	return sum.Int64(), nil
 }
@@ -1708,16 +1708,16 @@ func (s *Service) createTariffTx(
 	if err != nil {
 		return persistence.BillingProviderTariff{}, problem.Wrap(
 			500,
-			"billing_tariff_coordination_failed",
-			"The billing tariff catalog could not be coordinated.",
+			"cost_accounting_tariff_coordination_failed",
+			"The cost tariff catalog could not be coordinated.",
 			err,
 		)
 	}
 	if !locked {
 		return persistence.BillingProviderTariff{}, problem.New(
 			409,
-			"billing_tariff_catalog_busy",
-			"Another billing tariff mutation is in progress for this provider, region, and currency.",
+			"cost_accounting_tariff_catalog_busy",
+			"Another cost tariff mutation is in progress for this provider, region, and currency.",
 		)
 	}
 
@@ -1728,8 +1728,8 @@ func (s *Service) createTariffTx(
 	if conflict != nil {
 		return persistence.BillingProviderTariff{}, problem.New(
 			409,
-			"billing_tariff_version_conflict",
-			"The billing tariff version already exists for this provider, region, and currency.",
+			"cost_accounting_tariff_version_conflict",
+			"The cost tariff version already exists for this provider, region, and currency.",
 		)
 	}
 	overlaps, overlapErr := billingTariffOverlaps(ctx, tx, model, nil)
@@ -1737,17 +1737,17 @@ func (s *Service) createTariffTx(
 		return persistence.BillingProviderTariff{}, overlapErr
 	}
 	if overlaps {
-		return persistence.BillingProviderTariff{}, problem.New(409, "billing_tariff_overlap", "The billing tariff overlaps an existing effective interval.")
+		return persistence.BillingProviderTariff{}, problem.New(409, "cost_accounting_tariff_overlap", "The cost tariff overlaps an existing effective interval.")
 	}
 	if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			return persistence.BillingProviderTariff{}, problem.New(
 				409,
-				"billing_tariff_version_conflict",
-				"The billing tariff version already exists for this provider, region, and currency.",
+				"cost_accounting_tariff_version_conflict",
+				"The cost tariff version already exists for this provider, region, and currency.",
 			)
 		}
-		return persistence.BillingProviderTariff{}, problem.Wrap(409, "billing_tariff_create_failed", "The billing tariff could not be created.", err)
+		return persistence.BillingProviderTariff{}, problem.Wrap(409, "cost_accounting_tariff_create_failed", "The cost tariff could not be created.", err)
 	}
 	return model, nil
 }
@@ -1776,7 +1776,7 @@ func loadTariffs(
 	if err := query.
 		Order("provider ASC, region ASC, currency_code ASC, effective_start_at ASC, version ASC").
 		Find(&tariffs).Error; err != nil {
-		return nil, problem.Wrap(500, "billing_tariff_load_failed", "The billing tariffs could not be loaded.", err)
+		return nil, problem.Wrap(500, "cost_accounting_tariff_load_failed", "The cost tariffs could not be loaded.", err)
 	}
 	return tariffs, nil
 }
@@ -1797,7 +1797,7 @@ func loadTariffByVersion(
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, nil
 	default:
-		return nil, problem.Wrap(500, "billing_tariff_load_failed", "The billing tariffs could not be loaded.", err)
+		return nil, problem.Wrap(500, "cost_accounting_tariff_load_failed", "The cost tariffs could not be loaded.", err)
 	}
 }
 

@@ -121,7 +121,7 @@ func TestEstimateUsageChargesWithMigratedSQLiteClaimLedger(t *testing.T) {
 			BillingPeriodStartAt: fixture.base,
 			BillingPeriodEndAt:   fixture.base.Add(4 * time.Hour),
 		})
-		assertProblemCode(t, err, "billing_request_charge_delta_unavailable")
+		assertProblemCode(t, err, "cost_accounting_request_charge_delta_unavailable")
 
 		var persisted int64
 		if err := fixture.db.WithContext(ctx).Model(&persistence.BillingEstimatedUsageCharge{}).Count(&persisted).Error; err != nil {

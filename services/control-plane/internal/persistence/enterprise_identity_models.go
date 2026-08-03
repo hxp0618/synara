@@ -27,6 +27,38 @@ type IdentityConnection struct {
 
 func (IdentityConnection) TableName() string { return "identity_connections" }
 
+type TenantDomain struct {
+	ID                    uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID              uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	Domain                string     `gorm:"column:domain"`
+	Status                string     `gorm:"column:status"`
+	VerificationTokenHash []byte     `gorm:"column:verification_token_hash"`
+	VerificationExpiresAt time.Time  `gorm:"column:verification_expires_at"`
+	VerifiedAt            *time.Time `gorm:"column:verified_at"`
+	VerifiedBy            *uuid.UUID `gorm:"column:verified_by;type:uuid"`
+	RevokedAt             *time.Time `gorm:"column:revoked_at"`
+	RevokedBy             *uuid.UUID `gorm:"column:revoked_by;type:uuid"`
+	CreatedBy             uuid.UUID  `gorm:"column:created_by;type:uuid"`
+	CreatedAt             time.Time  `gorm:"column:created_at"`
+	UpdatedAt             time.Time  `gorm:"column:updated_at"`
+}
+
+func (TenantDomain) TableName() string { return "tenant_domains" }
+
+type TenantIdentityPolicy struct {
+	TenantID         uuid.UUID  `gorm:"column:tenant_id;type:uuid;primaryKey"`
+	SSOEnforcement   string     `gorm:"column:sso_enforcement"`
+	Version          int64      `gorm:"column:version;not null;default:1"`
+	RecoveryUserID   *uuid.UUID `gorm:"column:recovery_user_id;type:uuid"`
+	EnforcementSetAt *time.Time `gorm:"column:enforcement_set_at"`
+	EnforcementSetBy *uuid.UUID `gorm:"column:enforcement_set_by;type:uuid"`
+	UpdatedBy        uuid.UUID  `gorm:"column:updated_by;type:uuid"`
+	CreatedAt        time.Time  `gorm:"column:created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at"`
+}
+
+func (TenantIdentityPolicy) TableName() string { return "tenant_identity_policies" }
+
 type IdentityLoginAttempt struct {
 	ID               uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
 	TenantID         uuid.UUID  `gorm:"column:tenant_id;type:uuid"`

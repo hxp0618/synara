@@ -26,6 +26,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
@@ -983,6 +984,14 @@ func (s *Service) deleteModel(
 	if model.Status == "deleted" {
 		return false, nil
 	}
+	releaseMutation, acquired, err := retentiongate.AcquireResourceMutation(ctx, s.db, model.TenantID)
+	if err != nil {
+		return false, problem.Wrap(500, "artifact_legal_hold_lock_failed", "Artifact deletion could not coordinate with Legal Hold.", err)
+	}
+	if !acquired {
+		return false, problem.New(409, "artifact_legal_hold_lock_busy", "Artifact deletion conflicted with a Legal Hold or another resource mutation; retry it.")
+	}
+	defer releaseMutation()
 	referenced, err := s.artifactReferencedByCheckpoint(ctx, s.db, model.TenantID, model.ID)
 	if err != nil {
 		return false, err
@@ -997,7 +1006,7 @@ func (s *Service) deleteModel(
 	if memoryReferenced {
 		return false, problem.New(409, "artifact_memory_referenced", "Artifact is pinned by an immutable Agent Memory Revision.")
 	}
-	result := s.db.WithContext(ctx).Model(&persistence.Artifact{}).
+	deleteQuery := s.db.WithContext(ctx).Model(&persistence.Artifact{}).
 		Where("id = ? AND tenant_id = ? AND status IN ?", model.ID, model.TenantID, []string{"pending", "ready", "failed", "deleting"}).
 		Where(`NOT EXISTS (
 			SELECT 1 FROM workspace_checkpoints checkpoint
@@ -1009,9 +1018,20 @@ func (s *Service) deleteModel(
 			SELECT 1 FROM agent_memory_revisions memory_revision
 			WHERE memory_revision.tenant_id = artifacts.tenant_id
 			  AND memory_revision.artifact_id = artifacts.id
-		)`).
-		Update("status", "deleting")
+		)`)
+	deleteQuery = retentiongate.ExcludeArtifacts(deleteQuery, "artifacts")
+	result := deleteQuery.Update("status", "deleting")
 	if result.Error != nil || result.RowsAffected != 1 {
+		var unheld int64
+		holdQuery := s.db.WithContext(ctx).Model(&persistence.Artifact{}).
+			Where("id = ? AND tenant_id = ?", model.ID, model.TenantID)
+		holdQuery = retentiongate.ExcludeArtifacts(holdQuery, "artifacts")
+		if holdErr := holdQuery.Count(&unheld).Error; holdErr != nil {
+			return false, problem.Wrap(500, "artifact_legal_hold_check_failed", "Artifact Legal Hold could not be checked.", holdErr)
+		}
+		if unheld == 0 {
+			return false, problem.New(409, "artifact_legal_hold_active", "Artifact deletion is blocked by an active Legal Hold.")
+		}
 		referenced, referenceErr := s.artifactReferencedByCheckpoint(ctx, s.db, model.TenantID, model.ID)
 		if referenceErr != nil {
 			return false, referenceErr

@@ -77,8 +77,8 @@ func (s *Service) Publish(
 	input PublishInput,
 	requestID, ipAddress string,
 ) (Publication, error) {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return Publication{}, problem.New(404, "tenant_not_found", "Tenant not found.")
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return Publication{}, err
 	}
 	input.ScopeType = strings.ToLower(strings.TrimSpace(input.ScopeType))
 	input.MemoryKey = strings.ToLower(strings.TrimSpace(input.MemoryKey))

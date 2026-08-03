@@ -80,7 +80,7 @@ describe("authoritative Turn dispatch", () => {
 });
 
 describe("authoritative conversation rollback routing", () => {
-  it("never reads the local Native API for a SaaS rollback", () => {
+  it("never reads the local Native API for a Control Plane rollback", () => {
     const nativeApi = { source: "local" };
     const readNativeApi = vi.fn(() => nativeApi);
 
@@ -131,11 +131,11 @@ describe("server thread model switching availability", () => {
       selectable: false,
       label: "Switching",
       temporary: true,
-      message: "The Control Plane is switching this SaaS Session model.",
+      message: "The Control Plane is switching this Session model.",
     });
   });
 
-  it("blocks switching while the SaaS Session is connecting or running", () => {
+  it("blocks switching while the Control Plane Session is connecting or running", () => {
     expect(
       resolveServerThreadModelSwitchAvailability({
         capabilityAllowed: true,
@@ -148,7 +148,7 @@ describe("server thread model switching availability", () => {
     ).toMatchObject({
       selectable: false,
       label: "Busy",
-      message: "Wait for the SaaS Session to finish connecting before switching models.",
+      message: "Wait for the Control Plane Session to finish connecting before switching models.",
     });
 
     expect(
@@ -163,7 +163,7 @@ describe("server thread model switching availability", () => {
     ).toMatchObject({
       selectable: false,
       label: "Busy",
-      message: "Wait for the active SaaS Turn to finish before switching models.",
+      message: "Wait for the active Control Plane Turn to finish before switching models.",
     });
   });
 
@@ -172,7 +172,7 @@ describe("server thread model switching availability", () => {
       resolveServerThreadModelSwitchAvailability({
         capabilityAllowed: false,
         capabilityTemporary: false,
-        capabilityMessage: "Codex does not support model switch on this SaaS target.",
+        capabilityMessage: "Codex does not support model switch on this Control Plane target.",
         phase: "ready",
         hasActiveExecution: false,
         isPending: false,
@@ -181,7 +181,7 @@ describe("server thread model switching availability", () => {
       selectable: false,
       label: "Unavailable",
       temporary: false,
-      message: "Codex does not support model switch on this SaaS target.",
+      message: "Codex does not support model switch on this Control Plane target.",
     });
   });
 });

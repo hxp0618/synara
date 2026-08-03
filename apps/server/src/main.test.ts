@@ -600,7 +600,22 @@ it.layer(testLayer)("server CLI command", (it) => {
     }),
   );
 
-  it.effect("forwards the configured SaaS control plane URL to the server runtime", () =>
+  it.effect("treats an explicitly empty public URL as unset", () =>
+    Effect.gen(function* () {
+      yield* runCli([], {
+        SYNARA_HOST: "0.0.0.0",
+        SYNARA_AUTH_TOKEN: "remote-secret",
+        SYNARA_PUBLIC_URL: "",
+        SYNARA_ALLOW_INSECURE_REMOTE: "true",
+      });
+
+      assert.equal(start.mock.calls.length, 1);
+      assert.equal(resolvedConfig?.publicUrl, undefined);
+      assert.equal(resolvedConfig?.allowInsecureRemote, true);
+    }),
+  );
+
+  it.effect("forwards the configured Control Plane control plane URL to the server runtime", () =>
     Effect.gen(function* () {
       yield* runCli([], {
         SYNARA_CONTROL_PLANE_URL: "http://127.0.0.1:58180",

@@ -22,7 +22,7 @@ export async function dispatchApprovalInteractionResponse(input: {
     return;
   }
   if (input.decision === "acceptForSession") {
-    throw new Error("Always allow for this Session is not supported by the SaaS Control Plane.");
+    throw new Error("Always allow for this Session is not supported by the Control Plane.");
   }
   if (input.decision === "cancel") {
     await input.interruptControlPlane();

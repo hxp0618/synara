@@ -5,7 +5,7 @@
 > cloud Workload Identity are retained as internal/future contract surfaces and are not part of the current product or
 > Stage 4 release gate.
 
-This contract defines the first Control Plane billing-accounting boundary for retained worker usage.
+This contract defines the Control Plane internal cost-accounting boundary for retained worker usage.
 
 It is deliberately split into separate durable domains:
 
@@ -18,9 +18,14 @@ It is deliberately split into separate durable domains:
 - `billing_shared_actual_allocation_runs`, `billing_shared_actual_allocation_lines`, and
   `billing_shared_actual_charge_slices` are the operator-attested shared-Target actual-invoice allocation graph
   (see "Shared Target actual-invoice allocation" below).
-- `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are imported external billing truth keyed by tenant-scoped provider external IDs.
+- `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are imported provider-cost truth keyed by tenant-scoped provider external IDs.
 
 Estimates and actuals must never share a table or a mutable "final cost" column.
+
+The `billing_*` table names and the internal `billing` Go package are retained database/runtime compatibility identifiers;
+they are not payment or customer-billing product surfaces. Current API Problem Codes use `cost_accounting_*`, current
+audit actions/resource types use `cost_accounting.*` / `cost_accounting_*`, and historical audit rows keep their original
+`billing.*` values so evidence is never rewritten.
 
 ## Provider tariffs
 
@@ -33,13 +38,13 @@ Estimates and actuals must never share a table or a mutable "final cost" column.
 - effective interval `[effective_start_at, effective_end_at)`
 
 Tariff rows are platform-global catalog entries today and therefore do not carry `tenant_id`.
-Listing is tenant-authorized: callers must operate through an active tenant with `billing.manage`, but that
+Listing is tenant-authorized: callers must operate through an active tenant with `cost.manage`, but that
 authorization does not re-scope row ownership. Appending a global row additionally requires the path/active Tenant
-to match the platform-configured `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`. This Tenant is the platform billing
-operator for both global Tariffs and shared-Target accounting authority; the historical environment-variable name is
+to match the platform-configured `SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID`. This Tenant is the platform cost-accounting
+operator for both global Tariffs and shared-Target accounting authority; the environment-variable name is retained
 retained for compatibility. The mutation APIs fail closed when that authority is unset outside Personal profile;
-Personal binds it to the bootstrapped Tenant. A customer Tenant's owner or billing administrator therefore cannot
-change rates or seal shared accounting history merely by holding `billing.manage`.
+Personal binds it to the bootstrapped Tenant. A workload Tenant's owner or cost administrator therefore cannot
+change rates or seal shared accounting history merely by holding `cost.manage`.
 
 Rates are stored in currency micros for these units:
 
@@ -56,14 +61,14 @@ concurrent READ COMMITTED check/insert race. SQLite rejects overlapping direct i
 
 Current management/runtime surface:
 
-- `GET /v1/tenants/{tenantID}/billing/tariffs`
-- `POST /v1/tenants/{tenantID}/billing/tariffs` (configured platform tariff-operator Tenant only)
-- `GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
-- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
-- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/allocations:sweep`
-- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`
-- `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}`
-- `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`
+- `GET /v1/tenants/{tenantID}/cost-accounting/tariffs`
+- `POST /v1/tenants/{tenantID}/cost-accounting/tariffs` (configured platform tariff-operator Tenant only)
+- `GET /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage`
+- `POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage`
+- `POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/allocations:sweep`
+- `POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`
+- `POST /v1/tenants/{tenantID}/cost-accounting/imports/{provider}/{externalImportID}`
+- `POST /v1/tenants/{tenantID}/cost-accounting/imports/{importID}/reconcile`
 
 ## Estimated usage charges
 
@@ -93,8 +98,8 @@ Time-based charge kinds (`cpu`, `memory`, `ephemeral-storage`, `pod`) split exac
 - No historical backfill is synthesized. An incarnation is treated as request-ledger-complete only when `count(worker_claim_facts) == worker_incarnation_facts.claim_count`.
 - When the ledger is complete, request-rate estimates are emitted by `claimed_at`, split per billing period and per tariff segment, so billing boundaries and request-tariff changes are handled authoritatively.
 - Billing windows are half-open. The sole tie-breaker is a claim whose timestamp exactly equals its Worker's terminal timestamp: it belongs to that Worker's final tariff segment, preventing timestamp-precision truncation from dropping the last accepted claim; it cannot appear in a later period because the Worker is already terminal.
-- When the ledger is incomplete, the old safe fallback remains: only a fully enclosed incarnation lifetime under one effective request rate may emit request charges; crossing a billing boundary, using a non-terminal worker, or spanning a request-tariff change still fails closed with `billing_request_charge_delta_unavailable`.
-- A shared Target whose Worker fact has no authoritative tenant attribution still fails closed with `billing_worker_fact_tenant_unattributed` instead of creating a global or `NULL`-tenant estimate.
+- When the ledger is incomplete, the old safe fallback remains: only a fully enclosed incarnation lifetime under one effective request rate may emit request charges; crossing a billing boundary, using a non-terminal worker, or spanning a request-tariff change still fails closed with `cost_accounting_request_charge_delta_unavailable`.
+- A shared Target whose Worker fact has no authoritative tenant attribution still fails closed with `cost_accounting_worker_fact_tenant_unattributed` instead of creating a global or `NULL`-tenant estimate.
 
 `worker_claim_release_facts` never rewrites the claim row. It records one stable release reason, the business-effective
 `released_at`, the later-or-equal `recorded_at`, bounded authority/request evidence, and bounded object metadata. Exact
@@ -147,12 +152,12 @@ table INSERT privileges must not be granted to tenant/API roles. The original te
 its sweeper remain unchanged and still reject a `NULL`-Tenant Worker fact.
 
 The shared management API is intentionally operator-only. Sealing coverage requires the active path Tenant to be the
-configured platform billing operator with `billing.manage`, a platform-shared Target, a non-future `completeFromAt`, a
+configured platform cost-accounting operator with `cost.manage`, a platform-shared Target, a non-future `completeFromAt`, a
 bounded writer version, and a lowercase deployment-attestation SHA-256. The Coverage row and
-`billing.shared_target_ledger_coverage_sealed` audit entry commit atomically. PostgreSQL serializes concurrent first
+`cost_accounting.shared_target_ledger_coverage_sealed` audit entry commit atomically. PostgreSQL serializes concurrent first
 seals by Target; SQLite serializes them inside its single-replica Service. An exact retry returns the retained row and
 does not duplicate the audit entry; changing any asserted field returns
-`billing_shared_ledger_coverage_conflict`. The API never derives a cutover from historical rows. Operators must first
+`cost_accounting_shared_ledger_coverage_conflict`. The API never derives a cutover from historical rows. Operators must first
 prove that every production Claim release path is running at least `minimumWriterVersion`, then seal the observed
 deployment digest; supplying those assertions is an operational authority action, not an automated inference.
 
@@ -163,9 +168,9 @@ another Worker fails. The response is `completed` only when every overlapping Wo
 `retry-required` with counts and at most 20 bounded Worker/error entries plus `failuresOmitted`. Repeating the request
 after a crash or failure replays successful deterministic graphs and retries the remainder, so a browser heartbeat is
 neither required nor treated as scheduling authority. Every manual request first records
-`billing.shared_cost_allocation_sweep_requested`.
+`cost_accounting.shared_cost_allocation_sweep_requested`.
 
-Unattended retries use `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON`. Every mapping freezes one shared Target,
+Unattended retries use `SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON`. Every mapping freezes one shared Target,
 provider, currency, settlement delay, and retry interval, then chooses exactly one period mode:
 
 - static mode supplies exact RFC3339 `billingPeriodStartAt` / `billingPeriodEndAt` half-open bounds;
@@ -195,9 +200,9 @@ committed but outcome persistence did not, deterministic Run/Slice identity make
 settled-period scans intentionally catch late Worker facts. Operators cap or remove a mapping only after their external
 settlement/ingestion authority says no later facts can arrive.
 
-Every due scheduled attempt records `billing.shared_cost_allocation_sweep_scheduled` as a `system` actor under the
-configured platform billing operator Tenant before scanning. A partial Worker result fails the leader cycle with
-`billing_shared_allocation_sweep_partial_failure`, preserves successful graphs, and is retried after the configured
+Every due scheduled attempt records `cost_accounting.shared_cost_allocation_sweep_scheduled` as a `system` actor under the
+configured platform cost-accounting operator Tenant before scanning. A partial Worker result fails the leader cycle with
+`cost_accounting_shared_allocation_sweep_partial_failure`, preserves successful graphs, and is retried after the configured
 interval. Local operator/API, PostgreSQL concurrency, and two-holder leadership-handoff evidence is recorded in
 [`stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md`](../reports/stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md).
 Migration `000080` monthly generation, durable restart throttle, two-replica period claim, database fences, and
@@ -221,8 +226,8 @@ rewriting either source. It creates three retained tables:
 - `billing_shared_actual_charge_slices` references one immutable shared estimated slice at most once and preserves its
   exact Tenant or `platform-idle` ownership while carrying the signed actual micros.
 
-The API is operator-only: the active/path Tenant must be the configured platform billing operator and the caller must
-have `billing.manage`. The request supplies a lowercase `sourceScopeAttestationSHA256`. That digest is an explicit
+The API is operator-only: the active/path Tenant must be the configured platform cost-accounting operator and the caller must
+have `cost.manage`. The request supplies a lowercase `sourceScopeAttestationSHA256`. That digest is an explicit
 operator assertion that the provider account/export scope, object lineage, and settlement boundary have been checked;
 the Control Plane never invents it from an account name or treats a local digest as managed-cloud proof.
 
@@ -268,7 +273,7 @@ settlement, or managed-cloud delivery. Those capabilities are deferred rather th
 `billing_actual_invoice_imports` is immutable and idempotent by `(tenant_id, provider, external_import_id)`.
 PostgreSQL serializes that exact identity with a transaction-scoped advisory lock before lookup/insert: concurrent
 checksum-identical first imports return the same committed import/line identities, while different contents return
-`billing_invoice_import_conflict`. The single-replica SQLite profile retains its in-process transaction behavior.
+`cost_accounting_invoice_import_conflict`. The single-replica SQLite profile retains its in-process transaction behavior.
 
 `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are tenant-owned rows:
 
@@ -316,9 +321,9 @@ The current v1 report also returns unmatched estimated charge IDs for the import
 ## Provider Adapter Appendix
 
 The `services/control-plane/internal/billing` package includes blob-backed actual-invoice adapters for strict offline imports.
-They are internal compatibility/test surfaces in the current self-hosted product. A future managed-cloud integration would
-be governed separately by [`managed-cloud-billing-acceptance-v1.md`](managed-cloud-billing-acceptance-v1.md); local
-Kubernetes, MinIO, and provider-compatible emulators never imply cloud-provider support.
+The package name is a retained implementation compatibility identifier; the active product contract is internal cost
+accounting. These adapters are internal compatibility/test surfaces in the current self-hosted product. Local Kubernetes,
+MinIO, and provider-compatible emulators never imply cloud-provider support or a managed external service.
 
 Delimited provider/object mappings are configured by `(tenant_id, provider, external_import_id)` and resolve to one export object plus one parser format:
 

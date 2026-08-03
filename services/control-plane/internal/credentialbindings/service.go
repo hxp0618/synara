@@ -51,7 +51,7 @@ func (s *Service) Create(
 	input CreateInput,
 	requestID, ipAddress string,
 ) (Binding, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Binding{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -137,7 +137,7 @@ func (s *Service) List(
 	tenantID uuid.UUID,
 	filter OwnerFilter,
 ) ([]Binding, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsRead); err != nil {
@@ -145,6 +145,9 @@ func (s *Service) List(
 	}
 	if (filter.ProjectID == nil) == (filter.ExecutionTargetID == nil) {
 		return nil, problem.New(400, "invalid_credential_binding_filter", "Exactly one Credential Binding owner filter is required.")
+	}
+	if err := requireBindingOwner(ctx, s.db, tenantID, filter); err != nil {
+		return nil, err
 	}
 	query := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID)
 	if filter.ProjectID != nil {
@@ -163,13 +166,46 @@ func (s *Service) List(
 	return items, nil
 }
 
+func requireBindingOwner(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID uuid.UUID,
+	filter OwnerFilter,
+) error {
+	var row struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	if filter.ProjectID != nil {
+		err := db.WithContext(ctx).Table(persistence.Project{}.TableName()).Select("id").
+			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, *filter.ProjectID).
+			Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(404, "project_not_found", "Project not found.")
+		}
+		if err != nil {
+			return problem.Wrap(500, "project_load_failed", "Project could not be loaded.", err)
+		}
+		return nil
+	}
+	err := db.WithContext(ctx).Table(persistence.ExecutionTarget{}.TableName()).Select("id").
+		Where("tenant_id = ? AND id = ?", tenantID, *filter.ExecutionTargetID).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(404, "execution_target_not_found", "Execution Target not found.")
+	}
+	if err != nil {
+		return problem.Wrap(500, "execution_target_load_failed", "Execution Target could not be loaded.", err)
+	}
+	return nil
+}
+
 func (s *Service) Disable(
 	ctx context.Context,
 	principal identity.Principal,
 	tenantID, bindingID uuid.UUID,
 	requestID, ipAddress string,
 ) (Binding, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Binding{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -349,13 +385,6 @@ func gitCredentialMatchesRepository(descriptor credentials.BindingDescriptor, ra
 	default:
 		return false
 	}
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(403, "tenant_context_required", "The requested Tenant is not active for this session.")
-	}
-	return nil
 }
 
 func toBinding(model persistence.CredentialBinding) Binding {

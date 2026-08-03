@@ -86,13 +86,98 @@ func TestCursorCipherV2ClassifiesLegacyUnsupportedAndMalformedEnvelopes(t *testi
 		t.Fatal(err)
 	}
 	unsupported := append([]byte(nil), envelope...)
-	unsupported[len(cursorEnvelopeMagic)]++
+	unsupported[len(cursorEnvelopeMagic)] = 0x7f
 	if plain, status, err := cipher.OpenV2(unsupported, 1, binding); err != nil || status != CursorOpenUnsupportedEnvelope || plain != nil {
 		t.Fatalf("unsupported OpenV2 = %q, %s, %v", plain, status, err)
 	}
 	malformed := envelope[:len(cursorEnvelopeMagic)+2+cursorBindingDigestSize]
 	if plain, status, err := cipher.OpenV2(malformed, 1, binding); err != nil || status != CursorOpenAuthenticationFailed || plain != nil {
 		t.Fatalf("malformed OpenV2 = %q, %s, %v", plain, status, err)
+	}
+}
+
+func TestCursorCipherKeyringReadsLegacyAndWritesKeyedPrimaryEnvelopes(t *testing.T) {
+	oldKey := bytes.Repeat([]byte{0x51}, 32)
+	newKey := bytes.Repeat([]byte{0x52}, 32)
+	legacy, err := NewCursorCipher(oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyring, err := NewCursorCipherWithKeyring(
+		CipherKey{ID: "runtime-v2", Key: newKey},
+		CipherKey{ID: "runtime-v1", Key: oldKey},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyTarget, err := legacy.Encrypt("legacy-target-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, metadata, err := keyring.DecryptWithMetadata(legacyTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "legacy-target-configuration" || metadata.KeyID != "runtime-v1" || metadata.Primary || metadata.Keyed {
+		t.Fatalf("legacy target metadata = %#v, plain = %q", metadata, plain)
+	}
+
+	keyedTarget, err := keyring.Encrypt("keyed-target-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, metadata, err = keyring.DecryptWithMetadata(keyedTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "keyed-target-configuration" || metadata.KeyID != "runtime-v2" || !metadata.Primary || !metadata.Keyed {
+		t.Fatalf("keyed target metadata = %#v, plain = %q", metadata, plain)
+	}
+	if _, err := legacy.Decrypt(keyedTarget); err == nil {
+		t.Fatal("legacy cipher accepted a keyed target envelope")
+	}
+
+	var binding [32]byte
+	binding[0] = 0x22
+	legacyCursor, err := legacy.SealV2([]byte("legacy-cursor"), 1, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, status, metadata, err := keyring.OpenV2WithMetadata(legacyCursor, 1, binding)
+	if err != nil || status != CursorOpenValid || string(opened) != "legacy-cursor" ||
+		metadata.KeyID != "runtime-v1" || metadata.Primary || metadata.Keyed {
+		t.Fatalf("legacy cursor open = %q, %s, %#v, %v", opened, status, metadata, err)
+	}
+	keyedCursor, err := keyring.SealV2([]byte("keyed-cursor"), 1, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, status, metadata, err = keyring.OpenV2WithMetadata(keyedCursor, 1, binding)
+	if err != nil || status != CursorOpenValid || string(opened) != "keyed-cursor" ||
+		metadata.KeyID != "runtime-v2" || !metadata.Primary || !metadata.Keyed {
+		t.Fatalf("keyed cursor open = %q, %s, %#v, %v", opened, status, metadata, err)
+	}
+	tampered := append([]byte(nil), keyedCursor...)
+	keyIDOffset := len(cursorEnvelopeMagic) + 4
+	tampered[keyIDOffset] ^= 1
+	if opened, status, _, err := keyring.OpenV2WithMetadata(tampered, 1, binding); err != nil ||
+		status != CursorOpenAuthenticationFailed || opened != nil {
+		t.Fatalf("tampered keyed cursor = %q, %s, %v", opened, status, err)
+	}
+}
+
+func TestCursorCipherKeyringRejectsDuplicateIdentitiesAndMaterial(t *testing.T) {
+	primary := CipherKey{ID: "runtime-v2", Key: bytes.Repeat([]byte{0x61}, 32)}
+	if _, err := NewCursorCipherWithKeyring(primary, CipherKey{
+		ID: "runtime-v2", Key: bytes.Repeat([]byte{0x62}, 32),
+	}); err == nil {
+		t.Fatal("duplicate runtime key ID was accepted")
+	}
+	if _, err := NewCursorCipherWithKeyring(primary, CipherKey{
+		ID: "runtime-v1", Key: append([]byte(nil), primary.Key...),
+	}); err == nil {
+		t.Fatal("duplicate runtime key material was accepted")
 	}
 }
 

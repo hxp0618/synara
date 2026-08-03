@@ -54,8 +54,8 @@ func TestRunImportSchedulerOnceContinuesAfterFailuresAndScopesStatePerService(t 
 	service.now = func() time.Time { return now }
 
 	summary, err := service.RunImportSchedulerOnce(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "billing invoice import was not found") {
-		t.Fatalf("scheduler error = %v, want billing invoice import not found", err)
+	if err == nil || !strings.Contains(err.Error(), "provider cost invoice import was not found") {
+		t.Fatalf("scheduler error = %v, want provider cost invoice import not found", err)
 	}
 	if summary.Checked != 3 || summary.Imported != 2 || summary.Failed != 1 || summary.EstimateSweeps != 7 {
 		t.Fatalf("unexpected scheduler summary: %#v", summary)
@@ -281,7 +281,7 @@ func TestRunSharedAllocationSchedulerGeneratesMonthlyUTCPeriodsAndPersistsRestar
 	}
 	assertSharedScheduledAuditCount(t, fixture.db, 1)
 	var scheduledAudit persistence.AuditLog
-	if err := fixture.db.Where("action = ?", "billing.shared_cost_allocation_sweep_scheduled").
+	if err := fixture.db.Where("action = ?", "cost_accounting.shared_cost_allocation_sweep_scheduled").
 		Take(&scheduledAudit).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestRunSharedAllocationSchedulerOnceReportsPartialFailureAndRequiresOperato
 	)
 	service.now = func() time.Time { return fixture.base.Add(3 * time.Hour) }
 	partial, err := service.RunSharedAllocationSchedulerOnce(context.Background())
-	assertProblemCode(t, err, "billing_shared_allocation_sweep_partial_failure")
+	assertProblemCode(t, err, "cost_accounting_shared_allocation_sweep_partial_failure")
 	if partial.Attempted != 1 || partial.Completed != 0 || partial.Failed != 1 || partial.Workers != 2 ||
 		partial.AllocationRuns != 1 || partial.FailedWorkers != 1 {
 		t.Fatalf("unexpected partial shared scheduler summary: %#v", partial)
@@ -369,7 +369,7 @@ func TestRunSharedAllocationSchedulerOnceReportsPartialFailureAndRequiresOperato
 	)
 	withoutOperator.now = func() time.Time { return fixture.base.Add(4 * time.Hour) }
 	missingOperator, err := withoutOperator.RunSharedAllocationSchedulerOnce(context.Background())
-	assertProblemCode(t, err, "billing_shared_scheduler_operator_unavailable")
+	assertProblemCode(t, err, "cost_accounting_shared_scheduler_operator_unavailable")
 	if missingOperator.Attempted != 1 || missingOperator.Failed != 1 {
 		t.Fatalf("unexpected missing-operator scheduler summary: %#v", missingOperator)
 	}
@@ -411,8 +411,8 @@ func assertScheduledAuditCount(t *testing.T, db *gorm.DB, want int) {
 	t.Helper()
 	var entries []persistence.AuditLog
 	if err := db.Where("action IN ?", []string{
-		"billing.invoice_import_scheduled",
-		"billing.invoice_reconciled_scheduled",
+		"cost_accounting.invoice_import_scheduled",
+		"cost_accounting.invoice_reconciled_scheduled",
 	}).Find(&entries).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func assertScheduledAuditCount(t *testing.T, db *gorm.DB, want int) {
 func assertSharedScheduledAuditCount(t *testing.T, db *gorm.DB, want int) {
 	t.Helper()
 	var entries []persistence.AuditLog
-	if err := db.Where("action = ?", "billing.shared_cost_allocation_sweep_scheduled").Find(&entries).Error; err != nil {
+	if err := db.Where("action = ?", "cost_accounting.shared_cost_allocation_sweep_scheduled").Find(&entries).Error; err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != want {

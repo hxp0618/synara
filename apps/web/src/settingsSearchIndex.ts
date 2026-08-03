@@ -5,6 +5,7 @@
 // Exports: entry type, the index, section label lookup, and the ranking helper
 
 import { rankProviderDiscoveryItems } from "~/lib/providerDiscovery";
+import { ENTERPRISE_SETTINGS_SEARCH_ENTRIES } from "@synara/enterprise-ui";
 import {
   settingRowAnchorId,
   SETTINGS_NAV_ITEMS,
@@ -366,8 +367,9 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   {
     id: "usage:usage",
     section: "usage",
-    title: "Usage and billing",
-    keywords: "Remaining quota and credits for each signed-in provider. limits credits",
+    title: "Usage & internal cost",
+    keywords:
+      "Token usage execution time Provider cost internal allocation network limits soft quota",
     target: null,
   },
 
@@ -385,6 +387,14 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     title: "Recovery tools",
     keywords:
       "Rebuild local project indexes without clearing existing chats when the local state gets out of sync.",
+  },
+  {
+    id: "saas:connection",
+    section: "saas",
+    title: "Cloud Panel connection",
+    keywords:
+      "Desktop account tenant organization control plane device disconnect credential enrollment",
+    target: null,
   },
   {
     id: "integrations:external-mcp",
@@ -406,11 +416,17 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     keywords:
       "A running log of every update, newest first. changelog what's new about release notes",
   },
+  ...ENTERPRISE_SETTINGS_SEARCH_ENTRIES,
 ] as const;
 
 const SETTINGS_SECTION_LABEL_BY_ID = new Map<SettingsSectionId, string>(
   SETTINGS_NAV_ITEMS.map((item) => [item.id, item.label]),
 );
+
+// Exact keyword matches should outrank a title that only happens to contain the query as a
+// sparse subsequence (for example, SCIM previously ranked below "Terminal close confirmation").
+// Direct title matches still win because their scores stay below this secondary-field weight.
+const SETTINGS_SEARCH_KEYWORD_WEIGHT = 50;
 
 export function settingsSectionLabel(section: SettingsSectionId): string {
   return SETTINGS_SECTION_LABEL_BY_ID.get(section) ?? section;
@@ -431,7 +447,7 @@ export function rankSettingsSearchEntries(
   }
   const ranked = rankProviderDiscoveryItems(SETTINGS_SEARCH_ENTRIES, trimmed, (entry) => [
     { value: entry.title },
-    { value: entry.keywords, weight: 200 },
+    { value: entry.keywords, weight: SETTINGS_SEARCH_KEYWORD_WEIGHT },
     { value: settingsSectionLabel(entry.section), weight: 400 },
   ]);
   return ranked.slice(0, limit);

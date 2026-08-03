@@ -3,6 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +43,7 @@ import (
 
 func TestBillingTariffRoutesAuthorizeCreateAndList(t *testing.T) {
 	fixture := newBillingHTTPFixture(t)
-	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/tariffs"
+	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/tariffs"
 	firstStartAt := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	firstEndAt := firstStartAt.Add(time.Hour)
 	firstBody := map[string]any{
@@ -64,16 +68,16 @@ func TestBillingTariffRoutesAuthorizeCreateAndList(t *testing.T) {
 		"cpuCoreHourRateMicros": 7_200_000, "memoryGiBHourRateMicros": 2_000_000,
 		"ephemeralGiBHourRateMicros": 1_000_000, "requestRateMicros": 300_000, "podHourRateMicros": 7_200_000,
 	}
-	if recorder := fixture.request(t, http.MethodPost, basePath, fixture.billingAdminToken, secondBody); recorder.Code != http.StatusCreated {
-		t.Fatalf("billing admin tariff create status = %d, body = %s", recorder.Code, recorder.Body.String())
+	if recorder := fixture.request(t, http.MethodPost, basePath, fixture.costAdminToken, secondBody); recorder.Code != http.StatusCreated {
+		t.Fatalf("cost admin tariff create status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 
 	var all struct {
 		Items []billing.Tariff `json:"items"`
 	}
 	listPath := basePath + "?provider=aws&currencyCode=usd"
-	if recorder := fixture.request(t, http.MethodGet, listPath, fixture.billingAdminToken, nil); recorder.Code != http.StatusOK {
-		t.Fatalf("billing admin tariff list status = %d, body = %s", recorder.Code, recorder.Body.String())
+	if recorder := fixture.request(t, http.MethodGet, listPath, fixture.costAdminToken, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("cost admin tariff list status = %d, body = %s", recorder.Code, recorder.Body.String())
 	} else if err := json.Unmarshal(recorder.Body.Bytes(), &all); err != nil {
 		t.Fatal(err)
 	}
@@ -102,28 +106,119 @@ func TestBillingTariffRoutesAuthorizeCreateAndList(t *testing.T) {
 		fixture.request(
 			t,
 			http.MethodPost,
-			"/v1/tenants/"+fixture.otherTenantID.String()+"/billing/tariffs",
+			"/v1/tenants/"+fixture.otherTenantID.String()+"/cost-accounting/tariffs",
 			fixture.crossTenantToken,
 			firstBody,
 		),
 		http.StatusForbidden,
-		"billing_tariff_operator_forbidden",
+		"cost_accounting_tariff_operator_forbidden",
 	)
 
 	actions := fixture.auditActions(t)
-	if len(actions) != 2 || actions[0] != "billing.tariff_created" || actions[1] != "billing.tariff_created" {
+	if len(actions) != 2 || actions[0] != "cost_accounting.tariff_created" || actions[1] != "cost_accounting.tariff_created" {
 		t.Fatalf("unexpected billing tariff audit actions: %v", actions)
+	}
+}
+
+func TestInternalCostAccountingRoutesAssignReportAndExportWithoutPaymentSurface(t *testing.T) {
+	fixture := newBillingHTTPFixture(t)
+	var organization persistence.Organization
+	if err := fixture.db.Where("tenant_id = ? AND kind = ?", fixture.tenantID, "root").Take(&organization).Error; err != nil {
+		t.Fatal(err)
+	}
+	var target persistence.ExecutionTarget
+	if err := fixture.db.Order("created_at, id").First(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	var subscription persistence.TenantSubscription
+	if err := fixture.db.Where("tenant_id = ?", fixture.tenantID).Take(&subscription).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := subscription.CurrentPeriodStart.Add(time.Minute)
+	projectID, sessionID, turnID, executionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	provider := "codex"
+	for _, model := range []any{
+		&persistence.Project{ID: projectID, TenantID: fixture.tenantID, OrganizationID: organization.ID, Name: "Internal cost export", DefaultBranch: "main", Visibility: "organization", CreatedBy: organization.CreatedBy, CreatedAt: now, UpdatedAt: now},
+		&persistence.AgentSession{ID: sessionID, TenantID: fixture.tenantID, OrganizationID: organization.ID, ProjectID: projectID, CreatedBy: organization.CreatedBy, Title: "Internal cost export", Status: "active", Visibility: "private", Provider: provider, ExecutionTargetID: target.ID, CreatedAt: now, UpdatedAt: now},
+		&persistence.AgentTurn{ID: turnID, TenantID: fixture.tenantID, SessionID: sessionID, CreatedBy: organization.CreatedBy, Status: "completed", InputText: "Report cost", RuntimeMode: "approval-required", InteractionMode: "default", CreatedAt: now},
+		&persistence.AgentExecution{ID: executionID, TenantID: fixture.tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "completed", ExecutionTargetID: target.ID, TargetKind: target.Kind, Generation: 1, Provider: &provider, RequestedBy: organization.CreatedBy, QueuedAt: now},
+		&persistence.ExecutionUsageSummary{TenantID: fixture.tenantID, ExecutionID: executionID, Generation: 1, SessionID: sessionID, TurnID: turnID, Provider: provider, InputTokens: 100, OutputTokens: 23, TotalTokens: 123, ProviderCostMicros: 4500, ProviderCostReported: true, CurrencyCode: "USD", Final: true, LatestEventSequence: 1, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatalf("seed %T: %v", model, err)
+		}
+	}
+	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting"
+	denied := fixture.request(t, http.MethodPut, basePath+"/projects/"+projectID.String(), fixture.memberToken, map[string]any{
+		"costCenterCode": "CC-ENG", "departmentCode": "platform", "expectedVersion": 0,
+	})
+	assertProblemResponse(t, denied, http.StatusForbidden, "tenant_forbidden")
+	assigned := fixture.request(t, http.MethodPut, basePath+"/projects/"+projectID.String(), fixture.costAdminToken, map[string]any{
+		"costCenterCode": "CC-ENG", "departmentCode": "platform", "expectedVersion": 0,
+	})
+	if assigned.Code != http.StatusOK {
+		t.Fatalf("assign internal cost dimension status = %d body=%s", assigned.Code, assigned.Body.String())
+	}
+	reportResponse := fixture.request(t, http.MethodGet, basePath+"/report", fixture.costAdminToken, nil)
+	if reportResponse.Code != http.StatusOK {
+		t.Fatalf("internal cost report status = %d body=%s", reportResponse.Code, reportResponse.Body.String())
+	}
+	var report struct {
+		Rows []struct {
+			ProjectID           uuid.UUID        `json:"projectId"`
+			CostCenterCode      string           `json:"costCenterCode"`
+			DepartmentCode      string           `json:"departmentCode"`
+			TotalTokens         int64            `json:"totalTokens"`
+			KnownCostByCurrency map[string]int64 `json:"knownCostByCurrency"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(reportResponse.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Rows) != 1 || report.Rows[0].ProjectID != projectID || report.Rows[0].CostCenterCode != "CC-ENG" ||
+		report.Rows[0].DepartmentCode != "platform" || report.Rows[0].TotalTokens != 123 || report.Rows[0].KnownCostByCurrency["USD"] != 4500 {
+		t.Fatalf("internal cost report = %#v", report)
+	}
+	exported := fixture.request(t, http.MethodGet, basePath+"/export.csv", fixture.costAdminToken, nil)
+	if exported.Code != http.StatusOK || !strings.HasPrefix(exported.Header().Get("Content-Type"), "text/csv") ||
+		!strings.Contains(exported.Body.String(), "CC-ENG") || !strings.Contains(exported.Body.String(), ",123,") {
+		t.Fatalf("internal cost CSV export status=%d headers=%v body=%s", exported.Code, exported.Header(), exported.Body.String())
+	}
+	digest := sha256.Sum256(exported.Body.Bytes())
+	if exported.Header().Get("X-Synara-Cost-Export-Schema") != "csv-v1" ||
+		exported.Header().Get("X-Synara-Cost-Export-SHA256") != hex.EncodeToString(digest[:]) ||
+		exported.Header().Get("X-Synara-Cost-Export-Bytes") != strconv.Itoa(exported.Body.Len()) {
+		t.Fatalf("internal cost CSV integrity headers=%v bodyBytes=%d", exported.Header(), exported.Body.Len())
+	}
+	records, err := csv.NewReader(strings.NewReader(exported.Body.String())).ReadAll()
+	if err != nil || len(records) != 3 || len(records[0]) != 24 || len(records[1]) != len(records[0]) || len(records[2]) != len(records[0]) {
+		t.Fatalf("internal cost CSV shape records=%v err=%v", records, err)
+	}
+	legacy := fixture.request(t, http.MethodGet, "/v1/tenants/"+fixture.tenantID.String()+"/billing/tariffs", fixture.costAdminToken, nil)
+	if legacy.Code != http.StatusNotFound {
+		t.Fatalf("retired billing route status = %d, want 404", legacy.Code)
+	}
+	var auditEntries []persistence.AuditLog
+	if err := fixture.db.Where("tenant_id = ? AND action LIKE ?", fixture.tenantID, "internal_cost.%").Find(&auditEntries).Error; err != nil {
+		t.Fatal(err)
+	}
+	actions := make([]string, 0, len(auditEntries))
+	for _, entry := range auditEntries {
+		actions = append(actions, entry.Action)
+	}
+	if !slices.Contains(actions, "internal_cost.project_allocation_assigned") || !slices.Contains(actions, "internal_cost.allocation_exported") {
+		t.Fatalf("internal cost Audit actions = %v", actions)
 	}
 }
 
 func TestBillingTariffCreateFailsClosedWithoutConfiguredOperatorTenant(t *testing.T) {
 	fixture := newBillingHTTPFixtureWithOptions(t, billing.WithTariffOperatorTenant(uuid.Nil))
-	path := "/v1/tenants/" + fixture.tenantID.String() + "/billing/tariffs"
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/tariffs"
 	assertProblemResponse(
 		t,
 		fixture.request(t, http.MethodPost, path, fixture.ownerToken, map[string]any{}),
 		http.StatusServiceUnavailable,
-		"billing_tariff_management_unavailable",
+		"cost_accounting_tariff_management_unavailable",
 	)
 }
 
@@ -138,7 +233,7 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 	if err := fixture.db.Create(&target).Error; err != nil {
 		t.Fatal(err)
 	}
-	coveragePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+	coveragePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/shared-targets/" +
 		target.ID.String() + "/ledger-coverage"
 	coverageBody := map[string]any{
 		"completeFromAt":              periodStart.Add(-time.Minute),
@@ -150,7 +245,7 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 		t,
 		fixture.request(t, http.MethodGet, coveragePath, fixture.ownerToken, nil),
 		http.StatusNotFound,
-		"billing_shared_ledger_coverage_not_found",
+		"cost_accounting_shared_ledger_coverage_not_found",
 	)
 	var sealed billing.SharedTargetLedgerCoverage
 	if recorder := fixture.request(t, http.MethodPost, coveragePath, fixture.ownerToken, coverageBody); recorder.Code != http.StatusCreated {
@@ -161,11 +256,11 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 	if sealed.ExecutionTargetID != target.ID || sealed.MinimumWriterVersion != "stage4-http-v1" || sealed.SealedBy == uuid.Nil {
 		t.Fatalf("unexpected sealed shared coverage: %#v", sealed)
 	}
-	if recorder := fixture.request(t, http.MethodPost, coveragePath, fixture.billingAdminToken, coverageBody); recorder.Code != http.StatusOK {
+	if recorder := fixture.request(t, http.MethodPost, coveragePath, fixture.costAdminToken, coverageBody); recorder.Code != http.StatusOK {
 		t.Fatalf("shared coverage exact replay status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	var loaded billing.SharedTargetLedgerCoverage
-	if recorder := fixture.request(t, http.MethodGet, coveragePath, fixture.billingAdminToken, nil); recorder.Code != http.StatusOK {
+	if recorder := fixture.request(t, http.MethodGet, coveragePath, fixture.costAdminToken, nil); recorder.Code != http.StatusOK {
 		t.Fatalf("shared coverage get status = %d, body = %s", recorder.Code, recorder.Body.String())
 	} else if err := json.Unmarshal(recorder.Body.Bytes(), &loaded); err != nil {
 		t.Fatal(err)
@@ -180,7 +275,7 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 		t,
 		fixture.request(t, http.MethodPost, coveragePath, fixture.ownerToken, conflictingBody),
 		http.StatusConflict,
-		"billing_shared_ledger_coverage_conflict",
+		"cost_accounting_shared_ledger_coverage_conflict",
 	)
 	assertProblemResponse(
 		t,
@@ -188,16 +283,16 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 		http.StatusForbidden,
 		"tenant_forbidden",
 	)
-	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/billing/shared-targets/" +
+	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/cost-accounting/shared-targets/" +
 		target.ID.String() + "/ledger-coverage"
 	assertProblemResponse(
 		t,
 		fixture.request(t, http.MethodGet, otherTenantPath, fixture.crossTenantToken, nil),
 		http.StatusForbidden,
-		"billing_shared_operator_forbidden",
+		"cost_accounting_shared_operator_forbidden",
 	)
 
-	sweepPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+	sweepPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/shared-targets/" +
 		target.ID.String() + "/allocations:sweep"
 	sweepBody := map[string]any{
 		"provider": "aws", "currencyCode": "usd",
@@ -214,7 +309,7 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 	}
 
 	var replayedSweep billing.SharedUsageAllocationSweepResult
-	if recorder := fixture.request(t, http.MethodPost, sweepPath, fixture.billingAdminToken, sweepBody); recorder.Code != http.StatusOK {
+	if recorder := fixture.request(t, http.MethodPost, sweepPath, fixture.costAdminToken, sweepBody); recorder.Code != http.StatusOK {
 		t.Fatalf("replayed empty shared allocation sweep status = %d, body = %s", recorder.Code, recorder.Body.String())
 	} else if err := json.Unmarshal(recorder.Body.Bytes(), &replayedSweep); err != nil {
 		t.Fatal(err)
@@ -225,9 +320,9 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 
 	actions := fixture.auditActions(t)
 	wantActions := []string{
-		"billing.shared_cost_allocation_sweep_requested",
-		"billing.shared_cost_allocation_sweep_requested",
-		"billing.shared_target_ledger_coverage_sealed",
+		"cost_accounting.shared_cost_allocation_sweep_requested",
+		"cost_accounting.shared_cost_allocation_sweep_requested",
+		"cost_accounting.shared_target_ledger_coverage_sealed",
 	}
 	if !slices.Equal(actions, wantActions) {
 		t.Fatalf("unexpected shared billing audit actions: got=%v want=%v", actions, wantActions)
@@ -236,7 +331,7 @@ func TestBillingSharedTargetCoverageAndSweepRoutesAreOperatorScopedAndReplaySafe
 
 func TestBillingSharedTargetManagementFailsClosedWithoutConfiguredOperatorTenant(t *testing.T) {
 	fixture := newBillingHTTPFixtureWithOptions(t, billing.WithTariffOperatorTenant(uuid.Nil))
-	path := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/shared-targets/" +
 		uuid.NewString() + "/ledger-coverage"
 	assertProblemResponse(
 		t,
@@ -246,13 +341,13 @@ func TestBillingSharedTargetManagementFailsClosedWithoutConfiguredOperatorTenant
 			"deploymentAttestationSHA256": strings.Repeat("a", 64),
 		}),
 		http.StatusServiceUnavailable,
-		"billing_shared_management_unavailable",
+		"cost_accounting_shared_management_unavailable",
 	)
 }
 
 func TestBillingSharedActualInvoiceAllocationRouteIsOperatorScopedAndValidatesAttestation(t *testing.T) {
 	fixture := newBillingHTTPFixture(t)
-	path := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/shared-targets/" +
 		uuid.NewString() + "/actual-invoices/" + uuid.NewString() + "/allocations"
 	assertProblemResponse(
 		t,
@@ -260,7 +355,7 @@ func TestBillingSharedActualInvoiceAllocationRouteIsOperatorScopedAndValidatesAt
 			"sourceScopeAttestationSHA256": "not-a-digest",
 		}),
 		http.StatusBadRequest,
-		"billing_shared_actual_source_scope_attestation_invalid",
+		"cost_accounting_shared_actual_source_scope_attestation_invalid",
 	)
 	assertProblemResponse(
 		t,
@@ -270,7 +365,7 @@ func TestBillingSharedActualInvoiceAllocationRouteIsOperatorScopedAndValidatesAt
 		http.StatusForbidden,
 		"tenant_forbidden",
 	)
-	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/billing/shared-targets/" +
+	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/cost-accounting/shared-targets/" +
 		uuid.NewString() + "/actual-invoices/" + uuid.NewString() + "/allocations"
 	assertProblemResponse(
 		t,
@@ -278,13 +373,13 @@ func TestBillingSharedActualInvoiceAllocationRouteIsOperatorScopedAndValidatesAt
 			"sourceScopeAttestationSHA256": strings.Repeat("a", 64),
 		}),
 		http.StatusForbidden,
-		"billing_shared_operator_forbidden",
+		"cost_accounting_shared_operator_forbidden",
 	)
 }
 
 func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 	fixture := newBillingHTTPFixture(t)
-	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/tariffs"
+	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/tariffs"
 	periodStart := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	periodEnd := periodStart.Add(4 * time.Hour)
 	targetID := uuid.New()
@@ -313,7 +408,7 @@ func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 			},
 		},
 		{
-			token: fixture.billingAdminToken,
+			token: fixture.costAdminToken,
 			out:   &second,
 			body: map[string]any{
 				"provider": "aws", "region": "us-east-1", "currencyCode": "USD", "version": 2,
@@ -370,7 +465,7 @@ func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 		},
 	})
 
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 	var imported billing.ImportActualInvoiceResult
 	if recorder := fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil); recorder.Code != http.StatusOK {
 		t.Fatalf("tariff-driven import status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -378,9 +473,9 @@ func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reconcilePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/" + imported.Import.ID.String() + "/reconcile"
+	reconcilePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/" + imported.Import.ID.String() + "/reconcile"
 	var report billing.ReconciliationReport
-	if recorder := fixture.request(t, http.MethodPost, reconcilePath, fixture.billingAdminToken, nil); recorder.Code != http.StatusOK {
+	if recorder := fixture.request(t, http.MethodPost, reconcilePath, fixture.costAdminToken, nil); recorder.Code != http.StatusOK {
 		t.Fatalf("tariff-driven reconcile status = %d, body = %s", recorder.Code, recorder.Body.String())
 	} else if err := json.Unmarshal(recorder.Body.Bytes(), &report); err != nil {
 		t.Fatal(err)
@@ -399,7 +494,7 @@ func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 
 func TestBillingImportAndReconcileRoutesAuthorizeAndAudit(t *testing.T) {
 	fixture := newBillingHTTPFixture(t)
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 
 	var imported billing.ImportActualInvoiceResult
 	if recorder := fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil); recorder.Code != http.StatusOK {
@@ -411,10 +506,10 @@ func TestBillingImportAndReconcileRoutesAuthorizeAndAudit(t *testing.T) {
 		t.Fatalf("unexpected imported invoice response: %#v", imported)
 	}
 
-	reconcilePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/" + imported.Import.ID.String() + "/reconcile"
+	reconcilePath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/" + imported.Import.ID.String() + "/reconcile"
 	var report billing.ReconciliationReport
-	if recorder := fixture.request(t, http.MethodPost, reconcilePath, fixture.billingAdminToken, nil); recorder.Code != http.StatusOK {
-		t.Fatalf("billing admin reconcile status = %d, body = %s", recorder.Code, recorder.Body.String())
+	if recorder := fixture.request(t, http.MethodPost, reconcilePath, fixture.costAdminToken, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("cost admin reconcile status = %d, body = %s", recorder.Code, recorder.Body.String())
 	} else if err := json.Unmarshal(recorder.Body.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
@@ -425,16 +520,16 @@ func TestBillingImportAndReconcileRoutesAuthorizeAndAudit(t *testing.T) {
 	assertProblemResponse(t, fixture.request(
 		t,
 		http.MethodPost,
-		"/v1/tenants/"+fixture.tenantID.String()+"/billing/imports/aws/not-configured",
+		"/v1/tenants/"+fixture.tenantID.String()+"/cost-accounting/imports/aws/not-configured",
 		fixture.ownerToken,
 		nil,
-	), http.StatusNotFound, "billing_import_not_configured")
+	), http.StatusNotFound, "cost_accounting_import_not_configured")
 	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.securityAdminToken, nil), http.StatusForbidden, "tenant_forbidden")
 	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.memberToken, nil), http.StatusForbidden, "tenant_forbidden")
 	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.crossTenantToken, nil), http.StatusNotFound, "tenant_not_found")
 
 	actions := fixture.auditActions(t)
-	if len(actions) != 2 || actions[0] != "billing.invoice_import_triggered" || actions[1] != "billing.invoice_reconciled" {
+	if len(actions) != 2 || actions[0] != "cost_accounting.invoice_import_triggered" || actions[1] != "cost_accounting.invoice_reconciled" {
 		t.Fatalf("unexpected billing import audit actions: %v", actions)
 	}
 }
@@ -449,7 +544,7 @@ func TestBillingImportRouteRunsConfiguredEstimateSweepOnEveryReplay(t *testing.T
 		ExecutionTargetIDs: []uuid.UUID{targetID}, EstimateAfterImport: true,
 	}})(fixture.billingService)
 	billing.WithEstimateSweeper(sweeper)(fixture.billingService)
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		if recorder := fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil); recorder.Code != http.StatusOK {
@@ -478,7 +573,7 @@ func TestBillingImportRouteReturnsCommittedImportWhenEstimateSweepNeedsRetry(t *
 		ExecutionTargetIDs: []uuid.UUID{targetID}, EstimateAfterImport: true,
 	}})(fixture.billingService)
 	billing.WithEstimateSweeper(sweeper)(fixture.billingService)
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 
 	recorder := fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil)
 	if recorder.Code != http.StatusOK {
@@ -490,7 +585,7 @@ func TestBillingImportRouteReturnsCommittedImportWhenEstimateSweepNeedsRetry(t *
 	}
 	if result.Import.ID == uuid.Nil || result.EstimateSweep == nil ||
 		result.EstimateSweep.Status != "retry-required" ||
-		result.EstimateSweep.ErrorCode != "billing_estimate_sweep_failed" {
+		result.EstimateSweep.ErrorCode != "cost_accounting_estimate_sweep_failed" {
 		t.Fatalf("post-commit sweep response = %#v", result)
 	}
 	var importCount int64
@@ -506,7 +601,7 @@ func TestBillingImportAuditFailureRollsBackMutation(t *testing.T) {
 	fixture := newBillingHTTPFixtureWithOptions(t, billing.WithAuditRecorder(func(context.Context, *gorm.DB, audit.Entry) error {
 		return errors.New("audit unavailable")
 	}))
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 
 	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil), http.StatusInternalServerError, "internal_error")
 
@@ -533,22 +628,22 @@ func TestBillingImportAuditFailureRollsBackMutation(t *testing.T) {
 
 func TestBillingRoutesReturnBillingUnavailableWhenServiceIsNotConfigured(t *testing.T) {
 	fixture := newBillingHTTPFixtureWithoutBilling(t)
-	tariffPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/tariffs"
-	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/imports/aws/" + fixture.externalImportID
+	tariffPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/tariffs"
+	importPath := "/v1/tenants/" + fixture.tenantID.String() + "/cost-accounting/imports/aws/" + fixture.externalImportID
 
-	assertProblemResponse(t, fixture.request(t, http.MethodGet, tariffPath, fixture.ownerToken, nil), http.StatusServiceUnavailable, "billing_unavailable")
+	assertProblemResponse(t, fixture.request(t, http.MethodGet, tariffPath, fixture.ownerToken, nil), http.StatusServiceUnavailable, "cost_accounting_unavailable")
 	assertProblemResponse(
 		t,
 		fixture.request(t, http.MethodPost, tariffPath, fixture.ownerToken, map[string]any{"provider": "aws"}),
 		http.StatusServiceUnavailable,
-		"billing_unavailable",
+		"cost_accounting_unavailable",
 	)
-	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil), http.StatusServiceUnavailable, "billing_unavailable")
+	assertProblemResponse(t, fixture.request(t, http.MethodPost, importPath, fixture.ownerToken, nil), http.StatusServiceUnavailable, "cost_accounting_unavailable")
 	assertProblemResponse(
 		t,
-		fixture.request(t, http.MethodPost, "/v1/tenants/"+fixture.tenantID.String()+"/billing/imports/"+uuid.NewString()+"/reconcile", fixture.ownerToken, nil),
+		fixture.request(t, http.MethodPost, "/v1/tenants/"+fixture.tenantID.String()+"/cost-accounting/imports/"+uuid.NewString()+"/reconcile", fixture.ownerToken, nil),
 		http.StatusServiceUnavailable,
-		"billing_unavailable",
+		"cost_accounting_unavailable",
 	)
 }
 
@@ -561,7 +656,7 @@ type billingHTTPFixture struct {
 	tenantID           uuid.UUID
 	otherTenantID      uuid.UUID
 	ownerToken         string
-	billingAdminToken  string
+	costAdminToken     string
 	securityAdminToken string
 	memberToken        string
 	crossTenantToken   string
@@ -595,7 +690,7 @@ func newBillingHTTPFixtureWithOptions(t *testing.T, options ...billing.ServiceOp
 
 	now := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
 	ownerToken := createWorkerManifestHTTPLogin(t, store.DB(), domain.UserID, domain.TenantID)
-	billingAdminToken := createBillingHTTPUser(t, store.DB(), domain.TenantID, "billing_admin", now)
+	costAdminToken := createBillingHTTPUser(t, store.DB(), domain.TenantID, "cost_admin", now)
 	securityAdminToken := createBillingHTTPUser(t, store.DB(), domain.TenantID, "security_admin", now)
 	memberToken := createBillingHTTPUser(t, store.DB(), domain.TenantID, "member", now)
 
@@ -692,7 +787,7 @@ func newBillingHTTPFixtureWithOptions(t *testing.T, options ...billing.ServiceOp
 		tenantID:           domain.TenantID,
 		otherTenantID:      otherTenantID,
 		ownerToken:         ownerToken,
-		billingAdminToken:  billingAdminToken,
+		costAdminToken:     costAdminToken,
 		securityAdminToken: securityAdminToken,
 		memberToken:        memberToken,
 		crossTenantToken:   crossTenantToken,
@@ -801,7 +896,7 @@ func (a *billingHTTPMutableAdapter) FetchActualInvoice(_ context.Context, reques
 func (f billingHTTPFixture) auditActions(t *testing.T) []string {
 	t.Helper()
 	var entries []persistence.AuditLog
-	if err := f.db.Where("tenant_id = ? AND action LIKE ?", f.tenantID, "billing.%").Find(&entries).Error; err != nil {
+	if err := f.db.Where("tenant_id = ? AND action LIKE ?", f.tenantID, "cost_accounting.%").Find(&entries).Error; err != nil {
 		t.Fatal(err)
 	}
 	actions := make([]string, 0, len(entries))

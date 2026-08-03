@@ -1,12 +1,12 @@
 // FILE: ControlPlaneSessionArtifacts.tsx
-// Purpose: Shows durable SaaS Session Artifacts with retry-safe download actions.
+// Purpose: Shows durable Control Plane Session Artifacts with retry-safe download actions.
 // Layer: Chat status presentation
 // Exports: ControlPlaneSessionArtifacts
 
 import { formatBytes } from "@synara/shared/formatBytes";
 import { memo, useMemo } from "react";
 
-import type { ControlPlaneArtifact } from "~/lib/controlPlaneClient";
+import type { ControlPlaneArtifact } from "@synara/control-plane-client";
 import {
   controlPlaneArtifactDisplayName,
   controlPlaneArtifactKindLabel,

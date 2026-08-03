@@ -483,7 +483,7 @@ func (s *Service) updateControlCommandDelivery(
 		operation = "control-command.acknowledged"
 	}
 	appended := make([]persistence.SessionEvent, 0, 2)
-	result, err := runIdempotent(ctx, s, worker, requestID, operation, struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, operation, executionID, input.LeaseInput, struct {
 		ExecutionID      uuid.UUID                   `json:"executionId"`
 		ControlCommandID uuid.UUID                   `json:"controlCommandId"`
 		Input            ControlCommandDeliveryInput `json:"input"`

@@ -27,8 +27,17 @@ export SYNARA_LOGIN_COOKIE_SECURE=false
 export SYNARA_SSE_MAX_CONNECTIONS_PER_USER=1
 export SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT=10
 export SYNARA_WORKSPACE_PATH="$workspace"
-export SYNARA_HOST_PORT="${SYNARA_MULTI_REPLICA_WEB_PORT:-59890}"
+multi_replica_web_port="${SYNARA_MULTI_REPLICA_WEB_PORT:-59890}"
+export SYNARA_HOST_PORT="$multi_replica_web_port"
 export MINIO_HOST_PORT="${SYNARA_MULTI_REPLICA_MINIO_PORT:-59092}"
+# These defaults are scoped to the disposable Compose project and are never
+# suitable as deployment credentials. Keeping them here makes the acceptance
+# harness self-contained while still allowing an operator to override ports or
+# authorities explicitly.
+export MINIO_ARTIFACT_USER="${MINIO_ARTIFACT_USER:-multi-replica-artifacts}"
+export MINIO_ARTIFACT_PASSWORD="${MINIO_ARTIFACT_PASSWORD:-multi-replica-artifact-password}"
+export SYNARA_ARTIFACT_CORS_ALLOW_ORIGIN="${SYNARA_ARTIFACT_CORS_ALLOW_ORIGIN:-http://127.0.0.1:${multi_replica_web_port}}"
+export SYNARA_PLATFORM_OPERATOR_TENANT_ID="${SYNARA_PLATFORM_OPERATOR_TENANT_ID:-11111111-1111-4111-8111-111111111111}"
 
 latest_migration="$(find "$repo_root/services/control-plane/migrations" -maxdepth 1 -type f -name '[0-9]*.sql' \
   -exec basename {} \; | sort | tail -n 1)"
@@ -101,5 +110,5 @@ docker stop "${control_plane_ids[0]}" >/dev/null
   --replica-b "$replica_b" \
   --expected-schema-version "$expected_schema_version"
 
-printf 'Multi-replica SaaS acceptance passed: project=%s replicas=%s,%s migrations=%s\n' \
+printf 'Multi-replica self-hosted acceptance passed: project=%s replicas=%s,%s migrations=%s\n' \
   "$project" "$replica_a" "$replica_b" "$expected_schema_version"

@@ -21,8 +21,50 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenancy"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
+
+func TestAgentMemoryPublishRejectsInactiveTenantBeforeStorageAccess(t *testing.T) {
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	_, err := NewService(nil).Publish(
+		context.Background(),
+		identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID},
+		requestedTenantID,
+		PublishInput{},
+		"inactive-memory",
+		"127.0.0.1",
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "tenant_not_found" {
+		t.Fatalf("inactive Tenant Agent Memory publish error = %v", err)
+	}
+}
+
+func TestAgentMemorySessionReadRejectsCrossTenantSessionSubstitution(t *testing.T) {
+	fixture := setupMemoryFixture(t, "memory-session-isolation")
+	otherTenant, err := tenancy.NewService(fixture.db).CreateTenant(
+		context.Background(), fixture.principal,
+		tenancy.CreateTenantInput{
+			Slug: "memory-other-" + uuid.NewString()[:8], Name: "Memory Other",
+			PlanCode: "free", Status: "active",
+		},
+		"memory-other-create", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrincipal := fixture.principal
+	otherPrincipal.ActiveTenantID = &otherTenant.ID
+	_, err = fixture.service.ListEffectiveForSession(
+		context.Background(), otherPrincipal, fixture.sessionID,
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "session_not_found" {
+		t.Fatalf("cross-Tenant Session Memory read error = %v", err)
+	}
+}
 
 func TestPublishAndResolveEffectiveImmutableMemoryRevisions(t *testing.T) {
 	ctx := context.Background()

@@ -15,10 +15,14 @@ on:
         required: true
         default: false
         type: boolean
+      enterprise_ga_candidate:
+        description: "Hold this exact build for protected Stage 6 Enterprise GA evidence approval before publication"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: synara-desktop-release
@@ -29,6 +33,8 @@ jobs:
     name: Preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.release_meta.outputs.version }}
       tag: ${{ steps.release_meta.outputs.tag }}
@@ -36,6 +42,7 @@ jobs:
       make_latest: ${{ steps.release_meta.outputs.make_latest }}
       mirror_to_stable_channel: ${{ steps.release_meta.outputs.mirror_to_stable_channel }}
       publish_release: ${{ steps.release_mode.outputs.publish_release }}
+      enterprise_ga_candidate: ${{ steps.release_mode.outputs.enterprise_ga_candidate }}
       release_lane: ${{ steps.release_meta.outputs.release_lane }}
       bridge_tag: ${{ steps.release_meta.outputs.bridge_tag }}
       update_channel: ${{ steps.release_meta.outputs.update_channel }}
@@ -45,10 +52,12 @@ jobs:
       ref: ${{ steps.source_provenance.outputs.source_commit }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
 
@@ -57,8 +66,14 @@ jobs:
         shell: bash
         env:
           PUBLISH_RELEASE: ${{ github.event_name == 'push' || inputs.publish_release }}
+          ENTERPRISE_GA_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.enterprise_ga_candidate || false }}
         run: |
           echo "publish_release=$PUBLISH_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "enterprise_ga_candidate=$ENTERPRISE_GA_CANDIDATE" >> "$GITHUB_OUTPUT"
+          if [[ "$ENTERPRISE_GA_CANDIDATE" == "true" && "$PUBLISH_RELEASE" != "true" ]]; then
+            echo "Enterprise GA candidate mode must keep the exact signed build in a publication workflow while it awaits protected approval." >&2
+            exit 1
+          fi
           if [[ "$PUBLISH_RELEASE" == "true" ]]; then
             echo "Publication enabled."
           else
@@ -77,6 +92,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
           PUBLISH_RELEASE: ${{ steps.release_mode.outputs.publish_release }}
+          ENTERPRISE_GA_CANDIDATE: ${{ steps.release_mode.outputs.enterprise_ga_candidate }}
           EXPECTED_COMMIT: ${{ github.sha }}
           SOURCE_REF_TYPE: ${{ github.ref_type }}
           SOURCE_REF_NAME: ${{ github.ref_name }}
@@ -87,7 +103,23 @@ jobs:
             "$PUBLISH_RELEASE" \
             "$EXPECTED_COMMIT" \
             "$SOURCE_REF_TYPE" \
-            "$SOURCE_REF_NAME"
+            "$SOURCE_REF_NAME" \
+            "$ENTERPRISE_GA_CANDIDATE"
+
+      - name: Publish protected review instruction
+        if: ${{ steps.release_mode.outputs.enterprise_ga_candidate == 'true' }}
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          {
+            echo "## Stage 6 protected deployment review"
+            echo
+            echo 'Use this exact GitHub environment review comment:'
+            echo
+            echo "\`SYNARA_STAGE6_APPROVE $RELEASE_TAG $GITHUB_RUN_ID\`"
+            echo
+            echo "Do not rerun an approved candidate. A new attempt requires a new workflow run and evidence bundle."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify public updater repository
         env:
@@ -134,7 +166,7 @@ jobs:
           done
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
@@ -143,6 +175,12 @@ jobs:
 
       - name: Verify Synara identity
         run: bun run brand:check
+
+      - name: Verify Stage 6 engineering source gates
+        run: bun run stage6:engineering:check
+
+      - name: Verify release-only workflow gates
+        run: bun run release:smoke
 
       - name: Lint
         run: bun run lint
@@ -158,6 +196,11 @@ jobs:
     needs: preflight
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
@@ -184,18 +227,19 @@ jobs:
             arch: x64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
 
@@ -224,6 +268,7 @@ jobs:
           AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME }}
           AZURE_TRUSTED_SIGNING_SUBJECT_DN: ${{ secrets.AZURE_TRUSTED_SIGNING_SUBJECT_DN }}
           SYNARA_PUBLISH_RELEASE: ${{ needs.preflight.outputs.publish_release }}
+          SYNARA_ENTERPRISE_GA_CANDIDATE: ${{ needs.preflight.outputs.enterprise_ga_candidate }}
           ALLOW_UNSIGNED_WINDOWS_PUBLICATION: ${{ vars.SYNARA_ALLOW_UNSIGNED_WINDOWS_RELEASE == needs.preflight.outputs.version }}
           SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
           SOURCE_TAG: ${{ needs.preflight.outputs.source_tag }}
@@ -256,8 +301,11 @@ jobs:
           if [[ "${{ matrix.platform }}" == "mac" ]]; then
             if has_all "$CSC_LINK" "$CSC_KEY_PASSWORD" "$APPLE_API_KEY" "$APPLE_API_KEY_ID" "$APPLE_API_ISSUER" "$APPLE_TEAM_ID"; then
               key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+              umask 077
+              install -m 600 /dev/null "$key_path"
               printf '%s' "$APPLE_API_KEY" > "$key_path"
               export APPLE_API_KEY="$key_path"
+              bun run stage6:desktop:mac:preflight
               echo "macOS signing enabled."
               signed=true
               args+=(--signed)
@@ -280,7 +328,7 @@ jobs:
               echo "Windows signing enabled (Azure Trusted Signing)."
               signed=true
               args+=(--signed)
-            elif [[ "$SYNARA_PUBLISH_RELEASE" == "true" && "$ALLOW_UNSIGNED_WINDOWS_PUBLICATION" != "true" ]]; then
+            elif [[ "$SYNARA_PUBLISH_RELEASE" == "true" && ( "$SYNARA_ENTERPRISE_GA_CANDIDATE" == "true" || "$ALLOW_UNSIGNED_WINDOWS_PUBLICATION" != "true" ) ]]; then
               echo "Publishing Windows artifacts requires every Azure Trusted Signing secret."
               exit 1
             else
@@ -368,6 +416,48 @@ jobs:
             --expected-windows-publisher "$EXPECTED_WINDOWS_PUBLISHER" \
             --expected-windows-subject-dn "$EXPECTED_WINDOWS_SUBJECT_DN"
 
+      - id: artifact_attestation
+        name: Generate signed artifact attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: release-publish/*
+
+      - name: Retain artifact attestation bundle
+        shell: bash
+        env:
+          ATTESTATION_BUNDLE_PATH: ${{ steps.artifact_attestation.outputs.bundle-path }}
+          ATTESTATION_FILE_NAME: artifact-${{ matrix.platform }}-${{ matrix.arch }}.attestation.json
+        run: |
+          node -e 'const fs = require("node:fs"); const path = require("node:path"); const source = process.env.ATTESTATION_BUNDLE_PATH; const name = process.env.ATTESTATION_FILE_NAME; if (!source || !name) throw new Error("Artifact attestation outputs are missing."); fs.copyFileSync(source, path.join("release-publish", name));'
+
+      - name: Verify primary installer artifact attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE_PATH: ${{ steps.artifact_attestation.outputs.bundle-path }}
+          ATTESTATION_VERIFICATION_FILE: artifact-${{ matrix.platform }}-${{ matrix.arch }}.attestation-verification.json
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+        run: |
+          shopt -s nullglob
+          case "${{ matrix.platform }}" in
+            mac) primary=(release-publish/*.dmg) ;;
+            win) primary=(release-publish/*.exe) ;;
+            linux) primary=(release-publish/*.AppImage) ;;
+            *) echo "Unsupported attestation platform: ${{ matrix.platform }}" >&2; exit 1 ;;
+          esac
+          if [[ "${#primary[@]}" -ne 1 ]]; then
+            echo "Expected exactly one primary installer for attestation verification, found ${#primary[@]}." >&2
+            exit 1
+          fi
+          gh attestation verify "${primary[0]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ATTESTATION_BUNDLE_PATH" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$SOURCE_COMMIT" \
+            --deny-self-hosted-runners \
+            --format json > "release-publish/$ATTESTATION_VERIFICATION_FILE"
+          test -s "release-publish/$ATTESTATION_VERIFICATION_FILE"
+
       - name: Smoke packaged desktop startup
         shell: bash
         run: |
@@ -378,31 +468,254 @@ jobs:
             --version "${{ needs.preflight.outputs.version }}"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: release-publish/*
           if-no-files-found: error
 
-  publish_cli:
-    name: Publish CLI to npm
-    if: ${{ needs.preflight.outputs.publish_release == 'true' && vars.SYNARA_PUBLISH_CLI == '1' }}
+  finalize_release_assets:
+    name: Finalize immutable release asset set
+    if: ${{ needs.preflight.outputs.publish_release == 'true' }}
     needs: [preflight, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      final_asset_set_sha256: ${{ steps.final_asset_set.outputs.final_asset_set_sha256 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Checkout exact release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: package.json
+
+      - name: Download native build artifacts for finalization
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Merge macOS updater manifests before final binding
+        run: |
+          node scripts/merge-mac-update-manifests.ts \
+            release-assets/latest-mac.yml \
+            release-assets/latest-mac-x64.yml
+          rm -f release-assets/latest-mac-x64.yml
+
+      - name: Prepare updater feed metadata before final binding
+        run: node scripts/prepare-release-update-feed.ts release-assets
+
+      - id: final_asset_set
+        name: Bind and verify final public release bytes
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          LOCKFILE_SHA256: ${{ needs.preflight.outputs.lockfile_sha256 }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
+        run: |
+          node scripts/write-release-final-asset-set.ts \
+            --assets-dir release-assets \
+            --source-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL"
+          node scripts/verify-release-final-asset-set.ts \
+            --assets-dir release-assets \
+            --source-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --expected-final-asset-set-sha256 "$(jq -er '.finalAssetSetSha256' release-assets/release-final-asset-set.json)"
+
+      - name: Upload immutable finalized release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: finalized-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+
+  stage6_enterprise_approval:
+    name: Approve exact Stage 6 Enterprise GA candidate
+    if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+    needs: [preflight, build, finalize_release_assets]
+    environment:
+      name: stage6-enterprise-ga
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout exact candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: package.json
+
+      - name: Download exact candidate Desktop artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: stage6-candidate-artifacts
+
+      - name: Download finalized public release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: finalized-release-assets
+          path: stage6-finalized-assets
+
+      - name: Record protected candidate evidence approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CANDIDATE_ID: ${{ needs.preflight.outputs.tag }}
+          EXPECTED_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          EXPECTED_LOCKFILE_SHA256: ${{ needs.preflight.outputs.lockfile_sha256 }}
+          EXPECTED_BUILD_RUN_ID: ${{ github.run_id }}
+          DECLARED_CANDIDATE_ID: ${{ vars.SYNARA_STAGE6_CANDIDATE_ID }}
+          DECLARED_SOURCE_COMMIT: ${{ vars.SYNARA_STAGE6_CANDIDATE_SOURCE_COMMIT }}
+          DECLARED_BUILD_RUN_ID: ${{ vars.SYNARA_STAGE6_CANDIDATE_BUILD_RUN_ID }}
+          CANDIDATE_BUNDLE_RECEIPT_SHA256: ${{ vars.SYNARA_STAGE6_CANDIDATE_BUNDLE_RECEIPT_SHA256 }}
+          CANDIDATE_BUNDLE_RECEIPT_BASE64: ${{ secrets.SYNARA_STAGE6_CANDIDATE_BUNDLE_RECEIPT_BASE64 }}
+          DESKTOP_ARTIFACT_SET_SHA256: ${{ vars.SYNARA_STAGE6_DESKTOP_ARTIFACT_SET_SHA256 }}
+          EXPECTED_FINAL_ASSET_SET_SHA256: ${{ needs.finalize_release_assets.outputs.final_asset_set_sha256 }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p stage6-approval
+          test -n "$CANDIDATE_BUNDLE_RECEIPT_BASE64"
+          printf '%s' "$CANDIDATE_BUNDLE_RECEIPT_BASE64" \
+            | base64 --decode \
+            > stage6-approval/stage6-candidate-bundle-receipt.json
+          node scripts/verify-stage6-candidate-release-binding.ts \
+            --receipt stage6-approval/stage6-candidate-bundle-receipt.json \
+            --expected-receipt-sha256 "$CANDIDATE_BUNDLE_RECEIPT_SHA256" \
+            --expected-candidate-id "$EXPECTED_CANDIDATE_ID" \
+            --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+            --expected-lockfile-sha256 "$EXPECTED_LOCKFILE_SHA256" \
+            --expected-desktop-artifact-set-sha256 "$DESKTOP_ARTIFACT_SET_SHA256" \
+            > stage6-approval/stage6-candidate-release-binding.json
+          node scripts/verify-stage6-desktop-artifact-set.ts \
+            --assets-dir stage6-candidate-artifacts \
+            --candidate-tag "$EXPECTED_CANDIDATE_ID" \
+            --source-commit "$EXPECTED_SOURCE_COMMIT" \
+            --lockfile-sha256 "$EXPECTED_LOCKFILE_SHA256" \
+            --expected-artifact-set-sha256 "$DESKTOP_ARTIFACT_SET_SHA256" \
+            > stage6-approval/stage6-desktop-artifact-set-verification.json
+          node scripts/verify-release-final-asset-set.ts \
+            --assets-dir stage6-finalized-assets \
+            --source-tag "$EXPECTED_CANDIDATE_ID" \
+            --source-commit "$EXPECTED_SOURCE_COMMIT" \
+            --lockfile-sha256 "$EXPECTED_LOCKFILE_SHA256" \
+            --version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --expected-final-asset-set-sha256 "$EXPECTED_FINAL_ASSET_SET_SHA256" \
+            > stage6-approval/stage6-final-asset-set-verification.json
+
+          environment_response="$RUNNER_TEMP/stage6-environment.json"
+          approval_history_response="$RUNNER_TEMP/stage6-approval-history.json"
+          workflow_run_response="$RUNNER_TEMP/stage6-workflow-run.json"
+          branch_protection_response="$RUNNER_TEMP/stage6-branch-protection.json"
+          gh api \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > "$workflow_run_response"
+          source_branch_encoded="$(jq -er '.head_branch | @uri' "$workflow_run_response")"
+          gh api \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/branches/$source_branch_encoded/protection" \
+            > "$branch_protection_response"
+          gh api \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/environments/stage6-enterprise-ga" \
+            > "$environment_response"
+          gh api \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            > "$approval_history_response"
+          expected_review_comment="SYNARA_STAGE6_APPROVE $EXPECTED_CANDIDATE_ID $EXPECTED_BUILD_RUN_ID"
+          node scripts/write-stage6-release-approval.ts \
+            --output stage6-approval/stage6-enterprise-ga-approval.json \
+            --expected-candidate-id "$EXPECTED_CANDIDATE_ID" \
+            --declared-candidate-id "$DECLARED_CANDIDATE_ID" \
+            --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+            --declared-source-commit "$DECLARED_SOURCE_COMMIT" \
+            --expected-build-run-id "$EXPECTED_BUILD_RUN_ID" \
+            --declared-build-run-id "$DECLARED_BUILD_RUN_ID" \
+            --candidate-bundle-receipt stage6-approval/stage6-candidate-bundle-receipt.json \
+            --candidate-bundle-receipt-sha256 "$CANDIDATE_BUNDLE_RECEIPT_SHA256" \
+            --expected-lockfile-sha256 "$EXPECTED_LOCKFILE_SHA256" \
+            --desktop-artifact-set-sha256 "$DESKTOP_ARTIFACT_SET_SHA256" \
+            --raw-desktop-assets-dir stage6-candidate-artifacts \
+            --final-assets-dir stage6-finalized-assets \
+            --expected-final-asset-set-sha256 "$EXPECTED_FINAL_ASSET_SET_SHA256" \
+            --release-version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --environment-response "$environment_response" \
+            --approval-history-response "$approval_history_response" \
+            --workflow-run-response "$workflow_run_response" \
+            --branch-protection-response "$branch_protection_response" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --actor "$WORKFLOW_ACTOR" \
+            --triggering-actor "$TRIGGERING_ACTOR" \
+            --expected-review-comment "$expected_review_comment" \
+            --recorded-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+      - name: Retain Stage 6 approval record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: stage6-enterprise-ga-approval
+          path: stage6-approval/*
+          if-no-files-found: error
+
+  publish_cli:
+    name: Publish CLI to npm
+    if: ${{ always() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.finalize_release_assets.result == 'success' && needs.preflight.outputs.publish_release == 'true' && needs.preflight.outputs.enterprise_ga_candidate != 'true' && vars.SYNARA_PUBLISH_CLI == '1' }}
+    needs: [preflight, build, finalize_release_assets, stage6_enterprise_approval]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
           registry-url: https://registry.npmjs.org
@@ -420,37 +733,131 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: ${{ needs.preflight.outputs.publish_release == 'true' }}
-    needs: [preflight, build]
+    if: ${{ always() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.finalize_release_assets.result == 'success' && needs.preflight.outputs.publish_release == 'true' && (needs.preflight.outputs.enterprise_ga_candidate != 'true' || needs.stage6_enterprise_approval.result == 'success') }}
+    needs: [preflight, build, finalize_release_assets, stage6_enterprise_approval]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
 
-      - name: Download all desktop artifacts
-        uses: actions/download-artifact@v8
+      - name: Download immutable finalized release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: finalized-release-assets
+          path: release-assets
+
+      - name: Download protected Stage 6 raw Desktop evidence
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: desktop-*
           merge-multiple: true
-          path: release-assets
+          path: stage6-candidate-artifacts
 
-      - name: Merge macOS updater manifests
+      - name: Download protected Stage 6 approval record
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: stage6-enterprise-ga-approval
+          path: stage6-approval
+
+      - name: Reverify immutable final release bytes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          LOCKFILE_SHA256: ${{ needs.preflight.outputs.lockfile_sha256 }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
+          EXPECTED_FINAL_ASSET_SET_SHA256: ${{ needs.finalize_release_assets.outputs.final_asset_set_sha256 }}
         run: |
-          node scripts/merge-mac-update-manifests.ts \
-            release-assets/latest-mac.yml \
-            release-assets/latest-mac-x64.yml
-          rm -f release-assets/latest-mac-x64.yml
+          mkdir -p release-verification
+          node scripts/verify-release-final-asset-set.ts \
+            --assets-dir release-assets \
+            --source-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --expected-final-asset-set-sha256 "$EXPECTED_FINAL_ASSET_SET_SHA256" \
+            > release-verification/release-final-asset-set-publication-verification.json
 
-      - name: Prepare updater feed metadata
-        run: node scripts/prepare-release-update-feed.ts release-assets
+      - name: Reverify protected Stage 6 Desktop artifact bytes
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          LOCKFILE_SHA256: ${{ needs.preflight.outputs.lockfile_sha256 }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
+        run: |
+          (
+            cd stage6-approval
+            sha256sum -c stage6-enterprise-ga-approval.json.sha256
+          )
+          expected_candidate_receipt_sha256="$(
+            jq -er '.candidate.candidateBundleReceiptSha256' \
+              stage6-approval/stage6-enterprise-ga-approval.json
+          )"
+          expected_artifact_set_sha256="$(
+            jq -er '.candidate.desktopArtifactSetSha256' \
+              stage6-approval/stage6-enterprise-ga-approval.json
+          )"
+          expected_final_asset_set_sha256="$(
+            jq -er '.candidate.finalAssetSetSha256' \
+              stage6-approval/stage6-enterprise-ga-approval.json
+          )"
+          expected_cross_binding_sha256="$(
+            jq -er '.candidate.rawFinalCrossBindingSha256' \
+              stage6-approval/stage6-enterprise-ga-approval.json
+          )"
+          node scripts/verify-stage6-candidate-release-binding.ts \
+            --receipt stage6-approval/stage6-candidate-bundle-receipt.json \
+            --expected-receipt-sha256 "$expected_candidate_receipt_sha256" \
+            --expected-candidate-id "$RELEASE_TAG" \
+            --expected-source-commit "$SOURCE_COMMIT" \
+            --expected-lockfile-sha256 "$LOCKFILE_SHA256" \
+            --expected-desktop-artifact-set-sha256 "$expected_artifact_set_sha256" \
+            > stage6-approval/stage6-candidate-release-binding-publication-verification.json
+          node scripts/verify-stage6-desktop-artifact-set.ts \
+            --assets-dir stage6-candidate-artifacts \
+            --candidate-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --expected-artifact-set-sha256 "$expected_artifact_set_sha256"
+          node scripts/verify-release-final-asset-set.ts \
+            --assets-dir release-assets \
+            --source-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --expected-final-asset-set-sha256 "$expected_final_asset_set_sha256"
+          node scripts/verify-stage6-release-cross-binding.ts \
+            --raw-assets-dir stage6-candidate-artifacts \
+            --final-assets-dir release-assets \
+            --candidate-tag "$RELEASE_TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --lockfile-sha256 "$LOCKFILE_SHA256" \
+            --desktop-artifact-set-sha256 "$expected_artifact_set_sha256" \
+            --final-asset-set-sha256 "$expected_final_asset_set_sha256" \
+            --release-version "$RELEASE_VERSION" \
+            --update-channel "$UPDATE_CHANNEL" \
+            --expected-cross-binding-sha256 "$expected_cross_binding_sha256" \
+            > stage6-approval/stage6-raw-final-cross-binding-publication-verification.json
 
       - name: Prevent compatibility channel rollback
         if: ${{ needs.preflight.outputs.release_lane == 'bridge' }}
@@ -528,8 +935,28 @@ jobs:
             exit 1
           fi
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - name: Recheck protected Stage 6 tag reservation
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          if [[ "$tag_status" -eq 0 ]]; then
+            echo "Protected Enterprise GA tag $RELEASE_TAG appeared while evidence review was pending; refusing publication." >&2
+            exit 1
+          fi
+          if [[ "$tag_status" -ne 2 ]]; then
+            echo "Unable to prove that protected Enterprise GA tag $RELEASE_TAG remains absent." >&2
+            exit 1
+          fi
+
+      - name: Publish ordinary release
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate != 'true' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.preflight.outputs.ref }}
@@ -545,6 +972,36 @@ jobs:
             release-assets/*.blockmap
             release-assets/*.yml
             release-assets/*.provenance.json
+            release-assets/*.attestation*.json
+            release-assets/release-final-asset-set.json
+            release-assets/release-final-asset-set.json.sha256
+          fail_on_unmatched_files: true
+
+      - name: Publish protected Stage 6 Enterprise GA release
+        if: ${{ needs.preflight.outputs.enterprise_ga_candidate == 'true' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: Synara v${{ needs.preflight.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/*.AppImage
+            release-assets/*.exe
+            release-assets/*.blockmap
+            release-assets/*.yml
+            release-assets/*.provenance.json
+            release-assets/*.attestation*.json
+            release-assets/release-final-asset-set.json
+            release-assets/release-final-asset-set.json.sha256
+            stage6-approval/stage6-enterprise-ga-approval.json
+            stage6-approval/stage6-enterprise-ga-approval.json.sha256
+            stage6-approval/stage6-desktop-artifact-set-verification.json
+            stage6-approval/stage6-final-asset-set-verification.json
           fail_on_unmatched_files: true
 
       - name: Mirror Synara artifacts onto the pinned updater feed
@@ -605,17 +1062,19 @@ jobs:
     needs: [preflight, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - id: app_token
         name: Mint release app token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: main
           fetch-depth: 0
@@ -633,12 +1092,12 @@ jobs:
           echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
 

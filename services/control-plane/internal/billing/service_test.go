@@ -12,9 +12,55 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
+
+func TestCostManagementRejectsInactiveTenantBeforeConfigurationOrStorage(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil, nil)
+
+	_, err := service.ListTariffsAuthorized(ctx, principal, requestedTenantID, ListTariffsFilter{})
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.CreateTariffAuthorized(
+		ctx, principal, requestedTenantID, CreateTariffInput{},
+		"billing-inactive-tariff", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.ImportConfiguredInvoiceAuthorized(
+		ctx, principal, requestedTenantID, "", "",
+		"billing-inactive-import", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.ReconcileActualInvoiceImportAuthorized(
+		ctx, principal, requestedTenantID, uuid.New(),
+		"billing-inactive-reconcile", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.GetSharedTargetLedgerCoverageAuthorized(
+		ctx, principal, requestedTenantID, uuid.New(),
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, _, err = service.SealSharedTargetLedgerCoverageAuthorized(
+		ctx, principal, requestedTenantID, uuid.New(), SealSharedTargetLedgerCoverageInput{},
+		"billing-inactive-seal", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.SweepSharedUsageChargesAuthorized(
+		ctx, principal, requestedTenantID, SweepSharedUsageChargesInput{},
+		"billing-inactive-sweep", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.AllocateSharedActualInvoiceAuthorized(
+		ctx, principal, requestedTenantID, AllocateSharedActualInvoiceInput{},
+		"billing-inactive-allocate", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+}
 
 const (
 	workerClaimKindExecution        = "execution"
@@ -43,7 +89,7 @@ func TestCreateTariffRejectsOverlapButAllowsAdjacency(t *testing.T) {
 		EffectiveStartAt: base.Add(30 * time.Minute), EffectiveEndAt: timePointer(base.Add(90 * time.Minute)),
 		CPUCoreHourRateMicros: 4_200_000,
 	})
-	assertProblemCode(t, err, "billing_tariff_overlap")
+	assertProblemCode(t, err, "cost_accounting_tariff_overlap")
 
 	if _, err := fixture.service.CreateTariff(ctx, CreateTariffInput{
 		Provider: "aws", Region: "us-east-1", CurrencyCode: "USD", Version: 3,
@@ -166,7 +212,7 @@ func TestEstimateUsageChargesFailsClosedWithoutTenantAttribution(t *testing.T) {
 		BillingPeriodStartAt: fixture.base,
 		BillingPeriodEndAt:   fixture.base.Add(4 * time.Hour),
 	})
-	assertProblemCode(t, err, "billing_worker_fact_tenant_unattributed")
+	assertProblemCode(t, err, "cost_accounting_worker_fact_tenant_unattributed")
 }
 
 func TestEstimateUsageChargesUsesCompleteLedgerAcrossBillingBoundary(t *testing.T) {
@@ -295,7 +341,7 @@ func TestEstimateUsageChargesFailsClosedWhenRequestClaimLedgerIsIncompleteAcross
 		BillingPeriodStartAt: fixture.base,
 		BillingPeriodEndAt:   fixture.base.Add(4 * time.Hour),
 	})
-	assertProblemCode(t, err, "billing_request_charge_delta_unavailable")
+	assertProblemCode(t, err, "cost_accounting_request_charge_delta_unavailable")
 }
 
 func TestEstimateUsageChargesSplitsRequestChargesAcrossTariffChangesWhenLedgerComplete(t *testing.T) {
@@ -397,7 +443,7 @@ func TestEstimateUsageChargesFailsClosedWhenRequestTariffsChangeWithinPeriodAndC
 		BillingPeriodStartAt: fixture.base,
 		BillingPeriodEndAt:   fixture.base.Add(4 * time.Hour),
 	})
-	assertProblemCode(t, err, "billing_request_charge_delta_unavailable")
+	assertProblemCode(t, err, "cost_accounting_request_charge_delta_unavailable")
 }
 
 func TestImportAndReconcileActualInvoice(t *testing.T) {
@@ -698,7 +744,7 @@ func TestImportActualInvoiceRejectsConflictingReplay(t *testing.T) {
 		TenantID: fixture.tenantID,
 		Provider: "aws", ExternalImportID: "aws-conflict",
 	})
-	assertProblemCode(t, err, "billing_invoice_import_conflict")
+	assertProblemCode(t, err, "cost_accounting_invoice_import_conflict")
 }
 
 type billingFixture struct {
@@ -711,7 +757,7 @@ type billingFixture struct {
 
 func newBillingFixture(t *testing.T, adapter Adapter) billingFixture {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "billing.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "cost_accounting.sqlite")
 	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)

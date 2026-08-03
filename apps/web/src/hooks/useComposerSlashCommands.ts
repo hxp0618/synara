@@ -180,7 +180,7 @@ export function useComposerSlashCommands(input: {
         toastManager.add({
           type: "warning",
           title: "Compact is unavailable",
-          description: "The SaaS Control Plane compact route is unavailable right now.",
+          description: "The Control Plane compact route is unavailable right now.",
         });
         return false;
       }
@@ -315,14 +315,14 @@ export function useComposerSlashCommands(input: {
         if (inputOptions?.target) {
           toastManager.add({
             type: "warning",
-            title: "Invalid SaaS /fork command",
+            title: "Invalid Control Plane /fork command",
             description:
-              "SaaS Fork creates an isolated authoritative Session and does not accept Local or New Worktree targets.",
+              "Control Plane Fork creates an isolated authoritative Session and does not accept Local or New Worktree targets.",
           });
           return true;
         }
         if (!forkControlPlaneSession) {
-          throw new Error("The SaaS Control Plane fork route is unavailable right now.");
+          throw new Error("The Control Plane fork route is unavailable right now.");
         }
         const nextThreadId = await forkControlPlaneSession();
         await navigateToThread(nextThreadId);
@@ -508,7 +508,7 @@ export function useComposerSlashCommands(input: {
           toastManager.add({
             type: "warning",
             title: "Review is unavailable",
-            description: "The SaaS Control Plane review route is unavailable right now.",
+            description: "The Control Plane review route is unavailable right now.",
           });
           return false;
         }
@@ -699,7 +699,7 @@ export function useComposerSlashCommands(input: {
       toastManager.add({
         type: "warning",
         title: "Fast mode is unavailable",
-        description: "Provider-native commands are unavailable in SaaS execution mode.",
+        description: "Provider-native commands are unavailable in Control Plane execution mode.",
       });
       return false;
     }
@@ -823,7 +823,7 @@ export function useComposerSlashCommands(input: {
             title: `${command[0]!.toUpperCase()}${command.slice(1)} is unavailable`,
             description:
               advancedCommandUnavailableMessages?.[command] ??
-              `The selected Provider cannot use ${command} on this SaaS target right now.`,
+              `The selected Provider cannot use ${command} on this Control Plane target right now.`,
           });
           return true;
         }
@@ -895,7 +895,7 @@ export function useComposerSlashCommands(input: {
           if (!target) {
             toastManager.add({
               type: "warning",
-              title: "Invalid SaaS /review command",
+              title: "Invalid Control Plane /review command",
               description: "Use /review, /review changes, or /review base.",
             });
             return true;
@@ -946,9 +946,9 @@ export function useComposerSlashCommands(input: {
           if (slashInvocation.args.trim().length > 0) {
             toastManager.add({
               type: "warning",
-              title: "Invalid SaaS /fork command",
+              title: "Invalid Control Plane /fork command",
               description:
-                "Use /fork without Local or New Worktree arguments. SaaS creates an isolated authoritative Session.",
+                "Use /fork without Local or New Worktree arguments. The Control Plane creates an isolated authoritative Session.",
             });
             return true;
           }

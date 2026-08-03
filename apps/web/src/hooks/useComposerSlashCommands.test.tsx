@@ -22,8 +22,8 @@ function makeProject(): Project {
   return {
     id: ProjectId.makeUnsafe("project-saas"),
     kind: "project",
-    name: "SaaS Project",
-    remoteName: "SaaS Project",
+    name: "Control Plane Project",
+    remoteName: "Control Plane Project",
     folderName: "saas-project",
     localName: null,
     cwd: "/workspace/saas-project",
@@ -124,11 +124,11 @@ function makeInput(overrides: Partial<SlashCommandInput> = {}): SlashCommandInpu
   };
 }
 
-describe("useComposerSlashCommands SaaS routing", () => {
+describe("useComposerSlashCommands Control Plane routing", () => {
   beforeEach(() => {
     readNativeApiMock.mockReset();
     readNativeApiMock.mockImplementation(() => {
-      throw new Error("SaaS advanced commands must not read the local Native API.");
+      throw new Error("Control Plane advanced commands must not read the local Native API.");
     });
   });
 
@@ -169,7 +169,7 @@ describe("useComposerSlashCommands SaaS routing", () => {
     expect(readNativeApiMock).not.toHaveBeenCalled();
   });
 
-  it("opens the SaaS review target picker without falling back to local discovery", async () => {
+  it("opens the Control Plane review target picker without falling back to local discovery", async () => {
     const openReviewTargetPicker = vi.fn();
     const startControlPlaneReview = vi.fn(async () => undefined);
     const controller = renderSlashCommandHook(
@@ -186,7 +186,7 @@ describe("useComposerSlashCommands SaaS routing", () => {
     expect(readNativeApiMock).not.toHaveBeenCalled();
   });
 
-  it("rejects SaaS fork local and worktree targets instead of falling back to local forking", async () => {
+  it("rejects Control Plane fork local and worktree targets instead of falling back to local forking", async () => {
     const forkControlPlaneSession = vi.fn(async () => ThreadId.makeUnsafe("session-forked"));
     const navigateToThread = vi.fn(async () => undefined);
     const openForkTargetPicker = vi.fn();

@@ -11,6 +11,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
@@ -28,7 +29,7 @@ func (s *Service) DeleteByRetention(
 		limit = 200
 	}
 	var candidates []persistence.Artifact
-	err := s.db.WithContext(ctx).
+	candidateQuery := s.db.WithContext(ctx).
 		Where("tenant_id = ? AND deleted_at IS NULL AND status IN ?", tenantID,
 			[]string{"pending", "ready", "failed", "deleting"}).
 		Where("(expires_at IS NOT NULL AND expires_at <= ?) OR COALESCE(ready_at, created_at) <= ?", deletedAt, cutoff).
@@ -44,8 +45,9 @@ func (s *Service) DeleteByRetention(
 			FROM agent_memory_revisions memory_revision
 			WHERE memory_revision.tenant_id = artifacts.tenant_id
 			  AND memory_revision.artifact_id = artifacts.id
-		)`).
-		Order("COALESCE(ready_at, created_at), id").Limit(limit).Find(&candidates).Error
+		)`)
+	candidateQuery = retentiongate.ExcludeArtifacts(candidateQuery, "artifacts")
+	err := candidateQuery.Order("COALESCE(ready_at, created_at), id").Limit(limit).Find(&candidates).Error
 	if err != nil {
 		return 0, problem.Wrap(500, "retention_artifacts_load_failed", "Retention could not load eligible Artifacts.", err)
 	}
@@ -78,9 +80,11 @@ func (s *Service) CleanupExpiredUploads(ctx context.Context, expiredAt time.Time
 		limit = 200
 	}
 	var candidates []persistence.Artifact
-	if err := s.db.WithContext(ctx).
+	candidateQuery := s.db.WithContext(ctx).
 		Where("status IN ? AND upload_expires_at IS NOT NULL AND upload_expires_at <= ?", []string{"pending", "ready", "failed", "deleted"}, expiredAt).
-		Order("upload_expires_at, id").Limit(limit).Find(&candidates).Error; err != nil {
+		Model(&persistence.Artifact{})
+	candidateQuery = retentiongate.ExcludeArtifacts(candidateQuery, "artifacts")
+	if err := candidateQuery.Order("upload_expires_at, id").Limit(limit).Find(&candidates).Error; err != nil {
 		return 0, problem.Wrap(500, "expired_artifact_uploads_load_failed", "Expired Artifact uploads could not be loaded.", err)
 	}
 	cleaned := 0

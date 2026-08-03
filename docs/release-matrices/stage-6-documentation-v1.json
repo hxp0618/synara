@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "synara.enterprise-documentation-matrix.v1",
+  "documents": [
+    {
+      "id": "documentation-index",
+      "audience": "all",
+      "path": "docs/enterprise/README.md",
+      "contains": [
+        "## Choose your path",
+        "## Documentation release gate",
+        "source-documentation-validated-not-release-verified"
+      ]
+    },
+    {
+      "id": "user-guide",
+      "audience": "end-user",
+      "path": "docs/enterprise/user-guide.md",
+      "contains": [
+        "## Sign in and choose a Tenant",
+        "## Understand usage and cost",
+        "## Releases and required action",
+        "## Privacy, retention and help"
+      ]
+    },
+    {
+      "id": "administrator-guide",
+      "audience": "tenant-administrator",
+      "path": "docs/enterprise/administrator-guide.md",
+      "contains": [
+        "## Configure identity safely",
+        "## Govern people and machine identities",
+        "## Control support access",
+        "## Prepare a change or incident"
+      ]
+    },
+    {
+      "id": "deployment-guide",
+      "audience": "deployment-operator",
+      "path": "docs/enterprise/deployment-guide.md",
+      "contains": [
+        "## Choose the deployment profile",
+        "## Production prerequisites",
+        "## Install and migrate",
+        "## Readiness, monitoring and acceptance"
+      ]
+    },
+    {
+      "id": "troubleshooting-guide",
+      "audience": "support-operator",
+      "path": "docs/enterprise/troubleshooting-guide.md",
+      "contains": [
+        "## Five-minute triage",
+        "## Symptom routing",
+        "## Safe interventions",
+        "## Escalation packet"
+      ]
+    }
+  ]
+}

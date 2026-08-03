@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { useControlPlane } from "../controlPlaneContext";
+import { isControlPlaneTenantOperational } from "@synara/enterprise-ui";
 import { toastManager } from "./ui/toast";
 
 export function ControlPlaneContextSwitcher() {
@@ -13,7 +14,7 @@ export function ControlPlaneContextSwitcher() {
     <div className="mx-2 mb-1.5 rounded-xl border border-border/80 bg-foreground/[0.025] p-2">
       <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
         <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
-          SaaS context
+          Cloud Panel context
         </span>
         <span className="text-[10px] text-muted-foreground/60">
           {controlPlane.profile?.profile}
@@ -42,7 +43,11 @@ export function ControlPlaneContextSwitcher() {
           value={controlPlane.activeTenant.id}
         >
           {controlPlane.session?.tenants.map((tenant) => (
-            <option key={tenant.id} disabled={tenant.status !== "active"} value={tenant.id}>
+            <option
+              key={tenant.id}
+              disabled={!isControlPlaneTenantOperational(tenant)}
+              value={tenant.id}
+            >
               {tenant.name}
             </option>
           ))}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/subscriptionpolicy"
 )
 
 const (
@@ -248,18 +249,40 @@ func loadPlatformAccess(ctx context.Context, db *gorm.DB, tenantID uuid.UUID) (p
 }
 
 func LoadPlatformEntitlement(ctx context.Context, db *gorm.DB, tenantID uuid.UUID) (bool, error) {
-	var tenant persistence.Tenant
-	err := persistence.WithLocking(db.WithContext(ctx), "SHARE", "").
-		Select("id", "plan_code", "deleted_at").
-		Where("id = ? AND deleted_at IS NULL", tenantID).
-		Take(&tenant).Error
+	type entitlementState struct {
+		TenantPlanCode       string  `gorm:"column:tenant_plan_code"`
+		SubscriptionPlanCode *string `gorm:"column:subscription_plan_code"`
+		SubscriptionStatus   *string `gorm:"column:subscription_status"`
+	}
+	var state entitlementState
+	err := db.WithContext(ctx).
+		Table("tenants AS tenant").
+		Select(`tenant.plan_code AS tenant_plan_code,
+			subscription.plan_code AS subscription_plan_code,
+			subscription.status AS subscription_status`).
+		Joins("LEFT JOIN tenant_subscriptions AS subscription ON subscription.tenant_id = tenant.id").
+		Where("tenant.id = ? AND tenant.deleted_at IS NULL", tenantID).
+		Take(&state).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, problem.Wrap(500, "credential_platform_entitlement_load_failed", "Platform Credential entitlement could not be loaded.", err)
 	}
-	if tenant.PlanCode != "enterprise" {
+	if state.SubscriptionPlanCode == nil || state.SubscriptionStatus == nil {
+		return false, problem.New(503, "tenant_subscription_unavailable", "Tenant Subscription is not configured.")
+	}
+	if state.TenantPlanCode != *state.SubscriptionPlanCode {
+		return false, problem.New(503, "tenant_plan_projection_drift", "Tenant Plan projection does not match its Subscription.")
+	}
+	if state.TenantPlanCode != "enterprise" {
+		return false, nil
+	}
+	decision, err := subscriptionpolicy.Evaluate(*state.SubscriptionStatus)
+	if err != nil {
+		return false, problem.Wrap(503, "tenant_subscription_policy_invalid", "Tenant Subscription status is not covered by the effective Entitlement policy.", err)
+	}
+	if !decision.EntitlementsActive {
 		return false, nil
 	}
 	var installation persistence.PlatformInstallation

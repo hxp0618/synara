@@ -1,6 +1,6 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
 
-import type { ControlPlaneProject } from "./controlPlaneClient";
+import type { ControlPlaneProject } from "@synara/control-plane-client";
 
 const CONTROL_PLANE_SESSION_QUERY_KEY = ["control-plane", "session"] as const;
 

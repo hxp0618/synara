@@ -115,6 +115,18 @@ The MinIO/S3 adapter supports path-style lookup, explicit region and bucket, sta
 the standard IAM credential provider, streaming puts, stat, streaming reads, deletion, and presigned
 PUT/GET URLs.
 
+Remote upload/download grants are capped at 15 minutes. Enterprise endpoints must be credential-free HTTPS origins. The
+enterprise profile uses workload identity by default; explicitly configured access keys are accepted only as temporary
+credentials with a session token. The Kubernetes base therefore carries no static Artifact key. Its production overlay must
+bind the `synara-control-plane` ServiceAccount to a dedicated identity limited to bucket location/list and object
+read/write/delete/multipart operations below `tenants/*`.
+
+The single-node Compose profile isolates MinIO root credentials in the one-shot bootstrap service. It creates a private
+bucket, dedicated application user, exact `tenants/*` policy and exact-origin CORS configuration before the Control Plane can
+start. `validate_artifact_storage_deployment.py` prevents source-level drift in these constraints. This validation and local
+MinIO negative probes do not prove a production cloud IAM attachment, bucket policy, KMS key, Region, retention rule,
+network boundary or access-log control; those remain candidate deployment evidence.
+
 `internal/artifacts/s3_store_integration_test.go` is the shared live-store compatibility suite. It runs
 against MinIO in normal acceptance and can run unchanged against a writable AWS S3 test bucket by
 supplying the `SYNARA_TEST_S3_*` environment variables.

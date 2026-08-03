@@ -276,6 +276,7 @@ func (s *Service) FailoverExecution(
 			WorkspaceMaterializationID: &resources.MaterializationID, RestoreCheckpointID: resources.RestoreCheckpointID,
 			WarmPoolModeSnapshot: session.WarmPoolMode, Generation: 0, RequestedBy: source.RequestedBy,
 			QueuedAt: now, PredecessorExecutionID: &source.ID,
+			Traceparent: source.Traceparent,
 		}
 		if sourceBundle != nil {
 			destination.Status = "recovering"

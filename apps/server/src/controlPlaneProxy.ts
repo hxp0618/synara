@@ -1,12 +1,13 @@
 // FILE: controlPlaneProxy.ts
-// Purpose: Proxy same-origin /v1 SaaS API requests to the optional Go control plane.
+// Purpose: Proxy same-origin /v1 Control Plane API requests to the optional Go control plane.
 // Layer: Server HTTP transport
 
 import { NodeHttpServerRequest } from "@effect/platform-node";
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
-import { ServerConfig } from "./config";
+import { ServerConfig, type ServerConfigShape } from "./config";
+import { isTrustedAppOrigin, normalizeCorsOrigin } from "./trustedOrigins";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -22,16 +23,65 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 const RESPONSE_HEADERS_TO_DROP = new Set([...HOP_BY_HOP_HEADERS, "content-encoding"]);
 
-function unavailableResponse(status: 502 | 503, code: string, message: string) {
+const CONTROL_PLANE_PROXY_CORS_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
+const CONTROL_PLANE_PROXY_CORS_HEADERS =
+  "Authorization, Content-Type, Idempotency-Key, Last-Event-ID";
+
+function unavailableResponse(
+  status: 403 | 502 | 503,
+  code: string,
+  message: string,
+  headers: Readonly<Record<string, string>> = {},
+) {
   return HttpServerResponse.jsonUnsafe(
     { error: { code, message, details: null } },
-    { status, headers: { "Cache-Control": "no-store" } },
+    { status, headers: { "Cache-Control": "no-store", ...headers } },
   );
+}
+
+export function buildControlPlaneProxyCorsHeaders(input: {
+  readonly rawOrigin: string | ReadonlyArray<string> | undefined;
+  readonly requestOrigin: string;
+  readonly config: ServerConfigShape;
+}): Record<string, string> | null {
+  if (input.rawOrigin === undefined) return {};
+  const origin = normalizeCorsOrigin(input.rawOrigin);
+  if (
+    !origin ||
+    !isTrustedAppOrigin({ origin, requestOrigin: input.requestOrigin, config: input.config })
+  ) {
+    return null;
+  }
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": CONTROL_PLANE_PROXY_CORS_METHODS,
+    "Access-Control-Allow-Headers": CONTROL_PLANE_PROXY_CORS_HEADERS,
+    "Access-Control-Expose-Headers": "Content-Disposition, Location",
+    Vary: "Origin",
+  };
+}
+
+function mergeVaryHeader(
+  current: string | ReadonlyArray<string> | undefined,
+  addition: string,
+): string {
+  const values = [
+    ...(Array.isArray(current) ? current : current ? [current] : []),
+    addition,
+  ].flatMap((value) => value.split(","));
+  const unique = new Map<string, string>();
+  for (const value of values) {
+    const normalized = value.trim();
+    if (normalized) unique.set(normalized.toLowerCase(), normalized);
+  }
+  return [...unique.values()].join(", ");
 }
 
 export function resolveControlPlaneTarget(baseUrl: URL, requestUrl: URL): URL {
   const target = new URL(baseUrl);
-  target.pathname = requestUrl.pathname;
+  const basePath = target.pathname.replace(/\/+$/u, "");
+  target.pathname = `${basePath}${requestUrl.pathname.startsWith("/") ? requestUrl.pathname : `/${requestUrl.pathname}`}`;
   target.search = requestUrl.search;
   target.hash = "";
   return target;
@@ -109,7 +159,10 @@ export function buildControlPlaneProxyRequestHeaders(input: {
   return headers;
 }
 
-export function buildControlPlaneProxyResponseHeaders(response: Response) {
+export function buildControlPlaneProxyResponseHeaders(
+  response: Response,
+  corsHeaders: Readonly<Record<string, string>> = {},
+) {
   const headers: Record<string, string | ReadonlyArray<string>> = {};
   response.headers.forEach((value, name) => {
     if (!RESPONSE_HEADERS_TO_DROP.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie") {
@@ -125,6 +178,14 @@ export function buildControlPlaneProxyResponseHeaders(response: Response) {
     const setCookie = response.headers.get("set-cookie");
     if (setCookie) headers["set-cookie"] = setCookie;
   }
+  for (const [name, value] of Object.entries(corsHeaders)) {
+    const normalizedName = name.toLowerCase();
+    if (normalizedName === "vary") {
+      headers.vary = mergeVaryHeader(headers.vary, value);
+    } else {
+      headers[normalizedName] = value;
+    }
+  }
   return headers;
 }
 
@@ -139,11 +200,27 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
       "The control-plane request URL is invalid.",
     );
   }
+  const corsHeaders = buildControlPlaneProxyCorsHeaders({
+    rawOrigin: request.headers.origin,
+    requestOrigin: requestUrl.origin,
+    config,
+  });
+  if (corsHeaders === null) {
+    return unavailableResponse(
+      403,
+      "untrusted_proxy_origin",
+      "A trusted application origin is required for Control Plane proxy requests.",
+    );
+  }
+  if (request.method === "OPTIONS") {
+    return HttpServerResponse.empty({ status: 204, headers: corsHeaders });
+  }
   if (!config.controlPlaneUrl) {
     return unavailableResponse(
       503,
       "control_plane_unavailable",
-      "The SaaS control plane is not configured for this Synara instance.",
+      "The Control Plane is not configured for this Synara instance.",
+      corsHeaders,
     );
   }
 
@@ -184,7 +261,8 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
     return unavailableResponse(
       502,
       "control_plane_proxy_failed",
-      "The SaaS control plane could not be reached.",
+      "The Control Plane could not be reached.",
+      corsHeaders,
     );
   }
   const upstream = response.value;
@@ -194,7 +272,7 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
       {
         status: upstream.status,
         statusText: upstream.statusText,
-        headers: buildControlPlaneProxyResponseHeaders(upstream),
+        headers: buildControlPlaneProxyResponseHeaders(upstream, corsHeaders),
       },
     );
   }
@@ -206,7 +284,7 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
   return HttpServerResponse.uint8Array(bytes, {
     status: upstream.status,
     statusText: upstream.statusText,
-    headers: buildControlPlaneProxyResponseHeaders(upstream),
+    headers: buildControlPlaneProxyResponseHeaders(upstream, corsHeaders),
   });
 });
 

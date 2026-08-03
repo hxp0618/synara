@@ -381,7 +381,13 @@ export function EnvironmentPanel({
         actually shows, so toggling any section via the header gear menu never leaves a doubled or
         dangling rule. Visibility is gated on the per-section AppSettings flags.
       */}
-      {settings.showEnvironmentUsage ? <EnvironmentUsageSection provider={activeProvider} /> : null}
+      {settings.showEnvironmentUsage ? (
+        <EnvironmentUsageSection
+          provider={activeProvider}
+          sessionId={activeThreadId}
+          enabled={open}
+        />
+      ) : null}
 
       {settings.showEnvironmentRepository && githubRepository && onOpenGithubRepository ? (
         <EnvironmentLabeledSection label="Repository">

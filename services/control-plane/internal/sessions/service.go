@@ -23,6 +23,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenantstate"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -881,11 +882,11 @@ func (s *Service) CreateTurnWithIdempotency(
 		}
 		var tenant persistence.Tenant
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Select("id", "status").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
+			Select("id", "status", "trial_expires_at").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
 			return Turn{}, problem.Wrap(404, "tenant_not_found", "Tenant not found.", err)
 		}
-		if tenant.Status != "active" {
-			return Turn{}, problem.New(409, "tenant_suspended", "The tenant is suspended and cannot create new executions.")
+		if !tenantstate.IsOperational(tenant.Status, tenant.TrialExpiresAt, queuedAt) {
+			return Turn{}, problem.New(409, "tenant_suspended", "The tenant is not operational and cannot create new executions.")
 		}
 		locked, err := lockActiveSession(ctx, tx, tenantID, sessionID)
 		if err != nil {
@@ -1233,6 +1234,9 @@ func (s *Service) SanitizeSubscribedEvent(
 	principal identity.Principal,
 	event Event,
 ) (Event, error) {
+	if err := identity.RequireActiveTenant(principal, event.TenantID); err != nil {
+		return Event{}, err
+	}
 	if !isInteractionLifecycleEvent(event.EventType) {
 		return event, nil
 	}

@@ -18,6 +18,58 @@ server-error logs contain both identifiers.
 `X-Request-ID` remains the idempotency/audit correlation identifier. `X-Trace-ID` is
 diagnostic only and must not be used as a business key.
 
+When `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured on a process, that Control Plane
+or agentd process exports OTLP/HTTP spans with parent-based ratio sampling (`SYNARA_OTEL_TRACE_SAMPLE_RATIO`, default
+`0.1`). Remote/managed agentd processes receive a credentialless collector/relay endpoint and sampling environment;
+the Control Plane configuration is not forwarded through a Worker claim. HTTP ingress
+extracts W3C context and creates a server span. Migration `000104` freezes that diagnostic parent on each new Execution;
+Worker claim returns it so agentd can continue the trace with `worker.execution` and `provider.run`, while Provider Host
+receives `SYNARA_TRACEPARENT`. Cross-Target failover inherits the source Execution parent. With no exporter endpoint,
+export is disabled but propagation/correlation remains available.
+
+Enterprise Control Plane processes use the fail-closed mTLS exporter policy. When export is enabled, the effective trace
+endpoint must be an absolute HTTPS URL without userinfo, query or fragment; the protocol is `http/protobuf`; and both
+client-certificate and client-key paths must resolve to absolute regular files. The deployment
+cannot use `OTEL_EXPORTER_OTLP[_TRACES]_INSECURE=true` to override that transport boundary. It
+also declares a bounded collector Region and trace retention of 1–90 days through `SYNARA_OTEL_COLLECTOR_REGION` and
+`SYNARA_OTEL_TRACE_RETENTION_DAYS`. Those values are emitted only as bounded
+`synara.telemetry.region|retention_days` resource attributes. They make configuration drift observable but do not prove the
+collector stored data in that Region or deleted it on time; the candidate residency/security annex must verify that external
+control. Development and single-node processes may use credential-free HTTP collectors, but any OTLP authentication Header
+requires HTTPS and incomplete mTLS configuration is always rejected.
+
+Every non-Local agentd uses the separate enterprise Worker policy. It forbids Header credentials, client certificates and
+client keys in the Worker process. The endpoint is either credential-free HTTPS, with workload identity enforced outside
+the Worker filesystem, or explicit `http://127.0.0.1:<port>` / `http://[::1]:<port>` to a same-host relay. DNS aliases,
+remote plaintext endpoints and loopback URLs without an explicit port fail closed. The relay/service mesh owns external
+mTLS identity and must not expose it to agentd or the Provider child process.
+
+The Kubernetes production base keeps the endpoint empty by default. Endpoint, protocol, sample ratio, collector Region and
+retention are non-secret ConfigMap inputs; the mTLS client certificate and key are mounted from the Control Plane Secret as
+read-only files and referenced only by absolute in-container paths. The base does not expose OTLP header authentication or
+an insecure transport override. `scripts/stage6-security/validate_observability_deployment.py` protects this source wiring,
+but its receipt is not collector connectivity, IAM, storage-location or retention-deletion evidence.
+
+Generated native and warm-pool Kubernetes Workers obtain only explicit non-secret exporter keys from the fixed optional
+`synara-agentd-observability-config-<target-uuid>` ConfigMap in their Target Namespace. Full Target UUID suffixes prevent
+shared-namespace Targets from sharing exporter policy. The Control Plane does not read or persist the resource. Pod
+workload-identity validation rejects resource-name substitution, non-optional references, Header credentials, client
+identity and insecure overrides. The sandbox-operator standard template uses the same contract;
+Cocoon guest remains responsible for equivalent target-local configuration.
+
+Managed Docker and SSH agentd use a deployment-authority root configured only on the Control Plane, never an Execution
+Target field. Docker binds only the UUID-named child directory read-only; SSH receives only the derived remote
+`<root>/<target-uuid>/observability.env` path. agentd loads that file before exporter construction, accepts six explicit
+OTLP keys, confines the optional server-CA path beside the file, and rejects symlinks, writable authority,
+duplicate/unknown keys and conflicting ambient values. The file may not carry Header credentials, client identity or
+insecure overrides. An empty root keeps export disabled.
+
+Trace context is never an authorization, Tenant-scope, fencing, scheduling or idempotency authority. Spans may contain
+bounded resource IDs needed for diagnosis, but must never attach prompt/input text, Credential/KMS/Login/Lease tokens,
+Provider payloads or Presigned URLs. Collector access, retention and storage Region are part of the deployment security and
+residency annex. PostgreSQL rejects invalid or mutated persisted trace context; SQLite applies the same insertion and
+immutability guards.
+
 ## Cardinality contract
 
 Metrics may use only bounded labels:
@@ -51,6 +103,12 @@ Tenant, Organization, User, Session, Turn, Execution, Worker, Pod, Artifact,
 Credential, Request, and Trace identifiers are forbidden as metric labels. Domain
 gauges are read from authoritative metadata at scrape time instead of maintaining
 parallel counters that can drift.
+
+The shared label serializer enforces this at runtime for both base and appended
+histogram/quantile labels. It rejects identifier-shaped keys, UUID/commit/digest,
+URL/email/known credential-shaped values, and values longer than 128 bytes before
+rendering. Rejection uses a constant panic message so a failed scrape cannot copy
+the rejected identifier or secret into the recovery log.
 
 ## Production metrics
 
@@ -127,6 +185,12 @@ The checked-in Prometheus rules alert on an unavailable Control Plane, database 
 expired Worker Leases, Worker offline surges, Execution recovery surges, Outbox delay/dead letters,
 Artifact failures, and SSE catch-up delay. Worker and Execution surge rules use authoritative status
 gauges and require a sustained absolute threshold so a transient single-instance replacement does not page.
+
+Stage 6 adds 30-day recording rules and budget alerts for Availability, API Latency, Execution Start Delay, and Event
+Delay. Availability is intentionally sourced from an external `probe_success{job="synara-public-readiness"}` series;
+the in-process endpoint cannot measure time when it is unreachable. Definitions and claim boundaries are in
+[`enterprise-service-level-objectives-v1.md`](enterprise-service-level-objectives-v1.md). Missing or insufficient samples
+are not passing evidence.
 
 Stage 4 Generation metrics now use immutable `execution_generation_facts`; cold-start, queue, Pod provisioning, and
 outcome series are bounded to a trailing 30-day window. `execution_generation_pod_failure_facts` retains one immutable

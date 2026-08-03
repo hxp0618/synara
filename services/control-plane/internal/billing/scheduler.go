@@ -245,7 +245,7 @@ func (s *Service) sweepSharedUsageChargesScheduled(
 	if s.platformBillingOperatorTenantID == uuid.Nil {
 		return SharedUsageAllocationSweepResult{}, problem.New(
 			503,
-			"billing_shared_scheduler_operator_unavailable",
+			"cost_accounting_shared_scheduler_operator_unavailable",
 			"The shared billing scheduler requires an explicitly configured platform billing operator Tenant.",
 		)
 	}
@@ -277,7 +277,7 @@ func (s *Service) sweepSharedUsageChargesScheduled(
 		return s.recordAuditTx(ctx, tx, audit.Entry{
 			TenantID:     s.platformBillingOperatorTenantID,
 			ActorType:    "system",
-			Action:       "billing.shared_cost_allocation_sweep_scheduled",
+			Action:       "cost_accounting.shared_cost_allocation_sweep_scheduled",
 			ResourceType: "execution_target", ResourceID: &normalized.ExecutionTargetID,
 			RequestID: requestID,
 			Metadata:  metadata,
@@ -294,7 +294,7 @@ func (s *Service) sweepSharedUsageChargesScheduled(
 	}
 	partialErr := problem.New(
 		409,
-		"billing_shared_allocation_sweep_partial_failure",
+		"cost_accounting_shared_allocation_sweep_partial_failure",
 		"One or more shared Worker allocations failed; the configured period must be retried.",
 	)
 	partialErr.Details = map[string]any{
@@ -318,7 +318,7 @@ func (s *Service) scheduledSharedAllocations(now time.Time) ([]sharedAllocationS
 		if err != nil {
 			return nil, problem.Wrap(
 				500,
-				"billing_shared_scheduler_configuration_invalid",
+				"cost_accounting_shared_scheduler_configuration_invalid",
 				"A configured shared allocation schedule is invalid.",
 				err,
 			)
@@ -352,7 +352,7 @@ func expandMonthlySharedAllocationSchedule(
 	if configured.Calendar != SharedAllocationCalendarMonthlyUTC {
 		return nil, problem.New(
 			500,
-			"billing_shared_scheduler_calendar_unsupported",
+			"cost_accounting_shared_scheduler_calendar_unsupported",
 			"The configured shared allocation calendar is unsupported.",
 		)
 	}
@@ -368,7 +368,7 @@ func expandMonthlySharedAllocationSchedule(
 		if generated >= maxGeneratedSharedAllocationPeriods {
 			return nil, problem.New(
 				500,
-				"billing_shared_scheduler_calendar_range_exceeded",
+				"cost_accounting_shared_scheduler_calendar_range_exceeded",
 				"A monthly shared allocation schedule expanded beyond 1200 periods.",
 			)
 		}
@@ -471,7 +471,7 @@ func (s *Service) claimSharedAllocationSchedulerJob(
 			UpdatedAt:               startedAt,
 		}
 		if err := tx.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&state).Error; err != nil {
-			return problem.Wrap(500, "billing_shared_scheduler_state_create_failed", "Shared allocation schedule state could not be created.", err)
+			return problem.Wrap(500, "cost_accounting_shared_scheduler_state_create_failed", "Shared allocation schedule state could not be created.", err)
 		}
 		state = persistence.BillingSharedAllocationSchedulePeriod{}
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -482,10 +482,10 @@ func (s *Service) claimSharedAllocationSchedulerJob(
 				job.BillingPeriodEndAt,
 			).
 			Take(&state).Error; err != nil {
-			return problem.Wrap(500, "billing_shared_scheduler_state_load_failed", "Shared allocation schedule state could not be locked.", err)
+			return problem.Wrap(500, "cost_accounting_shared_scheduler_state_load_failed", "Shared allocation schedule state could not be locked.", err)
 		}
 		if !sharedAllocationScheduleStateMatchesJob(state, job) {
-			return problem.New(409, "billing_shared_scheduler_state_conflict", "Durable shared allocation schedule state does not match its configured period.")
+			return problem.New(409, "cost_accounting_shared_scheduler_state_conflict", "Durable shared allocation schedule state does not match its configured period.")
 		}
 		if startedAt.Before(state.NextAttemptAt) {
 			return nil
@@ -508,10 +508,10 @@ func (s *Service) claimSharedAllocationSchedulerJob(
 				"updated_at":      startedAt,
 			})
 		if result.Error != nil {
-			return problem.Wrap(500, "billing_shared_scheduler_state_claim_failed", "Shared allocation schedule period could not be claimed.", result.Error)
+			return problem.Wrap(500, "cost_accounting_shared_scheduler_state_claim_failed", "Shared allocation schedule period could not be claimed.", result.Error)
 		}
 		if result.RowsAffected != 1 {
-			return problem.New(409, "billing_shared_scheduler_state_claim_conflict", "Shared allocation schedule period changed before claim.")
+			return problem.New(409, "cost_accounting_shared_scheduler_state_claim_conflict", "Shared allocation schedule period changed before claim.")
 		}
 		claimed = true
 		return nil
@@ -554,10 +554,10 @@ func (s *Service) finishSharedAllocationSchedulerJob(
 				job.BillingPeriodEndAt,
 			).
 			Take(&state).Error; err != nil {
-			return problem.Wrap(500, "billing_shared_scheduler_state_finish_load_failed", "Shared allocation schedule state could not be loaded for completion.", err)
+			return problem.Wrap(500, "cost_accounting_shared_scheduler_state_finish_load_failed", "Shared allocation schedule state could not be loaded for completion.", err)
 		}
 		if state.LastStartedAt == nil || !state.LastStartedAt.Equal(startedAt) || state.LastOutcome != "running" {
-			return problem.New(409, "billing_shared_scheduler_state_finish_conflict", "Shared allocation schedule claim changed before completion.")
+			return problem.New(409, "cost_accounting_shared_scheduler_state_finish_conflict", "Shared allocation schedule claim changed before completion.")
 		}
 		result := tx.WithContext(ctx).Model(&persistence.BillingSharedAllocationSchedulePeriod{}).
 			Where(
@@ -570,10 +570,10 @@ func (s *Service) finishSharedAllocationSchedulerJob(
 			).
 			Updates(updates)
 		if result.Error != nil {
-			return problem.Wrap(500, "billing_shared_scheduler_state_finish_failed", "Shared allocation schedule outcome could not be persisted.", result.Error)
+			return problem.Wrap(500, "cost_accounting_shared_scheduler_state_finish_failed", "Shared allocation schedule outcome could not be persisted.", result.Error)
 		}
 		if result.RowsAffected != 1 {
-			return problem.New(409, "billing_shared_scheduler_state_finish_conflict", "Shared allocation schedule claim changed before completion.")
+			return problem.New(409, "cost_accounting_shared_scheduler_state_finish_conflict", "Shared allocation schedule claim changed before completion.")
 		}
 		return nil
 	})

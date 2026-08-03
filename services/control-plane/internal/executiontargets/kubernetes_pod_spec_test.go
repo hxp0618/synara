@@ -2,10 +2,26 @@ package executiontargets
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 )
+
+func TestKubernetesObservabilityAuthorityIsTargetScoped(t *testing.T) {
+	first := uuid.New()
+	second := uuid.New()
+	firstConfig := kubernetesObservabilityConfigMapName(first)
+	secondConfig := kubernetesObservabilityConfigMapName(second)
+	if firstConfig == secondConfig {
+		t.Fatal("distinct Execution Targets shared an observability authority name")
+	}
+	if !strings.HasSuffix(firstConfig, first.String()) {
+		t.Fatalf("observability authority omitted full Target identity: %q", firstConfig)
+	}
+}
 
 func TestApplyKubernetesWorkerPoolSchedulingTemplateForcesNonPreemption(t *testing.T) {
 	podSpec := map[string]any{

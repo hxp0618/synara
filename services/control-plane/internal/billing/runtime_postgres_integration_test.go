@@ -20,15 +20,15 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 )
 
-const billingRuntimeAcceptanceEvidenceDetailEnv = "SYNARA_BILLING_RUNTIME_ACCEPTANCE_EVIDENCE_DETAIL_FILE"
+const billingRuntimeAcceptanceEvidenceDetailEnv = "SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_EVIDENCE_DETAIL_FILE"
 
 func TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay(t *testing.T) {
 	requiredEnvironment := []string{
 		"SYNARA_TEST_DATABASE_URL",
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_ENDPOINT",
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_BUCKET",
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY",
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_ENDPOINT",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_BUCKET",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION",
 		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
 	}
@@ -74,8 +74,8 @@ func TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay(t *testi
 		Provider:            "aws",
 		ExternalImportID:    externalImportID,
 		Format:              ExportObjectFormatAWSCURCSV,
-		ObjectKey:           strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY")),
-		ObjectVersion:       strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION")),
+		ObjectKey:           strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY")),
+		ObjectVersion:       strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION")),
 		ScheduleInterval:    time.Hour,
 		Reconcile:           true,
 		EstimateAfterImport: true,
@@ -85,9 +85,9 @@ func TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay(t *testi
 		MaxObjectBytes: 1 << 20,
 		Source: SourceConfig{
 			Kind:                  SourceKindS3,
-			S3Bucket:              strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_BUCKET")),
+			S3Bucket:              strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_BUCKET")),
 			S3Region:              billingRuntimeAcceptanceRegion(),
-			S3Endpoint:            strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_ENDPOINT")),
+			S3Endpoint:            strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_ENDPOINT")),
 			S3UsePathStyle:        true,
 			S3AllowCustomEndpoint: true,
 			S3AllowHTTP:           true,
@@ -339,7 +339,7 @@ func loadBillingRuntimeAcceptanceState(
 	var auditEntries []persistence.AuditLog
 	if err := database.
 		Where("tenant_id = ? AND resource_id = ? AND action IN ?", tenantID, importModel.ID, []string{
-			"billing.invoice_import_scheduled", "billing.invoice_reconciled_scheduled",
+			"cost_accounting.invoice_import_scheduled", "cost_accounting.invoice_reconciled_scheduled",
 		}).Order("occurred_at, event_id").Find(&auditEntries).Error; err != nil {
 		t.Fatal(err)
 	}

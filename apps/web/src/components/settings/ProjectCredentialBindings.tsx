@@ -17,7 +17,7 @@ import {
   type ControlPlaneCredentialBindingKind,
   type ControlPlaneCredentialPurpose,
   type ControlPlaneProject,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { listUsableControlPlaneCredentials } from "~/lib/controlPlaneCredentials";
 
 const PROJECT_BINDING_KIND_OPTIONS: ReadonlyArray<{

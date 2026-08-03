@@ -28,6 +28,7 @@ import {
   type ControlPlaneAgentTurn,
   type ControlPlaneArtifact,
   type ControlPlaneControlCommand,
+  type ControlPlaneCreateTenantInput,
   type ControlPlaneForkResult,
   type ControlPlaneIdempotencyOptions,
   type ControlPlaneInteractionResolution,
@@ -39,7 +40,7 @@ import {
   type ControlPlaneRollbackResult,
   type ControlPlaneSessionState,
   type ControlPlaneTenantAccess,
-} from "./lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import {
   projectControlPlaneProjects,
   projectControlPlaneThreads,
@@ -56,7 +57,7 @@ import {
 import {
   resolveControlPlaneCapabilities,
   type ControlPlaneCapabilities,
-} from "./lib/controlPlanePermissions";
+} from "@synara/enterprise-ui";
 import {
   cancelControlPlaneTenantSwitchQueries,
   disposeControlPlaneTenantScope,
@@ -135,6 +136,7 @@ export type ControlPlaneContextValue = {
   devLogin: (input: { email: string; displayName: string }) => Promise<void>;
   logout: () => Promise<void>;
   setActiveTenant: (tenantId: string) => Promise<void>;
+  createTenant: (input: ControlPlaneCreateTenantInput) => Promise<ControlPlaneTenantAccess>;
   setActiveOrganization: (organizationId: string) => void;
   createProject: (input: CreateControlPlaneProjectInput) => Promise<ControlPlaneProject>;
   createSession: (
@@ -417,9 +419,20 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       resourcesRef.current = { projects: [], sessions: [] };
       projectionRuntime.setScope("", []);
       setProjectionError(null);
-      if (hadAuthoritativeProjectionRef.current || availability === "available") {
-        useStore.getState().setProjectionAuthority("local");
-        useStore.getState().syncAuthoritativeProjection([], []);
+      // A Provider can move from an authoritative Cloud Panel projection back to
+      // the local runtime (for example after a tenant switch, logout, or a
+      // Control Plane becoming unavailable). Clear a stale global projection so
+      // it cannot block the local shell snapshot, but do not mark a brand-new
+      // local store as hydrated before that snapshot arrives.
+      const currentStore = useStore.getState();
+      const hadControlPlaneProjection = currentStore.projectionAuthority === "control-plane";
+      currentStore.setProjectionAuthority("local");
+      if (
+        hadControlPlaneProjection ||
+        hadAuthoritativeProjectionRef.current ||
+        availability === "available"
+      ) {
+        currentStore.syncAuthoritativeProjection([], []);
       }
       hadAuthoritativeProjectionRef.current = false;
       return;
@@ -526,6 +539,14 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       });
     },
     [projectionRuntime, queryClient],
+  );
+  const createTenant = useCallback(
+    async (input: ControlPlaneCreateTenantInput) => {
+      const tenant = await controlPlaneClient.createTenant(input);
+      await setActiveTenant(tenant.id);
+      return tenant;
+    },
+    [setActiveTenant],
   );
   const setActiveOrganization = useCallback(
     (organizationId: string) => {
@@ -1143,6 +1164,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       devLogin,
       logout,
       setActiveTenant,
+      createTenant,
       setActiveOrganization,
       createProject,
       createSession,
@@ -1190,6 +1212,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       sessions,
       setActiveOrganization,
       setActiveTenant,
+      createTenant,
       streamStatusBySessionId,
       watchSession,
     ],

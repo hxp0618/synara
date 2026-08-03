@@ -183,7 +183,7 @@ func TestPostgresConcurrentSharedUsageAllocationSerializesAndReplays(t *testing.
 	var sweepAuditCount int64
 	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
 		Where("tenant_id = ? AND action = ? AND resource_id = ?", domainA.TenantID,
-			"billing.shared_cost_allocation_sweep_requested", target.ID).
+			"cost_accounting.shared_cost_allocation_sweep_requested", target.ID).
 		Count(&sweepAuditCount).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestPostgresConcurrentSharedUsageAllocationSerializesAndReplays(t *testing.
 	var actualAuditCount int64
 	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
 		Where("tenant_id = ? AND action = ? AND resource_id = ?", domainA.TenantID,
-			"billing.shared_actual_invoice_allocated", actualResult.Run.ID).
+			"cost_accounting.shared_actual_invoice_allocated", actualResult.Run.ID).
 		Count(&actualAuditCount).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestPostgresConcurrentSharedUsageAllocationSerializesAndReplays(t *testing.
 	overlap.BillingPeriodStartAt = base.Add(30 * time.Minute)
 	overlap.BillingPeriodEndAt = base.Add(90 * time.Minute)
 	_, err = service.AllocateSharedUsageCharges(ctx, overlap)
-	assertProblemCode(t, err, "billing_shared_allocation_period_overlap")
+	assertProblemCode(t, err, "cost_accounting_shared_allocation_period_overlap")
 
 	directOverlap := *first.result.Run
 	directOverlap.ID = uuid.New()

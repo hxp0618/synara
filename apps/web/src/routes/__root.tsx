@@ -1771,6 +1771,13 @@ function EventRouter() {
         },
       });
     });
+    // The cached replay and the initial stream snapshot can both arrive
+    // synchronously while the subscription is being installed. Defer the live
+    // marker by one microtask so those bootstrap values stay non-notifying while
+    // the first real update after mount is still observed.
+    queueMicrotask(() => {
+      subscribed = true;
+    });
     const unsubProviderStatusesUpdated = onServerProviderStatusesUpdated((payload) => {
       const nextProviderDiscoveryFingerprint = providerModelDiscoveryInvalidationFingerprint(
         payload.providers,
@@ -1822,7 +1829,6 @@ function EventRouter() {
         queryKey: serverSettingsQueryOptions().queryKey,
       });
     });
-    subscribed = true;
     void ensureScopedSubscriptions();
     // The shell stream normally delivers the sidebar snapshot. If it fails before
     // the first event, use the same lightweight query instead of the full history.

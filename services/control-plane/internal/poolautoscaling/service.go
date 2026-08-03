@@ -114,7 +114,7 @@ func (s *Service) Get(
 	principal identity.Principal,
 	tenantID, targetID, poolID uuid.UUID,
 ) (View, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return View{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -140,7 +140,7 @@ func (s *Service) Put(
 	input PutInput,
 	requestID, ipAddress string,
 ) (View, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return View{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -589,13 +589,6 @@ func toState(model persistence.WorkerPoolAutoscalingState) State {
 		LastQueueActiveAt:   model.LastQueueActiveAt, LastScaledAt: model.LastScaledAt,
 		DecisionVersion: model.DecisionVersion, ObservedAt: model.ObservedAt,
 	}
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }
 
 func queueAge(oldest *time.Time, now time.Time) time.Duration {

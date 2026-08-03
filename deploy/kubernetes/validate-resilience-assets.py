@@ -767,19 +767,33 @@ def main() -> None:
         "name: SYNARA_CREDENTIAL_KMS_PROVIDER\n              value: local",
         "name: SYNARA_CREDENTIAL_MASTER_KEY",
         "key: credential-master-key",
+        "serviceAccountName: synara-control-plane",
         "name: SYNARA_ARTIFACT_ENDPOINT",
-        "name: SYNARA_ARTIFACT_ACCESS_KEY_ID",
-        "name: SYNARA_ARTIFACT_SECRET_ACCESS_KEY",
-        "name: SYNARA_BILLING_BLOB_SOURCE",
+        "name: SYNARA_COST_ACCOUNTING_BLOB_SOURCE",
+        "name: OTEL_EXPORTER_OTLP_ENDPOINT",
+        "key: otel-exporter-otlp-endpoint",
+        "name: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+        "value: /var/run/secrets/synara/otel/client.crt",
+        "name: SYNARA_OTEL_COLLECTOR_REGION",
+        "key: otel-collector-region",
+        "name: SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT",
+        "key: docker-worker-observability-root",
+        "name: SYNARA_SSH_WORKER_OBSERVABILITY_ROOT",
+        "key: ssh-worker-observability-root",
+        "name: otel-client-identity",
+        "mountPath: /var/run/secrets/synara/otel",
+        "readOnly: true",
         'name: AWS_EC2_METADATA_DISABLED\n              value: "true"',
     ):
         if fragment not in deployment_text:
             fail(f"deployment.yaml omitted self-hosted default: {fragment}")
     for forbidden in (
+        "SYNARA_ARTIFACT_ACCESS_KEY_ID",
+        "SYNARA_ARTIFACT_SECRET_ACCESS_KEY",
         "SYNARA_CREDENTIAL_KMS_AWS_REGION",
-        "SYNARA_BILLING_GCS_BUCKET",
-        "SYNARA_BILLING_AZURE_CONTAINER_URL",
-        "SYNARA_BILLING_IMPORT_MAPPINGS_JSON",
+        "SYNARA_COST_ACCOUNTING_GCS_BUCKET",
+        "SYNARA_COST_ACCOUNTING_AZURE_CONTAINER_URL",
+        "SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON",
     ):
         if forbidden in deployment_text:
             fail(f"deployment.yaml exposes deferred cloud integration by default: {forbidden}")
@@ -791,20 +805,34 @@ def main() -> None:
         "artifact-endpoint:",
         "artifact-public-endpoint:",
         'artifact-use-path-style: "true"',
-        "billing-blob-source: disabled",
+        "cost-accounting-blob-source: disabled",
+        'otel-exporter-otlp-endpoint: ""',
+        "otel-exporter-otlp-protocol: http/protobuf",
+        'otel-collector-region: ""',
+        'otel-trace-retention-days: "30"',
+        'docker-worker-observability-root: ""',
+        'ssh-worker-observability-root: ""',
     ):
         if fragment not in config_example_text:
             fail(f"config.example.yaml omitted self-hosted setting: {fragment}")
-    for forbidden in ("aws-region:", "billing-gcs-bucket:", "billing-azure-container-url:"):
+    for forbidden in (
+        "aws-region:",
+        "cost-accounting-gcs-bucket:",
+        "cost-accounting-azure-container-url:",
+    ):
         if forbidden in config_example_text:
             fail(f"config.example.yaml exposes deferred cloud setting: {forbidden}")
     for fragment in (
         "credential-master-key:",
-        "artifact-access-key-id:",
-        "artifact-secret-access-key:",
+        "Artifact S3 credentials are intentionally absent",
+        "otel-client-certificate:",
+        "otel-client-key:",
     ):
         if fragment not in secret_example_text:
             fail(f"secret.example.yaml omitted self-hosted secret: {fragment}")
+    for forbidden in ("artifact-access-key-id:", "artifact-secret-access-key:"):
+        if forbidden in secret_example_text:
+            fail(f"secret.example.yaml exposes static Artifact credential: {forbidden}")
 
     acceptance_text = (SCRIPT_DIR / "acceptance.sh").read_text(encoding="utf-8")
     if acceptance_text.count("list_ready_control_plane_pods") < 3:

@@ -17,39 +17,49 @@ import {
   EnvironmentRowBody,
   EnvironmentRowChevron,
 } from "./EnvironmentRow";
+import { EnvironmentSessionUsageSection } from "./EnvironmentSessionUsageSection";
 
-export function EnvironmentUsageSection({ provider }: { provider: ProviderKind }) {
+export function EnvironmentUsageSection({
+  provider,
+  sessionId,
+  enabled,
+}: {
+  provider: ProviderKind;
+  sessionId: string | null;
+  enabled: boolean;
+}) {
   const model = useProviderUsageMenuModel(provider);
 
-  if (!model) {
-    return null;
-  }
-
   return (
-    <EnvironmentLabeledSection label="Usage">
-      <ProviderUsageMenuPopup provider={provider} model={model} align="start">
-        <MenuTrigger
-          render={
-            <button
-              type="button"
-              className={ENVIRONMENT_ROW_CLASS_NAME}
-              aria-label={model.menuTitle}
-            />
-          }
-        >
-          <EnvironmentRowBody
-            icon={
-              <ProviderIcon
-                provider={provider}
-                tone="header"
-                className={ENVIRONMENT_ROW_ICON_CLASS_NAME}
+    <>
+      {model ? (
+        <EnvironmentLabeledSection label="Provider usage">
+          <ProviderUsageMenuPopup provider={provider} model={model} align="start">
+            <MenuTrigger
+              render={
+                <button
+                  type="button"
+                  className={ENVIRONMENT_ROW_CLASS_NAME}
+                  aria-label={model.menuTitle}
+                />
+              }
+            >
+              <EnvironmentRowBody
+                icon={
+                  <ProviderIcon
+                    provider={provider}
+                    tone="header"
+                    className={ENVIRONMENT_ROW_ICON_CLASS_NAME}
+                  />
+                }
+                label={model.primaryRow.remainingLabel}
+                trailing={<EnvironmentRowChevron />}
               />
-            }
-            label={model.primaryRow.remainingLabel}
-            trailing={<EnvironmentRowChevron />}
-          />
-        </MenuTrigger>
-      </ProviderUsageMenuPopup>
-    </EnvironmentLabeledSection>
+            </MenuTrigger>
+          </ProviderUsageMenuPopup>
+        </EnvironmentLabeledSection>
+      ) : null}
+      <EnvironmentSessionUsageSection enabled={enabled} sessionId={sessionId} />
+    </>
   );
 }

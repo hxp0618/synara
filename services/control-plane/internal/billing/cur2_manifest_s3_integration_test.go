@@ -17,8 +17,8 @@ import (
 
 func TestBillingCUR2ManifestVersionedS3Acceptance(t *testing.T) {
 	requiredEnvironment := []string{
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_ENDPOINT",
-		"SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_BUCKET",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_ENDPOINT",
+		"SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_BUCKET",
 		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
 	}
@@ -34,8 +34,8 @@ func TestBillingCUR2ManifestVersionedS3Acceptance(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	endpoint := strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_ENDPOINT"))
-	bucket := strings.TrimSpace(os.Getenv("SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_BUCKET"))
+	endpoint := strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_ENDPOINT"))
+	bucket := strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_BUCKET"))
 	awsRuntimeConfig, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(billingRuntimeAcceptanceRegion()))
 	if err != nil {
 		t.Fatal(err)

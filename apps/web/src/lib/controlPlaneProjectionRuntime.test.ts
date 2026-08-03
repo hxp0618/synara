@@ -5,7 +5,7 @@ import {
   type ControlPlaneAgentSession,
   type ControlPlaneSessionEvent,
   type ControlPlaneSessionEventPage,
-} from "./controlPlaneClient";
+} from "@synara/control-plane-client";
 import { ControlPlaneProjectionRuntime } from "./controlPlaneProjectionRuntime";
 import { createTestAgentSession } from "./controlPlaneTestFixtures";
 

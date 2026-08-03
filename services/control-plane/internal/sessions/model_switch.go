@@ -152,6 +152,7 @@ func (s *Service) SwitchModelWithIdempotency(
 				"model":                                      modelName,
 				"current_runtime_binding_id":                 nil,
 				"provider_resume_cursor_encrypted":           nil,
+				"provider_resume_cursor_key_id":              nil,
 				"provider_resume_cursor_state":               "absent",
 				"provider_resume_cursor_source_execution_id": nil,
 				"provider_resume_cursor_source_generation":   nil,
@@ -164,6 +165,7 @@ func (s *Service) SwitchModelWithIdempotency(
 		locked.Model = &modelName
 		locked.CurrentRuntimeBindingID = nil
 		locked.ProviderResumeCursorEncrypted = nil
+		locked.ProviderResumeCursorKeyID = nil
 		locked.ProviderResumeCursorState = "absent"
 		locked.ProviderResumeCursorSourceExecutionID = nil
 		locked.ProviderResumeCursorSourceGeneration = nil

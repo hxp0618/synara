@@ -149,7 +149,17 @@ const CliEnvConfig = Config.all({
   host: Config.string("SYNARA_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
   synaraHome: Config.string("SYNARA_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  publicUrl: Config.url("SYNARA_PUBLIC_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  // Compose and other deployment templates commonly render an optional URL
+  // as an explicitly empty environment value. Treat that the same as an
+  // omitted value, while still parsing non-empty values below so malformed
+  // public origins fail closed with the normal startup error.
+  publicUrl: Config.string("SYNARA_PUBLIC_URL").pipe(
+    Config.option,
+    Config.map((value) => {
+      const raw = Option.getOrUndefined(value)?.trim();
+      return raw || undefined;
+    }),
+  ),
   allowInsecureRemote: optionalBooleanEnvironmentConfig("SYNARA_ALLOW_INSECURE_REMOTE"),
   noBrowser: optionalBooleanEnvironmentConfig("SYNARA_NO_BROWSER"),
   authToken: Config.string("SYNARA_AUTH_TOKEN").pipe(
@@ -203,7 +213,19 @@ const ServerConfigLive = (input: CliInput) =>
       });
 
       const devUrl = Option.getOrElse(input.devUrl, () => env.devUrl);
-      const configuredPublicUrl = Option.getOrUndefined(input.publicUrl) ?? env.publicUrl;
+      const configuredPublicUrl = yield* Effect.try({
+        try: () => {
+          const cliPublicUrl = Option.getOrUndefined(input.publicUrl);
+          if (cliPublicUrl) return cliPublicUrl;
+          return env.publicUrl ? new URL(env.publicUrl) : undefined;
+        },
+        catch: (cause) =>
+          new StartupError({
+            message:
+              "SYNARA_PUBLIC_URL/--public-url must be an HTTPS root origin without credentials, path, query, or fragment (for example https://synara.example.com).",
+            cause,
+          }),
+      });
       const publicUrl = configuredPublicUrl
         ? (normalizeHttpsPublicOrigin(configuredPublicUrl) ?? undefined)
         : undefined;

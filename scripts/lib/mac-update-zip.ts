@@ -36,9 +36,12 @@ export function resolveSingleMacUpdateZipFileName(entries: ReadonlyArray<string>
   return zipFileNames[0];
 }
 
-export function resolveMacUpdateManifestFileNames(entries: ReadonlyArray<string>): string[] {
+export function resolveMacUpdateManifestFileNames(
+  entries: ReadonlyArray<string>,
+  required = true,
+): string[] {
   const manifestFileNames = entries.filter((entry) => entry.endsWith("-mac.yml"));
-  if (manifestFileNames.length === 0) {
+  if (required && manifestFileNames.length === 0) {
     throw new Error("Expected at least one macOS update manifest, found 0.");
   }
   return manifestFileNames;

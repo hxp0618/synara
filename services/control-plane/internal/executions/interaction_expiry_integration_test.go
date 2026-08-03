@@ -98,8 +98,8 @@ func setupExpiredInteraction(t *testing.T) expiredInteractionFixture {
 	db := integrationDB(t)
 	execution := seedExecutionFixture(t, db)
 	service := integrationService(t, db)
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	service.now = func() time.Time { return now }
+	claimAt := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return claimAt }
 	worker := registerTestWorker(t, service, execution.TargetID, execution.TargetKind, "worker-interaction-expiry")
 	cleanupWorkers(t, db, worker.ID)
 
@@ -124,7 +124,7 @@ func setupExpiredInteraction(t *testing.T) expiredInteractionFixture {
 	requestID := "approval-expiry-" + uuid.NewString()
 	if _, err := service.AppendRuntimeEvent(context.Background(), worker, execution.ExecutionID, RuntimeEventInput{
 		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2,
-		EventType: "request.opened", OccurredAt: now,
+		EventType: "request.opened", OccurredAt: claimAt,
 		Payload: map[string]any{
 			"requestId": requestID, "requestType": "exec_command_approval", "detail": "Deploy release",
 		},
@@ -132,12 +132,15 @@ func setupExpiredInteraction(t *testing.T) expiredInteractionFixture {
 		t.Fatal(err)
 	}
 
-	requestedAt := now.Add(-2 * time.Hour)
+	requestedAt := claimAt
+	expiredAt := requestedAt.Add(time.Hour)
 	if err := db.Model(&persistence.ExecutionInteraction{}).
 		Where("tenant_id = ? AND execution_id = ? AND request_id = ?", execution.TenantID, execution.ExecutionID, requestID).
-		Updates(map[string]any{"requested_at": requestedAt, "expires_at": requestedAt.Add(time.Hour)}).Error; err != nil {
+		Updates(map[string]any{"requested_at": requestedAt, "expires_at": expiredAt}).Error; err != nil {
 		t.Fatal(err)
 	}
+	now := expiredAt.Add(time.Hour)
+	service.now = func() time.Time { return now }
 	return expiredInteractionFixture{
 		db: db, execution: execution, service: service, worker: worker,
 		leaseInput: leaseInput, requestID: requestID, now: now,

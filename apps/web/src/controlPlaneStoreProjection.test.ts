@@ -46,7 +46,7 @@ const thread: Thread = {
 };
 
 describe("syncAuthoritativeProjection", () => {
-  it("replaces local shell entities with one normalized SaaS projection", () => {
+  it("replaces local shell entities with one normalized Control Plane projection", () => {
     const state: AppState = {
       spaces: [],
       projects: [{ ...project, id: "local-project" as Project["id"], name: "Local" }],

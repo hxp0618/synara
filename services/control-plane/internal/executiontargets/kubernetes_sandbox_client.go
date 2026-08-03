@@ -32,6 +32,55 @@ type kubernetesSandboxTemplateToleration struct {
 	Effect   string `json:"effect"`
 }
 
+type kubernetesSandboxTemplateEnvironment struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	ValueFrom struct {
+		FieldRef struct {
+			FieldPath string `json:"fieldPath"`
+		} `json:"fieldRef"`
+		ConfigMapKeyRef *struct {
+			Name     string `json:"name"`
+			Key      string `json:"key"`
+			Optional *bool  `json:"optional"`
+		} `json:"configMapKeyRef"`
+	} `json:"valueFrom"`
+}
+
+type kubernetesSandboxTemplateVolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly"`
+}
+
+type kubernetesSandboxTemplateContainer struct {
+	Name         string                                 `json:"name"`
+	Image        string                                 `json:"image"`
+	Env          []kubernetesSandboxTemplateEnvironment `json:"env"`
+	VolumeMounts []kubernetesSandboxTemplateVolumeMount `json:"volumeMounts"`
+}
+
+type kubernetesSandboxTemplateVolume struct {
+	Name        string `json:"name"`
+	DownwardAPI struct {
+		Items []struct {
+			Path     string `json:"path"`
+			FieldRef struct {
+				FieldPath string `json:"fieldPath"`
+			} `json:"fieldRef"`
+		} `json:"items"`
+	} `json:"downwardAPI"`
+	Secret *struct {
+		SecretName  string `json:"secretName"`
+		Optional    *bool  `json:"optional"`
+		DefaultMode int32  `json:"defaultMode"`
+		Items       []struct {
+			Key  string `json:"key"`
+			Path string `json:"path"`
+		} `json:"items"`
+	} `json:"secret"`
+}
+
 type kubernetesSandboxAcceptanceObservation struct {
 	SandboxAPIReady                bool
 	SandboxClaimAPIReady           bool
@@ -44,6 +93,7 @@ type kubernetesSandboxAcceptanceObservation struct {
 	TemplateSandboxRuntimeImage    string
 	TemplateSandboxRuntimeName     string
 	AssignedExecutionFieldRefReady bool
+	TemplateObservabilityReady     bool
 	WarmPoolTemplateReady          bool
 	WarmPoolReady                  bool
 	WarmPoolDesiredReplicas        int
@@ -86,7 +136,7 @@ type kubernetesSandboxClient interface {
 	GetSandboxClaim(context.Context, string, string) (kubernetesSandboxClaimObservation, bool, error)
 	GetSandbox(context.Context, string, string) (kubernetesSandboxObservation, bool, error)
 	DeleteSandboxClaim(context.Context, string, string, string) error
-	ObserveSandboxAcceptance(context.Context, kubernetesTargetConfiguration) (kubernetesSandboxAcceptanceObservation, error)
+	ObserveSandboxAcceptance(context.Context, uuid.UUID, kubernetesTargetConfiguration) (kubernetesSandboxAcceptanceObservation, error)
 }
 
 func (c *kubernetesHTTPClient) GetSandboxClaim(
@@ -172,6 +222,7 @@ func (c *kubernetesHTTPClient) DeleteSandboxClaim(
 
 func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 	ctx context.Context,
+	targetID uuid.UUID,
 	configuration kubernetesTargetConfiguration,
 ) (kubernetesSandboxAcceptanceObservation, error) {
 	observation := kubernetesSandboxAcceptanceObservation{}
@@ -204,34 +255,8 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 				Spec struct {
 					NodeSelector map[string]string                     `json:"nodeSelector"`
 					Tolerations  []kubernetesSandboxTemplateToleration `json:"tolerations"`
-					Containers   []struct {
-						Name  string `json:"name"`
-						Image string `json:"image"`
-						Env   []struct {
-							Name      string `json:"name"`
-							Value     string `json:"value"`
-							ValueFrom struct {
-								FieldRef struct {
-									FieldPath string `json:"fieldPath"`
-								} `json:"fieldRef"`
-							} `json:"valueFrom"`
-						} `json:"env"`
-						VolumeMounts []struct {
-							Name      string `json:"name"`
-							MountPath string `json:"mountPath"`
-						} `json:"volumeMounts"`
-					} `json:"containers"`
-					Volumes []struct {
-						Name        string `json:"name"`
-						DownwardAPI struct {
-							Items []struct {
-								Path     string `json:"path"`
-								FieldRef struct {
-									FieldPath string `json:"fieldPath"`
-								} `json:"fieldRef"`
-							} `json:"items"`
-						} `json:"downwardAPI"`
-					} `json:"volumes"`
+					Containers   []kubernetesSandboxTemplateContainer  `json:"containers"`
+					Volumes      []kubernetesSandboxTemplateVolume     `json:"volumes"`
 				} `json:"spec"`
 			} `json:"podTemplate"`
 		} `json:"spec"`
@@ -370,6 +395,15 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		}
 		break
 	}
+	for _, container := range template.Spec.PodTemplate.Spec.Containers {
+		if strings.TrimSpace(container.Name) == "agentd" {
+			observation.TemplateObservabilityReady = kubernetesSandboxTemplateObservabilityReady(
+				targetID,
+				container,
+			)
+			break
+		}
+	}
 	for _, volume := range template.Spec.PodTemplate.Spec.Volumes {
 		for _, item := range volume.DownwardAPI.Items {
 			mountPath := assignmentMounts[volume.Name]
@@ -438,6 +472,38 @@ func (c *kubernetesHTTPClient) ObserveSandboxAcceptance(
 		observation.GuestIsolationReady = true
 	}
 	return observation, nil
+}
+
+func kubernetesSandboxTemplateObservabilityReady(
+	targetID uuid.UUID,
+	container kubernetesSandboxTemplateContainer,
+) bool {
+	wantConfig := map[string]struct{}{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":      {},
+		"OTEL_EXPORTER_OTLP_PROTOCOL":      {},
+		"OTEL_EXPORTER_OTLP_CERTIFICATE":   {},
+		"SYNARA_OTEL_TRACE_SAMPLE_RATIO":   {},
+		"SYNARA_OTEL_COLLECTOR_REGION":     {},
+		"SYNARA_OTEL_TRACE_RETENTION_DAYS": {},
+	}
+	seenConfig := make(map[string]struct{}, len(wantConfig))
+	for _, item := range container.Env {
+		name := strings.TrimSpace(item.Name)
+		if _, forbidden := kubernetesForbiddenWorkerObservabilityEnvironment[name]; forbidden {
+			return false
+		}
+		if _, required := wantConfig[name]; required {
+			ref := item.ValueFrom.ConfigMapKeyRef
+			if _, duplicate := seenConfig[name]; duplicate || strings.TrimSpace(item.Value) != "" || ref == nil ||
+				strings.TrimSpace(ref.Name) != kubernetesObservabilityConfigMapName(targetID) || strings.TrimSpace(ref.Key) != name ||
+				ref.Optional == nil || !*ref.Optional {
+				return false
+			}
+			seenConfig[name] = struct{}{}
+			continue
+		}
+	}
+	return len(seenConfig) == len(wantConfig)
 }
 
 func kubernetesCocoonNodeMatchesSchedulingFence(labels map[string]string) bool {

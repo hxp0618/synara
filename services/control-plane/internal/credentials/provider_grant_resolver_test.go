@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/credentialscope"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
@@ -191,8 +192,14 @@ func TestProviderCredentialGrantResolveReturnsUnavailableAfterCredentialRotation
 func TestProviderCredentialGrantResolveReturnsUnavailableWhenPlatformCredentialLosesEntitlement(t *testing.T) {
 	fixture := newCredentialFixture(t)
 	ctx := context.Background()
-	if err := fixture.db.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
-		Update("plan_code", "enterprise").Error; err != nil {
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
+			Update("plan_code", "enterprise").Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.TenantSubscription{}).Where("tenant_id = ?", fixture.tenantID).
+			Updates(map[string]any{"plan_code": "enterprise", "status": "active"}).Error
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Model(&persistence.PlatformInstallation{}).Where("key = ?", "control-plane").

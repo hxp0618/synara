@@ -67,6 +67,34 @@ func TestCreateRevisionPersistsImmutableGVisorCompatibility(t *testing.T) {
 	}
 }
 
+func TestWorkerReleaseOperationsRejectInactiveTenantBeforeStorageAccess(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil)
+	targetID := uuid.New()
+	revisionID := uuid.New()
+
+	_, err := service.List(ctx, principal, requestedTenantID, targetID)
+	assertProblem(t, err, 404, "tenant_not_found")
+	_, err = service.Promote(
+		ctx, principal, requestedTenantID, targetID, revisionID, PolicyChangeInput{},
+		"", "worker-release-inactive-promote", "127.0.0.1",
+	)
+	assertProblem(t, err, 404, "tenant_not_found")
+	_, err = service.StartCanary(
+		ctx, principal, requestedTenantID, targetID, revisionID, PolicyChangeInput{},
+		"", "worker-release-inactive-canary", "127.0.0.1",
+	)
+	assertProblem(t, err, 404, "tenant_not_found")
+	_, err = service.Rollback(
+		ctx, principal, requestedTenantID, targetID, revisionID, PolicyChangeInput{},
+		"", "worker-release-inactive-rollback", "127.0.0.1",
+	)
+	assertProblem(t, err, 404, "tenant_not_found")
+}
+
 func TestWorkerReleaseCanaryPromotionRollbackAndScheduling(t *testing.T) {
 	fixture := newReleaseFixture(t)
 	first := fixture.createRevision(t, fixture.firstManifestID, "initial production release", "release-first")

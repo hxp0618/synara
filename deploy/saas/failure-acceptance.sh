@@ -52,10 +52,14 @@ run_id="$(date +%s)-$$"
 export POSTGRES_PASSWORD="stage2-postgres-$run_id-$(openssl rand -hex 8)"
 export MINIO_ROOT_USER="stage2-minio-$run_id"
 export MINIO_ROOT_PASSWORD="stage2-minio-secret-$run_id-$(openssl rand -hex 8)"
+export MINIO_ARTIFACT_USER="stage2-artifact-$run_id"
+export MINIO_ARTIFACT_PASSWORD="stage2-artifact-secret-$run_id-$(openssl rand -hex 8)"
+export SYNARA_ARTIFACT_CORS_ALLOW_ORIGIN="$base_url"
 export SYNARA_WORKER_REGISTRATION_TOKEN="stage2-worker-registration-$run_id-$(openssl rand -hex 8)"
 export SYNARA_PROVIDER_CURSOR_KEY="$(openssl rand -base64 32 | tr -d '\n')"
 export SYNARA_CREDENTIAL_MASTER_KEY="$(openssl rand -base64 32 | tr -d '\n')"
 export SYNARA_AUTH_TOKEN="stage2-synara-auth-$run_id-$(openssl rand -hex 8)"
+export SYNARA_PLATFORM_OPERATOR_TENANT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 export SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP=true
 export SYNARA_LOGIN_COOKIE_SECURE=false
 export SYNARA_PUBLIC_CONTROL_PLANE_URL="$base_url"
@@ -138,15 +142,27 @@ wait_service_health control-plane
 wait_http_status /ready 200
 printf 'Failure acceptance setup is ready\n'
 
+if [[ "${SYNARA_FAILURE_RUN_BASE_ACCEPTANCE:-1}" == "1" ]]; then
+  SYNARA_ACCEPTANCE_WORKER_REGISTRATION_TOKEN="$SYNARA_WORKER_REGISTRATION_TOKEN" \
+    bash "$script_dir/acceptance.sh" "$base_url"
+  printf 'Internal self-hosted product, usage and cost acceptance passed\n'
+fi
+
 owner_cookie="$work_dir/owner.cookie"
 prompt_sentinel="stage2-prompt-sentinel-$run_id"
 owner_session="$(request_json "$owner_cookie" POST /v1/auth/dev-login \
   "{\"email\":\"failure-$run_id@example.com\",\"displayName\":\"Failure Acceptance Owner\"}")"
-tenant_id="$(jq -er '.user.activeTenantId' <<<"$owner_session")"
 owner_id="$(jq -er '.user.userId' <<<"$owner_session")"
+tenant="$(request_json "$owner_cookie" POST /v1/tenants \
+  "{\"slug\":\"failure-tenant-$run_id\",\"name\":\"Failure Acceptance Internal Tenant\",\"region\":\"local\"}")"
+tenant_id="$(jq -er '.id' <<<"$tenant")"
+request_json "$owner_cookie" PUT /v1/auth/active-tenant "{\"tenantId\":\"$tenant_id\"}" >/dev/null
 organization="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/organizations" \
   "{\"slug\":\"failure-$run_id\",\"name\":\"Failure Acceptance\",\"kind\":\"department\",\"settings\":{}}")"
 organization_id="$(jq -er '.id' <<<"$organization")"
+execution_target="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/execution-targets" \
+  "{\"organizationId\":\"$organization_id\",\"kind\":\"local\",\"name\":\"Failure Acceptance Local Target\",\"configuration\":{},\"capabilities\":{\"workspaceModes\":[\"local\",\"worktree\"],\"providerPolicy\":{\"experimentalProviders\":[\"codex\",\"claudeAgent\"]}}}")"
+created_execution_target_id="$(jq -er '.id' <<<"$execution_target")"
 project_json="$(request_json "$owner_cookie" POST "/v1/tenants/$tenant_id/organizations/$organization_id/projects" \
   '{"name":"Failure Acceptance Project","defaultBranch":"main","visibility":"organization"}')"
 project_id="$(jq -er '.id' <<<"$project_json")"
@@ -154,6 +170,7 @@ session_json="$(request_json "$owner_cookie" POST "/v1/projects/$project_id/sess
   '{"title":"Failure Acceptance Session","visibility":"project","provider":"codex"}')"
 session_id="$(jq -er '.id' <<<"$session_json")"
 execution_target_id="$(jq -er '.executionTargetId' <<<"$session_json")"
+[[ "$execution_target_id" == "$created_execution_target_id" ]]
 execution_target="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/execution-targets/$execution_target_id")"
 target_kind="$(jq -er '.kind' <<<"$execution_target")"
 worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
@@ -295,6 +312,7 @@ logs_file="$work_dir/control-plane.log"
 sensitive_values=(
   "$POSTGRES_PASSWORD"
   "$MINIO_ROOT_PASSWORD"
+  "$MINIO_ARTIFACT_PASSWORD"
   "$SYNARA_WORKER_REGISTRATION_TOKEN"
   "$SYNARA_PROVIDER_CURSOR_KEY"
   "$SYNARA_CREDENTIAL_MASTER_KEY"

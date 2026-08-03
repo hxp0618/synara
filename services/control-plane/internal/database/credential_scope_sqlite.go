@@ -167,6 +167,25 @@ func migrateCredentialScopeSQLiteSafety(ctx context.Context, db *gorm.DB) error 
 		     OR NEW.encrypted_data_key IS NOT OLD.encrypted_data_key
 		     OR NEW.kms_provider IS NOT OLD.kms_provider
 		     OR NEW.kms_key_id IS NOT OLD.kms_key_id
+		   ) AND NOT (
+		     NEW.aad_version IS OLD.aad_version
+		     AND NEW.encrypted_payload IS OLD.encrypted_payload
+		     AND EXISTS (
+		       SELECT 1
+		       FROM kms_rewrap_entries AS entry
+		       JOIN kms_rewrap_runs AS run ON run.id = entry.run_id
+		       WHERE entry.tenant_id IS OLD.tenant_id
+		         AND entry.resource_type = 'provider_credential'
+		         AND entry.resource_id IS OLD.id
+		         AND entry.old_kms_provider IS OLD.kms_provider
+		         AND entry.old_kms_key_id IS OLD.kms_key_id
+		         AND entry.old_encrypted_data_key IS OLD.encrypted_data_key
+		         AND entry.new_kms_provider IS NEW.kms_provider
+		         AND entry.new_kms_key_id IS NEW.kms_key_id
+		         AND entry.new_encrypted_data_key IS NEW.encrypted_data_key
+		         AND run.primary_provider IS NEW.kms_provider
+		         AND run.primary_key_id IS NEW.kms_key_id
+		     )
 		   ))
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Provider Credential scope identity is immutable');

@@ -9,7 +9,7 @@ import {
 const requestId = ApprovalRequestId.makeUnsafe("request-1");
 
 describe("Interaction response routing", () => {
-  it("never calls Native approval resolution in authoritative SaaS mode", async () => {
+  it("never calls Native approval resolution in authoritative Control Plane mode", async () => {
     const resolveControlPlane = vi.fn(async () => undefined);
     const interruptControlPlane = vi.fn(async () => undefined);
     const respondNative = vi.fn(async () => undefined);
@@ -29,7 +29,7 @@ describe("Interaction response routing", () => {
     expect(interruptControlPlane).not.toHaveBeenCalled();
   });
 
-  it("routes SaaS cancel through Interrupt and rejects unsupported Session-wide approval", async () => {
+  it("routes Control Plane cancel through Interrupt and rejects unsupported Session-wide approval", async () => {
     const resolveControlPlane = vi.fn(async () => undefined);
     const interruptControlPlane = vi.fn(async () => undefined);
     const respondNative = vi.fn(async () => undefined);
@@ -90,7 +90,7 @@ describe("Interaction response routing", () => {
     expect(interruptControlPlane).not.toHaveBeenCalled();
   });
 
-  it("routes SaaS structured input and cancel without touching Native", async () => {
+  it("routes Control Plane structured input and cancel without touching Native", async () => {
     const resolveControlPlane = vi.fn(async () => undefined);
     const interruptControlPlane = vi.fn(async () => undefined);
     const respondNative = vi.fn(async () => undefined);

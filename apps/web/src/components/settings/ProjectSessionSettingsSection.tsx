@@ -22,7 +22,7 @@ import {
   summarizeLifecycleEffective,
   summarizeLifecycleOverrides,
   TenantLifecyclePolicySettingsSection,
-} from "~/components/settings/TenantLifecyclePolicySettingsSection";
+} from "@synara/enterprise-ui";
 import {
   SettingsListRow,
   SettingsRow,
@@ -48,7 +48,7 @@ import {
   type ControlPlaneResourceLifecycleWarmPoolMode,
   type ControlPlaneProject,
   type ControlPlaneSessionEvent,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { listUsableControlPlaneCredentials } from "~/lib/controlPlaneCredentials";
 import {
   assertControlPlaneCapabilityAllowed,

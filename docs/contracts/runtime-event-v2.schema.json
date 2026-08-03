@@ -100,7 +100,7 @@
     "occurredAt": { "type": "string", "format": "date-time" },
     "payload": {
       "type": "object",
-      "description": "Canonical ProviderRuntimeEventV2 payload plus documented SaaS correlation extensions such as requestId. Serialized JSON is limited to 65536 bytes; larger content must use an Artifact reference."
+      "description": "Canonical ProviderRuntimeEventV2 payload plus documented Control Plane correlation extensions such as requestId. Serialized JSON is limited to 65536 bytes; larger content must use an Artifact reference."
     }
   },
   "allOf": [

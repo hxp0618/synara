@@ -1,11 +1,11 @@
 // FILE: controlPlaneArtifacts.ts
-// Purpose: Derive user-facing SaaS Artifact state from durable Session events and metadata.
+// Purpose: Derive user-facing Control Plane Artifact state from durable Session events and metadata.
 // Layer: Web Control Plane projection helpers
 // Exports: Artifact sequence, filtering, naming, and kind labels
 
 import type { OrchestrationThreadActivity } from "@synara/contracts";
 
-import type { ControlPlaneArtifact } from "./controlPlaneClient";
+import type { ControlPlaneArtifact } from "@synara/control-plane-client";
 
 const USER_DOWNLOADABLE_ARTIFACT_KINDS = new Set<ControlPlaneArtifact["kind"]>([
   "attachment",

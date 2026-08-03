@@ -27,6 +27,7 @@ func newFakeSandboxClient(runtime string) *fakeSandboxClient {
 			SandboxAPIReady: true, SandboxClaimAPIReady: true, SandboxTemplateAPIReady: true,
 			SandboxWarmPoolAPIReady: true, OperatorReady: true,
 			TemplateIdentity: "template-uid:1", TemplateRuntime: runtime, TemplateAgentdImage: "synara-agentd:test", AssignedExecutionFieldRefReady: true,
+			TemplateObservabilityReady:  true,
 			TemplateSandboxRuntimeImage: "synara-agentd:test",
 			TemplateSandboxRuntimeName:  kubernetesCocoonGuestContainerName,
 			WarmPoolTemplateReady:       true, WarmPoolReady: true, WarmPoolDesiredReplicas: 0,
@@ -205,6 +206,7 @@ func (c *fakeSandboxClient) DeleteSandboxClaim(_ context.Context, _, name, uid s
 
 func (c *fakeSandboxClient) ObserveSandboxAcceptance(
 	context.Context,
+	uuid.UUID,
 	kubernetesTargetConfiguration,
 ) (kubernetesSandboxAcceptanceObservation, error) {
 	return c.acceptance, nil

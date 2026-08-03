@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/databasetime"
 )
 
 type executionQueueGroup struct {
@@ -15,22 +17,6 @@ type executionQueueGroup struct {
 	QueueClass    string  `gorm:"column:queue_class"`
 	Depth         int64   `gorm:"column:depth"`
 	OldestQueued  string  `gorm:"column:oldest_queued_at"`
-}
-
-func parseMetricTimestamp(value string) (time.Time, error) {
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05-07:00",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
-	} {
-		parsed, err := time.Parse(layout, value)
-		if err == nil {
-			return parsed, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("parse metric timestamp %q", value)
 }
 
 type executionQueueMetricKey struct {
@@ -61,7 +47,7 @@ func (r *Registry) writeExecutionQueueMetrics(
 
 	metrics := make(map[executionQueueMetricKey]executionQueueMetric, len(rows))
 	for _, row := range rows {
-		oldestQueued, err := parseMetricTimestamp(row.OldestQueued)
+		oldestQueued, err := databasetime.Parse(row.OldestQueued)
 		if err != nil {
 			return fmt.Errorf("collect durable Execution queue metrics: %w", err)
 		}

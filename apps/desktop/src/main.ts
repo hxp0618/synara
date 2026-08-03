@@ -24,6 +24,7 @@ import {
   nativeImage,
   nativeTheme,
   protocol,
+  safeStorage,
   screen,
   session,
   shell,
@@ -37,6 +38,9 @@ import type {
 } from "electron";
 import * as Effect from "effect/Effect";
 import type {
+  DesktopConnectionMode,
+  DesktopConnectionModeState,
+  DesktopSaaSConnectionState,
   DesktopTheme,
   DesktopUpdateActionResult,
   DesktopUpdateState,
@@ -210,6 +214,25 @@ import {
   resolveSynaraStorageSnapshotPath,
 } from "./desktopStorageMigration";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
+import {
+  buildDesktopControlPlaneProxyHeaders,
+  isDesktopControlPlaneProxyRequest,
+  sanitizeDesktopControlPlaneProxyUrl,
+} from "./desktopControlPlaneProxySession";
+import { DesktopCredentialStore } from "./desktopCredentialStore";
+import {
+  planDesktopConnectionStartup,
+  readDesktopConnectionMode,
+  shouldInitializeDesktopCloudConnection,
+  writeDesktopConnectionMode,
+} from "./desktopConnectionMode";
+import {
+  DesktopEnrollmentLinkError,
+  findDesktopEnrollmentLinkArgument,
+  parseDesktopEnrollmentLink,
+  parseDesktopEnrollmentOriginAllowlist,
+} from "./desktopEnrollmentLink";
+import { DesktopSaaSConnectionError, DesktopSaaSConnectionManager } from "./desktopSaaSConnection";
 import { DesktopAppSnapManager } from "./appSnapManager";
 import { hardenBrowserAnnotationWebviewPreferences } from "./browserAnnotations/webviewSecurity";
 import {
@@ -250,6 +273,8 @@ const BASE_DIR =
   Path.join(OS.homedir(), desktopIdentity.defaultHomeDirectoryName);
 const STATE_DIR = Path.join(BASE_DIR, "userdata");
 const DESKTOP_WINDOW_STATE_PATH = Path.join(STATE_DIR, "desktop-window-state.json");
+const DESKTOP_SAAS_CONNECTION_PATH = Path.join(STATE_DIR, "desktop-saas-connection.json");
+const DESKTOP_CONNECTION_MODE_PATH = Path.join(STATE_DIR, "desktop-connection-mode.json");
 const DESKTOP_SCHEME = desktopIdentity.scheme;
 const ROOT_DIR = Path.resolve(__dirname, "../../..");
 const APP_DISPLAY_NAME = desktopIdentity.displayName;
@@ -330,6 +355,12 @@ let desktopShutdownPromise: Promise<void> | null = null;
 let desktopStartupBlockedForMigrationRecovery = false;
 let desktopShutdownComplete = false;
 let desktopProtocolRegistered = false;
+let desktopSaaSConnectionManager: DesktopSaaSConnectionManager | null = null;
+let desktopConnectionMode: DesktopConnectionMode = "unselected";
+let desktopSaaSInitializationComplete = false;
+let desktopEnrollmentDrainInFlight: Promise<void> | null = null;
+const pendingDesktopEnrollmentLinks: string[] = [];
+const expectedBackendRestarts = new WeakSet<ChildProcess.ChildProcess>();
 let aboutCommitHashCache: string | null | undefined;
 let appUpdateYmlCache: Record<string, string> | null | undefined;
 let desktopLogSink: RotatingFileSink | null = null;
@@ -1753,6 +1784,380 @@ function focusMainWindow(options: { stealAppFocus?: boolean } = {}): void {
   mainWindow.focus();
 }
 
+function sendDesktopSaaSConnectionState(state: DesktopSaaSConnectionState): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  window.webContents.send(IPC.saas.state, state);
+}
+
+function desktopConnectionModeState(): DesktopConnectionModeState {
+  return {
+    mode: desktopConnectionMode,
+    persisted: desktopConnectionMode !== "unselected",
+  };
+}
+
+function sendDesktopConnectionModeState(): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  window.webContents.send(IPC.saas.mode, desktopConnectionModeState());
+}
+
+function activeDesktopSaaSConnection() {
+  return desktopConnectionMode === "cloud"
+    ? (desktopSaaSConnectionManager?.getConnection() ?? null)
+    : null;
+}
+
+async function resolveDesktopConnectionModeForStartup(): Promise<boolean> {
+  const persisted = readDesktopConnectionMode(DESKTOP_CONNECTION_MODE_PATH);
+  const startupPlan = planDesktopConnectionStartup({ persisted });
+  desktopConnectionMode = startupPlan.mode;
+
+  if (startupPlan.requiresSelection) {
+    const result = await dialog.showMessageBox({
+      type: "question",
+      title: "Choose how to use Synara",
+      message: "Use Synara locally or connect to a Cloud Panel?",
+      detail:
+        "Local keeps projects and sessions on this Mac. Cloud Panel uses an administrator-provided, short-lived connection link. You can switch modes later in Settings.",
+      buttons: ["Use Local", "Connect Cloud Panel", "Quit"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (result.response === 2) {
+      writeDesktopLogHeader("Desktop connection mode selection cancelled");
+      app.quit();
+      return false;
+    }
+    desktopConnectionMode = result.response === 1 ? "cloud" : "local";
+    if (desktopConnectionMode === "local" && pendingDesktopEnrollmentLinks.length > 0) {
+      pendingDesktopEnrollmentLinks.length = 0;
+      writeDesktopLogHeader("Desktop Enrollment link ignored after first-run Local mode selection");
+    }
+  }
+
+  if (desktopConnectionMode === "unselected") {
+    throw new Error("Desktop connection mode selection did not resolve to Local or Cloud Panel.");
+  }
+  writeDesktopLogHeader(`Desktop connection mode selected mode=${desktopConnectionMode}`);
+  return true;
+}
+
+function persistDesktopConnectionModeIfNeeded(): void {
+  if (desktopConnectionMode === "unselected") {
+    throw new Error("Desktop connection mode must be resolved before it can be persisted.");
+  }
+  const persisted = readDesktopConnectionMode(DESKTOP_CONNECTION_MODE_PATH);
+  if (!persisted || persisted.mode !== desktopConnectionMode) {
+    writeDesktopConnectionMode(DESKTOP_CONNECTION_MODE_PATH, desktopConnectionMode);
+  }
+}
+
+function isDesktopCredentialStoreFailure(manager: DesktopSaaSConnectionManager): boolean {
+  const code = manager.getLastErrorCode();
+  return (
+    code === "os_credential_store_unavailable" ||
+    code === "os_credential_store_insecure" ||
+    code === "device_identity_missing" ||
+    code?.startsWith("stored_connection_") === true
+  );
+}
+
+async function initializeDesktopCloudConnectionForStartup(): Promise<boolean> {
+  desktopSaaSConnectionManager ??= createDesktopSaaSConnectionManager();
+  const manager = desktopSaaSConnectionManager;
+  for (;;) {
+    const state = await manager.initialize({ requireCredentialStore: true });
+    if (!isDesktopCredentialStoreFailure(manager)) return true;
+
+    const result = await dialog.showMessageBox({
+      type: "warning",
+      title: "Cloud Panel unavailable",
+      message: "Synara could not prepare Cloud Panel on this Mac.",
+      detail:
+        state.message ??
+        "The operating-system credential store is unavailable. You can use Local mode and connect Cloud Panel later from Settings.",
+      buttons: ["Use Local", "Retry Cloud", "Quit"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (result.response === 0) {
+      desktopConnectionMode = "local";
+      pendingDesktopEnrollmentLinks.length = 0;
+      writeDesktopLogHeader("Cloud Panel startup failed; user selected Local mode");
+      return true;
+    }
+    if (result.response === 1) continue;
+    writeDesktopLogHeader("Cloud Panel startup failed; user quit");
+    app.quit();
+    return false;
+  }
+}
+
+async function setDesktopConnectionMode(
+  mode: Exclude<DesktopConnectionMode, "unselected">,
+  options: { readonly restartBackend: boolean },
+): Promise<DesktopConnectionModeState> {
+  if (mode !== "local" && mode !== "cloud") {
+    throw new Error("Desktop connection mode must be local or cloud.");
+  }
+  const previousMode = desktopConnectionMode;
+  const changed = desktopConnectionMode !== mode;
+
+  if (mode === "cloud") {
+    desktopSaaSConnectionManager ??= createDesktopSaaSConnectionManager();
+    const state = await desktopSaaSConnectionManager.initialize({ requireCredentialStore: true });
+    if (state.status === "error") {
+      writeDesktopLogHeader(
+        `Desktop connection mode change rejected mode=cloud code=${desktopSaaSConnectionManager.getLastErrorCode() ?? "unknown"}`,
+      );
+      throw new Error(state.message ?? "Cloud Panel could not be initialized.");
+    }
+  }
+
+  desktopConnectionMode = mode;
+  try {
+    persistDesktopConnectionModeIfNeeded();
+  } catch (error) {
+    desktopConnectionMode = previousMode;
+    sendDesktopConnectionModeState();
+    throw error;
+  }
+  desktopSaaSInitializationComplete = true;
+  sendDesktopConnectionModeState();
+  writeDesktopLogHeader(`Desktop connection mode changed mode=${mode}`);
+
+  if (changed && options.restartBackend && backendProcess) {
+    await restartBackendForDesktopSaaSConnection(`mode changed to ${mode}`);
+    setTimeout(reloadRendererForDesktopSaaSConnection, 0);
+  }
+  return desktopConnectionModeState();
+}
+
+function disconnectedStateForMain(): DesktopSaaSConnectionState {
+  return {
+    status: "disconnected",
+    controlPlaneBaseUrl: null,
+    deviceId: null,
+    userId: null,
+    email: null,
+    displayName: null,
+    tenantId: null,
+    tenantName: null,
+    organizationId: null,
+    organizationName: null,
+    credentialExpiresAt: null,
+    message: null,
+  };
+}
+
+function desktopDeviceLabel(): string {
+  const hostname = OS.hostname()
+    .trim()
+    .replace(/[\r\n\u0000]/gu, " ")
+    .slice(0, 160);
+  return hostname || `${APP_DISPLAY_NAME} Desktop`;
+}
+
+function desktopEnrollmentAllowsLoopbackHTTP(): boolean {
+  return isDevelopment && process.env.SYNARA_DESKTOP_ALLOW_LOOPBACK_CONTROL_PLANE === "1";
+}
+
+function createDesktopSaaSConnectionManager(): DesktopSaaSConnectionManager {
+  const allowLoopbackHttp = desktopEnrollmentAllowsLoopbackHTTP();
+  const allowedControlPlaneBaseUrls = parseDesktopEnrollmentOriginAllowlist({
+    raw: process.env.SYNARA_DESKTOP_CONTROL_PLANE_ORIGINS,
+    allowLoopbackHttp,
+  });
+  return new DesktopSaaSConnectionManager({
+    store: new DesktopCredentialStore(DESKTOP_SAAS_CONNECTION_PATH, safeStorage),
+    platform: process.platform,
+    appVersion: app.getVersion(),
+    deviceLabel: desktopDeviceLabel(),
+    isControlPlaneBaseUrlAllowed: (baseUrl) => allowedControlPlaneBaseUrls.has(baseUrl),
+    onState: sendDesktopSaaSConnectionState,
+  });
+}
+
+function queueDesktopEnrollmentLink(rawLink: string): void {
+  if (!rawLink.startsWith(`${DESKTOP_SCHEME}://connect`)) return;
+  pendingDesktopEnrollmentLinks.push(rawLink);
+}
+
+function queueDesktopEnrollmentLinkFromArguments(argv: ReadonlyArray<string>): void {
+  const rawLink = findDesktopEnrollmentLinkArgument(argv, DESKTOP_SCHEME);
+  if (rawLink) queueDesktopEnrollmentLink(rawLink);
+}
+
+function showDesktopEnrollmentFailure(message?: string | null): void {
+  dialog.showErrorBox(
+    "Synara Desktop connection",
+    message?.trim() || "The Desktop connection link could not be completed safely.",
+  );
+}
+
+function desktopEnrollmentFailureCode(error: unknown): string {
+  if (error instanceof DesktopEnrollmentLinkError || error instanceof DesktopSaaSConnectionError) {
+    return error.code;
+  }
+  return "unexpected";
+}
+
+async function restartBackendForDesktopSaaSConnection(reason: string): Promise<void> {
+  if (isQuitting || desktopStartupBlockedForMigrationRecovery) return;
+  const child = backendProcess;
+  if (child) expectedBackendRestarts.add(child);
+  try {
+    await stopBackendAndWaitForExit();
+  } catch (error) {
+    if (child) expectedBackendRestarts.delete(child);
+    throw error;
+  }
+  if (isQuitting) return;
+  try {
+    await reserveBackendEndpoint(`Desktop Cloud Panel ${reason}`);
+  } catch (error) {
+    scheduleBackendRestart(`Desktop Cloud Panel ${reason} endpoint reservation failed`);
+    throw error;
+  }
+  startBackend("lifecycle");
+  ensureInitialBackendWindowOpen(backendHttpUrl);
+  const readinessSource = await waitForBackendWindowReady(backendHttpUrl);
+  writeDesktopLogHeader(`Desktop Cloud Panel ${reason} backend ready source=${readinessSource}`);
+}
+
+function reloadRendererForDesktopSaaSConnection(): void {
+  const targetWindow = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
+    return;
+  }
+  targetWindow.webContents.reload();
+}
+
+function drainDesktopEnrollmentLinks(options: { restartBackend: boolean }): Promise<void> {
+  if (desktopEnrollmentDrainInFlight) return desktopEnrollmentDrainInFlight;
+  if (!desktopSaaSInitializationComplete) return Promise.resolve();
+  const task = (async () => {
+    const allowLoopbackHttp = desktopEnrollmentAllowsLoopbackHTTP();
+    const allowedControlPlaneBaseUrls = parseDesktopEnrollmentOriginAllowlist({
+      raw: process.env.SYNARA_DESKTOP_CONTROL_PLANE_ORIGINS,
+      allowLoopbackHttp,
+    });
+    while (pendingDesktopEnrollmentLinks.length > 0) {
+      const rawLink = pendingDesktopEnrollmentLinks.shift();
+      if (!rawLink) continue;
+      writeDesktopLogHeader("desktop enrollment link processing started");
+      try {
+        const link = parseDesktopEnrollmentLink(rawLink, {
+          scheme: DESKTOP_SCHEME,
+          allowedControlPlaneBaseUrls,
+          allowLoopbackHttp,
+        });
+        if (desktopConnectionMode !== "cloud") {
+          const result = await dialog.showMessageBox({
+            type: "question",
+            title: "Switch to Cloud Panel?",
+            message: "This connection link requires Cloud Panel mode.",
+            detail:
+              "Synara is currently using the saved Local mode. Switch to Cloud Panel and continue with this administrator-provided link? You can switch back to Local later in Settings.",
+            buttons: ["Switch to Cloud Panel", "Keep Local"],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
+          });
+          if (result.response !== 0) {
+            writeDesktopLogHeader(
+              "Desktop Enrollment link ignored because Local mode was retained",
+            );
+            continue;
+          }
+          await setDesktopConnectionMode("cloud", { restartBackend: false });
+          writeDesktopLogHeader("Desktop Enrollment switched to Cloud Panel mode");
+        }
+        desktopSaaSConnectionManager ??= createDesktopSaaSConnectionManager();
+        const manager = desktopSaaSConnectionManager;
+        const state = await manager.connect(link);
+        writeDesktopLogHeader(`desktop enrollment link completed status=${state.status}`);
+        if (state.status !== "connected") {
+          showDesktopEnrollmentFailure(state.message);
+          continue;
+        }
+        if (options.restartBackend && backendProcess) {
+          await restartBackendForDesktopSaaSConnection("connection changed");
+          reloadRendererForDesktopSaaSConnection();
+        }
+        focusMainWindow({ stealAppFocus: true });
+      } catch (error) {
+        writeDesktopLogHeader(
+          `desktop enrollment link rejected code=${desktopEnrollmentFailureCode(error)}`,
+        );
+        showDesktopEnrollmentFailure(
+          error instanceof Error ? error.message : "The Desktop connection could not be completed.",
+        );
+      }
+    }
+  })().finally(() => {
+    if (desktopEnrollmentDrainInFlight === task) {
+      desktopEnrollmentDrainInFlight = null;
+      if (pendingDesktopEnrollmentLinks.length > 0) {
+        queueMicrotask(() => {
+          void drainDesktopEnrollmentLinks({ restartBackend: backendProcess !== null });
+        });
+      }
+    }
+  });
+  desktopEnrollmentDrainInFlight = task;
+  return task;
+}
+
+function registerDesktopEnrollmentProtocolClient(): void {
+  if (app.isPackaged) {
+    if (!app.setAsDefaultProtocolClient(DESKTOP_SCHEME)) {
+      console.warn("[desktop] Failed to register the Desktop Enrollment protocol handler.");
+    }
+    return;
+  }
+  if (process.env.SYNARA_DESKTOP_REGISTER_PROTOCOL !== "1") return;
+  const entry = process.argv[1];
+  if (
+    !entry ||
+    !app.setAsDefaultProtocolClient(DESKTOP_SCHEME, process.execPath, [Path.resolve(entry)])
+  ) {
+    console.warn(
+      "[desktop] Failed to register the development Desktop Enrollment protocol handler.",
+    );
+  }
+}
+
+function configureDesktopControlPlaneProxySession(): void {
+  const targetSession = session.defaultSession;
+  targetSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
+    const connection = activeDesktopSaaSConnection();
+    if (!connection) {
+      callback({});
+      return;
+    }
+    const redirectURL = sanitizeDesktopControlPlaneProxyUrl(details.url, backendHttpUrl);
+    callback(redirectURL ? { redirectURL } : {});
+  });
+  targetSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
+    const connection = activeDesktopSaaSConnection();
+    if (!connection || !isDesktopControlPlaneProxyRequest(details.url, backendHttpUrl)) {
+      callback({ requestHeaders: details.requestHeaders });
+      return;
+    }
+    callback({
+      requestHeaders: buildDesktopControlPlaneProxyHeaders(
+        details.requestHeaders,
+        connection.credential,
+      ),
+    });
+  });
+}
+
 // Show a native OS notification and refocus the app window when the alert is clicked.
 function showDesktopNotification(input: {
   title: string;
@@ -3005,6 +3410,7 @@ function backendNodeArgs(): string[] {
 
 function backendEnv(): NodeJS.ProcessEnv {
   const servedStaticRoot = resolveServedStaticRoot();
+  const desktopSaaSConnection = activeDesktopSaaSConnection();
   const env: NodeJS.ProcessEnv = {
     ...resolveBrowserHostPipeBackendEnv(
       process.env,
@@ -3020,6 +3426,9 @@ function backendEnv(): NodeJS.ProcessEnv {
     SYNARA_HOME: BASE_DIR,
     SYNARA_AUTH_TOKEN: backendAuthToken,
     SYNARA_DESKTOP_SHUTDOWN_TOKEN: DESKTOP_BACKEND_SHUTDOWN_TOKEN,
+    ...(desktopSaaSConnection
+      ? { SYNARA_CONTROL_PLANE_URL: desktopSaaSConnection.controlPlaneBaseUrl }
+      : {}),
   };
   // The backend runs the same login-shell probe at startup and does not begin listening
   // until it returns, so an unmarked child serializes a second ~1s hydration behind ours.
@@ -3336,6 +3745,7 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
     }
     closeBackendSession(`pid=${child.pid ?? "unknown"} error=${error.message}`);
     lastBackendFailureDetail = error.message;
+    if (expectedBackendRestarts.has(child)) return;
     scheduleBackendRestart(error.message);
   });
 
@@ -3356,6 +3766,7 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
         `pid=${child.pid ?? "unknown"} code=${code ?? "null"} signal=${signal ?? "null"}`,
       );
       if (isQuitting) return;
+      if (expectedBackendRestarts.delete(child)) return;
       const startupBlock = startupBlockDetector.read();
       if (startupBlock) {
         handleBackendStartupBlock(startupBlock);
@@ -3510,6 +3921,36 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(IPC.storageMigration.acknowledge);
   ipcMain.handle(IPC.storageMigration.acknowledge, async () => {
     await acknowledgeSynaraStorageSnapshot(storageSnapshotPath);
+  });
+
+  ipcMain.removeHandler(IPC.saas.getState);
+  ipcMain.handle(
+    IPC.saas.getState,
+    async () => desktopSaaSConnectionManager?.getState() ?? disconnectedStateForMain(),
+  );
+
+  ipcMain.removeHandler(IPC.saas.getMode);
+  ipcMain.handle(IPC.saas.getMode, async () => desktopConnectionModeState());
+
+  ipcMain.removeHandler(IPC.saas.setMode);
+  ipcMain.handle(IPC.saas.setMode, async (_event, mode: unknown) => {
+    if (mode !== "local" && mode !== "cloud") {
+      throw new Error("Desktop connection mode must be local or cloud.");
+    }
+    return setDesktopConnectionMode(mode, { restartBackend: true });
+  });
+
+  ipcMain.removeHandler(IPC.saas.disconnect);
+  ipcMain.handle(IPC.saas.disconnect, async () => {
+    const manager = desktopSaaSConnectionManager;
+    if (!manager) return disconnectedStateForMain();
+    const hadConnection = manager.getConnection() !== null;
+    const state = await manager.disconnect();
+    if (hadConnection && backendProcess) {
+      await restartBackendForDesktopSaaSConnection("disconnected");
+      setTimeout(reloadRendererForDesktopSaaSConnection, 0);
+    }
+    return state;
   });
 
   ipcMain.removeAllListeners(IPC.wsUrl);
@@ -4219,11 +4660,23 @@ if (hasSingleInstanceLock) {
 }
 
 configureAppIdentity();
+queueDesktopEnrollmentLinkFromArguments(process.argv);
+
+app.on("open-url", (event, rawUrl) => {
+  if (!rawUrl.startsWith(`${DESKTOP_SCHEME}://connect`)) return;
+  event.preventDefault();
+  queueDesktopEnrollmentLink(rawUrl);
+  if (app.isReady()) {
+    void drainDesktopEnrollmentLinks({ restartBackend: true });
+  }
+});
 
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, commandLine) => {
+    queueDesktopEnrollmentLinkFromArguments(commandLine);
+    void drainDesktopEnrollmentLinks({ restartBackend: true });
     focusMainWindow();
   });
 }
@@ -4241,6 +4694,15 @@ async function bootstrap(): Promise<void> {
   if (migrationRecoveryOutcome !== "continue") {
     return;
   }
+
+  if (!(await resolveDesktopConnectionModeForStartup())) return;
+
+  if (shouldInitializeDesktopCloudConnection(desktopConnectionMode)) {
+    if (!(await initializeDesktopCloudConnectionForStartup())) return;
+  }
+  persistDesktopConnectionModeIfNeeded();
+  desktopSaaSInitializationComplete = true;
+  await drainDesktopEnrollmentLinks({ restartBackend: false });
 
   backendAuthToken = Crypto.randomBytes(24).toString("hex");
   await reserveBackendEndpoint("bootstrap");
@@ -4344,6 +4806,8 @@ if (hasSingleInstanceLock) {
       applyLegacyMacDockIcon();
       refreshMacIconCacheOnVersionChange();
       configureMediaPermissions();
+      configureDesktopControlPlaneProxySession();
+      registerDesktopEnrollmentProtocolClient();
       initializeDesktopAppSnap();
       configureApplicationMenu();
       try {
@@ -4369,7 +4833,11 @@ if (hasSingleInstanceLock) {
       });
 
       app.on("activate", () => {
-        if (desktopStartupBlockedForMigrationRecovery || isQuitting) {
+        if (
+          desktopStartupBlockedForMigrationRecovery ||
+          isQuitting ||
+          desktopConnectionMode === "unselected"
+        ) {
           return;
         }
         handleDesktopAppForegrounded();

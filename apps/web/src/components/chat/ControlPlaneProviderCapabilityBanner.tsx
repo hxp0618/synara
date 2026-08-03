@@ -1,5 +1,5 @@
 // FILE: ControlPlaneProviderCapabilityBanner.tsx
-// Purpose: Surfaces the active SaaS Provider capability state above the transcript.
+// Purpose: Surfaces the active Control Plane Provider capability state above the transcript.
 // Layer: Chat status presentation
 // Exports: ControlPlaneProviderCapabilityBanner
 
@@ -28,10 +28,10 @@ export const ControlPlaneProviderCapabilityBanner = memo(
     const blocked = !decision.allowed;
     const title = blocked
       ? decision.blockingDecision?.status === "loading"
-        ? "Checking SaaS Provider support"
+        ? "Checking Control Plane Provider support"
         : decision.blockingDecision?.status === "error"
           ? "Provider capability check unavailable"
-          : "Provider unavailable on this SaaS target"
+          : "Provider unavailable on this Control Plane target"
       : "Waiting for a compatible Worker";
     const variant = blocked && !decision.temporary ? "error" : "warning";
     const Icon = variant === "error" ? CircleAlertIcon : TriangleAlertIcon;

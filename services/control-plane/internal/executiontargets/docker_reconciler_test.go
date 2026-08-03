@@ -129,6 +129,44 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	}
 }
 
+func TestDockerPoolReconcilerMountsTargetScopedObservabilityAuthority(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	root := filepath.Join(t.TempDir(), "observability")
+	fixture.reconciler.config.ObservabilityRoot = root
+	engine := newFakeDockerEngine()
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 1 {
+		t.Fatalf("created Docker specs = %d", len(engine.createdSpecs))
+	}
+	spec := engine.createdSpecs[0]
+	destination := "/etc/synara/targets/" + fixture.targetID.String()
+	wantBind := filepath.Join(root, fixture.targetID.String()) + ":" + destination + ":ro"
+	if !slices.Contains(spec.Binds, wantBind) {
+		t.Fatalf("Docker observability bind = %#v, want %q", spec.Binds, wantBind)
+	}
+	wantEnvironment := "SYNARA_AGENTD_OBSERVABILITY_ENV_FILE=" + destination + "/observability.env"
+	if !slices.Contains(spec.Environment, wantEnvironment) {
+		t.Fatalf("Docker observability environment = %#v", spec.Environment)
+	}
+	joinedEnvironment := strings.Join(spec.Environment, "\n")
+	if strings.Contains(joinedEnvironment, "OTEL_EXPORTER_OTLP_HEADERS") ||
+		strings.Contains(joinedEnvironment, "OTEL_EXPORTER_OTLP_ENDPOINT") ||
+		strings.Contains(joinedEnvironment, "OTEL_EXPORTER_OTLP_CLIENT_KEY") {
+		t.Fatalf("Docker Worker received Collector credentials in environment: %#v", spec.Environment)
+	}
+}
+
+func TestDockerPoolReconcilerRejectsUnsafeObservabilityRoot(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	fixture.reconciler.config.ObservabilityRoot = "relative"
+	fixture.reconciler.factory = &fakeDockerFactory{engine: newFakeDockerEngine()}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertExecutionTargetProblemCode(t, err, "docker_worker_observability_authority_invalid")
+}
+
 func TestDockerPoolReconcilerSelectsAndHardensGVisorRuntime(t *testing.T) {
 	fixture := newDockerReconcileFixture(t, 1)
 	configuration := dockerTestConfiguration(1)

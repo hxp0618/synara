@@ -53,12 +53,15 @@ func (s *Service) requireOrganizationPermission(
 	tenantID, organizationID uuid.UUID,
 	permission authorization.Permission,
 ) error {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return err
+	}
 	_, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, organizationID, permission)
 	return err
 }
 
 func (s *Service) ListOrganizations(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]Organization, error) {
-	tenantRole, err := s.tenantRole(ctx, principal.UserID, tenantID)
+	tenantRole, err := s.tenantRole(ctx, principal, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +123,7 @@ func (s *Service) CreateOrganization(
 	input CreateOrganizationInput,
 	requestID, ipAddress string,
 ) (Organization, error) {
-	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.OrganizationUpdate); err != nil {
+	if _, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.OrganizationUpdate); err != nil {
 		return Organization{}, err
 	}
 	var err error

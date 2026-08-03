@@ -135,8 +135,15 @@ func TestLocalArtifactLifecycleAndTenantIsolation(t *testing.T) {
 	}
 
 	otherTenant := uuid.New()
-	_, err = fixture.service.Get(context.Background(), identity.Principal{UserID: fixture.principal.UserID, ActiveTenantID: &otherTenant}, completed.ID)
+	otherPrincipal := identity.Principal{UserID: fixture.principal.UserID, ActiveTenantID: &otherTenant}
+	_, err = fixture.service.Get(context.Background(), otherPrincipal, completed.ID)
 	assertProblemCode(t, err, "artifact_not_found")
+	_, err = fixture.service.List(context.Background(), otherPrincipal, fixture.sessionID)
+	assertProblemCode(t, err, "session_not_found")
+	listed, err := fixture.service.List(context.Background(), fixture.principal, fixture.sessionID)
+	if err != nil || len(listed) != 1 || listed[0].ID != completed.ID {
+		t.Fatalf("Artifact list = %#v, %v", listed, err)
+	}
 
 	if err := fixture.service.Delete(context.Background(), fixture.principal, completed.ID, "artifact-delete", "127.0.0.1"); err != nil {
 		t.Fatal(err)

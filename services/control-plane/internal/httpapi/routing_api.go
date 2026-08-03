@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
@@ -391,8 +392,8 @@ func (s *Server) requireRoutingPermission(
 	permission authorization.Permission,
 ) bool {
 	principal := mustPrincipal(r)
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		s.writeError(w, r, problem.New(409, "active_tenant_mismatch", "The path tenant is not the active tenant."))
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		s.writeError(w, r, err)
 		return false
 	}
 	if _, err := authorization.NewAuthorizer(s.db).RequireTenant(

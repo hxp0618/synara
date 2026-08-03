@@ -5,6 +5,29 @@ metadata:
   namespace: synara-system
 data:
   public-control-plane-url: https://synara.example.com
+  public-admin-url: https://admin.synara.example.com
+  # Fill only after a failure-independent internal Status Board exists.
+  internal-status-board-url: ""
+  # Failure-independent operator relay that posts employee-safe incident updates.
+  # Keep empty together with internal-status-board-url until the receiver is deployed.
+  internal-incident-publisher-url: ""
+  # Trace export is disabled while the endpoint is empty. Enterprise export
+  # requires an absolute HTTPS OTLP/HTTP endpoint, complete mTLS identity,
+  # collector Region and retention between 1 and 90 days.
+  otel-exporter-otlp-endpoint: ""
+  otel-exporter-otlp-protocol: http/protobuf
+  # Leave empty for a publicly trusted collector certificate. To use a private
+  # CA, mount it in an overlay and set this to its absolute in-container path.
+  otel-exporter-otlp-certificate: ""
+  otel-trace-sample-ratio: "0.1"
+  otel-collector-region: ""
+  otel-trace-retention-days: "30"
+  # This self-hosted product has no payment or external subscription path.
+  commercialization-mode: internal-self-hosted
+  # Dedicated internal operations Tenant. Never use an ordinary workload Tenant here.
+  platform-operator-tenant-id: "00000000-0000-0000-0000-000000000000"
+  # Browser origin of the Tenant Web host used after Support Access handoff.
+  tenant-web-url: https://synara.example.com
   # Set to the ingress/load-balancer CIDRs that append X-Forwarded-For.
   trusted-proxy-cidrs: ""
   artifact-bucket: synara-artifacts
@@ -15,8 +38,12 @@ data:
   # Native cloud billing import is outside the supported self-hosted profile.
   # Keep this disabled; the operator Tenant owns versioned tariffs, shared
   # Target Coverage seals, and scheduled estimate/allocation audits.
-  billing-tariff-operator-tenant-id: ""
-  billing-blob-source: disabled
+  cost-accounting-operator-tenant-id: ""
+  cost-accounting-blob-source: disabled
+  # Optional paths on the Docker Engine host and remote SSH hosts. They are
+  # deployment-authority roots, never Tenant-selected Execution Target fields.
+  docker-worker-observability-root: ""
+  ssh-worker-observability-root: ""
   # Public keys and exact Target/DR scope only. Publisher private keys must
   # remain in the external probe/replication workload and never enter this ConfigMap.
   platform-routing-publishers-json: "[]"

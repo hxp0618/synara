@@ -113,7 +113,10 @@ export function useProviderModelCatalog(input: {
 
   const claudeModelDiscoveryEnabled = shouldDiscoverProvider("claudeAgent");
   const codexModelDiscoveryEnabled = shouldDiscoverProvider("codex");
-  const cursorModelDiscoveryEnabled = shouldDiscoverProvider("cursor");
+  // Cursor model discovery starts an ACP subprocess whose authentication method
+  // may open an interactive Cursor CLI login page. Never run it as background
+  // picker prefetch; only discover Cursor models when Cursor is actually selected.
+  const cursorModelDiscoveryEnabled = shouldDiscoverProvider("cursor", false);
   const antigravityModelDiscoveryEnabled = shouldDiscoverProvider("antigravity");
   const grokModelDiscoveryEnabled = shouldDiscoverProvider("grok");
   const droidModelDiscoveryEnabled = shouldDiscoverProvider("droid", false);

@@ -34,7 +34,7 @@ func (s *Service) DisableManagedKubernetesTarget(
 	tenantID, targetID uuid.UUID,
 	requestID, ipAddress string,
 ) (Target, bool, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Target{}, false, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {

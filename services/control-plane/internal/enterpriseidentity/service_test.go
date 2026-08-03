@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	credentialkms "github.com/synara-ai/synara/services/control-plane/internal/kms"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func TestOIDCConnectionEncryptsSecretAndCreatesPKCEAttempt(t *testing.T) {
@@ -88,6 +90,53 @@ func TestOIDCConnectionEncryptsSecretAndCreatesPKCEAttempt(t *testing.T) {
 	if strings.Contains(string(attempt.EncryptedPayload), parsed.Query().Get("nonce")) || attempt.ReturnTo != "/settings" {
 		t.Fatalf("OIDC attempt secret leaked or returnTo changed: %#v", attempt)
 	}
+}
+
+func TestIdentityOperationsRejectCrossTenantConnectionSubstitution(t *testing.T) {
+	db, principal, tenantA := setupIdentityTest(t)
+	service := NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), nil)
+	now := time.Now().UTC()
+	tenantB := uuid.New()
+	connectionA := uuid.New()
+	for _, model := range []any{
+		&persistence.Tenant{ID: tenantB, Slug: "identity-other", Name: "Identity Other", Status: "active", PlanCode: "enterprise", Region: "default", Settings: map[string]any{}, CreatedBy: principal.UserID},
+		&persistence.TenantMembership{TenantID: tenantB, UserID: principal.UserID, Role: "owner", Status: "active", JoinedAt: &now},
+		&persistence.IdentityConnection{ID: connectionA, TenantID: tenantA, Kind: "oidc", Name: "Tenant A SSO", Status: "active", Issuer: "https://idp.example.com", Configuration: map[string]any{}, CreatedBy: principal.UserID, UpdatedBy: principal.UserID},
+	} {
+		if err := db.Create(model).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherPrincipal := principal
+	otherPrincipal.ActiveTenantID = &tenantB
+
+	if _, err := service.List(context.Background(), otherPrincipal, tenantA); problemCode(err) != "tenant_not_found" {
+		t.Fatalf("cross-active-Tenant Identity list error = %v", err)
+	}
+	if _, err := service.ListMappings(context.Background(), otherPrincipal, tenantB, connectionA); problemCode(err) != "identity_connection_not_found" {
+		t.Fatalf("cross-Tenant Identity mapping list error = %v", err)
+	}
+	if err := service.Disable(
+		context.Background(), otherPrincipal, tenantB, connectionA,
+		"identity-cross-tenant-disable", "127.0.0.1",
+	); problemCode(err) != "identity_connection_not_found" {
+		t.Fatalf("cross-Tenant Identity disable error = %v", err)
+	}
+	var connection persistence.IdentityConnection
+	if err := db.Where("tenant_id = ? AND id = ?", tenantA, connectionA).Take(&connection).Error; err != nil {
+		t.Fatal(err)
+	}
+	if connection.Status != "active" {
+		t.Fatalf("cross-Tenant operation mutated Identity Connection: %#v", connection)
+	}
+}
+
+func problemCode(err error) string {
+	var apiError *problem.Error
+	if errors.As(err, &apiError) {
+		return apiError.Code
+	}
+	return ""
 }
 
 func TestOIDCCompleteValidatesProviderAndCreatesExternalSession(t *testing.T) {
@@ -200,6 +249,7 @@ func TestOIDCCompleteValidatesProviderAndCreatesExternalSession(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(result.Session.Token))
 	if loginSession.UserID != user.ID || loginSession.ActiveTenantID == nil || *loginSession.ActiveTenantID != tenantID ||
+		loginSession.AuthMethod != "sso" || loginSession.IdentityConnectionID == nil || *loginSession.IdentityConnectionID != connection.ID ||
 		!bytes.Equal(loginSession.RefreshTokenHash, tokenHash[:]) || loginSession.IPAddress == nil ||
 		*loginSession.IPAddress != "203.0.113.7" || loginSession.UserAgent == nil ||
 		*loginSession.UserAgent != "Synara OIDC test" || loginSession.RevokedAt != nil ||
@@ -213,6 +263,15 @@ func TestOIDCCompleteValidatesProviderAndCreatesExternalSession(t *testing.T) {
 	if authenticated.SessionID != loginSession.ID || authenticated.UserID != user.ID {
 		t.Fatalf("issued OIDC token did not authenticate the persisted session: %#v", authenticated)
 	}
+	if err := db.Model(&persistence.TenantMembership{}).Where("tenant_id = ? AND user_id = ?", tenantID, user.ID).
+		Update("status", "suspended").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = identityService.CompleteExternalLogin(context.Background(), identity.ExternalLoginInput{
+		ConnectionID: connection.ID, Provider: "oidc", Issuer: provider.issuer(), Subject: provider.subject,
+		Email: provider.email, DisplayName: provider.displayName, TenantID: tenantID, TenantRole: "member",
+	}, "203.0.113.7", "Synara OIDC test", "oidc-suspended-relogin")
+	assertProblemCode(t, err, "external_identity_membership_suspended")
 
 	var attempt persistence.IdentityLoginAttempt
 	if err := db.Where("connection_id = ?", connection.ID).Take(&attempt).Error; err != nil {

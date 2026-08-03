@@ -339,6 +339,7 @@ TypeScript/Web：只能使用 `bun run test`，禁止 `bun test`。
 
 ```bash
 bun run --cwd packages/contracts test src/providerHost.test.ts src/providerRuntime.test.ts
+bun run --cwd packages/control-plane-client test
 bun run --cwd apps/provider-host test \
   src/protocol.test.ts \
   src/runtimeEventV2.test.ts \
@@ -346,7 +347,6 @@ bun run --cwd apps/provider-host test \
   src/codexAppServerRuntime.test.ts \
   src/claudeAgentSdkRuntime.test.ts
 bun run --cwd apps/web test \
-  src/lib/controlPlaneClient.test.ts \
   src/lib/controlPlaneProjection.test.ts \
   src/session-logic.test.ts \
   src/components/ChatView.logic.test.ts

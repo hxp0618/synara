@@ -38,7 +38,7 @@ const (
 	ExportObjectFormatAzureCostJSON   ExportObjectFormat = "azure-cost-normalized-json"
 )
 
-var ErrBlobInvoiceTooLarge = errors.New("billing invoice blob exceeds size limit")
+var ErrBlobInvoiceTooLarge = errors.New("provider cost invoice blob exceeds size limit")
 
 type BlobObjectRef struct {
 	Key     string

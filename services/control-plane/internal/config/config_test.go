@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,6 +57,75 @@ func TestLoadRejectsEnterpriseDevBootstrapAndMissingPublicURL(t *testing.T) {
 	}
 }
 
+func TestLoadHardensArtifactStorageCredentialsEndpointsAndPresignTTL(t *testing.T) {
+	setValidEnterpriseArtifactConfig := func() {
+		clearConfigEnvironment(t)
+		t.Setenv("SYNARA_DEPLOYMENT_PROFILE", "enterprise")
+		t.Setenv("SYNARA_DATABASE_URL", "postgres://synara:test@db/synara")
+		t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "https://control.synara.example")
+		t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
+	}
+
+	setValidEnterpriseArtifactConfig()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ArtifactAccessKeyID != "" || cfg.ArtifactSecretAccessKey != "" || cfg.ArtifactSessionToken != "" {
+		t.Fatalf("enterprise Artifact workload identity unexpectedly contains static credentials: %#v", cfg)
+	}
+
+	for _, endpoint := range []struct {
+		name  string
+		value string
+	}{
+		{name: "SYNARA_ARTIFACT_ENDPOINT", value: "http://s3.internal.example"},
+		{name: "SYNARA_ARTIFACT_PUBLIC_ENDPOINT", value: "http://objects.synara.example"},
+		{name: "SYNARA_ARTIFACT_ENDPOINT", value: "https://operator:secret@s3.example"},
+		{name: "SYNARA_ARTIFACT_PUBLIC_ENDPOINT", value: "https://objects.synara.example/tenant"},
+	} {
+		setValidEnterpriseArtifactConfig()
+		t.Setenv(endpoint.name, endpoint.value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), endpoint.name) {
+			t.Fatalf("expected hardened Artifact endpoint rejection for %s=%q, got %v", endpoint.name, endpoint.value, err)
+		}
+	}
+
+	setValidEnterpriseArtifactConfig()
+	t.Setenv("SYNARA_ARTIFACT_PRESIGN_TTL", "15m1s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "at most 15m") {
+		t.Fatalf("expected remote Artifact presign TTL rejection, got %v", err)
+	}
+
+	setValidEnterpriseArtifactConfig()
+	t.Setenv("SYNARA_ARTIFACT_ACCESS_KEY_ID", "temporary-access")
+	t.Setenv("SYNARA_ARTIFACT_SECRET_ACCESS_KEY", "temporary-secret")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must be temporary") {
+		t.Fatalf("expected long-lived enterprise Artifact key rejection, got %v", err)
+	}
+
+	setValidEnterpriseArtifactConfig()
+	t.Setenv("SYNARA_ARTIFACT_ACCESS_KEY_ID", "temporary-access")
+	t.Setenv("SYNARA_ARTIFACT_SECRET_ACCESS_KEY", "temporary-secret")
+	t.Setenv("SYNARA_ARTIFACT_SESSION_TOKEN", "temporary-session")
+	if _, err := Load(); err != nil {
+		t.Fatalf("temporary enterprise Artifact credentials should be accepted: %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_ARTIFACT_ACCESS_KEY_ID", "orphan-access")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("expected partial Artifact credential rejection, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_ARTIFACT_ACCESS_KEY_ID", "unused-access")
+	t.Setenv("SYNARA_ARTIFACT_SECRET_ACCESS_KEY", "unused-secret")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "Local Artifact storage") {
+		t.Fatalf("expected ignored Local Artifact credential rejection, got %v", err)
+	}
+}
+
 func TestLoadValidatesCookieProxyAndIdleSessionConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
@@ -93,6 +163,25 @@ func TestLoadValidatesCookieProxyAndIdleSessionConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadBoundsDesktopEnrollmentTTL(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DesktopEnrollmentTTL != 3*time.Minute {
+		t.Fatalf("default Desktop Enrollment TTL = %s, want 3m", cfg.DesktopEnrollmentTTL)
+	}
+
+	for _, value := range []string{"59s", "5m1s"} {
+		clearConfigEnvironment(t)
+		t.Setenv("SYNARA_DESKTOP_ENROLLMENT_TTL", value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_DESKTOP_ENROLLMENT_TTL") {
+			t.Fatalf("expected bounded Desktop Enrollment TTL error for %q, got %v", value, err)
+		}
+	}
+}
+
 func TestLoadRequiresHTTPSAndSecureCookiesOutsideLoopback(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "http://synara.example.com")
@@ -110,6 +199,167 @@ func TestLoadRequiresHTTPSAndSecureCookiesOutsideLoopback(t *testing.T) {
 	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "http://127.0.0.1:3780")
 	if _, err := Load(); err != nil {
 		t.Fatalf("loopback HTTP should be allowed: %v", err)
+	}
+}
+
+func TestLoadValidatesPublicAdminURL(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_ADMIN_URL", "http://127.0.0.1:3774")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PublicAdminURL != "http://127.0.0.1:3774" {
+		t.Fatalf("public Admin URL = %q", cfg.PublicAdminURL)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_ADMIN_URL", "http://admin.synara.example")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PUBLIC_ADMIN_URL must use HTTPS") {
+		t.Fatalf("expected non-loopback Admin HTTPS requirement, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_ADMIN_URL", "ssh://admin.synara.example")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PUBLIC_ADMIN_URL must be an HTTP(S) origin") {
+		t.Fatalf("expected invalid public Admin URL rejection, got %v", err)
+	}
+}
+
+func TestLoadRequiresCompleteInternalIncidentDeliveryConfiguration(t *testing.T) {
+	setBase := func() {
+		clearConfigEnvironment(t)
+		t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
+		t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "https://control.synara.example")
+		t.Setenv("SYNARA_PUBLIC_ADMIN_URL", "https://admin.synara.example")
+		t.Setenv("SYNARA_INTERNAL_STATUS_BOARD_URL", "https://status.synara.example/history")
+	}
+	setBase()
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INTERNAL_INCIDENT_PUBLISHER") {
+		t.Fatalf("expected Status Board without publisher to fail, got %v", err)
+	}
+
+	setBase()
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://notify.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InternalIncidentPublisherURL == "" || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
+		t.Fatalf("unexpected incident publisher config: %#v", cfg)
+	}
+
+	setBase()
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://control.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "failure-independent") {
+		t.Fatalf("expected application-coupled publisher origin rejection, got %v", err)
+	}
+}
+
+func TestLoadValidatesIndependentInternalStatusBoardURL(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_INTERNAL_STATUS_BOARD_URL", "https://status.synara.example/history")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "https://notify.synara.example/hooks/incidents")
+	t.Setenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY", base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InternalStatusBoardURL != "https://status.synara.example/history" {
+		t.Fatalf("internal Status Board URL = %q", cfg.InternalStatusBoardURL)
+	}
+
+	for _, value := range []string{
+		"http://status.synara.example",
+		"https://operator:secret@status.synara.example",
+		"https://status.synara.example?tenant=secret",
+		"https://status.synara.example#internal",
+	} {
+		clearConfigEnvironment(t)
+		t.Setenv("SYNARA_INTERNAL_STATUS_BOARD_URL", value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_INTERNAL_STATUS_BOARD_URL") {
+			t.Fatalf("expected invalid internal Status Board URL rejection for %q, got %v", value, err)
+		}
+	}
+
+	for _, coupled := range []struct {
+		name  string
+		value string
+	}{
+		{name: "SYNARA_PUBLIC_CONTROL_PLANE_URL", value: "https://synara.example/api"},
+		{name: "SYNARA_PUBLIC_ADMIN_URL", value: "https://synara.example:443/admin"},
+	} {
+		clearConfigEnvironment(t)
+		t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
+		t.Setenv(coupled.name, coupled.value)
+		t.Setenv("SYNARA_INTERNAL_STATUS_BOARD_URL", "https://synara.example/status")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "failure-independent origin") {
+			t.Fatalf("expected coupled internal Status Board rejection for %s, got %v", coupled.name, err)
+		}
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_STATUS_PAGE_URL", "https://legacy-status.synara.example")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "is retired; use SYNARA_INTERNAL_STATUS_BOARD_URL") {
+		t.Fatalf("expected legacy public Status Page configuration rejection, got %v", err)
+	}
+}
+
+func TestLoadRejectsPaymentConfigurationForInternalSelfHostedProduct(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CommercializationMode != CommercializationModeInternalSelfHosted {
+		t.Fatalf("unexpected self-hosted product configuration: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_COMMERCIALIZATION_MODE", "external-subscription")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must be internal-self-hosted") {
+		t.Fatalf("expected external product mode rejection, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_COMMERCIAL_BILLING_PROVIDER", "stripe")
+	t.Setenv("SYNARA_COMMERCIAL_BILLING_RETURN_URL", "https://app.synara.example/settings")
+	t.Setenv("SYNARA_STRIPE_SECRET_KEY", "sk_test_"+strings.Repeat("x", 32))
+	t.Setenv("SYNARA_STRIPE_WEBHOOK_SECRET", "whsec_"+strings.Repeat("y", 32))
+	t.Setenv("SYNARA_STRIPE_PRICE_MAP_JSON", `{"enterprise":"price_enterprise123"}`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "unsupported by the internal-self-hosted product") {
+		t.Fatalf("expected self-hosted product mode to reject Stripe configuration, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_STRIPE_SECRET_KEY", "sk_test_"+strings.Repeat("x", 32))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "unsupported by the internal-self-hosted product") {
+		t.Fatalf("expected disabled provider to reject retained Stripe secret, got %v", err)
+	}
+
+	for _, name := range []string{
+		"SYNARA_COMMERCIAL_BILLING_PROVIDER",
+		"SYNARA_COMMERCIAL_BILLING_RETURN_URL",
+		"SYNARA_STRIPE_SECRET_KEY",
+		"SYNARA_STRIPE_WEBHOOK_SECRET",
+		"SYNARA_STRIPE_PRICE_MAP_JSON",
+		"SYNARA_STRIPE_AUTOMATIC_TAX_ENABLED",
+		"SYNARA_STRIPE_CHECKOUT_TTL",
+		"SYNARA_STRIPE_PORTAL_CONFIGURATION_ID",
+	} {
+		clearConfigEnvironment(t)
+		t.Setenv(name, "retained-payment-configuration")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "unsupported by the internal-self-hosted product") {
+			t.Errorf("expected %s to be rejected by internal-self-hosted configuration, got %v", name, err)
+		}
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_COST_ACCOUNTING_BLOB_SOURCE") {
+		t.Fatalf("expected retired Billing-prefixed cost configuration to fail with its replacement, got %v", err)
 	}
 }
 
@@ -232,6 +482,70 @@ func TestLoadValidatesCredentialKMSConfiguration(t *testing.T) {
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_CREDENTIAL_KMS_KEY_ID") {
 		t.Fatalf("expected missing AWS KMS key error, got %v", err)
 	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_CREDENTIAL_KMS_PROVIDER", "local")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_KEY_ID", "local-v2")
+	t.Setenv("SYNARA_CREDENTIAL_MASTER_KEY", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_OLD_CREDENTIAL_KEY", "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", `[{"provider":"local","keyId":"local-v1","localKeyEnvironment":"SYNARA_OLD_CREDENTIAL_KEY"}]`)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CredentialKMSDecryptKeys) != 1 || cfg.CredentialKMSDecryptKeys[0].KeyID != "local-v1" ||
+		len(cfg.CredentialKMSDecryptKeys[0].LocalKey) != 32 {
+		t.Fatalf("unexpected credential KMS fallback config: %#v", cfg.CredentialKMSDecryptKeys)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_CREDENTIAL_KMS_PROVIDER", "local")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_KEY_ID", "local-v2")
+	t.Setenv("SYNARA_CREDENTIAL_MASTER_KEY", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", `[{"provider":"local","keyId":"local-v2","localKeyEnvironment":"SYNARA_OLD_CREDENTIAL_KEY"}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "duplicates a KMS key") {
+		t.Fatalf("expected duplicate fallback KMS error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_CREDENTIAL_KMS_PROVIDER", "local")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_KEY_ID", "local-v2")
+	t.Setenv("SYNARA_CREDENTIAL_MASTER_KEY", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", `[{"provider":"local","keyId":"local-v1","localKeyEnvironment":"SYNARA_OLD_CREDENTIAL_KEY","unexpected":true}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must be a JSON array") {
+		t.Fatalf("expected unknown fallback field error, got %v", err)
+	}
+}
+
+func TestLoadValidatesProviderCursorKeyringConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY_ID", "runtime-v2")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY_OLD_V1", "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON", `[{"keyId":"runtime-v1","keyEnvironment":"SYNARA_PROVIDER_CURSOR_KEY_OLD_V1"}]`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderCursorKeyID != "runtime-v2" || len(cfg.ProviderCursorDecryptKeys) != 1 ||
+		cfg.ProviderCursorDecryptKeys[0].KeyID != "runtime-v1" || len(cfg.ProviderCursorDecryptKeys[0].Key) != 32 {
+		t.Fatalf("unexpected Provider Cursor keyring config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY_ID", "runtime-v2")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY_OLD_V1", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
+	t.Setenv("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON", `[{"keyId":"runtime-v1","keyEnvironment":"SYNARA_PROVIDER_CURSOR_KEY_OLD_V1"}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must not reuse") {
+		t.Fatalf("expected duplicate Provider Cursor key material error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_KEY_ID", "runtime-v2")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PROVIDER_CURSOR_KEY is required") {
+		t.Fatalf("expected named Provider Cursor primary key requirement, got %v", err)
+	}
 }
 
 func TestLoadValidatesProviderCredentialAccessTTL(t *testing.T) {
@@ -263,6 +577,8 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
 	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "https://synara.example.com/control-plane")
 	t.Setenv("SYNARA_AGENTD_BINARY_PATH", "/tmp/synara-agentd")
+	t.Setenv("SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT", "/srv/synara/docker-observability")
+	t.Setenv("SYNARA_SSH_WORKER_OBSERVABILITY_ROOT", "/etc/synara/targets")
 	t.Setenv("SYNARA_SSH_PROVISION_TIMEOUT", "45s")
 	t.Setenv("SYNARA_DOCKER_RECONCILE_INTERVAL", "7s")
 	t.Setenv("SYNARA_KUBERNETES_RECONCILE_INTERVAL", "3s")
@@ -274,7 +590,9 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	}
 	if cfg.PublicControlPlaneURL != "https://synara.example.com/control-plane" ||
 		cfg.AgentdBinaryPath != "/tmp/synara-agentd" || cfg.SSHProvisionTimeout.String() != "45s" ||
-		cfg.DockerReconcileInterval.String() != "7s" {
+		cfg.DockerReconcileInterval.String() != "7s" ||
+		cfg.DockerWorkerObservabilityRoot != "/srv/synara/docker-observability" ||
+		cfg.SSHWorkerObservabilityRoot != "/etc/synara/targets" {
 		t.Fatalf("unexpected SSH provisioning config: %#v", cfg)
 	}
 	if cfg.KubernetesReconcileInterval.String() != "3s" {
@@ -285,6 +603,18 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	}
 	if cfg.ResourceLifecycleSweepInterval.String() != "4s" {
 		t.Fatalf("unexpected Resource Lifecycle sweep interval: %s", cfg.ResourceLifecycleSweepInterval)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT", "relative")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT") {
+		t.Fatalf("expected invalid Docker observability root error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_SSH_WORKER_OBSERVABILITY_ROOT", "/")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_SSH_WORKER_OBSERVABILITY_ROOT") {
+		t.Fatalf("expected invalid SSH observability root error, got %v", err)
 	}
 
 	clearConfigEnvironment(t)
@@ -454,16 +784,16 @@ func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	tenantID := uuid.New()
 	targetID := uuid.New()
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
-	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
-	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
-	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com/")
-	t.Setenv("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
-	t.Setenv("SYNARA_BILLING_BLOB_PREFIX", " exports/aws ")
-	t.Setenv("SYNARA_BILLING_MAX_OBJECT_BYTES", "4096")
-	t.Setenv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID", tenantID.String())
-	t.Setenv("SYNARA_BILLING_S3_USE_PATH_STYLE", "true")
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_ENDPOINT", "https://billing.example.com/")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_PREFIX", " exports/aws ")
+	t.Setenv("SYNARA_COST_ACCOUNTING_MAX_OBJECT_BYTES", "4096")
+	t.Setenv("SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID", tenantID.String())
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_USE_PATH_STYLE", "true")
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":" AWS ",
 		"externalImportId":" july-2026 ",
@@ -475,7 +805,7 @@ func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
 		"reconcile":true,
 		"estimateAfterImport":true
 	}]`)
-	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
 		"executionTargetId":"`+targetID.String()+`",
 		"provider":" AWS ",
 		"currencyCode":" usd ",
@@ -516,6 +846,26 @@ func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
 		!shared.BillingPeriodEndAt.Equal(time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)) ||
 		shared.SettlementDelay != 24*time.Hour || shared.ScheduleInterval != 6*time.Hour {
 		t.Fatalf("unexpected billing shared allocation mapping: %#v", shared)
+	}
+}
+
+func TestLoadParsesPlatformOperatorTenant(t *testing.T) {
+	clearConfigEnvironment(t)
+	tenantID := uuid.New()
+	t.Setenv("SYNARA_PLATFORM_OPERATOR_TENANT_ID", tenantID.String())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformOperatorTenantID != tenantID {
+		t.Fatalf("platform operator Tenant = %s, want %s", cfg.PlatformOperatorTenantID, tenantID)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PLATFORM_OPERATOR_TENANT_ID", "not-a-uuid")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PLATFORM_OPERATOR_TENANT_ID must be a UUID") {
+		t.Fatalf("expected invalid Platform Operator Tenant error, got %v", err)
 	}
 }
 
@@ -561,7 +911,7 @@ func TestParseBillingSharedAllocationMappingsRejectsUnknownAndInvalidFields(t *t
 func TestLoadParsesMonthlyUTCSharedAllocationSchedule(t *testing.T) {
 	clearConfigEnvironment(t)
 	targetID := uuid.New()
-	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
 		"executionTargetId":"`+targetID.String()+`",
 		"provider":"aws",
 		"currencyCode":"USD",
@@ -591,7 +941,7 @@ func TestLoadParsesMonthlyUTCSharedAllocationSchedule(t *testing.T) {
 func TestLoadRejectsMixedStaticAndCalendarSharedAllocationFields(t *testing.T) {
 	clearConfigEnvironment(t)
 	targetID := uuid.New()
-	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON", `[{
 		"executionTargetId":"`+targetID.String()+`",
 		"provider":"aws",
 		"currencyCode":"USD",
@@ -653,13 +1003,13 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	tenantID := uuid.New()
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID", "not-a-uuid")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID must be a UUID") {
+	t.Setenv("SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID", "not-a-uuid")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID must be a UUID") {
 		t.Fatalf("expected invalid tariff operator tenant error, got %v", err)
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"aws",
 		"externalImportId":"july-2026",
@@ -671,12 +1021,12 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
-	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
-	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
-	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com")
-	t.Setenv("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_ENDPOINT", "https://billing.example.com")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"aws",
 		"externalImportId":"july-2026",
@@ -688,18 +1038,18 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
-	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
-	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
-	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com")
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_COST_ACCOUNTING_S3_ENDPOINT", "https://billing.example.com")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "custom endpoint requires explicit enablement") {
 		t.Fatalf("expected explicit custom endpoint allow error, got %v", err)
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "azure")
-	t.Setenv("SYNARA_BILLING_AZURE_CONTAINER_URL", "http://127.0.0.1:10000/devstoreaccount1/invoices")
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "azure")
+	t.Setenv("SYNARA_COST_ACCOUNTING_AZURE_CONTAINER_URL", "http://127.0.0.1:10000/devstoreaccount1/invoices")
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"azure",
 		"externalImportId":"july-2026",
@@ -712,9 +1062,9 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
-	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"aws",
 		"externalImportId":"duplicate",
@@ -732,9 +1082,9 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
-	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"aws",
 		"externalImportId":"negative",
@@ -747,9 +1097,9 @@ func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
 	}
 
 	clearConfigEnvironment(t)
-	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
-	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
-	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+	t.Setenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", `[{
 		"tenantId":"`+tenantID.String()+`",
 		"provider":"gcp",
 		"externalImportId":"provider-format-mismatch",
@@ -765,10 +1115,16 @@ func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"SYNARA_DEPLOYMENT_PROFILE", "SYNARA_METADATA_STORE", "SYNARA_ARTIFACT_STORE",
+		"SYNARA_ARTIFACT_LOCAL_PATH", "SYNARA_ARTIFACT_BUCKET", "SYNARA_ARTIFACT_REGION",
+		"SYNARA_ARTIFACT_ENDPOINT", "SYNARA_ARTIFACT_PUBLIC_ENDPOINT",
+		"SYNARA_ARTIFACT_ACCESS_KEY_ID", "SYNARA_ARTIFACT_SECRET_ACCESS_KEY",
+		"SYNARA_ARTIFACT_SESSION_TOKEN", "SYNARA_ARTIFACT_USE_PATH_STYLE",
+		"SYNARA_ARTIFACT_PRESIGN_TTL", "SYNARA_ARTIFACT_MAX_UPLOAD_BYTES",
 		"SYNARA_QUEUE_DRIVER", "SYNARA_CONTROL_PLANE_REPLICAS", "SYNARA_WORKER_LEASES_ENABLED",
 		"SYNARA_WORKER_FENCING_ENABLED", "SYNARA_DATABASE_URL", "SYNARA_LOGIN_COOKIE_SECURE",
 		"SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP", "SYNARA_LOGIN_SESSION_TTL",
 		"SYNARA_LOGIN_SESSION_IDLE_TTL", "SYNARA_LOGIN_COOKIE_NAME", "SYNARA_LOGIN_COOKIE_DOMAIN",
+		"SYNARA_DESKTOP_ENROLLMENT_TTL",
 		"SYNARA_LOGIN_COOKIE_PATH", "SYNARA_LOGIN_COOKIE_SAME_SITE", "SYNARA_TRUSTED_PROXY_CIDRS",
 		"SYNARA_CONTROL_PLANE_SHUTDOWN_TIMEOUT", "SYNARA_WORKER_LEASE_TTL",
 		"SYNARA_DATABASE_MAX_OPEN_CONNECTIONS", "SYNARA_DATABASE_MAX_IDLE_CONNECTIONS",
@@ -776,12 +1132,24 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT",
 		"SYNARA_WORKER_HEARTBEAT_TIMEOUT", "SYNARA_WORKER_RECEIPT_TTL",
 		"SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL",
+		"SYNARA_PROVIDER_CURSOR_KEY", "SYNARA_PROVIDER_CURSOR_KEY_ID",
+		"SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON", "SYNARA_PROVIDER_CURSOR_KEY_OLD_V1",
 		"SYNARA_PROVIDER_CURSOR_MAX_AGE",
 		"SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
 		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
 		"SYNARA_CREDENTIAL_KMS_PROVIDER", "SYNARA_CREDENTIAL_KMS_KEY_ID",
 		"SYNARA_CREDENTIAL_MASTER_KEY", "SYNARA_CREDENTIAL_KMS_AWS_REGION",
-		"SYNARA_PUBLIC_CONTROL_PLANE_URL", "SYNARA_AGENTD_BINARY_PATH",
+		"SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", "SYNARA_OLD_CREDENTIAL_KEY",
+		"SYNARA_PUBLIC_CONTROL_PLANE_URL", "SYNARA_PUBLIC_ADMIN_URL", "SYNARA_INTERNAL_STATUS_BOARD_URL",
+		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY",
+		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_TIMEOUT",
+		"SYNARA_PUBLIC_STATUS_PAGE_URL",
+		"SYNARA_COMMERCIALIZATION_MODE", "SYNARA_COMMERCIAL_BILLING_PROVIDER", "SYNARA_COMMERCIAL_BILLING_RETURN_URL",
+		"SYNARA_STRIPE_SECRET_KEY", "SYNARA_STRIPE_WEBHOOK_SECRET", "SYNARA_STRIPE_PRICE_MAP_JSON",
+		"SYNARA_STRIPE_AUTOMATIC_TAX_ENABLED", "SYNARA_STRIPE_CHECKOUT_TTL",
+		"SYNARA_STRIPE_PORTAL_CONFIGURATION_ID",
+		"SYNARA_AGENTD_BINARY_PATH",
+		"SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT", "SYNARA_SSH_WORKER_OBSERVABILITY_ROOT",
 		"SYNARA_SSH_PROVISION_TIMEOUT",
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
@@ -812,6 +1180,15 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_BILLING_BLOB_PREFIX", "SYNARA_BILLING_MAX_OBJECT_BYTES",
 		"SYNARA_BILLING_IMPORT_MAPPINGS_JSON", "SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON",
 		"SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID",
+		"SYNARA_COST_ACCOUNTING_BLOB_SOURCE", "SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR",
+		"SYNARA_COST_ACCOUNTING_S3_BUCKET", "SYNARA_COST_ACCOUNTING_S3_REGION", "SYNARA_COST_ACCOUNTING_S3_ENDPOINT",
+		"SYNARA_COST_ACCOUNTING_S3_USE_PATH_STYLE", "SYNARA_COST_ACCOUNTING_S3_ALLOW_CUSTOM_ENDPOINT",
+		"SYNARA_COST_ACCOUNTING_S3_ALLOW_HTTP", "SYNARA_COST_ACCOUNTING_GCS_BUCKET",
+		"SYNARA_COST_ACCOUNTING_AZURE_CONTAINER_URL", "SYNARA_COST_ACCOUNTING_AZURE_ALLOW_HTTP",
+		"SYNARA_COST_ACCOUNTING_BLOB_PREFIX", "SYNARA_COST_ACCOUNTING_MAX_OBJECT_BYTES",
+		"SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON", "SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON",
+		"SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID",
+		"SYNARA_PLATFORM_OPERATOR_TENANT_ID",
 	} {
 		t.Setenv(name, "")
 	}

@@ -25,7 +25,8 @@ import {
   hasSessionLifecycleOverrides,
   ProjectSessionSettingsSection,
 } from "./ProjectSessionSettingsSection";
-import { projectResourceLifecyclePolicyQueryKey } from "./TenantLifecyclePolicySettingsSection";
+import { projectResourceLifecyclePolicyQueryKey } from "@synara/enterprise-ui";
+import { WebEnterpriseUiHost } from "~/features/enterprise/WebEnterpriseUiHost";
 import type {
   ControlPlaneAgentSession,
   ControlPlaneExecutionTarget,
@@ -34,7 +35,7 @@ import type {
   ControlPlaneResourceLifecycleConfig,
   ControlPlaneResourceLifecyclePolicy,
   ControlPlaneSessionEvent,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 const organization: ControlPlaneOrganization = {
   id: "organization-1",
@@ -274,16 +275,18 @@ function renderProjectSessions(input?: { canReadProjects?: boolean }): string {
 
   return renderToStaticMarkup(
     <QueryClientProvider client={queryClient}>
-      <ProjectSessionSettingsSection
-        canManageProjectLifecycle={false}
-        canReadProjects={input?.canReadProjects ?? true}
-        credentials={[]}
-        executionTargets={[executionTarget]}
-        organizations={[organization]}
-        resourceLifecycleConfig={resourceLifecycleConfig}
-        tenantId="tenant-1"
-        userId="user-1"
-      />
+      <WebEnterpriseUiHost>
+        <ProjectSessionSettingsSection
+          canManageProjectLifecycle={false}
+          canReadProjects={input?.canReadProjects ?? true}
+          credentials={[]}
+          executionTargets={[executionTarget]}
+          organizations={[organization]}
+          resourceLifecycleConfig={resourceLifecycleConfig}
+          tenantId="tenant-1"
+          userId="user-1"
+        />
+      </WebEnterpriseUiHost>
     </QueryClientProvider>,
   );
 }
@@ -415,8 +418,8 @@ async function createSubmitPathHarness() {
     }),
   }));
 
-  vi.doMock("~/lib/controlPlaneClient", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("~/lib/controlPlaneClient")>();
+  vi.doMock("@synara/control-plane-client", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@synara/control-plane-client")>();
     return {
       ...actual,
       controlPlaneClient: {
@@ -625,8 +628,8 @@ async function createLiveSessionStreamHarness() {
     }),
   }));
 
-  vi.doMock("~/lib/controlPlaneClient", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("~/lib/controlPlaneClient")>();
+  vi.doMock("@synara/control-plane-client", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@synara/control-plane-client")>();
     return {
       ...actual,
       controlPlaneClient: {

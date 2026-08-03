@@ -368,7 +368,7 @@ Tenant
 | `owner`          | 全部权限，包括转移所有权和删除 Tenant |
 | `admin`          | 用户、组织、项目和 Agent 管理         |
 | `security_admin` | SSO、Credential、审计和安全策略       |
-| `billing_admin`  | 套餐、额度和用量                      |
+| `cost_admin`     | 内部用量、Token、额度和成本治理       |
 | `auditor`        | 只读审计和执行记录                    |
 | `member`         | 只能进入被授权的 Organization         |
 
@@ -420,7 +420,7 @@ credentials.manage
 worker.read
 worker.manage
 audit.read
-billing.manage
+cost.manage
 ```
 
 v1 使用固定角色和代码内 Permission Map。自定义角色和复杂 ABAC 延后。

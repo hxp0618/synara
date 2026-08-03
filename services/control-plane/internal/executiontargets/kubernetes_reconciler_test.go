@@ -225,6 +225,10 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		!bytes.Contains(environment, []byte(kubernetesStagedRegistrationTokenPath)) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) ||
+		!bytes.Contains(environment, []byte(kubernetesObservabilityConfigMapName(fixture.targetID))) ||
+		!bytes.Contains(environment, []byte("OTEL_EXPORTER_OTLP_ENDPOINT")) ||
+		bytes.Contains(environment, []byte("OTEL_EXPORTER_OTLP_CLIENT_KEY")) ||
+		bytes.Contains(environment, []byte("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")) ||
 		!bytes.Contains(environment, []byte(`"name":"SYNARA_AGENTD_LEASE_RENEW_INTERVAL","value":"2s"`)) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_DRAIN_TIMEOUT")) {
 		t.Fatalf("Kubernetes Pod secret/assignment environment is invalid: %s", environment)
@@ -985,6 +989,12 @@ func TestKubernetesReconcilerCreatesWarmPoolPodForActiveWarmPool(t *testing.T) {
 	}
 	if _, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID"); found {
 		t.Fatal("warm-pool pod unexpectedly carried an assigned execution environment")
+	}
+	warmPodJSON := mustJSON(t, pod)
+	if !bytes.Contains(warmPodJSON, []byte(kubernetesObservabilityConfigMapName(fixture.targetID))) ||
+		bytes.Contains(warmPodJSON, []byte("OTEL_EXPORTER_OTLP_CLIENT_KEY")) ||
+		bytes.Contains(warmPodJSON, []byte("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")) {
+		t.Fatalf("warm-pool Pod omitted operator observability wiring: %s", warmPodJSON)
 	}
 }
 

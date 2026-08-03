@@ -186,9 +186,9 @@ cannot approve receive sequence-preserving redacted Interaction Events instead o
 details.
 
 Resolution is rejected after Interaction expiry, Lease expiry, or Generation fencing. The response is
-idempotent, audited, and appended to Session Event replay. Approval accepts the durable SaaS decisions
+idempotent, audited, and appended to Session Event replay. Approval accepts the durable Control Plane decisions
 `accept` and `decline`; `acceptForSession` remains a local Provider-runtime behavior and is not silently
-mapped to `accept`. SaaS Cancel creates durable Interrupt intent. Local mode keeps the existing Native API
+mapped to `accept`. Control Plane Cancel creates durable Interrupt intent. Local mode keeps the existing Native API
 response and empty-answer cancel behavior.
 
 Structured User Input answers must contain exactly the persisted question keys. Values are non-empty,

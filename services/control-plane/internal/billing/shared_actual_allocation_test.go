@@ -108,7 +108,7 @@ func TestAllocateSharedActualInvoiceConservesSignedMicrosAndReplaysConcurrentFir
 		}
 	}
 	if err := fixture.db.Model(&persistence.AuditLog{}).
-		Where("tenant_id = ? AND action = ?", fixture.operatorTenantID, "billing.shared_actual_invoice_allocated").
+		Where("tenant_id = ? AND action = ?", fixture.operatorTenantID, "cost_accounting.shared_actual_invoice_allocated").
 		Count(&auditCount).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestAllocateSharedActualInvoiceConservesSignedMicrosAndReplaysConcurrentFir
 		context.Background(), fixture.principal, fixture.operatorTenantID, conflicting,
 		"shared-actual-conflict", "127.0.0.1",
 	)
-	assertProblemCode(t, err, "billing_shared_actual_allocation_conflict")
+	assertProblemCode(t, err, "cost_accounting_shared_actual_allocation_conflict")
 }
 
 func TestAllocateSharedActualInvoicePreservesNegativeInvoiceLineConservation(t *testing.T) {
@@ -195,7 +195,7 @@ func TestAllocateSharedActualInvoiceFailsClosedOnCrossTargetAmbiguity(t *testing
 		context.Background(), fixture.principal, fixture.operatorTenantID,
 		fixture.input(strings.Repeat("e", 64)), "shared-actual-ambiguous", "127.0.0.1",
 	)
-	assertProblemCode(t, err, "billing_shared_actual_allocation_target_ambiguous")
+	assertProblemCode(t, err, "cost_accounting_shared_actual_allocation_target_ambiguous")
 	var runCount int64
 	if err := fixture.db.Model(&persistence.BillingSharedActualAllocationRun{}).Count(&runCount).Error; err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestAllocateSharedActualMicrosUsesExactCumulativeIntegerConservation(t *tes
 		t.Fatalf("min-int allocation = amounts:%v estimated:%d err:%v", amounts, estimated, err)
 	}
 	_, _, err = allocateSharedActualMicros(1, []int64{0, 0})
-	assertProblemCode(t, err, "billing_shared_actual_allocation_basis_zero")
+	assertProblemCode(t, err, "cost_accounting_shared_actual_allocation_basis_zero")
 }
 
 type sharedActualFixture struct {

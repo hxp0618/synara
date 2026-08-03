@@ -41,11 +41,13 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
 	"github.com/synara-ai/synara/services/control-plane/internal/reconcilerleadership"
 	"github.com/synara-ai/synara/services/control-plane/internal/retention"
+	"github.com/synara-ai/synara/services/control-plane/internal/runtimekeys"
 	"github.com/synara-ai/synara/services/control-plane/internal/scim"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/serviceaccounts"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/internal/tenancy"
+	controltracing "github.com/synara-ai/synara/services/control-plane/internal/tracing"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
@@ -83,6 +85,22 @@ func main() {
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+	tracingPolicy := controltracing.ExportPolicyDevelopment
+	if cfg.Platform.Profile == platform.ProfileEnterprise {
+		tracingPolicy = controltracing.ExportPolicyEnterprise
+	}
+	tracingShutdown, err := controltracing.Configure(ctx, "synara-control-plane", logger, tracingPolicy)
+	if err != nil {
+		logger.Error("failed to configure OpenTelemetry tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownContext); err != nil {
+			logger.Warn("OpenTelemetry trace shutdown failed", "error", err)
+		}
+	}()
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	defer stopRuntime()
 	databaseOptions := database.Options{
@@ -125,8 +143,27 @@ func main() {
 		logger.Error("failed to configure outbox service", "error", err)
 		os.Exit(1)
 	}
+	incidentPublisher := outbox.Publisher(outbox.PublisherFunc(func(context.Context, outbox.Message) error {
+		return errors.New("internal incident publisher is not configured")
+	}))
+	if cfg.InternalIncidentPublisherURL != "" {
+		incidentPublisher, err = outbox.NewIncidentWebhookPublisher(outbox.IncidentWebhookPublisherConfig{
+			Endpoint: cfg.InternalIncidentPublisherURL,
+			HMACKey:  cfg.InternalIncidentPublisherHMACKey,
+			Timeout:  cfg.InternalIncidentPublisherTimeout,
+		})
+		if err != nil {
+			logger.Error("failed to configure internal incident publisher", "error", err)
+			os.Exit(1)
+		}
+	}
 	outboxDispatcher, err := outbox.NewDispatcher(
-		outboxService, outbox.DatabasePublisher{}, cfg.OutboxPollInterval, metrics, logger,
+		outboxService,
+		outbox.TopicPublisher{
+			Default: outbox.DatabasePublisher{},
+			Topics:  map[string]outbox.Publisher{outbox.InternalIncidentUpdateTopic: incidentPublisher},
+		},
+		cfg.OutboxPollInterval, metrics, logger,
 	)
 	if err != nil {
 		logger.Error("failed to configure outbox dispatcher", "error", err)
@@ -136,6 +173,9 @@ func main() {
 	if err != nil {
 		logger.Error("failed to bootstrap control-plane installation", "error", err)
 		os.Exit(1)
+	}
+	if cfg.PlatformOperatorTenantID == uuid.Nil && bootstrapped.Personal {
+		cfg.PlatformOperatorTenantID = bootstrapped.TenantID
 	}
 
 	identityOptions := make([]identity.PersonalDomain, 0, 1)
@@ -147,6 +187,7 @@ func main() {
 	credentialCipher, err := credentialkms.New(ctx, credentialkms.Config{
 		Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
 		LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
+		DecryptKeys: credentialKMSDecryptKeys(cfg.CredentialKMSDecryptKeys),
 	})
 	if err != nil {
 		logger.Error("failed to configure provider credential KMS", "provider", cfg.CredentialKMSProvider, "error", err)
@@ -171,7 +212,7 @@ func main() {
 		}
 		return resolution, err
 	}
-	cursorCipher, err := secret.NewCursorCipher(cfg.ProviderCursorKey)
+	cursorCipher, err := runtimekeys.NewProviderCursorCipher(cfg)
 	if err != nil {
 		logger.Error("failed to configure provider cursor encryption", "error", err)
 		os.Exit(1)
@@ -181,11 +222,12 @@ func main() {
 		AgentdBinaryPath: cfg.AgentdBinaryPath, RegistrationToken: cfg.WorkerRegistrationToken,
 		PublicControlPlaneURL: cfg.PublicControlPlaneURL, WorkerLeaseTTL: cfg.WorkerLeaseTTL,
 		WorkerHeartbeatTimeout: cfg.WorkerHeartbeatTimeout, Timeout: cfg.SSHProvisionTimeout,
+		ObservabilityRoot: cfg.SSHWorkerObservabilityRoot,
 	})
 	dockerReconciler := executiontargets.NewDockerPoolReconciler(executionTargetService, executiontargets.DockerPoolReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
 		WorkerLeaseTTL: cfg.WorkerLeaseTTL, Interval: cfg.DockerReconcileInterval,
-		Observer: metrics, ResolveImagePull: resolveImagePull,
+		Observer: metrics, ResolveImagePull: resolveImagePull, ObservabilityRoot: cfg.DockerWorkerObservabilityRoot,
 	}, logger)
 	reconcilerLeadershipConfig, err := loadReconcilerLeadershipConfig(cfg)
 	if err != nil {
@@ -218,6 +260,9 @@ func main() {
 		executions.WithMemoryReferenceResolver(memoryService),
 		executions.WithProviderCredentialAccessTTL(cfg.ProviderCredentialAccessTTL),
 		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
+		executions.WithHostedProviderCommercialAuthorization(
+			cfg.PlatformOperatorTenantID, cfg.Platform.Profile == platform.ProfileEnterprise,
+		),
 	)
 	workerPoolAutoscalingService := poolautoscaling.NewService(
 		db,
@@ -682,6 +727,16 @@ func main() {
 	if serveErr != nil || httpShutdownErr != nil {
 		os.Exit(1)
 	}
+}
+
+func credentialKMSDecryptKeys(values []config.CredentialKMSDecryptKeyConfig) []credentialkms.DecryptKeyConfig {
+	result := make([]credentialkms.DecryptKeyConfig, 0, len(values))
+	for _, value := range values {
+		result = append(result, credentialkms.DecryptKeyConfig{
+			Provider: value.Provider, KeyID: value.KeyID, LocalKey: value.LocalKey, Region: value.Region,
+		})
+	}
+	return result
 }
 
 func newControlPlaneHTTPServer(

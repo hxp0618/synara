@@ -95,7 +95,7 @@ func NewService(db *gorm.DB, platformConfig platform.Config, cipher *secret.Curs
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]Target, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -117,7 +117,7 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 }
 
 func (s *Service) Get(ctx context.Context, principal identity.Principal, tenantID, targetID uuid.UUID) (Target, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Target{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -131,7 +131,7 @@ func (s *Service) Get(ctx context.Context, principal identity.Principal, tenantI
 }
 
 func (s *Service) Create(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, input CreateInput) (Target, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Target{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -192,7 +192,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	model := persistence.ExecutionTarget{
 		ID: uuid.New(), TenantID: &tenantID, OrganizationID: input.OrganizationID,
 		Kind: string(kind), Name: name, Status: status, ConfigurationEncrypted: configuration,
-		Capabilities: capabilities,
+		ConfigurationKeyID: runtimeSecretKeyID(s.cipher, configuration), Capabilities: capabilities,
 	}
 	if err := s.db.WithContext(ctx).Create(&model).Error; err != nil {
 		return Target{}, problem.Wrap(409, "execution_target_create_rejected", "Execution target creation was rejected.", err)
@@ -206,7 +206,7 @@ func (s *Service) UpdateProviderPolicy(
 	tenantID, targetID uuid.UUID,
 	rawPolicy map[string]any,
 ) (Target, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Target{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -280,7 +280,7 @@ func (s *Service) UpdateProcessContainmentPolicy(
 	tenantID, targetID uuid.UUID,
 	rawPolicy map[string]any,
 ) (Target, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Target{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -773,6 +773,14 @@ func requireTargetRuntimeIsolationTransitionDrained(ctx context.Context, tx *gor
 	return nil
 }
 
+func runtimeSecretKeyID(cipher *secret.CursorCipher, encrypted []byte) *string {
+	if cipher == nil || len(encrypted) == 0 || cipher.PrimaryKeyID() == "" {
+		return nil
+	}
+	keyID := cipher.PrimaryKeyID()
+	return &keyID
+}
+
 func toTarget(model persistence.ExecutionTarget) Target {
 	capabilities := model.Capabilities
 	if capabilities == nil {
@@ -948,7 +956,6 @@ func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error
 	}
 	return nil
 }
-
 func normalizeExecutionTargetCapabilities(capabilities map[string]any) (map[string]any, error) {
 	normalized, err := normalizeProviderPolicyCapabilities(capabilities)
 	if err != nil {

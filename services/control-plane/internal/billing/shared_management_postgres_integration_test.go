@@ -84,7 +84,7 @@ func TestPostgresConcurrentSharedLedgerCoverageSealSerializesExactReplay(t *test
 	}
 	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
 		Where("tenant_id = ? AND action = ? AND resource_id = ?", operatorTenantID,
-			"billing.shared_target_ledger_coverage_sealed", first.coverage.ID).
+			"cost_accounting.shared_target_ledger_coverage_sealed", first.coverage.ID).
 		Count(&auditCount).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestPostgresConcurrentSharedLedgerCoverageSealSerializesExactReplay(t *test
 	_, _, err = service.SealSharedTargetLedgerCoverageAuthorized(
 		ctx, principal, operatorTenantID, target.ID, conflict, "shared-coverage-pg-conflict", "127.0.0.1",
 	)
-	assertProblemCode(t, err, "billing_shared_ledger_coverage_conflict")
+	assertProblemCode(t, err, "cost_accounting_shared_ledger_coverage_conflict")
 }
 
 func TestPostgresSharedAllocationSchedulerLeadershipHandoffReplaysExplicitPeriod(t *testing.T) {
@@ -237,7 +237,7 @@ func TestPostgresSharedAllocationSchedulerLeadershipHandoffReplaysExplicitPeriod
 	var scheduledAudits int64
 	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
 		Where("tenant_id = ? AND action = ? AND resource_id = ?", operatorTenantID,
-			"billing.shared_cost_allocation_sweep_scheduled", target.ID).
+			"cost_accounting.shared_cost_allocation_sweep_scheduled", target.ID).
 		Count(&scheduledAudits).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestPostgresMonthlySharedAllocationScheduleDurableClaimAllowsOneReplica(t *
 	var scheduledAudits int64
 	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
 		Where("tenant_id = ? AND action = ? AND resource_id = ?", operatorTenantID,
-			"billing.shared_cost_allocation_sweep_scheduled", target.ID).
+			"cost_accounting.shared_cost_allocation_sweep_scheduled", target.ID).
 		Count(&scheduledAudits).Error; err != nil {
 		t.Fatal(err)
 	}

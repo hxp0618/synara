@@ -220,6 +220,59 @@ func TestTenantOperatorsCanInspectAndAuditReplayWithoutPayloadExposure(t *testin
 	}
 }
 
+func TestTenantOutboxRejectsActiveTenantAndMessageIDSubstitution(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	db := adminTestDB(t)
+	service := testServiceWithInstance(t, db, &now, "tenant-isolation", 3)
+	userID, tenantA, tenantB, messageID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	deadAt := now
+	for _, model := range []any{
+		&persistence.User{ID: userID, Email: "outbox-isolation@example.com", DisplayName: "Outbox isolation", Status: "active"},
+		&persistence.Tenant{ID: tenantA, Slug: "outbox-tenant-a", Name: "Outbox Tenant A", Status: "active", PlanCode: "free", Region: "default", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.Tenant{ID: tenantB, Slug: "outbox-tenant-b", Name: "Outbox Tenant B", Status: "active", PlanCode: "free", Region: "default", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.TenantMembership{TenantID: tenantA, UserID: userID, Role: "admin", Status: "active", JoinedAt: &now},
+		&persistence.TenantMembership{TenantID: tenantB, UserID: userID, Role: "admin", Status: "active", JoinedAt: &now},
+		&persistence.OutboxMessage{ID: messageID, TenantID: &tenantA, Topic: "artifact.ready", MessageKey: uuid.NewString(), Payload: map[string]any{"secret": "tenant-a"}, Headers: map[string]any{}, Attempts: 3, AvailableAt: now, CreatedAt: now, DeadLetteredAt: &deadAt},
+	} {
+		if err := db.Create(model).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	principal := identity.Principal{UserID: userID, ActiveTenantID: &tenantB}
+	_, err := service.ListForTenant(context.Background(), principal, tenantA, ListQuery{Status: "all"})
+	if problemCode(err) != "tenant_not_found" {
+		t.Fatalf("cross-active-Tenant Outbox list error = %v", err)
+	}
+	_, err = service.ReplayAuthorized(
+		context.Background(), principal, tenantA, messageID, "outbox-cross-active", "127.0.0.1",
+	)
+	if problemCode(err) != "tenant_not_found" {
+		t.Fatalf("cross-active-Tenant Outbox replay error = %v", err)
+	}
+	principal.ActiveTenantID = &tenantB
+	_, err = service.ReplayAuthorized(
+		context.Background(), principal, tenantB, messageID, "outbox-cross-message", "127.0.0.1",
+	)
+	if problemCode(err) != "outbox_message_not_found" {
+		t.Fatalf("cross-Tenant Outbox message replay error = %v", err)
+	}
+	var message persistence.OutboxMessage
+	if err := db.Where("tenant_id = ? AND id = ?", tenantA, messageID).Take(&message).Error; err != nil {
+		t.Fatal(err)
+	}
+	if message.DeadLetteredAt == nil || message.Attempts != 3 {
+		t.Fatalf("cross-Tenant replay mutated original Outbox message: %#v", message)
+	}
+}
+
+func problemCode(err error) string {
+	var apiError *problem.Error
+	if errors.As(err, &apiError) {
+		return apiError.Code
+	}
+	return ""
+}
+
 type memoryPublisher struct {
 	mu       sync.Mutex
 	messages []Message

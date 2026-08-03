@@ -14,6 +14,7 @@ import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
 import { cn } from "~/lib/utils";
 
 import { FeatureSection } from "./FeatureSection";
+import { ReleaseNoticeSection } from "./ReleaseNoticeSection";
 import type { WhatsNewEntry } from "./logic";
 
 export interface ChangelogAccordionProps {
@@ -83,6 +84,9 @@ function ChangelogAccordionRow({
         </CollapsibleTrigger>
         <CollapsiblePanel>
           <div className="flex flex-col gap-6 pb-4 pl-6 pr-1">
+            {entry.notices?.map((notice) => (
+              <ReleaseNoticeSection key={notice.id} notice={notice} />
+            ))}
             {entry.features.map((feature) => (
               <FeatureSection key={feature.id} feature={feature} />
             ))}

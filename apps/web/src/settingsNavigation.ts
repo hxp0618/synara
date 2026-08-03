@@ -3,12 +3,18 @@
 // Layer: Route/UI support
 // Exports: section ids, nav items, and search normalization helper
 
+import {
+  ENTERPRISE_SETTINGS_NAV_ITEMS,
+  ENTERPRISE_SETTINGS_SECTION_IDS,
+} from "@synara/enterprise-ui";
+
 export const SETTINGS_SECTION_IDS = [
   "general",
   "profile",
   "appearance",
   "notifications",
   "behavior",
+  "saas",
   "appsnap",
   "shortcuts",
   "worktrees",
@@ -18,8 +24,8 @@ export const SETTINGS_SECTION_IDS = [
   "skills",
   "usage",
   "integrations",
-  "tenancy",
   "advanced",
+  ...ENTERPRISE_SETTINGS_SECTION_IDS,
 ] as const;
 
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
@@ -63,7 +69,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   { id: "archived", label: "Archived" },
 ] as const;
 
-export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
+export const CORE_SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
   {
     id: "general",
     group: "personal",
@@ -116,9 +122,18 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     id: "usage",
     group: "personal",
     label: "Usage & limits",
-    description: "See remaining quota and credits for every signed-in provider.",
+    description:
+      "See Token, execution, Provider cost and soft limits for every signed-in provider.",
     icon: "gauge",
-    eyebrow: "Provider limits",
+    eyebrow: "Usage and cost",
+  },
+  {
+    id: "saas",
+    group: "integrations",
+    label: "Cloud Panel connection",
+    description: "Review the Cloud Panel and Tenant connected to this device.",
+    icon: "cloud",
+    eyebrow: "Desktop account",
   },
   {
     id: "appsnap",
@@ -169,14 +184,6 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     eyebrow: "Workspace management",
   },
   {
-    id: "tenancy",
-    group: "organization",
-    label: "Organization",
-    description: "Tenants, organizations, memberships, roles, and invitations.",
-    icon: "buildings",
-    eyebrow: "SaaS control plane",
-  },
-  {
     id: "advanced",
     group: "system",
     label: "System tools",
@@ -192,6 +199,11 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     icon: "archive",
     eyebrow: "Thread management",
   },
+] as const;
+
+export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
+  ...CORE_SETTINGS_NAV_ITEMS,
+  ...ENTERPRISE_SETTINGS_NAV_ITEMS,
 ] as const;
 
 /**
@@ -211,6 +223,11 @@ export function settingRowAnchorId(title: string): string {
 export function normalizeSettingsSection(value: unknown): SettingsSectionId {
   if (typeof value !== "string") {
     return "general";
+  }
+  // Preserve the original aggregate Organization deep link while Phase A splits it into
+  // ordinary Settings destinations. New links only emit the canonical destination id.
+  if (value === "tenancy") {
+    return "organization-overview";
   }
   return SETTINGS_SECTION_IDS.find((candidate) => candidate === value) ?? "general";
 }

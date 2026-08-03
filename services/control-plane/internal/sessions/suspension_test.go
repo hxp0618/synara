@@ -41,6 +41,36 @@ func TestSuspendedTenantCannotCreateTurnExecution(t *testing.T) {
 	}
 }
 
+func TestOnlyUnexpiredTrialTenantCanCreateTurnExecution(t *testing.T) {
+	t.Run("unexpired", func(t *testing.T) {
+		fixture := newTenantExecutionPolicyFixture(t)
+		expiresAt := time.Now().UTC().Add(time.Hour)
+		if err := fixture.db.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
+			Updates(map[string]any{"status": "trialing", "trial_expires_at": expiresAt}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.service.CreateTurn(context.Background(), fixture.principal, fixture.sessionID,
+			CreateTurnInput{InputText: "trial execution"}, "trial-turn", "127.0.0.1"); err != nil {
+			t.Fatalf("unexpired trial could not create a Turn: %v", err)
+		}
+	})
+
+	t.Run("expired", func(t *testing.T) {
+		fixture := newTenantExecutionPolicyFixture(t)
+		expiresAt := time.Now().UTC().Add(-time.Minute)
+		if err := fixture.db.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
+			Updates(map[string]any{"status": "trialing", "trial_expires_at": expiresAt}).Error; err != nil {
+			t.Fatal(err)
+		}
+		_, err := fixture.service.CreateTurn(context.Background(), fixture.principal, fixture.sessionID,
+			CreateTurnInput{InputText: "expired trial execution"}, "expired-trial-turn", "127.0.0.1")
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "tenant_suspended" {
+			t.Fatalf("expected expired trial rejection, got %v", err)
+		}
+	})
+}
+
 func TestConcurrentExecutionQuotaRejectsSecondActiveExecution(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	maxExecutions := 1

@@ -7,28 +7,28 @@ projection and must be updated in the same change that edits that file.
 
 ## Tenant roles
 
-| Capability group                          | owner  | admin  | security_admin | billing_admin | auditor   | member                     |
-| ----------------------------------------- | ------ | ------ | -------------- | ------------- | --------- | -------------------------- |
-| Tenant read                               | yes    | yes    | yes            | yes           | yes       | yes                        |
-| Tenant update                             | yes    | yes    | no             | no            | no        | no                         |
-| Tenant delete                             | yes    | no     | no             | no            | no        | no                         |
-| Member read                               | yes    | yes    | yes            | yes           | yes       | no                         |
-| Member invite/update/remove               | yes    | yes    | no             | no            | no        | no                         |
-| Organization management                   | yes    | yes    | no             | no            | no        | no                         |
-| Project/session/execution operations      | yes    | yes    | read-only      | no            | read-only | organization role required |
-| Artifacts (`artifact.*`)                  | manage | manage | read           | no            | read      | no                         |
-| Credentials (`credentials.*`)             | manage | use    | manage         | no            | no        | no                         |
-| Workers (`worker.*`)                      | manage | manage | read           | no            | no        | no                         |
-| Audit (`audit.read`)                      | read   | read   | read           | no            | read      | no                         |
-| Outbox operations (`outbox.*`)            | manage | manage | read           | no            | read      | no                         |
-| Enterprise identity (`identity.*`)        | manage | read   | manage         | no            | no        | no                         |
-| Login Session revocation                  | manage | manage | manage         | no            | no        | no                         |
-| Service accounts (`service_accounts.*`)   | manage | manage | manage         | no            | no        | no                         |
-| Quota (`quota.*`)                         | manage | manage | no             | manage        | read      | no                         |
-| Retention (`retention.*`)                 | manage | manage | manage         | no            | read      | no                         |
-| Resource lifecycle (`lifecycle.*`)        | manage | manage | read           | no            | read      | no                         |
-| Scheduling policy (`scheduling_policy.*`) | manage | manage | manage         | no            | read      | no                         |
-| Billing (`billing.manage`)                | manage | no     | no             | manage        | no        | no                         |
+| Capability group                          | owner  | admin  | security_admin | cost_admin | auditor   | member                     |
+| ----------------------------------------- | ------ | ------ | -------------- | ---------- | --------- | -------------------------- |
+| Tenant read                               | yes    | yes    | yes            | yes        | yes       | yes                        |
+| Tenant update                             | yes    | yes    | no             | no         | no        | no                         |
+| Tenant delete                             | yes    | no     | no             | no         | no        | no                         |
+| Member read                               | yes    | yes    | yes            | yes        | yes       | no                         |
+| Member invite/update/remove               | yes    | yes    | no             | no         | no        | no                         |
+| Organization management                   | yes    | yes    | no             | no         | no        | no                         |
+| Project/session/execution operations      | yes    | yes    | read-only      | no         | read-only | organization role required |
+| Artifacts (`artifact.*`)                  | manage | manage | read           | no         | read      | no                         |
+| Credentials (`credentials.*`)             | manage | use    | manage         | no         | no        | no                         |
+| Workers (`worker.*`)                      | manage | manage | read           | no         | no        | no                         |
+| Audit (`audit.read`)                      | read   | read   | read           | no         | read      | no                         |
+| Outbox operations (`outbox.*`)            | manage | manage | read           | no         | read      | no                         |
+| Enterprise identity (`identity.*`)        | manage | read   | manage         | no         | no        | no                         |
+| Login Session revocation                  | manage | manage | manage         | no         | no        | no                         |
+| Service accounts (`service_accounts.*`)   | manage | manage | manage         | no         | no        | no                         |
+| Quota (`quota.*`)                         | manage | manage | no             | manage     | read      | no                         |
+| Retention (`retention.*`)                 | manage | manage | manage         | no         | read      | no                         |
+| Resource lifecycle (`lifecycle.*`)        | manage | manage | read           | no         | read      | no                         |
+| Scheduling policy (`scheduling_policy.*`) | manage | manage | manage         | no         | read      | no                         |
+| Internal cost accounting (`cost.manage`)  | manage | no     | no             | manage     | no        | no                         |
 
 In this table `manage` includes the group's read permissions; `use` means `credentials.use` only
 (Session-scoped Credential resolution without read or management access).
@@ -50,7 +50,7 @@ In this table `manage` includes the group's read permissions; `use` means `crede
 Tenant permissions may grant access across all organizations (for example Tenant Owner/Admin).
 Otherwise an active Organization Membership is required and its role supplies the permission.
 
-`billing.manage` covers listing the shared provider tariff catalog plus tenant-owned invoice import and reconciliation
+`cost.manage` covers listing the shared provider tariff catalog plus tenant-owned provider-cost import and reconciliation
 operations. Appending to the shared catalog, sealing/sweeping shared-Target estimate authority, and allocating an
 operator-owned account invoice to a shared Target also require the active/path Tenant to match the server-configured
 platform tariff-operator Tenant; tenant permission alone never grants a global rate or shared actual-cost mutation.

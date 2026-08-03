@@ -18,6 +18,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
@@ -78,7 +79,7 @@ func (s *Service) Get(
 	principal identity.Principal,
 	tenantID uuid.UUID,
 ) (Policy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Policy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.RetentionRead); err != nil {
@@ -102,7 +103,7 @@ func (s *Service) Update(
 	input UpdateInput,
 	requestID, ipAddress string,
 ) (Policy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Policy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.RetentionManage); err != nil {
@@ -176,7 +177,7 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) RunOnce(ctx context.Context, limit int) error {
-	release, acquired, err := persistence.TryAdvisoryLock(ctx, s.db, "synara:tenant-retention-sweeper")
+	release, acquired, err := persistence.TryAdvisoryLock(ctx, s.db, retentiongate.SweepLockKey)
 	if err != nil {
 		return problem.Wrap(500, "retention_lock_failed", "Retention sweep coordination failed.", err)
 	}
@@ -326,13 +327,6 @@ func (s *Service) applyPolicy(
 func validateDays(value *int) error {
 	if value != nil && (*value < 1 || *value > 36500) {
 		return errors.New("retention days must be between 1 and 36500 or null")
-	}
-	return nil
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
 	}
 	return nil
 }

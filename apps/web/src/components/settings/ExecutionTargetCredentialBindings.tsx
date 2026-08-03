@@ -15,7 +15,7 @@ import {
   type ControlPlaneCredential,
   type ControlPlaneCredentialBinding,
   type ControlPlaneExecutionTarget,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { listUsableControlPlaneCredentials } from "~/lib/controlPlaneCredentials";
 
 function targetCredentialBindingsQueryKey(tenantId: string, targetId: string) {

@@ -12,6 +12,11 @@ The target configuration then references `synara-worker` and
 `sandboxAllowedTenantIds`. Copying the configuration to another tenant fails
 closed until that tenant is deliberately selected.
 
+The standard template uses the same fixed optional, credentialless Worker observability ConfigMap as native Pods. Apply
+`../worker-observability.example.yaml` through the Target Namespace's operator authority before enabling its endpoint, and
+admit the collector through the Target NetworkPolicy. Do not inject Collector credentials through SandboxClaim labels or
+`envVarsInjectionPolicy`; the template keeps dynamic environment injection disabled.
+
 For Cocoon, start from `cocoon.example.yaml` and pin the first `agent`
 container to the immutable guest image. The container name is part of
 vk-cocoon's exec/logs contract. Keep

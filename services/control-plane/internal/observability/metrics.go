@@ -233,7 +233,8 @@ func (r *Registry) ObserveBackground(kind string, started time.Time, err error) 
 	switch kind {
 	case "docker", "kubernetes", "target-failover", "resource-lifecycle",
 		"worker-release-auto-rollback", "retention", "billing-import-scheduler",
-		"billing-shared-allocation-scheduler", "metric-rollup", "worker-pool-autoscaling", "outbox":
+		"billing-shared-allocation-scheduler",
+		"metric-rollup", "worker-pool-autoscaling", "outbox":
 	default:
 		kind = "other"
 	}
@@ -1387,7 +1388,8 @@ func cloneMap[K comparable, V any](values map[K]V) map[K]V {
 
 func labels(values map[string]string) string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
+	for key, value := range values {
+		validateMetricLabel(key, value)
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -1399,7 +1401,88 @@ func labels(values map[string]string) string {
 }
 
 func addLabel(existing, key, value string) string {
+	validateMetricLabel(key, value)
 	return strings.TrimSuffix(existing, "}") + "," + key + "=\"" + escapeLabel(value) + "\"}"
+}
+
+func validateMetricLabel(key, value string) {
+	if !validMetricLabelKey(key) || forbiddenMetricLabelKey(key) || forbiddenMetricLabelValue(value) {
+		// Never include the rejected key or value in the panic: the metrics endpoint
+		// must fail closed without copying a possible identifier or secret into logs.
+		panic("unsafe metric label rejected")
+	}
+}
+
+func validMetricLabelKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '_' {
+			continue
+		}
+		if index > 0 && character >= '0' && character <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func forbiddenMetricLabelKey(value string) bool {
+	value = strings.ToLower(value)
+	switch value {
+	case "id", "tenant", "organization", "user", "session", "turn", "execution", "generation",
+		"worker", "target", "pod", "artifact", "credential", "request", "trace", "publisher",
+		"key", "nonce", "digest", "token", "secret", "email", "subject", "reference", "url":
+		return true
+	}
+	for _, suffix := range []string{
+		"_id", "_uuid", "_digest", "_hash", "_nonce", "_token", "_secret", "_email", "_subject",
+		"_reference", "_url",
+	} {
+		if strings.HasSuffix(value, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func forbiddenMetricLabelValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) > 128 {
+		return true
+	}
+	if _, err := uuid.Parse(value); err == nil {
+		return true
+	}
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{
+		"http://", "https://", "postgres://", "postgresql://", "file://", "ssh://", "sha256:",
+		"sk_live_", "sk_test_", "rk_live_", "rk_test_", "ghp_", "github_pat_", "xoxb-", "xoxp-",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	if strings.Contains(value, "@") {
+		return true
+	}
+	return isHexMetricIdentifier(value)
+}
+
+func isHexMetricIdentifier(value string) bool {
+	switch len(value) {
+	case 32, 40, 64, 128:
+	default:
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') && (character < 'A' || character > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func escapeLabel(value string) string {

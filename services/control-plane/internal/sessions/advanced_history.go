@@ -402,6 +402,7 @@ func clearProviderCursorForHistoryMutation(
 ) error {
 	updates := map[string]any{
 		"provider_resume_cursor_encrypted":           nil,
+		"provider_resume_cursor_key_id":              nil,
 		"provider_resume_cursor_state":               "absent",
 		"provider_resume_cursor_source_execution_id": nil,
 		"provider_resume_cursor_source_generation":   nil,
@@ -412,6 +413,7 @@ func clearProviderCursorForHistoryMutation(
 		return problem.Wrap(500, "session_cursor_clear_failed", "The stale Provider Cursor could not be cleared.", err)
 	}
 	session.ProviderResumeCursorEncrypted = nil
+	session.ProviderResumeCursorKeyID = nil
 	session.ProviderResumeCursorState = "absent"
 	session.ProviderResumeCursorSourceExecutionID = nil
 	session.ProviderResumeCursorSourceGeneration = nil

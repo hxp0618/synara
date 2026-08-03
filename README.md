@@ -40,7 +40,7 @@ For the Phase 1 single-server Docker Compose deployment, provider login,
 reverse proxy, backup, and automated/manual acceptance checks, see
 [REMOTE.md](./REMOTE.md).
 
-## SaaS control-plane foundations
+## Self-hosted control-plane foundations
 
 The in-progress Go control plane now supports three explicit deployment profiles (`personal`,
 `single-node`, and `enterprise`) and four independent execution target kinds (`local`, `ssh`, `docker`,
@@ -55,7 +55,8 @@ semantics are maintained in the
 [`services/control-plane` README](./services/control-plane/README.md#persistence).
 
 - Personal Compose example: [`deploy/personal`](./deploy/personal)
-- Single-node SaaS Compose example: [`deploy/saas`](./deploy/saas)
+- Single-node self-hosted Compose example: [`deploy/saas`](./deploy/saas)
+- Enterprise user, administrator, deployment and troubleshooting docs: [`docs/enterprise`](./docs/enterprise)
 - Revised tenancy plan: [`docs/plans/saas-tenancy-organization-user-plan.md`](docs/plans/saas-tenancy-organization-user-plan.md)
 - Profile/target ADR: [`docs/adr/0002-deployment-profile-execution-target-v1.md`](./docs/adr/0002-deployment-profile-execution-target-v1.md)
 

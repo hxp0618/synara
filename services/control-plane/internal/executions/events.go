@@ -38,7 +38,7 @@ func (s *Service) AppendRuntimeEvent(
 	}
 
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.runtime_event", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.runtime_event", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID         `json:"executionId"`
 		Input       RuntimeEventInput `json:"input"`
 	}{executionID, input}, 201, func(tx *gorm.DB) (RuntimeEventResult, error) {
@@ -84,6 +84,9 @@ func (s *Service) AppendRuntimeEvent(
 			Payload: input.Payload, OccurredAt: &input.OccurredAt,
 		})
 		if err != nil {
+			return RuntimeEventResult{}, err
+		}
+		if err := s.projectRuntimeUsageLocked(ctx, tx, execution, input.EventType, input.Payload, appended.Sequence); err != nil {
 			return RuntimeEventResult{}, err
 		}
 		if input.EventType == "session.started" {

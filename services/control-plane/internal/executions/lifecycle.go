@@ -16,6 +16,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercommercial"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
@@ -156,7 +157,7 @@ func (s *Service) Claim(
 				convertedLease := toLease(lease, plainToken)
 				result = ClaimResult{
 					Execution: &convertedExecution, Lease: &convertedLease, Workload: workload,
-					ProviderResumeCursor: resumeCursor,
+					ProviderResumeCursor: resumeCursor, Traceparent: executionTraceparent(execution),
 				}
 				replayed = true
 				return nil
@@ -197,7 +198,7 @@ func (s *Service) Claim(
 			claimNow := s.now()
 			var execution persistence.AgentExecution
 			claimQuery := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
-				Joins("JOIN tenants AS claim_tenant ON claim_tenant.id = agent_executions.tenant_id AND claim_tenant.status = ? AND claim_tenant.deleted_at IS NULL", "active").
+				Joins("JOIN tenants AS claim_tenant ON claim_tenant.id = agent_executions.tenant_id AND claim_tenant.deleted_at IS NULL AND (claim_tenant.status = ? OR (claim_tenant.status = ? AND claim_tenant.trial_expires_at > CURRENT_TIMESTAMP))", "active", "trialing").
 				Joins("JOIN agent_sessions AS claim_session ON claim_session.tenant_id = agent_executions.tenant_id AND claim_session.id = agent_executions.session_id").
 				Where("claim_session.absolute_expires_at IS NULL OR claim_session.absolute_expires_at > ?", claimNow).
 				Where("agent_executions.status IN ? AND agent_executions.execution_target_id = ? AND agent_executions.target_kind = ?", []string{"queued", "recovering"}, normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind)
@@ -320,6 +321,15 @@ func (s *Service) Claim(
 				claimSnapshot, snapshotErr := loadProviderCursorClaimSnapshot(ctx, tx, execution, claimWorker, now)
 				if snapshotErr != nil {
 					return snapshotErr
+				}
+				if s.providerCommercialAuthorizationRequired && execution.Provider != nil {
+					if err := providercommercial.RequireHostedExecution(ctx, tx, s.providerCommercialOperatorTenantID, providercommercial.HostedExecutionInput{
+						TenantID: execution.TenantID, Provider: *execution.Provider, TargetKind: execution.TargetKind,
+						PlacementRegion: execution.PlacementRegion, CredentialID: claimSnapshot.CredentialID,
+						CredentialVersion: claimSnapshot.CredentialVersion,
+					}, now); err != nil {
+						return err
+					}
 				}
 				plainToken, tokenHash, tokenErr := secret.NewToken()
 				if tokenErr != nil {
@@ -457,7 +467,7 @@ func (s *Service) Claim(
 				convertedLease := toLease(lease, plainToken)
 				result = ClaimResult{
 					Execution: &convertedExecution, Lease: &convertedLease, Workload: &workload,
-					ProviderResumeCursor: resumeSelection.Cursor,
+					ProviderResumeCursor: resumeSelection.Cursor, Traceparent: executionTraceparent(execution),
 				}
 			}
 
@@ -498,6 +508,13 @@ func (s *Service) Claim(
 		return OperationResult[ClaimResult]{Value: result, Replayed: replayed, StatusCode: 200}, nil
 	}
 	return OperationResult[ClaimResult]{}, problem.New(409, "request_receipt_conflict", "The claim request is still being committed; retry with the same X-Request-ID.")
+}
+
+func executionTraceparent(execution persistence.AgentExecution) string {
+	if execution.Traceparent == nil {
+		return ""
+	}
+	return *execution.Traceparent
 }
 
 func validateWorkerExecutionPoolAffinity(
@@ -545,7 +562,7 @@ func (s *Service) Renew(
 	requestID string,
 ) (OperationResult[Lease], error) {
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.renew", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.renew", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID       `json:"executionId"`
 		Input       RenewLeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Lease, error) {
@@ -612,7 +629,7 @@ func (s *Service) Start(
 	requestID string,
 ) (OperationResult[Execution], error) {
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.start", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.start", executionID, input, struct {
 		ExecutionID uuid.UUID  `json:"executionId"`
 		Input       LeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
@@ -671,7 +688,7 @@ func (s *Service) Complete(
 	requestID string,
 ) (OperationResult[Execution], error) {
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.complete", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.complete", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID              `json:"executionId"`
 		Input       CompleteExecutionInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
@@ -796,7 +813,7 @@ func (s *Service) Fail(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_failure_message", "failureMessage must not exceed 10000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.fail", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.fail", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID          `json:"executionId"`
 		Input       FailExecutionInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
@@ -904,7 +921,7 @@ func (s *Service) Release(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_release_reason", "reason must not exceed 1000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.release", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.release", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID         `json:"executionId"`
 		Input       ReleaseLeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {

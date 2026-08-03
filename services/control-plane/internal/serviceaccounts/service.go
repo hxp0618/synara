@@ -17,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenantstate"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -82,7 +83,7 @@ func NewService(db *gorm.DB) *Service {
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]Account, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.ServiceAccountsRead); err != nil {
@@ -100,7 +101,7 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 }
 
 func (s *Service) Create(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, input CreateInput, requestID, ipAddress string) (IssuedAccount, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return IssuedAccount{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.ServiceAccountsManage); err != nil {
@@ -144,7 +145,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 }
 
 func (s *Service) RotateToken(ctx context.Context, principal identity.Principal, tenantID, accountID uuid.UUID, expiresAt *time.Time, requestID, ipAddress string) (IssuedToken, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return IssuedToken{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.ServiceAccountsManage); err != nil {
@@ -184,7 +185,7 @@ func (s *Service) RotateToken(ctx context.Context, principal identity.Principal,
 }
 
 func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tenantID, accountID uuid.UUID, requestID, ipAddress string) error {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.ServiceAccountsManage); err != nil {
@@ -221,14 +222,19 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 		return Principal{}, problem.New(401, "invalid_service_account_token", "Service Account authentication failed.")
 	}
 	hash := sha256.Sum256([]byte(token))
+	now := s.now()
 	type row struct {
 		persistence.ServiceAccount
-		TokenID uuid.UUID `gorm:"column:token_id"`
+		TokenID              uuid.UUID  `gorm:"column:token_id"`
+		TenantStatus         string     `gorm:"column:tenant_status"`
+		TenantTrialExpiresAt *time.Time `gorm:"column:tenant_trial_expires_at"`
 	}
 	var matched row
 	err := s.db.WithContext(ctx).Table("service_account_tokens AS sat").
-		Select("sa.*, sat.id AS token_id").Joins("JOIN service_accounts AS sa ON sa.tenant_id = sat.tenant_id AND sa.id = sat.service_account_id").
-		Where("sat.token_hash = ? AND sat.revoked_at IS NULL AND (sat.expires_at IS NULL OR sat.expires_at > ?)", hash[:], s.now()).
+		Select("sa.*, sat.id AS token_id, tenant.status AS tenant_status, tenant.trial_expires_at AS tenant_trial_expires_at").
+		Joins("JOIN service_accounts AS sa ON sa.tenant_id = sat.tenant_id AND sa.id = sat.service_account_id").
+		Joins("JOIN tenants AS tenant ON tenant.id = sa.tenant_id AND tenant.deleted_at IS NULL").
+		Where("sat.token_hash = ? AND sat.revoked_at IS NULL AND (sat.expires_at IS NULL OR sat.expires_at > ?)", hash[:], now).
 		Where("sa.status = ?", "active").Take(&matched).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Principal{}, problem.New(401, "invalid_service_account_token", "Service Account authentication failed.")
@@ -236,9 +242,12 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	if err != nil {
 		return Principal{}, problem.Wrap(500, "service_account_authentication_failed", "Service Account authentication failed.", err)
 	}
+	if !tenantstate.IsOperational(matched.TenantStatus, matched.TenantTrialExpiresAt, now) {
+		return Principal{}, problem.New(401, "invalid_service_account_token", "Service Account authentication failed.")
+	}
 	_ = s.db.WithContext(ctx).Model(&persistence.ServiceAccountToken{}).
-		Where("id = ? AND (last_used_at IS NULL OR last_used_at < ?)", matched.TokenID, s.now().Add(-5*time.Minute)).
-		Update("last_used_at", s.now()).Error
+		Where("id = ? AND (last_used_at IS NULL OR last_used_at < ?)", matched.TokenID, now.Add(-5*time.Minute)).
+		Update("last_used_at", now).Error
 	scopes := make(map[string]struct{}, len(matched.Scopes))
 	for _, scope := range matched.Scopes {
 		scopes[scope] = struct{}{}
@@ -311,11 +320,4 @@ func toAccount(model persistence.ServiceAccount) Account {
 		Scopes: append([]string(nil), model.Scopes...), CreatedBy: model.CreatedBy,
 		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt, RevokedAt: model.RevokedAt,
 	}
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }

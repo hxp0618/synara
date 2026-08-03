@@ -18,7 +18,7 @@ import type {
   ControlPlaneAgentSession,
   ControlPlaneProject,
   ControlPlaneSessionEvent,
-} from "./controlPlaneClient";
+} from "@synara/control-plane-client";
 
 export type ControlPlaneStreamStatus =
   | "idle"

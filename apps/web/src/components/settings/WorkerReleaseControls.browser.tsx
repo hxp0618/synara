@@ -13,7 +13,7 @@ import {
   type ControlPlaneWorkerManifest,
   type ControlPlaneWorkerReleaseOverview,
   type ControlPlaneWorkerReleasePolicy,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 const activeTarget: ControlPlaneExecutionTarget = {
   id: "target-1",

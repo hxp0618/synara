@@ -19,6 +19,22 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestWorkerPoolAutoscalingRejectsInactiveTenantBeforeStorageAccess(t *testing.T) {
+	service := NewService(nil)
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	targetID, poolID := uuid.New(), uuid.New()
+
+	_, err := service.Get(context.Background(), principal, requestedTenantID, targetID, poolID)
+	assertProblemCode(t, err, "tenant_not_found")
+	_, err = service.Put(
+		context.Background(), principal, requestedTenantID, targetID, poolID,
+		PutInput{}, "inactive-autoscaling", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "tenant_not_found")
+}
+
 func TestWorkerPoolAutoscalingUsesQueueDelayCooldownAndHardColdStartGate(t *testing.T) {
 	fixture := newAutoscalingFixture(t)
 	ctx := context.Background()

@@ -64,7 +64,7 @@ func NewService(db *gorm.DB) *Service {
 }
 
 func (s *Service) Get(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) (Quota, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Quota{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.QuotaRead); err != nil {
@@ -88,7 +88,7 @@ func (s *Service) Put(
 	input PutInput,
 	requestID, ipAddress string,
 ) (Quota, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Quota{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.QuotaManage); err != nil {
@@ -146,7 +146,7 @@ func (s *Service) GetScoped(
 	scopeKind string,
 	scopeID uuid.UUID,
 ) (ScopedQuota, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ScopedQuota{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.QuotaRead); err != nil {
@@ -181,7 +181,7 @@ func (s *Service) PutScoped(
 	input PutScopedInput,
 	requestID, ipAddress string,
 ) (ScopedQuota, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ScopedQuota{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.QuotaManage); err != nil {
@@ -365,11 +365,4 @@ func toQuota(model persistence.TenantQuota) Quota {
 		MaxConcurrentExecutionUnits: model.MaxConcurrentExecutionUnits,
 		MaxArtifactBytes:            model.MaxArtifactBytes,
 	}
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }

@@ -53,7 +53,7 @@ func (s *Service) List(
 	principal identity.Principal,
 	tenantID, targetID uuid.UUID,
 ) (Overview, error) {
-	if err := requireTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Overview{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -133,7 +133,7 @@ func (s *Service) CreateRevision(
 	input CreateRevisionInput,
 	idempotencyKey, requestID, ipAddress string,
 ) (OperationResult[Revision], error) {
-	if err := requireTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return OperationResult[Revision]{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -296,7 +296,7 @@ func (s *Service) changePolicy(
 		option = options[0]
 	}
 	automatic := option.automaticWindowID != nil
-	if err := requireTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return OperationResult[Policy]{}, err
 	}
 	if !automatic {
@@ -890,13 +890,6 @@ func projectedTransitionAction(model persistence.WorkerReleaseTransition) string
 		return "abort-canary"
 	}
 	return model.Action
-}
-
-func requireTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }
 
 func requireIdempotencyKey(value string) error {

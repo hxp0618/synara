@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,7 @@ type Config struct {
 	ArtifactPresignTTL                   time.Duration
 	ArtifactMaxUploadBytes               int64
 	InstallationID                       string
+	PlatformOperatorTenantID             uuid.UUID
 	CookieName                           string
 	CookieDomain                         string
 	CookiePath                           string
@@ -54,6 +56,7 @@ type Config struct {
 	DevBootstrapEnabled                  bool
 	SessionTTL                           time.Duration
 	SessionIdleTTL                       time.Duration
+	DesktopEnrollmentTTL                 time.Duration
 	TrustedProxyCIDRs                    []netip.Prefix
 	ShutdownTimeout                      time.Duration
 	WorkerRegistrationToken              string
@@ -62,6 +65,8 @@ type Config struct {
 	WorkerReceiptTTL                     time.Duration
 	ProviderCredentialAccessTTL          time.Duration
 	ProviderCursorKey                    []byte
+	ProviderCursorKeyID                  string
+	ProviderCursorDecryptKeys            []ProviderCursorDecryptKeyConfig
 	ProviderCursorMaximumAge             time.Duration
 	LocalAgentdRunnerCommand             []string
 	LocalAgentdWorkspaceRoot             string
@@ -71,8 +76,17 @@ type Config struct {
 	CredentialKMSKeyID                   string
 	CredentialKMSLocalKey                []byte
 	CredentialKMSAWSRegion               string
+	CredentialKMSDecryptKeys             []CredentialKMSDecryptKeyConfig
 	PublicControlPlaneURL                string
+	PublicAdminURL                       string
+	InternalStatusBoardURL               string
+	InternalIncidentPublisherURL         string
+	InternalIncidentPublisherHMACKey     []byte
+	InternalIncidentPublisherTimeout     time.Duration
+	CommercializationMode                string
 	AgentdBinaryPath                     string
+	DockerWorkerObservabilityRoot        string
+	SSHWorkerObservabilityRoot           string
 	SSHProvisionTimeout                  time.Duration
 	DockerReconcileInterval              time.Duration
 	KubernetesReconcileInterval          time.Duration
@@ -104,6 +118,32 @@ type Config struct {
 	SSEMaxConnectionsPerUser             int
 	SSEMaxConnectionsPerTenant           int
 	Billing                              billing.RuntimeConfig
+}
+
+const CommercializationModeInternalSelfHosted = "internal-self-hosted"
+
+type CredentialKMSDecryptKeyConfig struct {
+	Provider string
+	KeyID    string
+	LocalKey []byte
+	Region   string
+}
+
+type ProviderCursorDecryptKeyConfig struct {
+	KeyID string
+	Key   []byte
+}
+
+type providerCursorDecryptKeyInput struct {
+	KeyID          string `json:"keyId"`
+	KeyEnvironment string `json:"keyEnvironment"`
+}
+
+type credentialKMSDecryptKeyInput struct {
+	Provider            string `json:"provider"`
+	KeyID               string `json:"keyId"`
+	LocalKeyEnvironment string `json:"localKeyEnvironment,omitempty"`
+	Region              string `json:"region,omitempty"`
 }
 
 func Load() (Config, error) {
@@ -172,6 +212,12 @@ func Load() (Config, error) {
 		CookieSameSite:          strings.ToLower(envOrDefault("SYNARA_LOGIN_COOKIE_SAME_SITE", "lax")),
 		WorkerRegistrationToken: strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN")),
 	}
+	if rawTenantID, ok := nonEmptyEnv("SYNARA_PLATFORM_OPERATOR_TENANT_ID"); ok {
+		cfg.PlatformOperatorTenantID, err = uuid.Parse(rawTenantID)
+		if err != nil {
+			return Config{}, errors.New("SYNARA_PLATFORM_OPERATOR_TENANT_ID must be a UUID")
+		}
+	}
 	if cfg.CookieSecure, err = envBoolStrict("SYNARA_LOGIN_COOKIE_SECURE", false); err != nil {
 		return Config{}, err
 	}
@@ -182,6 +228,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SessionIdleTTL, err = envDurationStrict("SYNARA_LOGIN_SESSION_IDLE_TTL", 7*24*time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.DesktopEnrollmentTTL, err = envDurationStrict("SYNARA_DESKTOP_ENROLLMENT_TTL", 3*time.Minute); err != nil {
 		return Config{}, err
 	}
 	if cfg.TrustedProxyCIDRs, err = parseCIDRs(os.Getenv("SYNARA_TRUSTED_PROXY_CIDRS")); err != nil {
@@ -253,11 +302,76 @@ func Load() (Config, error) {
 		}
 		cfg.ProviderCursorKey = key
 	}
+	cfg.ProviderCursorKeyID = strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CURSOR_KEY_ID"))
+	if raw := strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON")); raw != "" {
+		cfg.ProviderCursorDecryptKeys, err = parseProviderCursorDecryptKeys(
+			raw, cfg.ProviderCursorKeyID, cfg.ProviderCursorKey,
+		)
+		if err != nil {
+			return Config{}, err
+		}
+	}
 	cfg.CredentialKMSProvider = strings.ToLower(strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_PROVIDER")))
 	cfg.CredentialKMSKeyID = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_KEY_ID"))
 	cfg.CredentialKMSAWSRegion = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_AWS_REGION"))
 	cfg.PublicControlPlaneURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_CONTROL_PLANE_URL")), "/")
+	cfg.PublicAdminURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_ADMIN_URL")), "/")
+	if strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_STATUS_PAGE_URL")) != "" {
+		return Config{}, errors.New("SYNARA_PUBLIC_STATUS_PAGE_URL is retired; use SYNARA_INTERNAL_STATUS_BOARD_URL for internal incident communications")
+	}
+	cfg.InternalStatusBoardURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_STATUS_BOARD_URL")), "/")
+	cfg.InternalIncidentPublisherURL = strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL"))
+	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")); encodedKey != "" {
+		cfg.InternalIncidentPublisherHMACKey, err = decodeKey(encodedKey, "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.InternalIncidentPublisherTimeout, err = envDurationStrict("SYNARA_INTERNAL_INCIDENT_PUBLISHER_TIMEOUT", 10*time.Second); err != nil {
+		return Config{}, err
+	}
+	cfg.CommercializationMode = strings.ToLower(envOrDefault(
+		"SYNARA_COMMERCIALIZATION_MODE",
+		CommercializationModeInternalSelfHosted,
+	))
+	if cfg.CommercializationMode != CommercializationModeInternalSelfHosted {
+		return Config{}, errors.New("SYNARA_COMMERCIALIZATION_MODE must be internal-self-hosted")
+	}
+	for _, name := range []string{
+		"SYNARA_COMMERCIAL_BILLING_PROVIDER", "SYNARA_COMMERCIAL_BILLING_RETURN_URL",
+		"SYNARA_STRIPE_SECRET_KEY", "SYNARA_STRIPE_WEBHOOK_SECRET", "SYNARA_STRIPE_PRICE_MAP_JSON",
+		"SYNARA_STRIPE_AUTOMATIC_TAX_ENABLED", "SYNARA_STRIPE_CHECKOUT_TTL",
+		"SYNARA_STRIPE_PORTAL_CONFIGURATION_ID",
+	} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return Config{}, fmt.Errorf("%s is unsupported by the internal-self-hosted product", name)
+		}
+	}
+	for _, legacy := range []struct{ old, current string }{
+		{"SYNARA_BILLING_BLOB_SOURCE", "SYNARA_COST_ACCOUNTING_BLOB_SOURCE"},
+		{"SYNARA_BILLING_LOCAL_BASE_DIR", "SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR"},
+		{"SYNARA_BILLING_S3_BUCKET", "SYNARA_COST_ACCOUNTING_S3_BUCKET"},
+		{"SYNARA_BILLING_S3_REGION", "SYNARA_COST_ACCOUNTING_S3_REGION"},
+		{"SYNARA_BILLING_S3_ENDPOINT", "SYNARA_COST_ACCOUNTING_S3_ENDPOINT"},
+		{"SYNARA_BILLING_S3_USE_PATH_STYLE", "SYNARA_COST_ACCOUNTING_S3_USE_PATH_STYLE"},
+		{"SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", "SYNARA_COST_ACCOUNTING_S3_ALLOW_CUSTOM_ENDPOINT"},
+		{"SYNARA_BILLING_S3_ALLOW_HTTP", "SYNARA_COST_ACCOUNTING_S3_ALLOW_HTTP"},
+		{"SYNARA_BILLING_GCS_BUCKET", "SYNARA_COST_ACCOUNTING_GCS_BUCKET"},
+		{"SYNARA_BILLING_AZURE_CONTAINER_URL", "SYNARA_COST_ACCOUNTING_AZURE_CONTAINER_URL"},
+		{"SYNARA_BILLING_AZURE_ALLOW_HTTP", "SYNARA_COST_ACCOUNTING_AZURE_ALLOW_HTTP"},
+		{"SYNARA_BILLING_BLOB_PREFIX", "SYNARA_COST_ACCOUNTING_BLOB_PREFIX"},
+		{"SYNARA_BILLING_MAX_OBJECT_BYTES", "SYNARA_COST_ACCOUNTING_MAX_OBJECT_BYTES"},
+		{"SYNARA_BILLING_IMPORT_MAPPINGS_JSON", "SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON"},
+		{"SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", "SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON"},
+		{"SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID", "SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID"},
+	} {
+		if strings.TrimSpace(os.Getenv(legacy.old)) != "" {
+			return Config{}, fmt.Errorf("%s is retired; use %s for internal cost accounting", legacy.old, legacy.current)
+		}
+	}
 	cfg.AgentdBinaryPath = envOrDefault("SYNARA_AGENTD_BINARY_PATH", "/usr/local/bin/synara-agentd")
+	cfg.DockerWorkerObservabilityRoot = strings.TrimSpace(os.Getenv("SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT"))
+	cfg.SSHWorkerObservabilityRoot = strings.TrimSpace(os.Getenv("SYNARA_SSH_WORKER_OBSERVABILITY_ROOT"))
 	if cfg.SSHProvisionTimeout, err = envDurationStrict("SYNARA_SSH_PROVISION_TIMEOUT", 2*time.Minute); err != nil {
 		return Config{}, err
 	}
@@ -354,51 +468,51 @@ func Load() (Config, error) {
 	cfg.Billing = billing.RuntimeConfig{
 		MaxObjectBytes: 16 << 20,
 		Source: billing.SourceConfig{
-			Kind:              strings.ToLower(strings.TrimSpace(os.Getenv("SYNARA_BILLING_BLOB_SOURCE"))),
-			LocalBaseDir:      strings.TrimSpace(os.Getenv("SYNARA_BILLING_LOCAL_BASE_DIR")),
-			S3Bucket:          strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_BUCKET")),
-			S3Region:          strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_REGION")),
-			S3Endpoint:        strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_ENDPOINT")),
-			GCSBucket:         strings.TrimSpace(os.Getenv("SYNARA_BILLING_GCS_BUCKET")),
-			AzureContainerURL: strings.TrimSpace(os.Getenv("SYNARA_BILLING_AZURE_CONTAINER_URL")),
-			Prefix:            strings.TrimSpace(os.Getenv("SYNARA_BILLING_BLOB_PREFIX")),
+			Kind:              strings.ToLower(strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_BLOB_SOURCE"))),
+			LocalBaseDir:      strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_LOCAL_BASE_DIR")),
+			S3Bucket:          strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_S3_BUCKET")),
+			S3Region:          strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_S3_REGION")),
+			S3Endpoint:        strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_S3_ENDPOINT")),
+			GCSBucket:         strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_GCS_BUCKET")),
+			AzureContainerURL: strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_AZURE_CONTAINER_URL")),
+			Prefix:            strings.TrimSpace(os.Getenv("SYNARA_COST_ACCOUNTING_BLOB_PREFIX")),
 		},
 	}
-	if rawTenantID, ok := nonEmptyEnv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID"); ok {
+	if rawTenantID, ok := nonEmptyEnv("SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID"); ok {
 		cfg.Billing.TariffOperatorTenantID, err = uuid.Parse(rawTenantID)
 		if err != nil {
-			return Config{}, errors.New("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID must be a UUID")
+			return Config{}, errors.New("SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID must be a UUID")
 		}
 	}
-	if cfg.Billing.MaxObjectBytes, err = envInt64("SYNARA_BILLING_MAX_OBJECT_BYTES", cfg.Billing.MaxObjectBytes); err != nil {
+	if cfg.Billing.MaxObjectBytes, err = envInt64("SYNARA_COST_ACCOUNTING_MAX_OBJECT_BYTES", cfg.Billing.MaxObjectBytes); err != nil {
 		return Config{}, err
 	}
-	if cfg.Billing.Source.S3UsePathStyle, err = envBoolStrict("SYNARA_BILLING_S3_USE_PATH_STYLE", false); err != nil {
+	if cfg.Billing.Source.S3UsePathStyle, err = envBoolStrict("SYNARA_COST_ACCOUNTING_S3_USE_PATH_STYLE", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.Billing.Source.S3AllowCustomEndpoint, err = envBoolStrict("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", false); err != nil {
+	if cfg.Billing.Source.S3AllowCustomEndpoint, err = envBoolStrict("SYNARA_COST_ACCOUNTING_S3_ALLOW_CUSTOM_ENDPOINT", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.Billing.Source.S3AllowHTTP, err = envBoolStrict("SYNARA_BILLING_S3_ALLOW_HTTP", false); err != nil {
+	if cfg.Billing.Source.S3AllowHTTP, err = envBoolStrict("SYNARA_COST_ACCOUNTING_S3_ALLOW_HTTP", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.Billing.Source.AzureAllowHTTP, err = envBoolStrict("SYNARA_BILLING_AZURE_ALLOW_HTTP", false); err != nil {
+	if cfg.Billing.Source.AzureAllowHTTP, err = envBoolStrict("SYNARA_COST_ACCOUNTING_AZURE_ALLOW_HTTP", false); err != nil {
 		return Config{}, err
 	}
-	if rawMappings, ok := nonEmptyEnv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON"); ok {
+	if rawMappings, ok := nonEmptyEnv("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON"); ok {
 		cfg.Billing.Imports, err = parseBillingImportMappings(rawMappings)
 		if err != nil {
-			return Config{}, fmt.Errorf("SYNARA_BILLING_IMPORT_MAPPINGS_JSON: %w", err)
+			return Config{}, fmt.Errorf("SYNARA_COST_ACCOUNTING_IMPORT_MAPPINGS_JSON: %w", err)
 		}
 	}
-	if rawMappings, ok := nonEmptyEnv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON"); ok {
+	if rawMappings, ok := nonEmptyEnv("SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON"); ok {
 		cfg.Billing.SharedAllocations, err = parseBillingSharedAllocationMappings(rawMappings)
 		if err != nil {
-			return Config{}, fmt.Errorf("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON: %w", err)
+			return Config{}, fmt.Errorf("SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON: %w", err)
 		}
 	}
 	if cfg.Billing, err = cfg.Billing.Normalize(); err != nil {
-		return Config{}, fmt.Errorf("invalid billing configuration: %w", err)
+		return Config{}, fmt.Errorf("invalid cost accounting configuration: %w", err)
 	}
 	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_MASTER_KEY")); encodedKey != "" {
 		cfg.CredentialKMSLocalKey, err = decodeKey(encodedKey, "SYNARA_CREDENTIAL_MASTER_KEY")
@@ -411,6 +525,17 @@ func Load() (Config, error) {
 	}
 	if cfg.CredentialKMSProvider == "local" && cfg.CredentialKMSKeyID == "" {
 		cfg.CredentialKMSKeyID = "local-v1"
+	}
+	if raw := strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON")); raw != "" {
+		cfg.CredentialKMSDecryptKeys, err = parseCredentialKMSDecryptKeys(
+			raw,
+			cfg.CredentialKMSProvider,
+			cfg.CredentialKMSKeyID,
+			cfg.CredentialKMSLocalKey,
+		)
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
 	if cfg.Platform.MetadataStore == platform.MetadataPostgres && cfg.DatabaseURL == "" {
@@ -463,6 +588,9 @@ func Load() (Config, error) {
 	if cfg.DatabaseConnectionMaxIdleTime < 0 {
 		return Config{}, errors.New("SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME must not be negative")
 	}
+	if cfg.DesktopEnrollmentTTL < time.Minute || cfg.DesktopEnrollmentTTL > 5*time.Minute {
+		return Config{}, errors.New("SYNARA_DESKTOP_ENROLLMENT_TTL must be between 1m and 5m")
+	}
 	if cfg.DatabaseMigrationLockTimeout <= 0 {
 		return Config{}, errors.New("SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT must be positive")
 	}
@@ -497,23 +625,33 @@ func Load() (Config, error) {
 	if cfg.Platform.Profile == platform.ProfileEnterprise && cfg.PublicControlPlaneURL == "" {
 		return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL is required for enterprise deployments")
 	}
-	if cfg.PublicControlPlaneURL != "" {
-		parsed, parseErr := url.Parse(cfg.PublicControlPlaneURL)
-		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-			(parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL must be an HTTP(S) origin")
-		}
-		if !isLoopbackHostname(parsed.Hostname()) {
-			if parsed.Scheme != "https" {
-				return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL must use HTTPS outside loopback")
-			}
-			if !cfg.CookieSecure {
-				return Config{}, errors.New("SYNARA_LOGIN_COOKIE_SECURE must be true outside loopback")
-			}
-		}
+	if err := validatePublicHTTPURL("SYNARA_PUBLIC_CONTROL_PLANE_URL", cfg.PublicControlPlaneURL, cfg.CookieSecure); err != nil {
+		return Config{}, err
+	}
+	if err := validatePublicHTTPURL("SYNARA_PUBLIC_ADMIN_URL", cfg.PublicAdminURL, cfg.CookieSecure); err != nil {
+		return Config{}, err
+	}
+	if err := validateInternalStatusBoardURL(
+		"SYNARA_INTERNAL_STATUS_BOARD_URL",
+		cfg.InternalStatusBoardURL,
+		cfg.PublicControlPlaneURL,
+		cfg.PublicAdminURL,
+	); err != nil {
+		return Config{}, err
+	}
+	if err := validateInternalIncidentPublisher(cfg); err != nil {
+		return Config{}, err
 	}
 	if strings.TrimSpace(cfg.AgentdBinaryPath) == "" {
 		return Config{}, errors.New("SYNARA_AGENTD_BINARY_PATH must not be empty")
+	}
+	for name, root := range map[string]string{
+		"SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT": cfg.DockerWorkerObservabilityRoot,
+		"SYNARA_SSH_WORKER_OBSERVABILITY_ROOT":    cfg.SSHWorkerObservabilityRoot,
+	} {
+		if root != "" && (!filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator)) {
+			return Config{}, fmt.Errorf("%s must be a non-root absolute directory", name)
+		}
 	}
 	if cfg.SSHProvisionTimeout <= 0 {
 		return Config{}, errors.New("SYNARA_SSH_PROVISION_TIMEOUT must be positive")
@@ -586,6 +724,14 @@ func Load() (Config, error) {
 		cfg.SSEMaxConnectionsPerUser > cfg.SSEMaxConnectionsPerTenant {
 		return Config{}, errors.New("SYNARA_SSE connection limits must be positive and the per-user limit must not exceed the per-tenant limit")
 	}
+	if cfg.ProviderCursorKeyID != "" {
+		if len(cfg.ProviderCursorKeyID) > 200 || strings.ContainsAny(cfg.ProviderCursorKeyID, "\r\n\t") {
+			return Config{}, errors.New("SYNARA_PROVIDER_CURSOR_KEY_ID is invalid")
+		}
+		if len(cfg.ProviderCursorKey) != 32 {
+			return Config{}, errors.New("SYNARA_PROVIDER_CURSOR_KEY is required when SYNARA_PROVIDER_CURSOR_KEY_ID is configured")
+		}
+	}
 	switch cfg.CredentialKMSProvider {
 	case "":
 		if cfg.CredentialKMSKeyID != "" || cfg.CredentialKMSAWSRegion != "" {
@@ -608,8 +754,33 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.ArtifactBucket) == "" {
 		return Config{}, errors.New("SYNARA_ARTIFACT_BUCKET must not be empty")
 	}
+	artifactAccessKeyConfigured := cfg.ArtifactAccessKeyID != ""
+	artifactSecretKeyConfigured := cfg.ArtifactSecretAccessKey != ""
+	if artifactAccessKeyConfigured != artifactSecretKeyConfigured {
+		return Config{}, errors.New("SYNARA_ARTIFACT_ACCESS_KEY_ID and SYNARA_ARTIFACT_SECRET_ACCESS_KEY must be configured together")
+	}
+	if cfg.ArtifactSessionToken != "" && !artifactAccessKeyConfigured {
+		return Config{}, errors.New("SYNARA_ARTIFACT_SESSION_TOKEN requires an Artifact access key pair")
+	}
 	if cfg.Platform.ArtifactStore == platform.ArtifactLocal && strings.TrimSpace(cfg.ArtifactLocalPath) == "" {
 		return Config{}, errors.New("SYNARA_ARTIFACT_LOCAL_PATH must not be empty")
+	}
+	if cfg.Platform.ArtifactStore == platform.ArtifactLocal && (artifactAccessKeyConfigured || cfg.ArtifactSessionToken != "") {
+		return Config{}, errors.New("Artifact S3 credentials must not be configured for Local Artifact storage")
+	}
+	if cfg.Platform.ArtifactStore != platform.ArtifactLocal {
+		if cfg.ArtifactPresignTTL > 15*time.Minute {
+			return Config{}, errors.New("SYNARA_ARTIFACT_PRESIGN_TTL must be at most 15m for MinIO/S3 Artifact storage")
+		}
+		if err := validateArtifactEndpoint("SYNARA_ARTIFACT_ENDPOINT", cfg.ArtifactEndpoint, cfg.Platform.Profile == platform.ProfileEnterprise); err != nil {
+			return Config{}, err
+		}
+		if err := validateArtifactEndpoint("SYNARA_ARTIFACT_PUBLIC_ENDPOINT", cfg.ArtifactPublicEndpoint, cfg.Platform.Profile == platform.ProfileEnterprise); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.Platform.Profile == platform.ProfileEnterprise && artifactAccessKeyConfigured && cfg.ArtifactSessionToken == "" {
+		return Config{}, errors.New("enterprise Artifact static credentials must be temporary and include SYNARA_ARTIFACT_SESSION_TOKEN; prefer workload identity")
 	}
 	if cfg.Platform.ArtifactStore == platform.ArtifactMinIO {
 		if cfg.ArtifactEndpoint == "" {
@@ -620,6 +791,248 @@ func Load() (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func validateInternalIncidentPublisher(cfg Config) error {
+	configured := cfg.InternalIncidentPublisherURL != "" || len(cfg.InternalIncidentPublisherHMACKey) != 0
+	if !configured {
+		if cfg.InternalStatusBoardURL != "" {
+			return errors.New("SYNARA_INTERNAL_STATUS_BOARD_URL requires SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY")
+		}
+		return nil
+	}
+	if cfg.InternalIncidentPublisherURL == "" || len(cfg.InternalIncidentPublisherHMACKey) != 32 {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL and SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY must be configured together")
+	}
+	if cfg.InternalStatusBoardURL == "" {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL requires SYNARA_INTERNAL_STATUS_BOARD_URL")
+	}
+	parsed, err := url.Parse(cfg.InternalIncidentPublisherURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL must be a credential-free HTTPS URL without query or fragment")
+	}
+	if sameURLOrigin(parsed, mustParseURL(cfg.PublicControlPlaneURL)) ||
+		sameURLOrigin(parsed, mustParseURL(cfg.PublicAdminURL)) {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL must use a failure-independent origin from Synara application services")
+	}
+	if cfg.InternalIncidentPublisherTimeout <= 0 || cfg.InternalIncidentPublisherTimeout > 30*time.Second {
+		return errors.New("SYNARA_INTERNAL_INCIDENT_PUBLISHER_TIMEOUT must be positive and at most 30s")
+	}
+	return nil
+}
+
+func mustParseURL(value string) *url.URL {
+	parsed, _ := url.Parse(value)
+	return parsed
+}
+
+func validateArtifactEndpoint(name, value string, requireHTTPS bool) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%s must be an HTTP(S) origin without credentials, path, query or fragment", name)
+	}
+	if requireHTTPS && parsed.Scheme != "https" {
+		return fmt.Errorf("%s must use HTTPS for enterprise deployments", name)
+	}
+	return nil
+}
+
+func validatePublicHTTPURL(name, value string, cookieSecure bool) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%s must be an HTTP(S) origin", name)
+	}
+	if !isLoopbackHostname(parsed.Hostname()) {
+		if parsed.Scheme != "https" {
+			return fmt.Errorf("%s must use HTTPS outside loopback", name)
+		}
+		if !cookieSecure {
+			return errors.New("SYNARA_LOGIN_COOKIE_SECURE must be true outside loopback")
+		}
+	}
+	return nil
+}
+
+func validateInternalStatusBoardURL(name, value string, coupledURLs ...string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be a credential-free HTTPS URL without query or fragment", name)
+	}
+	for _, coupledValue := range coupledURLs {
+		if strings.TrimSpace(coupledValue) == "" {
+			continue
+		}
+		coupled, parseErr := url.Parse(coupledValue)
+		if parseErr == nil && sameURLOrigin(parsed, coupled) {
+			return fmt.Errorf("%s must use a failure-independent origin from Synara application services", name)
+		}
+	}
+	return nil
+}
+
+func sameURLOrigin(left, right *url.URL) bool {
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectiveURLPort(left) == effectiveURLPort(right)
+}
+
+func effectiveURLPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(value.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func parseProviderCursorDecryptKeys(
+	raw, primaryKeyID string,
+	primaryKey []byte,
+) ([]ProviderCursorDecryptKeyConfig, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var inputs []providerCursorDecryptKeyInput
+	if err := decoder.Decode(&inputs); err != nil {
+		return nil, fmt.Errorf("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON must be a JSON array: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON must contain one JSON value")
+	}
+	if len(inputs) == 0 || len(inputs) > 8 {
+		return nil, errors.New("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON must contain between 1 and 8 keys")
+	}
+	if primaryKeyID == "" || len(primaryKey) != 32 {
+		return nil, errors.New("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON requires a named primary Provider Cursor key")
+	}
+	seenIDs := map[string]struct{}{primaryKeyID: {}}
+	seenKeys := [][]byte{primaryKey}
+	result := make([]ProviderCursorDecryptKeyConfig, 0, len(inputs))
+	for index, input := range inputs {
+		keyID := strings.TrimSpace(input.KeyID)
+		keyEnvironment := strings.TrimSpace(input.KeyEnvironment)
+		if keyID == "" || len(keyID) > 200 || strings.ContainsAny(keyID, "\r\n\t") {
+			return nil, fmt.Errorf("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON[%d].keyId is invalid", index)
+		}
+		if _, exists := seenIDs[keyID]; exists {
+			return nil, fmt.Errorf("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON[%d] duplicates a key ID", index)
+		}
+		if !validEnvironmentName(keyEnvironment) {
+			return nil, fmt.Errorf("SYNARA_PROVIDER_CURSOR_DECRYPT_KEYS_JSON[%d].keyEnvironment is invalid", index)
+		}
+		encoded := strings.TrimSpace(os.Getenv(keyEnvironment))
+		if encoded == "" {
+			return nil, fmt.Errorf("%s is required for Provider Cursor fallback decryption", keyEnvironment)
+		}
+		decoded, err := decodeKey(encoded, keyEnvironment)
+		if err != nil {
+			return nil, err
+		}
+		for _, seen := range seenKeys {
+			if bytes.Equal(decoded, seen) {
+				return nil, fmt.Errorf("%s must not reuse another Provider Cursor key", keyEnvironment)
+			}
+		}
+		seenIDs[keyID] = struct{}{}
+		seenKeys = append(seenKeys, decoded)
+		result = append(result, ProviderCursorDecryptKeyConfig{KeyID: keyID, Key: decoded})
+	}
+	return result, nil
+}
+
+func parseCredentialKMSDecryptKeys(
+	raw, primaryProvider, primaryKeyID string,
+	primaryLocalKey []byte,
+) ([]CredentialKMSDecryptKeyConfig, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var inputs []credentialKMSDecryptKeyInput
+	if err := decoder.Decode(&inputs); err != nil {
+		return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON must be a JSON array: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON must contain one JSON value")
+	}
+	if len(inputs) == 0 || len(inputs) > 8 {
+		return nil, errors.New("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON must contain between 1 and 8 keys")
+	}
+	if strings.TrimSpace(primaryProvider) == "" || strings.TrimSpace(primaryKeyID) == "" {
+		return nil, errors.New("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON requires a primary credential KMS key")
+	}
+	seen := map[string]struct{}{strings.ToLower(strings.TrimSpace(primaryProvider)) + "\x00" + strings.TrimSpace(primaryKeyID): {}}
+	keys := make([]CredentialKMSDecryptKeyConfig, 0, len(inputs))
+	for index, input := range inputs {
+		provider := strings.ToLower(strings.TrimSpace(input.Provider))
+		keyID := strings.TrimSpace(input.KeyID)
+		region := strings.TrimSpace(input.Region)
+		keyEnvironment := strings.TrimSpace(input.LocalKeyEnvironment)
+		if keyID == "" || len(keyID) > 1024 || strings.ContainsAny(keyID, "\r\n\t") {
+			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].keyId is invalid", index)
+		}
+		identity := provider + "\x00" + keyID
+		if _, exists := seen[identity]; exists {
+			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] duplicates a KMS key", index)
+		}
+		seen[identity] = struct{}{}
+		key := CredentialKMSDecryptKeyConfig{Provider: provider, KeyID: keyID, Region: region}
+		switch provider {
+		case "local":
+			if !validEnvironmentName(keyEnvironment) || region != "" {
+				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] local key configuration is invalid", index)
+			}
+			encoded := strings.TrimSpace(os.Getenv(keyEnvironment))
+			if encoded == "" {
+				return nil, fmt.Errorf("%s is required for credential KMS fallback decryption", keyEnvironment)
+			}
+			decoded, err := decodeKey(encoded, keyEnvironment)
+			if err != nil {
+				return nil, err
+			}
+			if len(primaryLocalKey) > 0 && bytes.Equal(decoded, primaryLocalKey) {
+				return nil, fmt.Errorf("%s must not reuse the primary local credential KMS key", keyEnvironment)
+			}
+			key.LocalKey = decoded
+		case "aws-kms":
+			if keyEnvironment != "" {
+				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] AWS KMS key must not declare localKeyEnvironment", index)
+			}
+		default:
+			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].provider must be local or aws-kms", index)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func validEnvironmentName(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'A' && character <= 'Z') || character == '_' ||
+			(index > 0 && character >= '0' && character <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func parseCIDRs(value string) ([]netip.Prefix, error) {

@@ -302,6 +302,25 @@ def phase_one(
         f"/v1/tenants/{tenant_id}/organizations",
         {"slug": f"multi-{run_id}", "name": "Multi Replica", "kind": "department", "settings": {}},
     )
+    execution_target = owner.json(
+        replica_a,
+        "POST",
+        f"/v1/tenants/{tenant_id}/execution-targets",
+        {
+            "organizationId": organization["id"],
+            "kind": "local",
+            "name": "Multi Replica Local Target",
+            "configuration": {},
+            "capabilities": {
+                "workspaceModes": ["local", "worktree"],
+                "providerPolicy": {"experimentalProviders": ["codex", "claudeAgent"]},
+            },
+        },
+    )
+    require(
+        execution_target.get("kind") == "local" and execution_target.get("status") == "active",
+        "multi-replica execution target was not created as active local target",
+    )
     project_body = {"name": "Multi Replica Project", "defaultBranch": "main", "visibility": "organization"}
     project_key = f"project-{run_id}"
     project, _ = owner.json_with_headers(
@@ -416,16 +435,40 @@ def phase_one(
         "targetKind": target["kind"],
         "executionId": execution_id,
     }
+
+    def claim(address: str, request_id: str) -> dict[str, Any]:
+        status, body, _ = worker.request(
+            address,
+            "POST",
+            "/v1/workers/executions/claim",
+            claim_body,
+            worker_headers | {"X-Request-ID": request_id},
+        )
+        if status == 409:
+            try:
+                decoded = json.loads(body)
+            except json.JSONDecodeError as error:
+                raise AcceptanceError(f"worker claim returned invalid 409 JSON: {error}") from error
+            require(
+                decoded.get("error", {}).get("code") == "worker_busy",
+                f"concurrent worker claim returned unexpected 409: {body.decode(errors='replace')}",
+            )
+            return {"execution": None, "busy": True}
+        require(
+            200 <= status < 300,
+            f"POST /v1/workers/executions/claim through {address} returned {status}: {body.decode(errors='replace')}",
+        )
+        try:
+            decoded = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise AcceptanceError(f"worker claim returned invalid JSON: {error}") from error
+        require(isinstance(decoded, dict), "worker claim did not return a JSON object")
+        return decoded
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         claims = list(
             executor.map(
-                lambda request: worker.json(
-                    request[0],
-                    "POST",
-                    "/v1/workers/executions/claim",
-                    claim_body,
-                    worker_headers | {"X-Request-ID": request[1]},
-                ),
+                lambda request: claim(request[0], request[1]),
                 [(replica_a, f"claim-a-{run_id}"), (replica_b, f"claim-b-{run_id}")],
             )
         )

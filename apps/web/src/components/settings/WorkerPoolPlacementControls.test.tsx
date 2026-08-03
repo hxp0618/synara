@@ -12,7 +12,7 @@ import {
 import type {
   ControlPlaneExecutionPlacementState,
   ControlPlaneExecutionTarget,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 const target: ControlPlaneExecutionTarget = {
   id: "target-1",

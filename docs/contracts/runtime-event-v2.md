@@ -40,7 +40,7 @@ Agentd supplies the Worker-authenticated execution, lease, generation, event ID,
 upload envelope. Control Plane assigns the authoritative Session Sequence. Provider-native sequence numbers are
 never used as Session Sequence.
 
-The SaaS Session Event envelope predates the richer local Provider Runtime base fields. Stable correlation values
+The Control Plane Session Event envelope predates the richer local Provider Runtime base fields. Stable correlation values
 such as `requestId` therefore remain a documented payload transport extension for Interaction events until that
 outer envelope evolves; their meaning and validation still follow the canonical Runtime Event contract.
 

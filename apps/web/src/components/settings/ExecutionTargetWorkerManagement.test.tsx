@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { ExecutionTargetWorkerManagement } from "./ExecutionTargetWorkerManagement";
-import type { ControlPlaneExecutionTarget, ControlPlaneWorker } from "~/lib/controlPlaneClient";
+import type { ControlPlaneExecutionTarget, ControlPlaneWorker } from "@synara/control-plane-client";
 
 const target: ControlPlaneExecutionTarget = {
   id: "target-1",

@@ -16,10 +16,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/secretguard"
+	controltracing "github.com/synara-ai/synara/services/control-plane/internal/tracing"
 )
 
 const (
@@ -307,7 +312,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		runErr := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor)
+		executionContext := controltracing.ContextWithRemoteParent(runContext, claim.Traceparent)
+		runErr := d.runExecution(executionContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor)
 		if runErr != nil {
 			if isWorkerRevocationError(runErr) {
 				cancelRun()
@@ -694,7 +700,24 @@ func (d *Daemon) runExecution(
 	lease executions.Lease,
 	workload executions.Workload,
 	resumeCursor *string,
-) error {
+) (runErr error) {
+	ctx, span := otel.Tracer("synara/agentd").Start(
+		ctx,
+		"worker.execution",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("synara.execution.id", execution.ID.String()),
+			attribute.Int64("synara.execution.generation", lease.Generation),
+			attribute.String("synara.provider", traceProviderName(execution.Provider)),
+		),
+	)
+	defer func() {
+		if runErr != nil {
+			span.RecordError(runErr)
+			span.SetStatus(codes.Error, "execution failed")
+		}
+		span.End()
+	}()
 	executionContext, cancelExecution := context.WithCancel(ctx)
 	if err := executions.ValidateRecoveryBundle(execution, workload); err != nil {
 		cancelExecution()

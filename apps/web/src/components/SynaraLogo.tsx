@@ -3,7 +3,7 @@
 // Layer: Shared app branding primitive
 
 import type { SVGProps } from "react";
-import { SYNARA_LOGO_PATHS } from "~/assets/synaraLogoPath";
+import { SYNARA_LOGO_PATHS } from "@synara/shared/brand";
 import { cn } from "~/lib/utils";
 
 export function SynaraLogo({ className, ...props }: SVGProps<SVGSVGElement>) {

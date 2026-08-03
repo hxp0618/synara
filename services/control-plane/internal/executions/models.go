@@ -210,6 +210,7 @@ type ClaimResult struct {
 	Lease                *Lease     `json:"lease"`
 	Workload             *Workload  `json:"workload"`
 	ProviderResumeCursor *string    `json:"providerResumeCursor,omitempty"`
+	Traceparent          string     `json:"traceparent,omitempty"`
 }
 
 type WorkspaceCleanupClaimInput struct {

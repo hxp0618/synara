@@ -24,7 +24,7 @@ func (s *Service) ListWorkers(
 	principal identity.Principal,
 	tenantID uuid.UUID,
 ) ([]ManagedWorker, error) {
-	if err := requireWorkerTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerRead); err != nil {
@@ -55,7 +55,7 @@ func (s *Service) RevokeWorker(
 	input RevokeWorkerInput,
 	idempotencyKey, requestID, ipAddress string,
 ) (OperationResult[WorkerRevocation], error) {
-	if err := requireWorkerTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return OperationResult[WorkerRevocation]{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -127,7 +127,7 @@ func (s *Service) RevokeExecutionTargetWorkers(
 	expectedOperationGeneration int64,
 	reason, requestID, ipAddress string,
 ) error {
-	if err := requireWorkerTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -463,13 +463,6 @@ func lockTenantWorker(
 		return persistence.WorkerInstance{}, persistence.ExecutionTarget{}, problem.Wrap(500, "worker_target_load_failed", "The Worker's Execution Target could not be loaded.", err)
 	}
 	return worker, target, nil
-}
-
-func requireWorkerTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }
 
 func workerTokenRevoked() error {

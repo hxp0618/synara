@@ -18,11 +18,14 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import {
   createDesktopPlatformBuildConfig,
   MAC_APPSNAP_HELPER_STAGE_PATH,
+  resolveDesktopArtifactName,
+  resolveDesktopDependencyInstallTarget,
   validateDesktopNativeBuildHost,
 } from "./lib/desktop-platform-build-config.ts";
 import { SYNARA_PRODUCTION_BUNDLE_ID } from "@synara/shared/desktopIdentity";
 import { parseBooleanEnvValue } from "./lib/env-bool.ts";
 import { finalizeSignedMacDmg } from "./lib/mac-dmg-finalize.ts";
+import { validateMacDistributionEnvironment } from "./lib/mac-distribution-preflight.ts";
 import { finalizeMacUpdateZip } from "./lib/mac-update-zip-finalize.ts";
 import {
   RELEASE_LOCKFILE_PATH,
@@ -110,6 +113,7 @@ interface BuildCliInput {
   readonly skipBuild: Option.Option<boolean>;
   readonly keepStage: Option.Option<boolean>;
   readonly signed: Option.Option<boolean>;
+  readonly macDevelopmentIdentity: Option.Option<string>;
   readonly verbose: Option.Option<boolean>;
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<string>;
@@ -209,6 +213,7 @@ interface ResolvedBuildOptions {
   readonly skipBuild: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
+  readonly macDevelopmentIdentity: string | undefined;
   readonly verbose: boolean;
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: string | undefined;
@@ -261,6 +266,7 @@ const BuildEnvConfig = Config.all({
   skipBuild: Config.string("SYNARA_DESKTOP_SKIP_BUILD").pipe(Config.option),
   keepStage: Config.string("SYNARA_DESKTOP_KEEP_STAGE").pipe(Config.option),
   signed: Config.string("SYNARA_DESKTOP_SIGNED").pipe(Config.option),
+  macDevelopmentIdentity: Config.string("SYNARA_MAC_DEVELOPMENT_IDENTITY").pipe(Config.option),
   verbose: Config.string("SYNARA_DESKTOP_VERBOSE").pipe(Config.option),
   mockUpdates: Config.string("SYNARA_DESKTOP_MOCK_UPDATES").pipe(Config.option),
   mockUpdateServerPort: Config.string("SYNARA_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.option),
@@ -325,6 +331,11 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const skipBuild = resolveBooleanFlag(input.skipBuild, envSkipBuild);
   const keepStage = resolveBooleanFlag(input.keepStage, envKeepStage);
   const signed = resolveBooleanFlag(input.signed, envSigned);
+  const macDevelopmentIdentity = mergeOptions(
+    input.macDevelopmentIdentity,
+    env.macDevelopmentIdentity,
+    undefined,
+  )?.trim();
   const verbose = resolveBooleanFlag(input.verbose, envVerbose);
   const mockUpdates = resolveBooleanFlag(input.mockUpdates, envMockUpdates);
   const mockUpdateServerPort = mergeOptions(
@@ -332,6 +343,22 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     env.mockUpdateServerPort,
     undefined,
   );
+
+  if (macDevelopmentIdentity && platform !== "mac") {
+    return yield* new BuildScriptError({
+      message: "SYNARA_MAC_DEVELOPMENT_IDENTITY is supported only for macOS artifacts.",
+    });
+  }
+  if (macDevelopmentIdentity && signed) {
+    return yield* new BuildScriptError({
+      message: "Local Apple Development signing and distribution signing are mutually exclusive.",
+    });
+  }
+  if (macDevelopmentIdentity && !/^Apple Development:/u.test(macDevelopmentIdentity)) {
+    return yield* new BuildScriptError({
+      message: "Local macOS signing requires an explicit 'Apple Development:' identity.",
+    });
+  }
 
   return {
     platform,
@@ -345,6 +372,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     skipBuild,
     keepStage,
     signed,
+    macDevelopmentIdentity,
     verbose,
     mockUpdates,
     mockUpdateServerPort,
@@ -575,6 +603,19 @@ const verifyStagedNodePty = Effect.fn("verifyStagedNodePty")(function* (
   );
 });
 
+const verifyStagedServerRuntimeImports = Effect.fn("verifyStagedServerRuntimeImports")(function* (
+  stageAppDir: string,
+  verbose: boolean,
+) {
+  yield* Effect.log("[desktop-artifact] Verifying staged server runtime imports...");
+  yield* runCommand(
+    ChildProcess.make({
+      cwd: stageAppDir,
+      ...commandOutputOptions(verbose),
+    })`${process.execPath} --input-type=module --eval ${"await Promise.all([import('@effect/platform-node'), import('@effect/platform-node/NodeRedis')])"}`,
+  );
+});
+
 interface PatchFileExpectation {
   readonly file: string;
   readonly addedLines: ReadonlyArray<string>;
@@ -645,6 +686,7 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
   repoRoot: string,
   stageAppDir: string,
   platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
   verbose: boolean,
 ) {
   const path = yield* Path.Path;
@@ -667,6 +709,7 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
   yield* Effect.log(
     "[desktop-artifact] Installing staged production dependencies from the repository lockfile...",
   );
+  const installTarget = resolveDesktopDependencyInstallTarget({ platform, arch });
   if (platform === "win") {
     // Bun 1.3.12 needs a platform-only lockfile rewrite while resolving this
     // copied workspace on Windows even though the repository-level frozen
@@ -679,14 +722,14 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
         ...commandOutputOptions(verbose),
         // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
         shell: process.platform === "win32",
-      })`bun install --omit=dev --ignore-scripts --linker hoisted`,
+      })`bun install --omit=dev --ignore-scripts --linker hoisted --cpu ${installTarget.cpu} --os ${installTarget.os}`,
     );
   } else {
     yield* runCommand(
       ChildProcess.make({
         cwd: stageAppDir,
         ...commandOutputOptions(verbose),
-      })`bun install --frozen-lockfile --ignore-scripts --linker hoisted`,
+      })`bun install --frozen-lockfile --ignore-scripts --linker hoisted --cpu ${installTarget.cpu} --os ${installTarget.os}`,
     );
   }
 
@@ -718,19 +761,25 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
 const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
+  arch: typeof BuildArch.Type,
   productName: string,
   signed: boolean,
+  macDevelopmentIdentity: string | undefined,
   mockUpdates: boolean,
   mockUpdateServerPort: string | undefined,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: SYNARA_PRODUCTION_BUNDLE_ID,
     productName,
-    artifactName: "Synara-${version}-${arch}.${ext}",
+    artifactName: resolveDesktopArtifactName({
+      platform,
+      signed,
+      ...(macDevelopmentIdentity ? { macDevelopmentIdentity } : {}),
+    }),
     directories: {
       buildResources: "apps/desktop/resources",
     },
-    forceCodeSigning: signed,
+    forceCodeSigning: signed || Boolean(macDevelopmentIdentity),
   };
   const publishConfig = resolveGitHubPublishConfig();
   if (publishConfig) {
@@ -761,7 +810,9 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const platformBuildConfigInput = {
     platform,
     target,
+    arch,
     signed,
+    ...(macDevelopmentIdentity ? { macDevelopmentIdentity } : {}),
     ...(windowsAzureSignOptions ? { windowsAzureSignOptions } : {}),
   } as const;
 
@@ -769,6 +820,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 
   return {
     buildConfig,
+    expectsUpdateManifest: buildConfig.publish !== undefined,
     windowsPublisherSubject: windowsSigningConfig?.subjectDistinguishedName ?? null,
   };
 });
@@ -843,6 +895,18 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     return yield* new BuildScriptError({
       message: nativeBuildHostIssue,
     });
+  }
+
+  if (options.platform === "mac" && options.signed) {
+    yield* Effect.try({
+      try: () => validateMacDistributionEnvironment({ environment: process.env }),
+      catch: (cause) =>
+        new BuildScriptError({
+          message: "Signed macOS distribution preflight failed before staging.",
+          cause,
+        }),
+    });
+    yield* Effect.log("[desktop-artifact] Signed macOS distribution preflight passed.");
   }
 
   const electronVersion = desktopPackageJson.dependencies.electron;
@@ -1012,8 +1076,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const resolvedBuildConfig = yield* createBuildConfig(
     options.platform,
     options.target,
+    options.arch,
     desktopPackageJson.productName ?? "Synara",
     options.signed,
+    options.macDevelopmentIdentity,
     options.mockUpdates,
     options.mockUpdateServerPort,
   );
@@ -1043,7 +1109,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     },
   };
 
-  yield* installFrozenStageDependencies(repoRoot, stageAppDir, options.platform, options.verbose);
+  yield* installFrozenStageDependencies(
+    repoRoot,
+    stageAppDir,
+    options.platform,
+    options.arch,
+    options.verbose,
+  );
+  yield* verifyStagedServerRuntimeImports(stageAppDir, options.verbose);
 
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
   yield* fs.writeFileString(path.join(stageAppDir, "package.json"), `${stagePackageJsonString}\n`);
@@ -1060,7 +1133,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       delete buildEnv[key];
     }
   }
-  if (!options.signed) {
+  if (!options.signed && !options.macDevelopmentIdentity) {
     buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
     delete buildEnv.CSC_LINK;
     delete buildEnv.CSC_KEY_PASSWORD;
@@ -1126,7 +1199,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       try: () =>
         finalizeMacUpdateZip({
           stageDistDir,
-          signed: options.signed,
+          signed: options.signed || Boolean(options.macDevelopmentIdentity),
+          requireManifest: resolvedBuildConfig.expectsUpdateManifest,
+          expectedArch: options.arch,
           verbose: options.verbose,
         }),
       catch: (cause) =>
@@ -1219,6 +1294,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   signed: Flag.boolean("signed").pipe(
     Flag.withDescription(
       "Enable signing/notarization discovery; Windows uses Azure Trusted Signing (env: SYNARA_DESKTOP_SIGNED).",
+    ),
+    Flag.optional,
+  ),
+  macDevelopmentIdentity: Flag.string("mac-development-identity").pipe(
+    Flag.withDescription(
+      "Sign the complete local macOS app with an Apple Development identity without notarizing it (env: SYNARA_MAC_DEVELOPMENT_IDENTITY).",
     ),
     Flag.optional,
   ),

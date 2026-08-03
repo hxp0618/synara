@@ -42,3 +42,18 @@ The `postgres-outbox` driver acknowledges the durable database dispatch boundary
 authoritative Execution state through the idempotent Claim API, so a duplicate wake-up cannot create a
 second valid Lease. External queue builds implement the same `Publisher` interface; this repository
 does not silently treat an unconfigured external driver as PostgreSQL delivery.
+
+## Internal incident communication intent
+
+Broad-impact employee-safe Incident updates are also written transactionally to the `incident.internal-update` Topic.
+The payload contains only the Incident identity, severity, sanitized summary, affected component/Region sets and the
+credential-free internal Status Board references. It contains no operator email, Credential, Prompt or Tenant-private
+payload. The Outbox row proves only that a durable notification intent was committed; it does not prove Status Board,
+paging or employee-channel delivery. `incident.internal-update` is never acknowledged by the built-in database
+publisher. When `SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL` and its dedicated 32-byte HMAC key are configured, the Control
+Plane routes only this Topic to the failure-independent HTTPS receiver, sends the Outbox Message ID as
+`Idempotency-Key`, and signs the exact versioned JSON body as `X-Synara-Signature: v1=<hex-hmac-sha256>`.
+Redirects are not followed. A non-2xx response is retried through the normal Outbox policy and can dead-letter; without
+the adapter, the intent fails closed instead of being reported as published. A 2xx response proves receiver acceptance,
+not employee receipt, paging or Status Board publication, so the external system must retain its own delivery evidence
+under the incident exercise contract.

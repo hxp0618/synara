@@ -1,0 +1,66 @@
+{
+  "assessment": "design-current-not-release-approved",
+  "components": {
+    "controlPlane": {
+      "apiMajor": 1,
+      "sourceCommitRequired": true
+    },
+    "packages": {
+      "admin": "0.6.3",
+      "controlPlaneClient": "0.6.3",
+      "contracts": "0.6.3",
+      "desktop": "0.6.3",
+      "enterpriseUi": "0.6.3",
+      "providerHost": "0.2.0",
+      "server": "0.6.3",
+      "web": "0.6.3"
+    },
+    "providerHostProtocol": {
+      "acceptedMajor": 2,
+      "minimumAcceptedMinor": 1,
+      "producedMajor": 2,
+      "producedMinor": 2
+    },
+    "runtimeEvent": {
+      "controlPlaneReadMaximum": 2,
+      "controlPlaneReadMinimum": 1,
+      "managedWorkerMaximum": 2,
+      "managedWorkerMinimum": 2
+    },
+    "workerManifestStorageSchema": 3,
+    "workerProtocol": {
+      "maximum": 2,
+      "minimum": 2
+    }
+  },
+  "database": {
+    "rollbackPolicy": "application-only-after-previous-build-target-schema-proof",
+    "targetTail": {
+      "name": "000163_stage6_candidate_compatibility_matrix_evidence.sql",
+      "sha256": "sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd"
+    },
+    "upgradePolicy": "forward-only-expand-contract"
+  },
+  "matrixVersion": 1,
+  "releaseCoupling": {
+    "adminAndContractsVersionMustMatch": true,
+    "adminAndWebVersionMustMatch": true,
+    "controlPlaneClientAndContractsVersionMustMatch": true,
+    "desktopAndContractsVersionMustMatch": true,
+    "desktopAndEnterpriseUiVersionMustMatch": true,
+    "enterpriseUiAndWebVersionMustMatch": true,
+    "managedWorkerGitCommitMustMatchRelease": true,
+    "webAndContractsVersionMustMatch": true,
+    "webAndServerVersionMustMatch": true
+  },
+  "rolloutOrder": [
+    "collect-and-approve-artifact-digests",
+    "backup-and-verify-restore-point",
+    "apply-additive-migrations",
+    "roll-control-plane-web-admin-and-publish-desktop",
+    "canary-then-promote-worker-release",
+    "verify-slo-audit-and-rollback-window"
+  ],
+  "schemaVersion": "synara.release-compatibility-matrix.v1",
+  "scope": "enterprise-internal-self-hosted"
+}

@@ -2,6 +2,7 @@ package executiontargets
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -9,7 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+var sandboxAcceptanceTargetID = uuid.MustParse("11111111-1111-4111-8111-111111111111")
 
 func TestObserveSandboxAcceptanceRequiresStoredCRDsAndUpdatingAssignmentFile(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -18,12 +23,7 @@ func TestObserveSandboxAcceptanceRequiresStoredCRDsAndUpdatingAssignmentFile(t *
 		case strings.Contains(request.URL.Path, "/customresourcedefinitions/"):
 			_, _ = writer.Write([]byte(`{"status":{"storedVersions":["v1beta1"],"conditions":[{"type":"Established","status":"True"}]}}`))
 		case strings.HasSuffix(request.URL.Path, "/sandboxtemplates/synara-worker"):
-			_, _ = writer.Write([]byte(`{
-  "metadata":{"uid":"template-uid","resourceVersion":"42"},
-  "spec":{"podTemplate":{"metadata":{"annotations":{"sandbox.cocoonstack.io/runtime":"standard"}},"spec":{
-    "containers":[{"name":"agentd","image":"synara-agentd:test","env":[{"name":"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE","value":"/var/run/synara/assignment/execution-id"}],"volumeMounts":[{"name":"assignment","mountPath":"/var/run/synara/assignment"}]}],
-    "volumes":[{"name":"assignment","downwardAPI":{"items":[{"path":"execution-id","fieldRef":{"fieldPath":"metadata.labels['synara.io/assigned-execution-id']"}}]}}]
-  }}}}`))
+			_, _ = writer.Write(standardSandboxTemplateResponse(t, sandboxAcceptanceTargetID))
 		case strings.HasSuffix(request.URL.Path, "/sandboxwarmpools/synara-interactive"):
 			_, _ = writer.Write([]byte(`{"metadata":{"uid":"pool-uid"},"spec":{"replicas":2,"sandboxTemplateRef":{"name":"synara-worker"},"updateStrategy":{"type":"Recreate"}},"status":{"replicas":2,"readyReplicas":2}}`))
 		case strings.HasSuffix(request.URL.Path, "/sandboxes"):
@@ -37,7 +37,7 @@ func TestObserveSandboxAcceptanceRequiresStoredCRDsAndUpdatingAssignmentFile(t *
 	}))
 	defer server.Close()
 	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-	observation, err := client.ObserveSandboxAcceptance(context.Background(), kubernetesTargetConfiguration{
+	observation, err := client.ObserveSandboxAcceptance(context.Background(), sandboxAcceptanceTargetID, kubernetesTargetConfiguration{
 		AllocationBackend: "sandbox-operator-standard", Namespace: "synara-workers",
 		SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
 	})
@@ -47,12 +47,100 @@ func TestObserveSandboxAcceptanceRequiresStoredCRDsAndUpdatingAssignmentFile(t *
 	if !observation.SandboxAPIReady || !observation.SandboxClaimAPIReady ||
 		!observation.SandboxTemplateAPIReady || !observation.SandboxWarmPoolAPIReady ||
 		!observation.OperatorReady || !observation.WarmPoolTemplateReady || !observation.WarmPoolReady ||
-		!observation.AssignedExecutionFieldRefReady || observation.WarmPoolDesiredReplicas != 2 ||
+		!observation.AssignedExecutionFieldRefReady || !observation.TemplateObservabilityReady ||
+		observation.WarmPoolDesiredReplicas != 2 ||
 		observation.TemplateIdentity != "template-uid:42" || observation.TemplateRuntime != "standard" ||
 		observation.TemplateAgentdImage != "synara-agentd:test" || observation.WarmPoolUpdateStrategy != "Recreate" ||
 		observation.TemplateSandboxRuntimeImage != "synara-agentd:test" ||
 		!observation.WarmPoolTemplateImageFresh {
 		t.Fatalf("Sandbox acceptance observation = %#v", observation)
+	}
+}
+
+func standardSandboxTemplateResponse(t *testing.T, targetID uuid.UUID) []byte {
+	t.Helper()
+	environment := append([]any{
+		map[string]any{
+			"name":  "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID_FILE",
+			"value": "/var/run/synara/assignment/execution-id",
+		},
+	}, kubernetesObservabilityEnvironment(targetID)...)
+	mounts := []any{
+		map[string]any{"name": "assignment", "mountPath": "/var/run/synara/assignment"},
+	}
+	volumes := []any{
+		map[string]any{
+			"name": "assignment",
+			"downwardAPI": map[string]any{"items": []any{map[string]any{
+				"path": "execution-id",
+				"fieldRef": map[string]any{
+					"fieldPath": "metadata.labels['synara.io/assigned-execution-id']",
+				},
+			}}},
+		},
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"uid": "template-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"podTemplate": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{"sandbox.cocoonstack.io/runtime": "standard"}},
+			"spec": map[string]any{
+				"containers": []any{map[string]any{
+					"name": "agentd", "image": "synara-agentd:test", "env": environment, "volumeMounts": mounts,
+				}},
+				"volumes": volumes,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func TestKubernetesSandboxTemplateObservabilityRequiresFixedOperatorAuthority(t *testing.T) {
+	container := kubernetesSandboxTemplateContainer{Name: "agentd"}
+	decodeJSONFixture(t, kubernetesObservabilityEnvironment(sandboxAcceptanceTargetID), &container.Env)
+	if !kubernetesSandboxTemplateObservabilityReady(sandboxAcceptanceTargetID, container) {
+		t.Fatal("valid operator observability template was rejected")
+	}
+
+	tests := []struct {
+		name   string
+		weaken func(*kubernetesSandboxTemplateContainer)
+	}{
+		{name: "renamed config", weaken: func(container *kubernetesSandboxTemplateContainer) {
+			container.Env[0].ValueFrom.ConfigMapKeyRef.Name = "tenant-selected-config"
+		}},
+		{name: "required config", weaken: func(container *kubernetesSandboxTemplateContainer) {
+			optional := false
+			container.Env[0].ValueFrom.ConfigMapKeyRef.Optional = &optional
+		}},
+		{name: "client identity", weaken: func(container *kubernetesSandboxTemplateContainer) {
+			container.Env = append(container.Env, kubernetesSandboxTemplateEnvironment{
+				Name: "OTEL_EXPORTER_OTLP_CLIENT_KEY", Value: "/data/client.key",
+			})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidateContainer := container
+			decodeJSONFixture(t, container, &candidateContainer)
+			test.weaken(&candidateContainer)
+			if kubernetesSandboxTemplateObservabilityReady(sandboxAcceptanceTargetID, candidateContainer) {
+				t.Fatal("weakened observability template was accepted")
+			}
+		})
+	}
+}
+
+func decodeJSONFixture(t *testing.T, input, output any) {
+	t.Helper()
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, output); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -82,7 +170,7 @@ func TestObserveSandboxAcceptanceRejectsAssignmentFileMountedOnlyBySidecar(t *te
 	}))
 	defer server.Close()
 	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-	observation, err := client.ObserveSandboxAcceptance(context.Background(), kubernetesTargetConfiguration{
+	observation, err := client.ObserveSandboxAcceptance(context.Background(), sandboxAcceptanceTargetID, kubernetesTargetConfiguration{
 		AllocationBackend: "sandbox-operator-standard", Namespace: "synara-workers",
 		SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
 	})
@@ -167,7 +255,7 @@ func TestObserveSandboxAcceptanceRequiresCocoonAttestationOnSameReadyKVMNode(t *
 			}))
 			defer server.Close()
 			client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
-			observation, err := client.ObserveSandboxAcceptance(context.Background(), kubernetesTargetConfiguration{
+			observation, err := client.ObserveSandboxAcceptance(context.Background(), sandboxAcceptanceTargetID, kubernetesTargetConfiguration{
 				AllocationBackend: "sandbox-operator-cocoon", Namespace: "synara-workers",
 				SandboxTemplateName: "synara-worker", SandboxWarmPoolName: "synara-interactive",
 			})

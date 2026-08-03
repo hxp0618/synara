@@ -315,6 +315,17 @@ const worker = setupWorker(
       sendEffectRpcExit(client, request.id, result);
     });
   }),
+  http.get("*/v1/platform/profile", () =>
+    HttpResponse.json(
+      {
+        error: {
+          code: "control_plane_unavailable",
+          message: "The local browser fixture does not expose an authoritative Control Plane.",
+        },
+      },
+      { status: 503 },
+    ),
+  ),
   http.get("*/attachments/:attachmentId", () => new HttpResponse(null, { status: 204 })),
   http.get("*/api/project-favicon", () => new HttpResponse(null, { status: 204 })),
 );

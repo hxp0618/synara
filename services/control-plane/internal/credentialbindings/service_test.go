@@ -22,6 +22,29 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestCredentialBindingMutationsRejectInactiveTenantBeforeStorageAccess(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil, nil)
+
+	_, err := service.Create(
+		ctx, principal, requestedTenantID, CreateInput{},
+		"credential-binding-inactive-create", "127.0.0.1",
+	)
+	if bindingProblemCode(err) != "tenant_not_found" {
+		t.Fatalf("inactive Tenant Credential Binding create error = %v", err)
+	}
+	_, err = service.Disable(
+		ctx, principal, requestedTenantID, uuid.New(),
+		"credential-binding-inactive-disable", "127.0.0.1",
+	)
+	if bindingProblemCode(err) != "tenant_not_found" {
+		t.Fatalf("inactive Tenant Credential Binding disable error = %v", err)
+	}
+}
+
 func TestCredentialBindingLifecycleValidatesPurposeSelectorAndAuthorization(t *testing.T) {
 	fixture := newBindingFixture(t)
 	ctx := context.Background()
@@ -108,6 +131,33 @@ func TestCredentialBindingLifecycleValidatesPurposeSelectorAndAuthorization(t *t
 	)
 	if err != nil || replayed.DisabledAt == nil {
 		t.Fatalf("idempotent Binding disable = %#v err=%v", replayed, err)
+	}
+}
+
+func TestCredentialBindingListRejectsCrossTenantOwnerSubstitution(t *testing.T) {
+	fixture := newBindingFixture(t)
+	now := time.Now().UTC()
+	otherTenantID, otherOrganizationID := uuid.New(), uuid.New()
+	otherProjectID, otherTargetID := uuid.New(), uuid.New()
+	for _, model := range []any{
+		&persistence.Tenant{ID: otherTenantID, Slug: "binding-other", Name: "Binding Other", Status: "active", PlanCode: "free", Region: "default", Settings: map[string]any{}, CreatedBy: fixture.owner.UserID},
+		&persistence.Organization{ID: otherOrganizationID, TenantID: otherTenantID, Slug: "root", Name: "Other root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: fixture.owner.UserID},
+		&persistence.Project{ID: otherProjectID, TenantID: otherTenantID, OrganizationID: otherOrganizationID, Name: "Other Project", DefaultBranch: "main", Visibility: "tenant", CreatedBy: fixture.owner.UserID},
+		&persistence.ExecutionTarget{ID: otherTargetID, TenantID: &otherTenantID, OrganizationID: &otherOrganizationID, Kind: "local", Name: "Other Target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.List(
+		context.Background(), fixture.owner, fixture.tenantID, OwnerFilter{ProjectID: &otherProjectID},
+	); bindingProblemCode(err) != "project_not_found" {
+		t.Fatalf("cross-Tenant Project Binding list error = %v", err)
+	}
+	if _, err := fixture.service.List(
+		context.Background(), fixture.owner, fixture.tenantID, OwnerFilter{ExecutionTargetID: &otherTargetID},
+	); bindingProblemCode(err) != "execution_target_not_found" {
+		t.Fatalf("cross-Tenant Target Binding list error = %v", err)
 	}
 }
 

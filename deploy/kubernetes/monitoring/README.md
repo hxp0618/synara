@@ -17,3 +17,15 @@ schedulable units, Queue depth/oldest age, and Worker Pool autoscaling decisions
 capacity is deliberately a Prometheus time-series concern rather than a PostgreSQL transaction-authority table;
 operators must configure Prometheus retention to the period required for their capacity planning and SLO review.
 PostgreSQL retains only the latest versioned capacity authority used by the scheduler.
+
+The Stage 6 rules also record the four provisional Enterprise SLOs and their 30-day error budgets. Availability requires
+an independently operated external blackbox probe whose Prometheus series is exactly
+`probe_success{job="synara-public-readiness"}`. The checked-in rules deliberately alert when that series is absent; an
+internal `up` series cannot prove public reachability. Configure at least three external probe regions at a 30-second
+cadence and retain at least 30 days of data before assessing a production window.
+
+The exact good-event definitions, minimum sample volumes, no-data behavior, and release-evidence boundary are frozen in
+[`enterprise-service-level-objectives-v1.md`](../../../docs/contracts/enterprise-service-level-objectives-v1.md).
+Alert ownership, paging, public communication, and error-budget response are defined in
+[`enterprise-incident-response.md`](../../../docs/runbooks/enterprise-incident-response.md); deployment-specific contacts
+and Internal Status Board URLs belong in a private operations annex.

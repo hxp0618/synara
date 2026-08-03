@@ -24,6 +24,43 @@ export interface WhatsNewFeature {
   readonly details?: string;
 }
 
+interface BaseReleaseNotice {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly affectedAudience: string;
+  readonly requiredAction: string;
+  /** ISO-8601 timestamp for the first customer-visible notification. */
+  readonly firstPublishedAt: string;
+  /** ISO-8601 timestamp after which the action or behavior change takes effect. */
+  readonly effectiveAt: string;
+  readonly supportUrl?: string;
+}
+
+/**
+ * Structured notices rendered ahead of ordinary release highlights.
+ *
+ * The union intentionally makes migration and emergency-exception evidence
+ * impossible to omit from the notice classes that require them. The release
+ * checklist remains the authority for approval and publication evidence.
+ */
+export type WhatsNewNotice =
+  | (BaseReleaseNotice & {
+      readonly classification: "administrator-action";
+      readonly migrationGuideUrl?: string;
+    })
+  | (BaseReleaseNotice & {
+      readonly classification: "breaking-change";
+      readonly migrationGuideUrl: string;
+    })
+  | (BaseReleaseNotice & {
+      readonly classification: "urgent-security";
+      readonly mitigation: string;
+      readonly exceptionApprovalReference: string;
+      readonly exceptionExpiresAt: string;
+      readonly migrationGuideUrl?: string;
+    });
+
 /**
  * A single release entry. `version` is a semver-like `MAJOR.MINOR.PATCH`
  * string that matches the `version` field in `apps/web/package.json` (mirrored
@@ -39,8 +76,88 @@ export interface WhatsNewEntry {
   readonly version: string;
   readonly date: string;
   readonly features: readonly WhatsNewFeature[];
+  readonly notices?: readonly WhatsNewNotice[];
   readonly heroImage?: string;
   readonly heroImageAlt?: string;
+}
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
+const ISO_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseISOTimestamp(value: string): number {
+  if (!ISO_TIMESTAMP_PATTERN.test(value)) return Number.NaN;
+  return Date.parse(value);
+}
+
+function isSafeNoticeURL(value: string): boolean {
+  if (value.startsWith("/")) return !value.startsWith("//");
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate the public timing contract without trusting author-entered labels.
+ * Ordinary administrator actions require 30 days and breaking changes require
+ * 90 days. Urgent security notices may be shorter only because their type
+ * requires an approval reference, mitigation and exception expiry.
+ */
+export function validateReleaseNotice(notice: WhatsNewNotice): readonly string[] {
+  const errors: string[] = [];
+  const firstPublishedAt = parseISOTimestamp(notice.firstPublishedAt);
+  const effectiveAt = parseISOTimestamp(notice.effectiveAt);
+
+  for (const [field, value] of [
+    ["id", notice.id],
+    ["title", notice.title],
+    ["summary", notice.summary],
+    ["affectedAudience", notice.affectedAudience],
+    ["requiredAction", notice.requiredAction],
+  ] as const) {
+    if (value.trim().length === 0) errors.push(`${field} must not be empty`);
+  }
+
+  if (!Number.isFinite(firstPublishedAt)) {
+    errors.push("firstPublishedAt must be an ISO-8601 timestamp");
+  }
+  if (!Number.isFinite(effectiveAt)) {
+    errors.push("effectiveAt must be an ISO-8601 timestamp");
+  }
+  if (errors.length > 0) return errors;
+
+  const leadTimeDays = (effectiveAt - firstPublishedAt) / MILLISECONDS_PER_DAY;
+  if (leadTimeDays < 0) {
+    errors.push("effectiveAt must not precede firstPublishedAt");
+  } else if (notice.classification === "administrator-action" && leadTimeDays < 30) {
+    errors.push("administrator-action notices require at least 30 days lead time");
+  } else if (notice.classification === "breaking-change" && leadTimeDays < 90) {
+    errors.push("breaking-change notices require at least 90 days lead time");
+  }
+
+  if (notice.classification === "urgent-security") {
+    const exceptionExpiresAt = parseISOTimestamp(notice.exceptionExpiresAt);
+    if (!Number.isFinite(exceptionExpiresAt)) {
+      errors.push("exceptionExpiresAt must be an ISO-8601 timestamp");
+    } else if (exceptionExpiresAt <= firstPublishedAt) {
+      errors.push("exceptionExpiresAt must be after firstPublishedAt");
+    }
+    if (notice.mitigation.trim().length === 0) errors.push("mitigation must not be empty");
+    if (notice.exceptionApprovalReference.trim().length === 0) {
+      errors.push("exceptionApprovalReference must not be empty");
+    }
+  }
+
+  if (notice.migrationGuideUrl !== undefined && !isSafeNoticeURL(notice.migrationGuideUrl)) {
+    errors.push("migrationGuideUrl must be HTTPS or root-relative");
+  }
+  if (notice.supportUrl !== undefined && !isSafeNoticeURL(notice.supportUrl)) {
+    errors.push("supportUrl must be HTTPS or root-relative");
+  }
+
+  return errors;
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   parseVersion,
   resolveWhatsNewState,
   sortEntriesByVersionDesc,
+  validateReleaseNotice,
   type WhatsNewEntry,
 } from "./logic";
 
@@ -19,6 +20,73 @@ const entry = (version: string, overrides?: Partial<WhatsNewEntry>): WhatsNewEnt
     },
   ],
   ...overrides,
+});
+
+describe("validateReleaseNotice", () => {
+  it("enforces the 30-day administrator-action window", () => {
+    expect(
+      validateReleaseNotice({
+        id: "admin-action",
+        classification: "administrator-action",
+        title: "Update allowlist",
+        summary: "A network range is changing.",
+        affectedAudience: "Enterprise administrators",
+        requiredAction: "Update the allowlist.",
+        firstPublishedAt: "2026-07-01T00:00:00Z",
+        effectiveAt: "2026-07-30T00:00:00Z",
+      }),
+    ).toEqual(["administrator-action notices require at least 30 days lead time"]);
+  });
+
+  it("accepts a breaking change with 90 days lead time and a migration guide", () => {
+    expect(
+      validateReleaseNotice({
+        id: "breaking-change",
+        classification: "breaking-change",
+        title: "Protocol version retirement",
+        summary: "An old protocol version will stop accepting new work.",
+        affectedAudience: "Self-managed enterprise administrators",
+        requiredAction: "Upgrade workers before the effective timestamp.",
+        firstPublishedAt: "2026-07-01T00:00:00Z",
+        effectiveAt: "2026-09-29T00:00:00Z",
+        migrationGuideUrl: "https://example.com/migrate",
+      }),
+    ).toEqual([]);
+  });
+
+  it("requires a valid expiry for urgent security exceptions", () => {
+    expect(
+      validateReleaseNotice({
+        id: "urgent-security",
+        classification: "urgent-security",
+        title: "Urgent administrator action",
+        summary: "A customer-safe urgent action is required.",
+        affectedAudience: "Enterprise administrators",
+        requiredAction: "Follow the approved mitigation.",
+        firstPublishedAt: "2026-07-01T00:00:00Z",
+        effectiveAt: "2026-07-02T00:00:00Z",
+        mitigation: "Apply the documented temporary control.",
+        exceptionApprovalReference: "SEC-APPROVAL-1",
+        exceptionExpiresAt: "not-a-timestamp",
+      }),
+    ).toEqual(["exceptionExpiresAt must be an ISO-8601 timestamp"]);
+  });
+
+  it("rejects non-HTTPS external notice links", () => {
+    expect(
+      validateReleaseNotice({
+        id: "breaking-change",
+        classification: "breaking-change",
+        title: "Protocol version retirement",
+        summary: "An old protocol version will stop accepting new work.",
+        affectedAudience: "Self-managed enterprise administrators",
+        requiredAction: "Upgrade workers before the effective timestamp.",
+        firstPublishedAt: "2026-07-01T00:00:00Z",
+        effectiveAt: "2026-09-29T00:00:00Z",
+        migrationGuideUrl: "http://docs.example.com/migrate",
+      }),
+    ).toEqual(["migrationGuideUrl must be HTTPS or root-relative"]);
+  });
 });
 
 describe("parseVersion", () => {

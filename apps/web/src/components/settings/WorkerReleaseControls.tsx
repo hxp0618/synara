@@ -18,7 +18,7 @@ import {
   type ControlPlaneWorkerManifest,
   type ControlPlaneWorkerReleaseOverview,
   type ControlPlaneWorkerReleaseRevision,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { randomUUID } from "~/lib/utils";
 
 export const workerReleasesQueryKey = (tenantId: string, targetId: string) =>

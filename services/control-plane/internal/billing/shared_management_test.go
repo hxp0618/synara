@@ -73,7 +73,7 @@ func TestSweepSharedUsageChargesPersistsSuccessAndReportsRetryableWorkers(t *tes
 		t.Fatalf("unexpected partial shared sweep result: %#v", partial)
 	}
 	if partial.Failures[0].WorkerID != nonterminal.WorkerID ||
-		partial.Failures[0].ErrorCode != "billing_shared_worker_not_terminal" {
+		partial.Failures[0].ErrorCode != "cost_accounting_shared_worker_not_terminal" {
 		t.Fatalf("unexpected partial shared sweep failure: %#v", partial.Failures[0])
 	}
 	if err := fixture.db.Model(&persistence.BillingSharedCostAllocationRun{}).Count(&runCount).Error; err != nil {
@@ -93,5 +93,5 @@ func TestSweepSharedUsageChargesRejectsOpenBillingPeriod(t *testing.T) {
 		BillingPeriodStartAt: fixture.base.Add(2 * time.Hour),
 		BillingPeriodEndAt:   fixture.base.Add(4 * time.Hour),
 	})
-	assertProblemCode(t, err, "billing_shared_allocation_period_open")
+	assertProblemCode(t, err, "cost_accounting_shared_allocation_period_open")
 }

@@ -51,6 +51,13 @@ func WithProviderCredentialAccessTTL(ttl time.Duration) ServiceOption {
 	}
 }
 
+func WithHostedProviderCommercialAuthorization(operatorTenantID uuid.UUID, required bool) ServiceOption {
+	return func(service *Service) {
+		service.providerCommercialAuthorizationRequired = required
+		service.providerCommercialOperatorTenantID = operatorTenantID
+	}
+}
+
 type MemoryReferenceResolver interface {
 	ResolveExecutionRecoveryMemoryReferences(
 		context.Context,
@@ -89,20 +96,22 @@ func expectOne(result *gorm.DB, status int, code, message string) error {
 }
 
 type Service struct {
-	db                          *gorm.DB
-	authorizer                  *authorization.Authorizer
-	sessions                    *sessions.Service
-	leaseTTL                    time.Duration
-	heartbeatTimeout            time.Duration
-	receiptTTL                  time.Duration
-	cursorCipher                *secret.CursorCipher
-	providerCursorMaximumAge    time.Duration
-	providerCredentialAccessTTL time.Duration
-	targets                     *executiontargets.Service
-	projects                    *projects.Service
-	memoryReferences            MemoryReferenceResolver
-	now                         func() time.Time
-	claimRecoverySweeps         *recoverySweepThrottle
+	db                                      *gorm.DB
+	authorizer                              *authorization.Authorizer
+	sessions                                *sessions.Service
+	leaseTTL                                time.Duration
+	heartbeatTimeout                        time.Duration
+	receiptTTL                              time.Duration
+	cursorCipher                            *secret.CursorCipher
+	providerCursorMaximumAge                time.Duration
+	providerCredentialAccessTTL             time.Duration
+	providerCommercialAuthorizationRequired bool
+	providerCommercialOperatorTenantID      uuid.UUID
+	targets                                 *executiontargets.Service
+	projects                                *projects.Service
+	memoryReferences                        MemoryReferenceResolver
+	now                                     func() time.Time
+	claimRecoverySweeps                     *recoverySweepThrottle
 }
 
 // recoverySweepThrottle rate-limits the opportunistic expired-state sweeps

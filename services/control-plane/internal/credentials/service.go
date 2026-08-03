@@ -99,7 +99,7 @@ func NewService(db *gorm.DB, cipher *credentialkms.EnvelopeCipher) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, input CreateInput, requestID, ipAddress string) (Credential, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Credential{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -149,7 +149,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 		CredentialType: normalized.CredentialType, AADVersion: 3, Version: 1,
 		CreatedBy: principal.UserID, UpdatedBy: principal.UserID, ExpiresAt: normalized.ExpiresAt,
 	}
-	aad, err := credentialAAD(model)
+	aad, err := EnvelopeAAD(model)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -179,7 +179,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]Credential, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsRead); err != nil {
@@ -197,7 +197,7 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 }
 
 func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tenantID, credentialID uuid.UUID, input RotateInput, requestID, ipAddress string) (Credential, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Credential{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -247,7 +247,7 @@ func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tena
 	next := current
 	next.AADVersion = 3
 	next.Version = nextVersion
-	aad, err := credentialAAD(next)
+	aad, err := EnvelopeAAD(next)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -288,7 +288,7 @@ func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tena
 }
 
 func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tenantID, credentialID uuid.UUID, requestID, ipAddress string) error {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -326,7 +326,7 @@ func (s *Service) SetAutoSelect(
 	input SetAutoSelectInput,
 	requestID, ipAddress string,
 ) (Credential, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Credential{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -397,7 +397,7 @@ func (s *Service) GetScopePolicy(
 	principal identity.Principal,
 	tenantID uuid.UUID,
 ) (ScopePolicy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ScopePolicy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsRead); err != nil {
@@ -421,7 +421,7 @@ func (s *Service) UpdateScopePolicy(
 	input UpdateScopePolicyInput,
 	requestID, ipAddress string,
 ) (ScopePolicy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ScopePolicy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CredentialsManage); err != nil {
@@ -513,7 +513,7 @@ func (s *Service) resolveModel(ctx context.Context, model persistence.ProviderCr
 	if purposeErr != nil {
 		return nil, problem.New(500, "credential_purpose_invalid", "Credential purpose is invalid.")
 	}
-	aad, err := credentialAAD(model)
+	aad, err := EnvelopeAAD(model)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +569,10 @@ func normalizeCreate(input CreateInput, now time.Time) (CreateInput, []byte, err
 	return input, payload, err
 }
 
-func credentialAAD(model persistence.ProviderCredential) ([]byte, error) {
+// EnvelopeAAD returns the authenticated identity bound to a Provider
+// Credential envelope. KMS rotation reuses it to authenticate the payload
+// before rewrapping only the data key.
+func EnvelopeAAD(model persistence.ProviderCredential) ([]byte, error) {
 	switch model.AADVersion {
 	case 1:
 		if model.Purpose != PurposeProvider {
@@ -719,13 +722,6 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }
 
 func zero(value []byte) {

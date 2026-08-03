@@ -9,7 +9,7 @@ PostgreSQL、对象存储或多副本处置。
 - MinIO/S3 是 Artifact Payload 的权威来源；数据库只保存受验证的 Metadata。
 - `/health` 只表示进程存活，`/ready` 才表示可以接收生产流量。
 - 数据库或对象存储不可用时允许 `/health=200`、`/ready=503`，不得绕过 Readiness 强行导流。
-- Session Event Broker、进程内 Cache 和本地文件都不是 SaaS 权威来源。
+- Session Event Broker、进程内 Cache 和本地文件都不是 Control Plane 权威来源。
 - 不在命令行、工单、聊天或日志中粘贴 Login、Worker、Lease、Provider、KMS 或 Presigned URL 凭据。
 - 先保留证据，再执行重启、扩缩容或 Replay。禁止直接修改 Event Sequence、Lease Generation
   或 Outbox Published 状态。
@@ -204,9 +204,11 @@ curl --fail-with-body --no-buffer \
 处置：
 
 1. 确认 Dispatcher 副本仍运行、数据库可写，`claimed_at/claim_expires_at` 是否持续推进。
-2. 查看管理员 Outbox 列表中的安全错误摘要；API 不返回 Payload。
+2. 在 Settings → Delivery Outbox 查看 topic、message key、状态、attempt 与时间戳；API 不返回 Payload/Header，
+   Web 也不显示原始 `lastError`，支持态只能读取。
 3. 上游短暂失败时等待指数退避，避免批量手工 Replay 放大故障。
-4. Dead Letter 必须确认消费者幂等后，通过受审计 Replay API逐条或小批恢复。
+4. Dead Letter 必须确认消费者幂等后，由 Tenant Owner/Admin 在同一页面通过受审计 Replay 逐条恢复；
+   `support_readonly` 不会看到 Replay 控件。
 5. 不直接设置 `published_at`，不删除未处理消息。
 
 ## 6. Worker 全部离线或 Lease 恢复激增
@@ -269,10 +271,11 @@ kubectl -n synara-system describe pod -l app.kubernetes.io/name=synara-control-p
 
 ## 9. Provider Credential KMS 失败
 
-1. 确认受支持的 Local KMS、独立 32-byte KEK，以及 Secret Manager/Vault 到 Kubernetes Secret 的受控交付权限。
-2. 本地 KEK 轮换必须执行显式重加密流程；不能直接覆盖现有 Key。
-3. Local KMS 必须提供 32-byte Key；Vault 可负责保管/投递该 Secret，但当前 Control Plane 不把 Vault Transit
-   作为 Provider Credential KMS。云厂商 KMS 当前也不在支持范围。
+1. 确认受支持的 Local KMS 或 AWS KMS、精确且不可变的 Key ID，以及 Secret Manager 到运行时 Secret 的受控交付权限。
+2. KEK 轮换必须执行“两读一写”keyring 与数据密钥 rewrap 流程；不能直接覆盖现有 Key。完整步骤、干跑、恢复和
+   不可变收据见 [`production-secret-certificate-domain-rotation.md`](production-secret-certificate-domain-rotation.md)。
+3. Local KMS 必须提供独立 32-byte Key；Vault 可负责保管/投递该 Secret，但当前 Control Plane 不把 Vault Transit
+   作为 Provider Credential KMS。AWS KMS 需使用部署身份与不可变 Key ARN/ID，不能靠移动 Alias 冒充轮换。
 4. KMS 不可用时拒绝新的 Credential 读取/写入，不将密文降级为明文或写入磁盘。
 5. 恢复后使用专用测试 Credential 验证 Envelope 解密，不读取真实用户 Credential 做探测。
 
@@ -293,7 +296,102 @@ kubectl -n synara-system describe pod -l app.kubernetes.io/name=synara-control-p
 KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 ```
 
-## 11. 安全日志检查
+## 11. 受控 Support Access
+
+生产环境必须显式设置 `SYNARA_PLATFORM_OPERATOR_TENANT_ID`。该 Tenant 的 `owner|admin` 才能审批，
+`security_admin` 可提交自己的支持请求；个人部署会自动使用本地 Personal Tenant。不要通过直接写
+`support_access_grants`、临时添加客户 Tenant Membership 或共享客户账号来绕过审批。
+Migration `000110` 之后，每份新 Grant 都固定 `operator_tenant_id`。升级前仍为 pending/active 但没有该绑定的
+历史 Grant 会 fail closed，必须重新走四眼申请；禁止猜测或手工回填 Platform authority。
+
+Platform Tenant overview 每 30 秒刷新一次租户级运维快照。优先检查离线 Worker、最老排队时间、
+24 小时 Execution 失败、pending Artifact、unavailable Credential 和 disabled Identity Connection；
+汇总信号只用于定位受影响租户，不能替代客户授权。进入 Worker、Credential 或 Identity 详情前仍必须
+完成下述 Support Access 流程，且只允许读取。
+
+标准流程：
+
+1. 客户 Tenant 的 Owner/Admin 在 Settings → Tenancy 开启 Support Access，填写不会包含 Secret/客户内容的理由。
+2. Support Engineer 保持 Platform Operator Tenant 为当前上下文，选择目标 Tenant、5 分钟至 4 小时时限并提交理由。
+3. 另一名 Platform Admin 核对工单、目标 Tenant 与时限后批准；请求人不能自批。
+4. 请求人在 active grant 行进入 read-only view。所有请求先写入目标 Tenant Audit；除退出支持态和登出外，非 GET 请求在 HTTP 中间件直接拒绝。
+5. 排障完成后由 Platform Admin 或客户管理员立即 Revoke，不等待自然过期。客户关闭 policy 会同步撤销全部 active grant。
+6. 验证客户 Audit 中存在 `support.access_requested`、`support.access_approved`、逐次
+   `support.read_accessed|support.control_attempted` 和 `support.access_revoked|support.policy_updated`。
+
+若支持人员声称仍能访问：先检查 grant `status/expires_at/version/operator_tenant_id`、Tenant policy，再检查
+requester 在 Platform Operator Tenant 的 Membership/Role、Operator Tenant 生命周期和 Login Session 的
+`active_tenant_id`。Grant 存续期间每次授权都会重验 Platform 资格；离职、降权、Operator Tenant 停用、撤销或
+过期后，下一次认证会自动清除无效客户 Tenant 上下文。不要手工删除 Audit、回填 authority 或把 grant 改回 active。
+
+## 12. Legal Hold
+
+Tenant `owner|admin|security_admin` 可在 Settings → Legal Holds 放置或释放 Hold，`auditor` 只读。创建时必须
+写明 matter reference、理由和 `tenant|user|organization|project|session` scope；数据库会验证 scope
+属于当前 Tenant。不要直接更新 `legal_holds`，也不要通过缩短 Retention Policy 规避 Hold。
+
+处理流程：
+
+1. 根据法务/合规工单创建 Hold，并在 Audit 确认 `legal_hold.created`。
+2. 保留任务会自动跳过匹配的 Session、Workspace、Checkpoint 与 Artifact；任一 active Hold 都阻断
+   整个 Tenant 删除。若删除返回 `*_legal_hold_active`，先核对工单，不要手工改状态。
+3. matter 结束且获得授权后，以当前 version 和不少于 10 字符的理由 release；release 是单向操作，
+   会写 `legal_hold.released`，原 scope、matter 和创建证据不可变。
+4. release 后等待下一次 retention sweep，核对 `retention_policy.applied` 与资源级 Audit。不要把 release
+   当作立即删除指令。
+
+PostgreSQL 通过 advisory lock 将 Hold 变更与 retention sweep、Artifact 对象删除串行化；SQLite 个人部署
+使用进程内租户锁和单连接事务。若出现 version conflict，刷新历史后重新确认，不能覆盖新状态。
+
+## 13. Privacy Request 与数据导出
+
+Tenant 成员可在 Settings → Privacy Requests 为自己提交 `access_export` 或 `erasure`；
+`owner|admin|security_admin` 可代成员提交、验证身份、批准、拒绝并执行已批准的请求。状态按
+`requested → verified → approved → processing → completed` 推进，拒绝、取消、失败和重试保留完整的
+versioned 事件历史。默认到期日是受理后 30 天，不能通过直接更新 `privacy_requests` 或
+`privacy_request_events` 跳过身份核验。
+
+DSAR 标准流程：
+
+1. 核对请求主体、Tenant Membership 与受理理由；代提交不得把 Subject 改成 Tenant 外用户。
+2. 完成身份核验后进入 `verified`，再次复核请求范围后进入 `approved`。所有转换理由不少于 10 个字符。
+3. `access_export` 可由 Subject 自助生成并下载；导出包含主体在当前 Tenant 的 Membership、内容和元数据，
+   但不包含 Credential/KMS Secret、Login Token 或 Presigned URL。
+4. `erasure` 只能由隐私管理员执行。active Legal Hold、Subject 的 active Execution 或“最后一个 active
+   Tenant Owner”都会阻断处理；先解决权威依赖，不要直接改库。
+5. 擦除会删除用户创建的 Artifact payload、撤销用户 BYOK/Login Session、移除 Organization Membership、
+   暂停 Tenant Membership，并对 Turn、Session Event 与私有 Session 标识做确定性脱敏。不可变 Audit、
+   Memory/Checkpoint 证据按合规边界保留，并在 `resultSummary` 明示。
+6. 执行失败会进入 `failed`；确认失败原因后以新理由重新批准，再由新 version 重试。核对 Audit 中的
+   `privacy_request.created`、`privacy_request.transitioned` 和 `privacy_request.erasure_applied`。
+
+Tenant 级导出只对隐私管理员开放。Settings 中生成的是一致性 JSON 快照，包含 Tenant、成员、Organization、
+Project、Session/Turn/Event、Execution、Artifact 元数据、Credential 元数据、Identity Connection 非秘密配置、
+Legal Hold、Privacy Request 与 Audit。Artifact payload 仍在对象存储中；导出不创建下载 URL，也不包含
+Credential、SSO 或 KMS 密钥。每次生成都会写入不可变 `tenant_data_exports` 收据，记录 schema version、
+字节数、逐类行数和 SHA-256，并写 `tenant.data_exported` Audit。交付前重新计算下载文件 SHA-256 与收据比对；
+收据不可更新或删除。
+
+## 14. Tenant 与成员生命周期
+
+Tenant Owner/Admin 在 Settings → Tenant members 执行固定 RBAC 调岗、成员暂停/重新启用、该 Tenant Login
+Session 撤销和受约束移除；Owner 成员只能由另一 Owner 管理，当前用户不能从 UI 自行降权/停用。暂停在同一
+事务中暂停 Organization Membership、撤销该 Tenant 的 Login Session、撤销 user-scope Credential 并关闭自动
+选择，人工路径与 SCIM 共用同一 offboarding 原语。重新启用只恢复 Tenant Membership；按审批重新分配
+Organization 和 Credential，不能假设旧权限复活。存在不可变 Credential/Grant 等依赖时，物理 Membership
+移除可被数据库拒绝，应保留 suspended 记录和审计链，不要强删依赖。
+
+Tenant Owner 在 Settings → Tenant lifecycle 执行 `evaluation|active|suspended|closed` 合法转换；每次提交必须
+携带当前 lifecycle version 与不少于 10 字符的理由。若返回 version conflict，刷新后重新评估，不覆盖并发
+变更。暂停或关闭前必须先让 active Execution 终态；不要通过旧的 Tenant PATCH status 或直接改库绕过门禁。
+
+删除是 closed 后的独立危险步骤。Settings 发起后，Tenant 进入 `deleting`、离开普通 Tenant/session 列表，
+并触发 Execution 终止与 Workspace cleanup。Owner 仍可在 Tenant deletion recovery 区域读取独立的
+owner-only recovery inventory；恢复携带删除后的新 lifecycle version，成功后回到 `closed`。Legal Hold、
+active work 或未完成 cleanup 会 fail closed。不要使用 `DELETE` 兼容路由作为日常操作，也不要清除
+`tenant.deleted|tenant.restored` Audit 来隐藏一次撤销。
+
+## 15. 安全日志检查
 
 日志允许：`requestId`、`traceId`、资源 ID、Generation、稳定 `errorCode` 和安全错误摘要。
 
@@ -308,7 +406,7 @@ KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 `deploy/saas/failure-acceptance.sh` 和 `deploy/kubernetes/acceptance.sh` 都用随机 Sentinel 执行动态
 日志泄漏审计。发布前仍需对真实日志采集器、Sidecar 和 Ingress Access Log 做同样检查。
 
-## 12. 相关资料
+## 16. 相关资料
 
 - `docs/release-checklists/stage-2-control-plane.md`
 - `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`

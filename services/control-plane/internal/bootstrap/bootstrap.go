@@ -107,6 +107,9 @@ func ensurePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error
 		Capabilities:           builtInLocalTargetCapabilities(),
 	}
 	models := []any{
+		&persistence.SaaSPlan{
+			Code: "personal", DisplayName: "Personal", Status: "active", Version: 1,
+		},
 		&persistence.User{
 			ID: result.UserID, Email: "local-owner@localhost.invalid", DisplayName: "Local Owner",
 			Status: "active", EmailVerifiedAt: &now,
@@ -115,6 +118,10 @@ func ensurePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error
 			ID: result.TenantID, Slug: "personal-" + suffix, Name: "Personal", Status: "active",
 			PlanCode: "personal", Region: "local", Settings: map[string]any{"deploymentProfile": "personal"},
 			CreatedBy: result.UserID,
+		},
+		&persistence.TenantSubscription{
+			TenantID: result.TenantID, PlanCode: "personal", Status: "active", Version: 1,
+			CurrentPeriodStart: now, CurrentPeriodEnd: now.AddDate(0, 1, 0), AssignmentSource: "migration",
 		},
 		&persistence.TenantMembership{
 			TenantID: result.TenantID, UserID: result.UserID, Role: "owner", Status: "active", JoinedAt: &now,
@@ -213,6 +220,7 @@ func validatePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) err
 	}{
 		{&persistence.User{}, "id = ? AND status = ? AND deleted_at IS NULL", []any{result.UserID, "active"}},
 		{&persistence.Tenant{}, "id = ? AND created_by = ? AND status = ? AND deleted_at IS NULL", []any{result.TenantID, result.UserID, "active"}},
+		{&persistence.TenantSubscription{}, "tenant_id = ? AND plan_code = ? AND status = ?", []any{result.TenantID, "personal", "active"}},
 		{&persistence.TenantMembership{}, "tenant_id = ? AND user_id = ? AND role = ? AND status = ?", []any{result.TenantID, result.UserID, "owner", "active"}},
 		{&persistence.Organization{}, "id = ? AND tenant_id = ? AND created_by = ? AND status = ?", []any{result.OrganizationID, result.TenantID, result.UserID, "active"}},
 		{&persistence.OrganizationMembership{}, "tenant_id = ? AND organization_id = ? AND user_id = ? AND role = ? AND status = ?", []any{result.TenantID, result.OrganizationID, result.UserID, "owner", "active"}},

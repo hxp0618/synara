@@ -3,7 +3,7 @@ package authorization
 import "testing"
 
 func TestTenantPermissionsAreRoleBased(t *testing.T) {
-	if !TenantAllows("owner", TenantDelete) || !TenantAllows("owner", BillingManage) {
+	if !TenantAllows("owner", TenantDelete) || !TenantAllows("owner", CostManage) {
 		t.Fatal("owner must have every tenant permission")
 	}
 	if !TenantAllows("member", TenantRead) {
@@ -38,7 +38,7 @@ func TestSchedulingPolicyPermissionsAreIndependentFromWorkerManagement(t *testin
 	if !TenantAllows("auditor", SchedulingPolicyRead) || TenantAllows("auditor", SchedulingPolicyManage) {
 		t.Fatal("tenant auditor scheduling policy authority must remain read-only")
 	}
-	if TenantAllows("billing_admin", SchedulingPolicyRead) || TenantAllows("member", SchedulingPolicyRead) {
+	if TenantAllows("cost_admin", SchedulingPolicyRead) || TenantAllows("member", SchedulingPolicyRead) {
 		t.Fatal("unrelated tenant roles must not inherit scheduling policy authority")
 	}
 

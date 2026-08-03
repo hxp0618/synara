@@ -12,6 +12,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 )
 
 func (s *Service) ArchiveByRetention(
@@ -25,13 +26,14 @@ func (s *Service) ArchiveByRetention(
 		limit = 200
 	}
 	var candidates []uuid.UUID
-	err := s.db.WithContext(ctx).Model(&persistence.AgentSession{}).
+	candidateQuery := s.db.WithContext(ctx).Model(&persistence.AgentSession{}).
 		Select("id").
 		Where("tenant_id = ? AND status = ? AND updated_at <= ?", tenantID, "active", cutoff).
 		Where("NOT EXISTS (?)", s.db.Model(&persistence.AgentExecution{}).
 			Select("1").Where("agent_executions.tenant_id = agent_sessions.tenant_id AND agent_executions.session_id = agent_sessions.id AND agent_executions.status IN ?",
-			activeSessionExecutionStatuses)).
-		Order("updated_at, id").Limit(limit).Scan(&candidates).Error
+			activeSessionExecutionStatuses))
+	candidateQuery = retentiongate.ExcludeSessions(candidateQuery, "agent_sessions")
+	err := candidateQuery.Order("updated_at, id").Limit(limit).Scan(&candidates).Error
 	if err != nil {
 		return 0, problem.Wrap(500, "retention_sessions_load_failed", "Retention could not load eligible Agent Sessions.", err)
 	}
@@ -41,9 +43,11 @@ func (s *Service) ArchiveByRetention(
 		var published *persistence.SessionEvent
 		err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 			var model persistence.AgentSession
-			err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			lockedQuery := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 				Where("tenant_id = ? AND id = ? AND status = ? AND updated_at <= ?", tenantID, sessionID, "active", cutoff).
-				Take(&model).Error
+				Model(&persistence.AgentSession{})
+			lockedQuery = retentiongate.ExcludeSessions(lockedQuery, "agent_sessions")
+			err := lockedQuery.Take(&model).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}

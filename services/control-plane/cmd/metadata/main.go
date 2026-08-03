@@ -7,16 +7,22 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/uuid"
+
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
+	credentialkms "github.com/synara-ai/synara/services/control-plane/internal/kms"
+	"github.com/synara-ai/synara/services/control-plane/internal/kmsrotation"
 	"github.com/synara-ai/synara/services/control-plane/internal/metadatamigration"
+	"github.com/synara-ai/synara/services/control-plane/internal/runtimekeys"
+	"github.com/synara-ai/synara/services/control-plane/internal/runtimesecretrotation"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: control-plane-metadata export --output manifest.json | import --input manifest.json")
+		fatal("usage: control-plane-metadata export --output manifest.json | import --input manifest.json | rewrap-kms [--execute --operator REF] | rekey-runtime-secrets [--execute --operator REF]")
 	}
 	ctx := context.Background()
 	cfg, err := config.Load()
@@ -105,9 +111,105 @@ func main() {
 			return
 		}
 		printJSON(report)
+	case "rewrap-kms":
+		flags := flag.NewFlagSet("rewrap-kms", flag.ExitOnError)
+		execute := flags.Bool("execute", false, "execute the rewrap; omission performs a read-only dry-run")
+		operator := flags.String("operator", "", "non-secret change or incident reference (required with --execute)")
+		batchSize := flags.Int("batch-size", 200, "rows per deterministic batch (1-1000)")
+		resumeRunID := flags.String("resume-run-id", "", "resume an incomplete immutable run")
+		_ = flags.Parse(os.Args[2:])
+		cipher, err := credentialkms.New(ctx, credentialkms.Config{
+			Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
+			LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
+			DecryptKeys: metadataCredentialKMSDecryptKeys(cfg.CredentialKMSDecryptKeys),
+		})
+		if err != nil {
+			fatal(err.Error())
+		}
+		service, err := kmsrotation.New(store.DB(), cipher)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if !*execute {
+			if *resumeRunID != "" {
+				fatal("--resume-run-id requires --execute")
+			}
+			plan, err := service.Plan(ctx)
+			if err != nil {
+				fatal(err.Error())
+			}
+			printJSON(map[string]any{"mode": "dry-run", "plan": plan})
+			return
+		}
+		var parsedResumeRunID *uuid.UUID
+		if *resumeRunID != "" {
+			value, err := uuid.Parse(*resumeRunID)
+			if err != nil {
+				fatal("--resume-run-id must be a UUID")
+			}
+			parsedResumeRunID = &value
+		}
+		report, err := service.Execute(ctx, kmsrotation.ExecuteOptions{
+			OperatorReference: *operator, BatchSize: *batchSize, ResumeRunID: parsedResumeRunID,
+		})
+		if err != nil {
+			fatal(err.Error())
+		}
+		printJSON(map[string]any{"mode": "execute", "receipt": report})
+	case "rekey-runtime-secrets":
+		flags := flag.NewFlagSet("rekey-runtime-secrets", flag.ExitOnError)
+		execute := flags.Bool("execute", false, "execute re-encryption; omission performs a read-only dry-run")
+		operator := flags.String("operator", "", "non-secret change or incident reference (required with --execute)")
+		batchSize := flags.Int("batch-size", 200, "rows per deterministic batch (1-1000)")
+		resumeRunID := flags.String("resume-run-id", "", "resume an incomplete immutable run")
+		_ = flags.Parse(os.Args[2:])
+		cipher, err := runtimekeys.NewProviderCursorCipher(cfg)
+		if err != nil {
+			fatal(err.Error())
+		}
+		service, err := runtimesecretrotation.New(store.DB(), cipher)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if !*execute {
+			if *resumeRunID != "" {
+				fatal("--resume-run-id requires --execute")
+			}
+			plan, err := service.Plan(ctx, *batchSize)
+			if err != nil {
+				fatal(err.Error())
+			}
+			printJSON(map[string]any{"mode": "dry-run", "plan": plan})
+			return
+		}
+		var parsedResumeRunID *uuid.UUID
+		if *resumeRunID != "" {
+			value, err := uuid.Parse(*resumeRunID)
+			if err != nil {
+				fatal("--resume-run-id must be a UUID")
+			}
+			parsedResumeRunID = &value
+		}
+		report, err := service.Execute(ctx, runtimesecretrotation.ExecuteOptions{
+			OperatorReference: *operator, BatchSize: *batchSize, ResumeRunID: parsedResumeRunID,
+		})
+		if err != nil {
+			fatal(err.Error())
+		}
+		printJSON(map[string]any{"mode": "execute", "receipt": report})
 	default:
 		fatal(fmt.Sprintf("unknown metadata command %q", os.Args[1]))
 	}
+}
+
+func metadataCredentialKMSDecryptKeys(values []config.CredentialKMSDecryptKeyConfig) []credentialkms.DecryptKeyConfig {
+	result := make([]credentialkms.DecryptKeyConfig, 0, len(values))
+	for _, value := range values {
+		result = append(result, credentialkms.DecryptKeyConfig{
+			Provider: value.Provider, KeyID: value.KeyID, LocalKey: value.LocalKey, Region: value.Region,
+		})
+	}
+	return result
 }
 
 func printJSON(value any) {

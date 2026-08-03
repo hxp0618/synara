@@ -175,9 +175,9 @@ func TestExecutionTargetRoutingRoutesEnforceReadManageAndRejectSharedHealthWrite
 		code   string
 	}{
 		{name: "list unauthenticated", method: http.MethodGet, path: basePath, status: http.StatusUnauthorized, code: "authentication_required"},
-		{name: "list active tenant mismatch", method: http.MethodGet, path: basePath, token: fixture.crossTenantToken, status: http.StatusConflict, code: "active_tenant_mismatch"},
+		{name: "list active tenant mismatch", method: http.MethodGet, path: basePath, token: fixture.crossTenantToken, status: http.StatusNotFound, code: "tenant_not_found"},
 		{name: "list missing worker read", method: http.MethodGet, path: basePath, token: fixture.memberToken, status: http.StatusForbidden, code: "tenant_forbidden"},
-		{name: "observe active tenant mismatch", method: http.MethodPut, path: ownedHealthPath, token: fixture.crossTenantToken, body: healthBody, status: http.StatusConflict, code: "active_tenant_mismatch"},
+		{name: "observe active tenant mismatch", method: http.MethodPut, path: ownedHealthPath, token: fixture.crossTenantToken, body: healthBody, status: http.StatusNotFound, code: "tenant_not_found"},
 		{name: "observe missing worker manage", method: http.MethodPut, path: ownedHealthPath, token: fixture.readOnlyToken, body: healthBody, status: http.StatusForbidden, code: "tenant_forbidden"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -440,9 +440,9 @@ func TestLocationOutageRoutesEnforceReadManageAndProjectCurrentAuthority(t *test
 		body   string
 	}{
 		{name: "list unauthenticated", method: http.MethodGet, status: http.StatusUnauthorized, code: "authentication_required"},
-		{name: "list active tenant mismatch", method: http.MethodGet, token: fixture.crossTenantToken, status: http.StatusConflict, code: "active_tenant_mismatch"},
+		{name: "list active tenant mismatch", method: http.MethodGet, token: fixture.crossTenantToken, status: http.StatusNotFound, code: "tenant_not_found"},
 		{name: "list missing worker read", method: http.MethodGet, token: fixture.memberToken, status: http.StatusForbidden, code: "tenant_forbidden"},
-		{name: "observe active tenant mismatch", method: http.MethodPut, token: fixture.crossTenantToken, status: http.StatusConflict, code: "active_tenant_mismatch", body: body},
+		{name: "observe active tenant mismatch", method: http.MethodPut, token: fixture.crossTenantToken, status: http.StatusNotFound, code: "tenant_not_found", body: body},
 		{name: "observe missing worker manage", method: http.MethodPut, token: fixture.readOnlyToken, status: http.StatusForbidden, code: "tenant_forbidden", body: body},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -534,7 +534,7 @@ func TestTargetGroupMemberLifecycleRouteUsesManagePermissionCASAndAudit(t *testi
 		code   string
 	}{
 		{name: "unauthenticated", status: http.StatusUnauthorized, code: "authentication_required"},
-		{name: "active tenant mismatch", token: fixture.crossTenantToken, status: http.StatusConflict, code: "active_tenant_mismatch"},
+		{name: "active tenant mismatch", token: fixture.crossTenantToken, status: http.StatusNotFound, code: "tenant_not_found"},
 		{name: "missing worker manage", token: fixture.readOnlyToken, status: http.StatusForbidden, code: "tenant_forbidden"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

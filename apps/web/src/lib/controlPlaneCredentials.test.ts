@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { ControlPlaneCredential } from "./controlPlaneClient";
+import type { ControlPlaneCredential } from "@synara/control-plane-client";
 import { listUsableControlPlaneCredentials } from "./controlPlaneCredentials";
 
 function credential(

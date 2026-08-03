@@ -1,5 +1,5 @@
 // FILE: ControlPlaneSessionStreamBanner.tsx
-// Purpose: Surfaces authoritative SaaS Session Event reconnect failures above the transcript.
+// Purpose: Surfaces authoritative Control Plane Session Event reconnect failures above the transcript.
 // Layer: Chat status presentation
 // Exports: ControlPlaneSessionStreamBanner
 

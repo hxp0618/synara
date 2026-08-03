@@ -118,7 +118,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 			t.Fatal(err)
 		}
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_ledger_coverage_missing")
+		assertProblemCode(t, err, "cost_accounting_shared_ledger_coverage_missing")
 		fixture.assertNoRuns(t)
 	})
 
@@ -132,7 +132,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 			t.Fatal(err)
 		}
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_ledger_coverage_incomplete")
+		assertProblemCode(t, err, "cost_accounting_shared_ledger_coverage_incomplete")
 		fixture.assertNoRuns(t)
 	})
 
@@ -140,7 +140,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 		fixture := newSharedAllocationFixture(t, 2)
 		fixture.seedClaim(t, fixture.tenantA, fixture.base.Add(10*time.Minute), fixture.base.Add(20*time.Minute), 1)
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_claim_ledger_incomplete")
+		assertProblemCode(t, err, "cost_accounting_shared_claim_ledger_incomplete")
 		fixture.assertNoRuns(t)
 	})
 
@@ -148,7 +148,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 		fixture := newSharedAllocationFixture(t, 1)
 		fixture.seedClaimWithoutRelease(t, fixture.tenantA, fixture.base.Add(10*time.Minute), 1)
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_release_ledger_incomplete")
+		assertProblemCode(t, err, "cost_accounting_shared_release_ledger_incomplete")
 		fixture.assertNoRuns(t)
 	})
 
@@ -157,7 +157,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 		fixture.seedClaim(t, fixture.tenantA, fixture.base.Add(10*time.Minute), fixture.base.Add(40*time.Minute), 1)
 		fixture.seedClaim(t, fixture.tenantB, fixture.base.Add(30*time.Minute), fixture.base.Add(50*time.Minute), 2)
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_claim_intervals_overlap")
+		assertProblemCode(t, err, "cost_accounting_shared_claim_intervals_overlap")
 		fixture.assertNoRuns(t)
 	})
 
@@ -169,7 +169,7 @@ func TestAllocateSharedUsageChargesFailsClosedOnIncompleteOrAmbiguousAuthority(t
 			t.Fatal(err)
 		}
 		_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-		assertProblemCode(t, err, "billing_shared_worker_not_terminal")
+		assertProblemCode(t, err, "cost_accounting_shared_worker_not_terminal")
 		fixture.assertNoRuns(t)
 	})
 }
@@ -190,7 +190,7 @@ func TestAllocateSharedUsageChargesRejectsPersistedReplayDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-	assertProblemCode(t, err, "billing_shared_allocation_conflict")
+	assertProblemCode(t, err, "cost_accounting_shared_allocation_conflict")
 }
 
 func TestAllocateSharedUsageChargesSQLiteConcurrentFirstWriteReplaysWinner(t *testing.T) {
@@ -242,7 +242,7 @@ func TestAllocateSharedUsageChargesFailsClosedWhenRatedResourceFactIsMissing(t *
 				t.Fatal(err)
 			}
 			_, err := fixture.service.AllocateSharedUsageCharges(context.Background(), fixture.input())
-			assertProblemCode(t, err, "billing_shared_requested_resource_invalid")
+			assertProblemCode(t, err, "cost_accounting_shared_requested_resource_invalid")
 			fixture.assertNoRuns(t)
 		})
 	}
@@ -261,7 +261,7 @@ func TestAllocateSharedUsageChargesRejectsOverlappingImmutablePeriod(t *testing.
 	overlap.BillingPeriodStartAt = fixture.base.Add(30 * time.Minute)
 	overlap.BillingPeriodEndAt = fixture.base.Add(90 * time.Minute)
 	_, err = fixture.service.AllocateSharedUsageCharges(context.Background(), overlap)
-	assertProblemCode(t, err, "billing_shared_allocation_period_overlap")
+	assertProblemCode(t, err, "cost_accounting_shared_allocation_period_overlap")
 	var runCount int64
 	if err := fixture.db.Model(&persistence.BillingSharedCostAllocationRun{}).Count(&runCount).Error; err != nil {
 		t.Fatal(err)

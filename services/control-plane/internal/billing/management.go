@@ -23,10 +23,10 @@ func (s *Service) ListTariffsAuthorized(
 	tenantID uuid.UUID,
 	filter ListTariffsFilter,
 ) ([]Tariff, error) {
-	if err := requireBillingTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return nil, err
 	}
-	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.BillingManage); err != nil {
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CostManage); err != nil {
 		return nil, err
 	}
 	items, err := s.ListTariffs(ctx, filter)
@@ -43,24 +43,24 @@ func (s *Service) CreateTariffAuthorized(
 	input CreateTariffInput,
 	requestID, ipAddress string,
 ) (Tariff, error) {
-	if err := requireBillingTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Tariff{}, err
 	}
-	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.BillingManage); err != nil {
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CostManage); err != nil {
 		return Tariff{}, err
 	}
 	if s.platformBillingOperatorTenantID == uuid.Nil {
 		return Tariff{}, problem.New(
 			503,
-			"billing_tariff_management_unavailable",
-			"Billing tariff management requires an explicitly configured platform operator Tenant.",
+			"cost_accounting_tariff_management_unavailable",
+			"Cost tariff management requires an explicitly configured platform operator Tenant.",
 		)
 	}
 	if tenantID != s.platformBillingOperatorTenantID {
 		return Tariff{}, problem.New(
 			403,
-			"billing_tariff_operator_forbidden",
-			"This Tenant is not the configured platform billing tariff operator.",
+			"cost_accounting_tariff_operator_forbidden",
+			"This Tenant is not the configured platform cost-accounting operator.",
 		)
 	}
 	normalized, err := normalizeTariffInput(input)
@@ -76,8 +76,8 @@ func (s *Service) CreateTariffAuthorized(
 			return createErr
 		}
 		return s.recordAuditTx(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "billing.tariff_created",
-			ResourceType: "billing_provider_tariff", ResourceID: &created.ID,
+			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "cost_accounting.tariff_created",
+			ResourceType: "cost_accounting_provider_tariff", ResourceID: &created.ID,
 			RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
 				"provider": created.Provider, "region": created.Region, "currencyCode": created.CurrencyCode,
@@ -99,10 +99,10 @@ func (s *Service) ImportConfiguredInvoiceAuthorized(
 	externalImportID string,
 	requestID, ipAddress string,
 ) (ConfiguredInvoiceImportResult, error) {
-	if err := requireBillingTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ConfiguredInvoiceImportResult{}, err
 	}
-	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.BillingManage); err != nil {
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CostManage); err != nil {
 		return ConfiguredInvoiceImportResult{}, err
 	}
 	configuredImport, err := s.requireConfiguredImport(tenantID, provider, externalImportID)
@@ -110,7 +110,7 @@ func (s *Service) ImportConfiguredInvoiceAuthorized(
 		return ConfiguredInvoiceImportResult{}, err
 	}
 	result, err := s.importConfiguredInvoiceWithAudit(ctx, configuredImport, audit.Entry{
-		TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "billing.invoice_import_triggered",
+		TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "cost_accounting.invoice_import_triggered",
 		RequestID: requestID, IPAddress: ipAddress,
 	}, false)
 	if err != nil {
@@ -167,8 +167,8 @@ func configuredEstimateSweepOutcome(
 		return outcome
 	}
 	outcome.Status = "retry-required"
-	outcome.ErrorCode = "billing_estimate_sweep_failed"
-	outcome.ErrorMessage = "The billing estimate sweep did not complete and must be retried."
+	outcome.ErrorCode = "cost_accounting_estimate_sweep_failed"
+	outcome.ErrorMessage = "The cost estimate sweep did not complete and must be retried."
 	var apiError *problem.Error
 	if errors.As(err, &apiError) {
 		outcome.ErrorCode = apiError.Code
@@ -184,14 +184,14 @@ func (s *Service) ReconcileActualInvoiceImportAuthorized(
 	importID uuid.UUID,
 	requestID, ipAddress string,
 ) (ReconciliationReport, error) {
-	if err := requireBillingTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return ReconciliationReport{}, err
 	}
-	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.BillingManage); err != nil {
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.CostManage); err != nil {
 		return ReconciliationReport{}, err
 	}
 	report, err := s.reconcileActualInvoiceImportWithAudit(ctx, tenantID, importID, audit.Entry{
-		TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "billing.invoice_reconciled",
+		TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID, Action: "cost_accounting.invoice_reconciled",
 		RequestID: requestID, IPAddress: ipAddress,
 	}, false)
 	if err != nil {
@@ -206,7 +206,7 @@ func (s *Service) importConfiguredInvoiceScheduled(
 	requestID string,
 ) (importedInvoiceMutation, error) {
 	return s.importConfiguredInvoiceWithAudit(ctx, configuredImport, audit.Entry{
-		TenantID: configuredImport.TenantID, ActorType: "system", Action: "billing.invoice_import_scheduled",
+		TenantID: configuredImport.TenantID, ActorType: "system", Action: "cost_accounting.invoice_import_scheduled",
 		RequestID: requestID,
 	}, true)
 }
@@ -218,7 +218,7 @@ func (s *Service) reconcileActualInvoiceImportScheduled(
 	requestID string,
 ) (reconciliationMutation, error) {
 	return s.reconcileActualInvoiceImportWithAudit(ctx, configuredImport.TenantID, importID, audit.Entry{
-		TenantID: configuredImport.TenantID, ActorType: "system", Action: "billing.invoice_reconciled_scheduled",
+		TenantID: configuredImport.TenantID, ActorType: "system", Action: "cost_accounting.invoice_reconciled_scheduled",
 		RequestID: requestID,
 	}, true)
 }
@@ -249,7 +249,7 @@ func (s *Service) importConfiguredInvoiceWithAudit(
 		}
 		return s.recordAuditTx(ctx, tx, audit.Entry{
 			TenantID: entry.TenantID, ActorType: entry.ActorType, ActorID: entry.ActorID, Action: entry.Action,
-			ResourceType: "billing_actual_invoice_import", ResourceID: &result.Result.Import.ID,
+			ResourceType: "cost_accounting_actual_invoice_import", ResourceID: &result.Result.Import.ID,
 			RequestID: entry.RequestID, IPAddress: entry.IPAddress,
 			Metadata: map[string]any{
 				"provider": result.Result.Import.Provider, "externalImportId": result.Result.Import.ExternalImportID,
@@ -284,7 +284,7 @@ func (s *Service) reconcileActualInvoiceImportWithAudit(
 		}
 		return s.recordAuditTx(ctx, tx, audit.Entry{
 			TenantID: entry.TenantID, ActorType: entry.ActorType, ActorID: entry.ActorID, Action: entry.Action,
-			ResourceType: "billing_actual_invoice_import", ResourceID: &report.Report.Import.ID,
+			ResourceType: "cost_accounting_actual_invoice_import", ResourceID: &report.Report.Import.ID,
 			RequestID: entry.RequestID, IPAddress: entry.IPAddress,
 			Metadata: map[string]any{
 				"provider": report.Report.Import.Provider, "externalImportId": report.Report.Import.ExternalImportID,
@@ -299,20 +299,13 @@ func (s *Service) reconcileActualInvoiceImportWithAudit(
 	return report, nil
 }
 
-func requireBillingTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
-}
-
 func (s *Service) requireConfiguredImport(
 	tenantID uuid.UUID,
 	provider string,
 	externalImportID string,
 ) (ConfiguredImport, error) {
 	if len(s.configuredImports) == 0 {
-		return ConfiguredImport{}, problem.New(404, "billing_import_not_configured", "The billing invoice import is not configured.")
+		return ConfiguredImport{}, problem.New(404, "cost_accounting_import_not_configured", "The provider cost invoice import is not configured.")
 	}
 	normalizedProvider, err := normalizeProvider(provider)
 	if err != nil {
@@ -321,7 +314,7 @@ func (s *Service) requireConfiguredImport(
 	key := configuredImportKey(tenantID, normalizedProvider, strings.TrimSpace(externalImportID))
 	configuredImport, ok := s.configuredImports[key]
 	if !ok {
-		return ConfiguredImport{}, problem.New(404, "billing_import_not_configured", "The billing invoice import is not configured.")
+		return ConfiguredImport{}, problem.New(404, "cost_accounting_import_not_configured", "The provider cost invoice import is not configured.")
 	}
 	return configuredImport, nil
 }
@@ -363,8 +356,8 @@ func (s *Service) runEstimateSweep(
 	if s.estimateSweeper == nil {
 		return ScheduledEstimateSweepResult{}, problem.New(
 			500,
-			"billing_estimate_sweeper_unavailable",
-			"The configured billing estimate sweep is not available in this Control Plane build.",
+			"cost_accounting_estimate_sweeper_unavailable",
+			"The configured cost estimate sweep is not available in this Control Plane build.",
 		)
 	}
 	return s.estimateSweeper.SweepImportedInvoice(ctx, ScheduledEstimateSweepRequest{

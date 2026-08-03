@@ -41,7 +41,11 @@ func TestS3CompatiblePresignedLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	objectKey := "integration/s3-compatible/" + uuid.NewString()
+	objectKey := "tenants/" + uuid.NewString() +
+		"/organizations/" + uuid.NewString() +
+		"/projects/" + uuid.NewString() +
+		"/sessions/" + uuid.NewString() +
+		"/executions/_session/artifacts/" + uuid.NewString()
 	t.Cleanup(func() { _ = store.Delete(context.Background(), objectKey) })
 	payload := []byte("synara s3-compatible artifact lifecycle\n")
 	uploadURL, err := store.PresignUpload(ctx, objectKey, 5*time.Minute)

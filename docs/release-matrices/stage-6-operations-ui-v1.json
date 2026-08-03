@@ -1,0 +1,1322 @@
+{
+  "schemaVersion": "synara.operations-ui-matrix.v2",
+  "surfaceBindings": [
+    {
+      "id": "platform-admin",
+      "surface": "platform-admin",
+      "status": "reachable",
+      "operations": [
+        "platform.tenant-overview",
+        "platform.tenant-provision",
+        "platform.tenant-entitlement",
+        "platform.support-request",
+        "platform.support-approve-revoke",
+        "platform.release-candidate-lifecycle",
+        "platform.release-role-decision",
+        "platform.compliance-program-lifecycle",
+        "platform.compliance-evidence-review",
+        "platform.compliance-start-gate-decision",
+        "platform.provider-commercial-lifecycle",
+        "platform.provider-commercial-approval",
+        "platform.governance-authority-lifecycle",
+        "platform.incident-lifecycle",
+        "platform.incident-internal-communication",
+        "platform.incident-security-resolution",
+        "platform.slo-window-import",
+        "platform.slo-window-decision",
+        "platform.recovery-drill-import",
+        "platform.recovery-drill-decision",
+        "platform.penetration-engagement-import",
+        "platform.penetration-engagement-decision",
+        "platform.capacity-run-import",
+        "platform.capacity-run-decision",
+        "platform.internal-cost-review-import",
+        "platform.internal-cost-review-decision",
+        "platform.incident-exercise-import",
+        "platform.incident-exercise-decision",
+        "support.enter-readonly"
+      ],
+      "registration": {
+        "path": "apps/admin/src/platform/PlatformAdminShell.tsx",
+        "contains": ["export function PlatformAdminShell", "Platform authority", "Tenant context:"]
+      },
+      "entrypoint": {
+        "path": "apps/admin/src/main.tsx",
+        "contains": ["createRoot(root).render", "<AdminApp />"]
+      }
+    },
+    {
+      "id": "tenant-self-service",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": ["user.tenant-self-service"],
+      "registration": {
+        "path": "apps/web/src/components/ControlPlaneGate.tsx",
+        "contains": ["Create an internal Tenant", "controlPlane.createTenant"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/components/ControlPlaneGate.tsx",
+        "contains": ["export function ControlPlaneGate", "const createTenant ="]
+      }
+    },
+    {
+      "id": "enterprise-overview",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": [
+        "tenant.lifecycle-transition",
+        "tenant.deletion-request-recovery",
+        "tenant.worker-governance",
+        "tenant.worker-release"
+      ],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-overview", "Tenant summary"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-members",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": ["tenant.member-governance"],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-members", "Members & roles"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-identity",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": ["tenant.identity-governance", "tenant.service-account-governance"],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-identity", "Identity & access"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-credentials",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": ["tenant.credential-governance", "support.credential-read"],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-credentials", "Credential governance"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-usage",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": ["tenant.usage-quota"],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-usage", "Usage & limits"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-data",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": [
+        "tenant.legal-hold",
+        "tenant.privacy-request",
+        "tenant.data-export",
+        "tenant.data-residency"
+      ],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-data", "Data & compliance"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    },
+    {
+      "id": "enterprise-support",
+      "surface": "tenant-web",
+      "status": "reachable",
+      "operations": [
+        "tenant.outbox-read",
+        "tenant.outbox-replay",
+        "tenant.audit-search-export",
+        "tenant.support-policy",
+        "tenant.support-diagnostic-export"
+      ],
+      "registration": {
+        "path": "packages/enterprise-ui/src/settingsRegistration.ts",
+        "contains": ["organization-support", "Controlled support"]
+      },
+      "entrypoint": {
+        "path": "apps/web/src/routes/_chat.settings.tsx",
+        "contains": ["EnterpriseSettingsFeature", "isEnterpriseSettingsSection"]
+      }
+    }
+  ],
+  "operations": [
+    {
+      "id": "platform.tenant-overview",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "read",
+      "ui": {
+        "path": "apps/admin/src/App.tsx",
+        "contains": ["controlPlaneClient.listPlatformTenants", "<PlatformAdminShell"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["listPlatformTenants:", "\"/v1/platform/tenants\""]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["GET /v1/platform/tenants", "server.listPlatformTenants"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.tenant-provision",
+      "actor": "platform-admin",
+      "negativeActor": "platform-operator",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformTenantProvisioning.tsx",
+        "contains": ["Provision internal Tenant", "controlPlaneClient.provisionPlatformTenant"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["provisionPlatformTenant:", "\"/v1/platform/tenants\""]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/tenants", "server.provisionPlatformTenant"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.tenant-entitlement",
+      "actor": "platform-admin",
+      "negativeActor": "platform-operator",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSubscriptionManagement.tsx",
+        "contains": [
+          "Manage internal entitlement profile",
+          "assignPlatformTenantEntitlementProfile"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["getPlatformTenantEntitlements:", "assignPlatformTenantEntitlementProfile:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/platform/tenants/{tenantID}/entitlements",
+          "PUT /v1/platform/tenants/{tenantID}/entitlement-profile"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.release-candidate-lifecycle",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformReleaseGovernance.tsx",
+        "contains": [
+          "Create candidate",
+          "Exact-candidate readiness",
+          "Bind immutable Final Review",
+          "Advance candidate state"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "createPlatformStage6ReleaseCandidate:",
+          "getPlatformStage6ReleaseReadiness:",
+          "recordPlatformStage6ReleaseFinalReview:",
+          "transitionPlatformStage6ReleaseCandidate:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/release-candidates",
+          "GET /v1/platform/release-candidates/{candidateRecordID}/readiness",
+          "POST /v1/platform/release-candidates/{candidateRecordID}/final-review",
+          "POST /v1/platform/release-candidates/{candidateRecordID}/transitions"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.release-role-decision",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformReleaseGovernance.tsx",
+        "contains": ["Record separated decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6ReleaseApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/release-candidates/{candidateRecordID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.compliance-program-lifecycle",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformComplianceGovernance.tsx",
+        "contains": [
+          "Create immutable program scope",
+          "Add append-only control",
+          "Advance compliance record"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "createPlatformStage6ComplianceProgram:",
+          "createPlatformStage6ComplianceControl:",
+          "transitionPlatformStage6ComplianceProgram:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/compliance-programs",
+          "POST /v1/platform/compliance-programs/{programID}/controls",
+          "POST /v1/platform/compliance-programs/{programID}/transitions"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.compliance-evidence-review",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformComplianceGovernance.tsx",
+        "contains": ["Submit immutable evidence metadata", "Independently review evidence"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "submitPlatformStage6ComplianceEvidence:",
+          "reviewPlatformStage6ComplianceEvidence:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/compliance-programs/{programID}/evidence",
+          "POST /v1/platform/compliance-programs/{programID}/evidence/{evidenceRecordID}/review"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.compliance-start-gate-decision",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformComplianceGovernance.tsx",
+        "contains": ["Record separated start-gate decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6ComplianceDecision:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/compliance-programs/{programID}/decisions"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.provider-commercial-lifecycle",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformProviderCommercialGovernance.tsx",
+        "contains": ["Create immutable commercial authorization", "Advance or revoke authorization"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "createPlatformProviderCommercialAuthorization:",
+          "transitionPlatformProviderCommercialAuthorization:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/provider-commercial-authorizations",
+          "POST /v1/platform/provider-commercial-authorizations/{authorizationID}/transitions"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.provider-commercial-approval",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformProviderCommercialGovernance.tsx",
+        "contains": ["Record separated commercial decision", "Record immutable commercial decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformProviderCommercialApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/provider-commercial-authorizations/{authorizationID}/approvals"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.governance-authority-lifecycle",
+      "actor": "platform-owner",
+      "negativeActor": "platform-admin",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformGovernanceAuthorities.tsx",
+        "contains": ["Assign exact functional authority", "Revoke authority"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createPlatformGovernanceAuthority:", "revokePlatformGovernanceAuthority:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/governance-authorities",
+          "POST /v1/platform/governance-authorities/{grantID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.incident-lifecycle",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformIncidentGovernance.tsx",
+        "contains": ["Open governed incident", "Commander transition"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createPlatformStage6Incident:", "transitionPlatformStage6Incident:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/incidents",
+          "POST /v1/platform/incidents/{incidentID}/transitions"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.incident-internal-communication",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformIncidentGovernance.tsx",
+        "contains": ["Bind internal Status Board incident", "Record internal incident update"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "bindPlatformStage6IncidentStatusBoard:",
+          "addPlatformStage6IncidentInternalUpdate:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/incidents/{incidentID}/status-board",
+          "POST /v1/platform/incidents/{incidentID}/internal-updates"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.incident-security-resolution",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformIncidentGovernance.tsx",
+        "contains": [
+          "Independent Security / Privacy resolution decision",
+          "Record immutable decision"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6IncidentResolutionApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/incidents/{incidentID}/resolution-approval"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.slo-window-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSLOGovernance.tsx",
+        "contains": ["Import exact SLO validator receipt", "Import immutable window"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["importPlatformStage6SLOWindow:", "listPlatformStage6SLOWindows:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/slo-windows", "GET /v1/platform/slo-windows"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.slo-window-decision",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSLOGovernance.tsx",
+        "contains": ["Record separated SLO decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6SLOApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/slo-windows/{sloWindowRecordID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.recovery-drill-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformRecoveryGovernance.tsx",
+        "contains": ["Import exact Recovery v2 receipt", "Import immutable drill"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["importPlatformStage6RecoveryDrill:", "listPlatformStage6RecoveryDrills:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/recovery-drills", "GET /v1/platform/recovery-drills"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.recovery-drill-decision",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformRecoveryGovernance.tsx",
+        "contains": ["Record separated Recovery decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6RecoveryApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/recovery-drills/{recoveryDrillRecordID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.penetration-engagement-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformPenetrationGovernance.tsx",
+        "contains": ["Import exact Penetration receipt", "Import immutable engagement"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "importPlatformStage6PenetrationEngagement:",
+          "listPlatformStage6PenetrationEngagements:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/penetration-engagements",
+          "GET /v1/platform/penetration-engagements"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.penetration-engagement-decision",
+      "actor": "security-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformPenetrationGovernance.tsx",
+        "contains": ["Record separated Penetration decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6PenetrationApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/penetration-engagements/{penetrationEngagementID}/approvals"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.capacity-run-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformCapacityGovernance.tsx",
+        "contains": ["Import exact Capacity receipt", "Import immutable run"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["importPlatformStage6CapacityRun:", "listPlatformStage6CapacityRuns:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/capacity-runs", "GET /v1/platform/capacity-runs"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.capacity-run-decision",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformCapacityGovernance.tsx",
+        "contains": ["Record separated Capacity decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6CapacityApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/capacity-runs/{capacityRunID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.internal-cost-review-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformInternalCostGovernance.tsx",
+        "contains": ["Import exact internal usage and cost receipt", "Import immutable review"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "importPlatformStage6InternalCostReview:",
+          "listPlatformStage6InternalCostReviews:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/internal-cost-reviews",
+          "GET /v1/platform/internal-cost-reviews"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.internal-cost-review-decision",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformInternalCostGovernance.tsx",
+        "contains": ["Record separated internal cost decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6InternalCostApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/internal-cost-reviews/{internalCostReviewID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.incident-exercise-import",
+      "actor": "platform-admin",
+      "negativeActor": "security-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformIncidentExerciseGovernance.tsx",
+        "contains": ["Import exact Incident exercise receipt", "Import immutable exercise"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "importPlatformStage6IncidentExercise:",
+          "listPlatformStage6IncidentExercises:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/incident-exercises", "GET /v1/platform/incident-exercises"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.incident-exercise-decision",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformIncidentExerciseGovernance.tsx",
+        "contains": ["Record separated Incident exercise decision", "Record immutable decision"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["recordPlatformStage6IncidentExerciseApproval:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/platform/incident-exercises/{incidentExerciseID}/approvals"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "user.tenant-self-service",
+      "actor": "authenticated-user",
+      "negativeActor": "unauthenticated",
+      "access": "write",
+      "ui": {
+        "path": "apps/web/src/components/ControlPlaneGate.tsx",
+        "contains": ["Create an internal Tenant", "controlPlane.createTenant"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createTenant:", "entitlementProfileCode: \"standard\""]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/tenants", "server.createTenant"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.support-request",
+      "actor": "platform-operator",
+      "negativeActor": "tenant-admin",
+      "access": "write",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSupportAccess.tsx",
+        "contains": ["Request Support Access", "requestPlatformSupportAccess"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["requestPlatformSupportAccess:", "\"/v1/platform/support-access/requests\""]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/support-access/requests",
+          "server.requestPlatformSupportAccess"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "platform.support-approve-revoke",
+      "actor": "platform-admin",
+      "negativeActor": "platform-operator",
+      "access": "four-eyes",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSupportAccess.tsx",
+        "contains": [
+          "Decide or revoke Support Access",
+          "approvePlatformSupportAccess",
+          "revokePlatformSupportAccess"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["approvePlatformSupportAccess:", "revokePlatformSupportAccess:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/platform/support-access/{grantID}/approve",
+          "POST /v1/platform/support-access/{grantID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "support.enter-readonly",
+      "actor": "support-engineer",
+      "negativeActor": "tenant-admin",
+      "access": "read-only",
+      "ui": {
+        "path": "apps/admin/src/platform/PlatformSupportAccess.tsx",
+        "contains": ["Enter read-only view", "switchTenant.mutate"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["setActiveTenant:", "\"/v1/auth/active-tenant\""]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["PUT /v1/auth/active-tenant", "server.setActiveTenant"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.lifecycle-transition",
+      "actor": "tenant-owner",
+      "negativeActor": "tenant-admin",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantStatusLifecycleSettingsSection.tsx",
+        "contains": ["Change Tenant status", "controlPlaneClient.transitionTenant"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["transitionTenant:", "/lifecycle-transitions"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/tenants/{tenantID}/lifecycle-transitions", "server.transitionTenant"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.deletion-request-recovery",
+      "actor": "tenant-owner",
+      "negativeActor": "tenant-admin",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantOrganizationSettingsPanel.tsx",
+        "contains": [
+          "TenantStatusLifecycleSettingsSection",
+          "TenantDeletionRecoverySettingsSection"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["requestTenantDeletion:", "listTenantDeletionRequests:", "restoreTenant:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/deletion-requests",
+          "GET /v1/tenants/deletion-requests",
+          "POST /v1/tenants/{tenantID}/restore"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.member-governance",
+      "actor": "tenant-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantMemberLifecycleControls.tsx",
+        "contains": ["Save role", "Revoke Sessions", "controlPlaneClient.updateTenantMember"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["updateTenantMember:", "revokeTenantUserSessions:", "removeTenantMember:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "PATCH /v1/tenants/{tenantID}/members/{userID}",
+          "POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions",
+          "DELETE /v1/tenants/{tenantID}/members/{userID}"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.identity-governance",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantIdentityGovernanceSettings.tsx",
+        "contains": [
+          "Domain verification",
+          "SSO enforcement",
+          "controlPlaneClient.createIdentityDomain"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createIdentityDomain:", "updateTenantIdentityPolicy:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/identity-domains",
+          "PUT /v1/tenants/{tenantID}/identity-policy"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.service-account-governance",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantServiceAccountSettingsSection.tsx",
+        "contains": ["Rotate token", "Revoke", "controlPlaneClient.rotateServiceAccountToken"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["rotateServiceAccountToken:", "revokeServiceAccount:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/rotate-token",
+          "POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.credential-governance",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantCredentialSettingsSection.tsx",
+        "contains": [
+          "Add encrypted Credential",
+          "Rotate Credential",
+          "controlPlaneClient.revokeCredential"
+        ]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["rotateCredential:", "revokeCredential:", "setCredentialAutoSelect:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/credentials/{credentialID}/rotate",
+          "POST /v1/tenants/{tenantID}/credentials/{credentialID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "support.credential-read",
+      "actor": "support-engineer",
+      "negativeActor": "tenant-member",
+      "access": "read-only",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantOrganizationSettingsPanel.tsx",
+        "contains": ["canReadCredentials", "canManage={canManageCredentials}"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["listCredentials:", "/credentials"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["GET /v1/tenants/{tenantID}/credentials", "server.listCredentials"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.worker-governance",
+      "actor": "tenant-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "apps/web/src/components/settings/ExecutionTargetWorkerManagement.tsx",
+        "contains": ["controlPlaneClient.revokeWorker", "Worker revoked"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["listWorkers:", "revokeWorker:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/tenants/{tenantID}/workers",
+          "POST /v1/tenants/{tenantID}/workers/{workerID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.worker-release",
+      "actor": "tenant-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "apps/web/src/components/settings/WorkerReleaseControls.tsx",
+        "contains": ["Start canary", "Promote canary", "controlPlaneClient.transitionWorkerRelease"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createWorkerRelease:", "transitionWorkerRelease:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases",
+          "/worker-releases/{releaseRevisionID}/canary",
+          "/worker-releases/{releaseRevisionID}/promote",
+          "/worker-releases/{releaseRevisionID}/rollback"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.outbox-read",
+      "actor": "support-engineer",
+      "negativeActor": "tenant-member",
+      "access": "read-only",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantOutboxSettingsSection.tsx",
+        "contains": ["Redacted delivery diagnostics", "listTenantOutboxMessages"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["listTenantOutboxMessages:", "/outbox-messages?"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["GET /v1/tenants/{tenantID}/outbox-messages", "server.listOutboxMessages"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.outbox-replay",
+      "actor": "tenant-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantOutboxSettingsSection.tsx",
+        "contains": ["Replay", "replayTenantOutboxMessage"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["replayTenantOutboxMessage:", "/replay"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/outbox-messages/{messageID}/replay",
+          "server.replayOutboxMessage"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.audit-search-export",
+      "actor": "auditor",
+      "negativeActor": "tenant-member",
+      "access": "read",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantAuditSettingsSection.tsx",
+        "contains": ["Search and export", "resolveAuditLogExportUrl"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["listAuditLogs:", "resolveAuditLogExportUrl"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/tenants/{tenantID}/audit-logs",
+          "GET /v1/tenants/{tenantID}/audit-logs/export"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.legal-hold",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantLegalHoldsSettingsSection.tsx",
+        "contains": ["Place Legal Hold", "Release Legal Hold"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createLegalHold:", "releaseLegalHold:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/legal-holds",
+          "POST /v1/tenants/{tenantID}/legal-holds/{holdID}/release"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.privacy-request",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantPrivacyRequestsSettingsSection.tsx",
+        "contains": ["Privacy Requests", "Verify identity before approval"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["createPrivacyRequest:", "transitionPrivacyRequest:", "executePrivacyErasure:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "POST /v1/tenants/{tenantID}/privacy-requests",
+          "/privacy-requests/{privacyRequestID}/erasure"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.data-export",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantPrivacyRequestsSettingsSection.tsx",
+        "contains": ["Tenant data export", "Generate & download Tenant export"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["executeTenantDataExport:", "/data-export"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": ["POST /v1/tenants/{tenantID}/data-export", "server.executeTenantDataExport"]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.data-residency",
+      "actor": "security-admin",
+      "negativeActor": "tenant-member",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantDataResidencySettingsSection.tsx",
+        "contains": ["Execution Region boundary", "Enforce execution Regions"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "getTenantExecutionSchedulingPolicy:",
+          "updateTenantExecutionSchedulingPolicy:"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/tenants/{tenantID}/execution-scheduling-policy",
+          "PUT /v1/tenants/{tenantID}/execution-scheduling-policy"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.usage-quota",
+      "actor": "cost-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantOrganizationSettingsPanel.tsx",
+        "contains": ["TenantUsageSettingsSection", "TenantQuotaSettingsSection", "canManageCost"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": [
+          "getTenantUsage:",
+          "getTenantQuota:",
+          "updateTenantQuota:",
+          "getInternalCostAllocationReport:",
+          "putProjectCostAllocation:",
+          "resolveInternalCostAllocationExportUrl"
+        ]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/tenants/{tenantID}/usage",
+          "GET /v1/tenants/{tenantID}/quota",
+          "PUT /v1/tenants/{tenantID}/quota",
+          "GET /v1/tenants/{tenantID}/cost-accounting/report",
+          "GET /v1/tenants/{tenantID}/cost-accounting/export.csv",
+          "PUT /v1/tenants/{tenantID}/cost-accounting/projects/{projectID}"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.support-diagnostic-export",
+      "actor": "support-engineer",
+      "negativeActor": "tenant-member",
+      "access": "read-only",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantSupportAccessSettingsSection.tsx",
+        "contains": ["Support diagnostic snapshot", "getTenantSupportDiagnosticExport"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["getTenantSupportDiagnosticExport:", "support-diagnostic.json"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "GET /v1/tenants/{tenantID}/support-diagnostic.json",
+          "server.exportTenantSupportDiagnosticJSON"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    },
+    {
+      "id": "tenant.support-policy",
+      "actor": "tenant-admin",
+      "negativeActor": "auditor",
+      "access": "write",
+      "ui": {
+        "path": "packages/enterprise-ui/src/TenantSupportAccessSettingsSection.tsx",
+        "contains": ["Tenant Support Access policy", "Revoke active Support Access"]
+      },
+      "client": {
+        "path": "packages/control-plane-client/src/index.ts",
+        "contains": ["updateTenantSupportPolicy:", "revokeTenantSupportAccess:"]
+      },
+      "route": {
+        "path": "services/control-plane/internal/httpapi/server.go",
+        "contains": [
+          "PUT /v1/tenants/{tenantID}/support-policy",
+          "POST /v1/tenants/{tenantID}/support-access/{grantID}/revoke"
+        ]
+      },
+      "cliRequired": false,
+      "databaseClientRequired": false
+    }
+  ]
+}

@@ -390,6 +390,9 @@ func (s *Service) ListForTenant(
 	tenantID uuid.UUID,
 	input ListQuery,
 ) ([]AdminMessage, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return nil, err
+	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.OutboxRead); err != nil {
 		return nil, err
 	}
@@ -432,6 +435,9 @@ func (s *Service) ReplayAuthorized(
 	tenantID, messageID uuid.UUID,
 	requestID, ipAddress string,
 ) (Message, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return Message{}, err
+	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.OutboxManage); err != nil {
 		return Message{}, err
 	}

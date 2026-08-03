@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +44,7 @@ func TestTenantExecutionSchedulingPolicyRoutesAuthorizeCASAndAudit(t *testing.T)
 	path := "/v1/tenants/" + fixture.tenantID.String() + "/execution-scheduling-policy"
 
 	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, "", nil), http.StatusUnauthorized, "authentication_required")
-	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.crossTenantToken, nil), http.StatusConflict, "active_tenant_mismatch")
+	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.crossTenantToken, nil), http.StatusNotFound, "tenant_not_found")
 	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.memberToken, nil), http.StatusForbidden, "tenant_forbidden")
 	if response := schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, auditorToken, nil); response.Code != http.StatusOK {
 		t.Fatalf("auditor GET status = %d, body = %s", response.Code, response.Body.String())
@@ -113,6 +116,54 @@ func TestTenantExecutionSchedulingPolicyRoutesAuthorizeCASAndAudit(t *testing.T)
 		Where("tenant_id = ? AND action = ?", fixture.tenantID, "execution_scheduling_policy.tenant_updated").
 		Count(&tenantAuditCount).Error; err != nil || tenantAuditCount != 1 {
 		t.Fatalf("tenant policy audit count = %d, err = %v", tenantAuditCount, err)
+	}
+}
+
+func TestTenantDataResidencyStatementRouteIsServerAuthoritativeAndByteBound(t *testing.T) {
+	fixture := newWorkerManifestHTTPFixture(t)
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/data-residency-statement"
+	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, "", nil), http.StatusUnauthorized, "authentication_required")
+	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.crossTenantToken, nil), http.StatusNotFound, "tenant_not_found")
+	assertProblemResponse(t, schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.memberToken, nil), http.StatusForbidden, "tenant_forbidden")
+
+	document := schedulingpolicy.UnrestrictedDocument()
+	document.Region = schedulingpolicy.Rule{Mode: schedulingpolicy.ModeAllow, Values: []string{"cn-east-1"}}
+	if response := schedulingPolicyHTTPRequest(t, fixture, http.MethodPut,
+		"/v1/tenants/"+fixture.tenantID.String()+"/execution-scheduling-policy", fixture.ownerToken,
+		schedulingPolicyUpdateJSON(t, 0, document)); response.Code != http.StatusOK {
+		t.Fatalf("policy update status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response := schedulingPolicyHTTPRequest(t, fixture, http.MethodGet, path, fixture.ownerToken, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("statement status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var statement dataResidencyStatement
+	if err := json.Unmarshal(response.Body.Bytes(), &statement); err != nil {
+		t.Fatalf("decode statement: %v", err)
+	}
+	if statement.SchemaVersion != dataResidencyStatementSchema || statement.Tenant.ID != fixture.tenantID ||
+		statement.Execution.Status != "enforced" || statement.Execution.PolicyVersion != 1 ||
+		statement.Execution.PolicyDigest == schedulingpolicy.UnrestrictedDigest ||
+		len(statement.Execution.AllowedRegions) != 1 || statement.Execution.AllowedRegions[0] != "cn-east-1" {
+		t.Fatalf("server residency statement = %#v", statement)
+	}
+	if statement.GeneratedAt.IsZero() || statement.DataPlanes.Metadata != "deployment-annex-required" {
+		t.Fatalf("statement authority/limitation fields = %#v", statement)
+	}
+	digest := sha256.Sum256(response.Body.Bytes())
+	if response.Header().Get("X-Synara-Data-Residency-SHA256") != hex.EncodeToString(digest[:]) ||
+		response.Header().Get("X-Synara-Data-Residency-Bytes") != strconv.Itoa(response.Body.Len()) ||
+		response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
+		t.Fatalf("statement integrity headers = %#v body=%d", response.Header(), response.Body.Len())
+	}
+	var entry persistence.AuditLog
+	if err := fixture.db.Where("tenant_id = ? AND action = ?", fixture.tenantID, "tenant.data_residency_statement_exported").Take(&entry).Error; err != nil {
+		t.Fatal(err)
+	}
+	if entry.ResourceID == nil || *entry.ResourceID != fixture.tenantID || entry.Metadata["sha256"] != "sha256:"+hex.EncodeToString(digest[:]) ||
+		entry.Metadata["policyVersion"] != float64(1) {
+		t.Fatalf("statement audit entry = %#v", entry)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,7 +17,11 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/productprofile"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
+	"github.com/synara-ai/synara/services/control-plane/internal/schedulingpolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenantuseraccess"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -26,8 +31,10 @@ func toTenant(model persistence.Tenant, role string) Tenant {
 		settings = map[string]any{}
 	}
 	return Tenant{
-		ID: model.ID, Slug: model.Slug, Name: model.Name, Status: model.Status,
-		PlanCode: model.PlanCode, Region: model.Region, Settings: settings, Role: role,
+		ID: model.ID, Slug: model.Slug, Name: model.Name, Status: productprofile.PublicLifecycleStatus(model.Status),
+		LifecycleVersion: model.LifecycleVersion, TrialExpiresAt: model.TrialExpiresAt,
+		SuspendedAt: model.SuspendedAt, ClosedAt: model.ClosedAt, DeletionRequestedAt: model.DeletedAt,
+		PlanCode: productprofile.PublicProfileCode(model.PlanCode), Region: model.Region, Settings: settings, Role: role,
 		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
 }
@@ -39,22 +46,118 @@ func (s *Service) CreateTenant(
 	requestID string,
 	ipAddress string,
 ) (Tenant, error) {
-	normalized, err := normalizeTenantInput(input)
+	model, err := s.createTenantForOwner(
+		ctx, principal, principal.UserID, input, "self_service", requestID, ipAddress,
+	)
 	if err != nil {
 		return Tenant{}, err
 	}
+	return toTenant(model, "owner"), nil
+}
+
+func (s *Service) CreateSelfServiceTenant(
+	ctx context.Context,
+	principal identity.Principal,
+	input CreateTenantInput,
+	requestID string,
+	ipAddress string,
+) (Tenant, error) {
+	planCode := productprofile.InternalProfileCode(input.PlanCode)
+	if planCode != "" && planCode != "free" {
+		return Tenant{}, problem.New(403, "self_service_entitlement_profile_forbidden", "Self-service Tenant creation is limited to the Standard entitlement profile.")
+	}
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if status != "" && status != "active" {
+		return Tenant{}, problem.New(403, "self_service_status_forbidden", "Self-service Tenant creation starts active on the Standard entitlement profile.")
+	}
+	if input.TrialExpiresAt != nil {
+		return Tenant{}, problem.New(400, "self_service_evaluation_forbidden", "Self-service Standard Tenants do not accept a client-supplied evaluation expiry.")
+	}
+	input.PlanCode = "free"
+	input.Status = "active"
+	model, err := s.createTenantForOwner(
+		ctx, principal, principal.UserID, input, "self_service", requestID, ipAddress,
+	)
+	if err != nil {
+		return Tenant{}, err
+	}
+	return toTenant(model, "owner"), nil
+}
+
+func (s *Service) ProvisionTenant(
+	ctx context.Context,
+	principal identity.Principal,
+	input ProvisionTenantInput,
+	requestID string,
+	ipAddress string,
+) (ProvisionedTenant, error) {
+	ownerEmail, err := validation.Email(input.OwnerEmail)
+	if err != nil {
+		return ProvisionedTenant{}, err
+	}
+	var owner persistence.User
+	if err := s.db.WithContext(ctx).
+		Where("LOWER(email) = ? AND status = ? AND deleted_at IS NULL", ownerEmail, "active").
+		Take(&owner).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return ProvisionedTenant{}, problem.New(409, "tenant_owner_not_found", "The initial owner must have an active Synara user account.")
+	} else if err != nil {
+		return ProvisionedTenant{}, problem.Wrap(500, "tenant_owner_load_failed", "The initial Tenant owner could not be loaded.", err)
+	}
+	model, err := s.createTenantForOwner(ctx, principal, owner.ID, CreateTenantInput{
+		Slug: input.Slug, Name: input.Name, Region: input.Region, PlanCode: input.PlanCode,
+		Status: input.Status, TrialExpiresAt: input.TrialExpiresAt,
+	}, "platform_admin", requestID, ipAddress)
+	if err != nil {
+		return ProvisionedTenant{}, err
+	}
+	return ProvisionedTenant{
+		ID: model.ID, Slug: model.Slug, Name: model.Name, Status: productprofile.PublicLifecycleStatus(model.Status),
+		LifecycleVersion: model.LifecycleVersion, TrialExpiresAt: model.TrialExpiresAt,
+		PlanCode: productprofile.PublicProfileCode(model.PlanCode), Region: model.Region, OwnerUserID: owner.ID,
+		OwnerEmail: ownerEmail, CreatedAt: model.CreatedAt,
+	}, nil
+}
+
+func (s *Service) createTenantForOwner(
+	ctx context.Context,
+	principal identity.Principal,
+	ownerUserID uuid.UUID,
+	input CreateTenantInput,
+	assignmentSource string,
+	requestID string,
+	ipAddress string,
+) (persistence.Tenant, error) {
+	normalized, err := normalizeTenantInput(input)
+	if err != nil {
+		return persistence.Tenant{}, err
+	}
 	tenantID, organizationID := uuid.New(), uuid.New()
+	tenantModel := persistence.Tenant{
+		ID: tenantID, Slug: normalized.Slug, Name: normalized.Name, Status: normalized.Status,
+		LifecycleVersion: 1, TrialExpiresAt: normalized.TrialExpiresAt,
+		PlanCode: normalized.PlanCode, Region: normalized.Region, Settings: map[string]any{},
+		CreatedBy: principal.UserID,
+	}
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		if err := tx.Create(&persistence.Tenant{
-			ID: tenantID, Slug: normalized.Slug, Name: normalized.Name, Status: "active",
-			PlanCode: normalized.PlanCode, Region: normalized.Region, Settings: map[string]any{},
-			CreatedBy: principal.UserID,
-		}).Error; err != nil {
+		var plan persistence.SaaSPlan
+		if err := tx.Where("code = ? AND status = ?", normalized.PlanCode, "active").Take(&plan).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(400, "tenant_entitlement_profile_unavailable", "The requested Tenant entitlement profile is unavailable.")
+		} else if err != nil {
+			return problem.Wrap(500, "tenant_entitlement_profile_load_failed", "Failed to load the Tenant entitlement profile.", err)
+		}
+		if err := tx.Create(&tenantModel).Error; err != nil {
 			return problem.Wrap(409, "tenant_slug_conflict", "A tenant with this slug already exists.", err)
 		}
 		now := time.Now().UTC()
+		if err := tx.Create(&persistence.TenantSubscription{
+			TenantID: tenantID, PlanCode: normalized.PlanCode, Status: normalized.Status, Version: 1,
+			TrialEndsAt: normalized.TrialExpiresAt, CurrentPeriodStart: now,
+			CurrentPeriodEnd: now.AddDate(0, 1, 0), AssignmentSource: assignmentSource,
+		}).Error; err != nil {
+			return problem.Wrap(409, "tenant_entitlement_profile_create_failed", "Failed to create the Tenant entitlement profile assignment.", err)
+		}
 		if err := tx.Create(&persistence.TenantMembership{
-			TenantID: tenantID, UserID: principal.UserID, Role: "owner", Status: "active", JoinedAt: &now,
+			TenantID: tenantID, UserID: ownerUserID, Role: "owner", Status: "active", JoinedAt: &now,
 		}).Error; err != nil {
 			return problem.Wrap(500, "tenant_create_failed", "Failed to create the owner membership.", err)
 		}
@@ -65,7 +168,7 @@ func (s *Service) CreateTenant(
 			return problem.Wrap(500, "tenant_create_failed", "Failed to create the root organization.", err)
 		}
 		if err := tx.Create(&persistence.OrganizationMembership{
-			TenantID: tenantID, OrganizationID: organizationID, UserID: principal.UserID,
+			TenantID: tenantID, OrganizationID: organizationID, UserID: ownerUserID,
 			Role: "owner", Status: "active",
 		}).Error; err != nil {
 			return problem.Wrap(500, "tenant_create_failed", "Failed to create the root organization owner.", err)
@@ -74,20 +177,29 @@ func (s *Service) CreateTenant(
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "tenant.created", ResourceType: "tenant", ResourceID: &tenantID,
 			OrganizationID: &organizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"slug": normalized.Slug, "planCode": normalized.PlanCode},
+			Metadata: map[string]any{
+				"slug":                   normalized.Slug,
+				"entitlementProfileCode": productprofile.PublicProfileCode(normalized.PlanCode),
+				"status":                 productprofile.PublicLifecycleStatus(normalized.Status), "lifecycleVersion": 1,
+				"ownerUserId": ownerUserID, "assignmentSource": assignmentSource,
+			},
 		})
 	})
 	if err != nil {
-		return Tenant{}, err
+		return persistence.Tenant{}, err
 	}
-	return s.GetTenant(ctx, principal, tenantID)
+	return tenantModel, nil
 }
 
 func (s *Service) GetTenant(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) (Tenant, error) {
-	role, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantRead)
+	role, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantRead)
 	if err != nil {
 		return Tenant{}, err
 	}
+	return s.loadTenantForRole(ctx, tenantID, role)
+}
+
+func (s *Service) loadTenantForRole(ctx context.Context, tenantID uuid.UUID, role string) (Tenant, error) {
 	model, err := s.tenantRepository.First(ctx,
 		func(db *gorm.DB) *gorm.DB { return db.Where("id = ? AND deleted_at IS NULL", tenantID) },
 	)
@@ -122,6 +234,31 @@ func (s *Service) ListTenants(ctx context.Context, principal identity.Principal)
 	return result, nil
 }
 
+// ListDeletingTenants returns only deletion requests that the current user can still restore as a Tenant owner.
+// It intentionally uses a separate read path because normal Tenant/session lists exclude soft-deleted rows.
+func (s *Service) ListDeletingTenants(ctx context.Context, principal identity.Principal) ([]Tenant, error) {
+	type tenantRow struct {
+		persistence.Tenant
+		Role string `gorm:"column:role"`
+	}
+	rows := make([]tenantRow, 0)
+	err := s.db.WithContext(ctx).Unscoped().
+		Table("tenant_memberships AS tm").
+		Select("t.*, tm.role").
+		Joins("JOIN tenants AS t ON t.id = tm.tenant_id").
+		Where("tm.user_id = ? AND tm.status = ? AND tm.role = ?", principal.UserID, "active", "owner").
+		Where("t.status = ? AND t.deleted_at IS NOT NULL", "deleting").
+		Order("t.deleted_at DESC, t.id").Scan(&rows).Error
+	if err != nil {
+		return nil, problem.Wrap(500, "tenant_deletion_requests_load_failed", "Tenant deletion requests could not be loaded.", err)
+	}
+	result := make([]Tenant, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, toTenant(row.Tenant, row.Role))
+	}
+	return result, nil
+}
+
 func (s *Service) UpdateTenant(
 	ctx context.Context,
 	principal identity.Principal,
@@ -130,7 +267,7 @@ func (s *Service) UpdateTenant(
 	requestID string,
 	ipAddress string,
 ) (Tenant, error) {
-	role, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantUpdate)
+	role, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantUpdate)
 	if err != nil {
 		return Tenant{}, err
 	}
@@ -143,13 +280,10 @@ func (s *Service) UpdateTenant(
 		updates["name"] = name
 	}
 	if input.Status != nil {
-		if *input.Status != "active" && *input.Status != "suspended" {
-			return Tenant{}, problem.New(400, "invalid_tenant_status", "Tenant status must be active or suspended.")
-		}
 		if role != "owner" {
 			return Tenant{}, problem.New(403, "tenant_status_forbidden", "Only a tenant owner can change tenant status.")
 		}
-		updates["status"] = *input.Status
+		return Tenant{}, problem.New(400, "tenant_lifecycle_transition_required", "Use the Tenant lifecycle transition endpoint to change status with a reason and expected version.")
 	}
 	if input.Region != nil {
 		region, err := validation.Code(*input.Region, "", "invalid_tenant_region", "Tenant region")
@@ -166,6 +300,20 @@ func (s *Service) UpdateTenant(
 	}
 
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if region, changingRegion := updates["region"].(string); changingRegion {
+			policyService := schedulingpolicy.NewService(s.db)
+			snapshot, err := policyService.Resolve(ctx, tx, tenantID, nil)
+			if err != nil {
+				return problem.Wrap(500, "tenant_region_policy_load_failed", "Tenant execution Region policy could not be loaded.", err)
+			}
+			if err := policyService.LockEffectiveForCommit(ctx, tx, tenantID, nil, snapshot); err != nil {
+				return problem.Wrap(409, "tenant_region_policy_stale", "Tenant execution Region policy changed before the home Region update.", err)
+			}
+			if snapshot.Effective.Region.Mode == schedulingpolicy.ModeAllow &&
+				!slices.Contains(snapshot.Effective.Region.Values, region) {
+				return problem.New(409, "tenant_region_outside_execution_boundary", "Tenant home Region must remain inside the enforced execution Region boundary.")
+			}
+		}
 		result := tx.Model(&persistence.Tenant{}).
 			Where("id = ? AND deleted_at IS NULL", tenantID).Updates(updates)
 		if result.Error != nil {
@@ -193,7 +341,37 @@ func (s *Service) DeleteTenant(
 	requestID string,
 	ipAddress string,
 ) error {
-	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantDelete); err != nil {
+	return s.deleteTenant(ctx, principal, tenantID, nil, "legacy DELETE request", requestID, ipAddress)
+}
+
+func (s *Service) RequestTenantDeletion(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID uuid.UUID,
+	input DeleteTenantInput,
+	requestID string,
+	ipAddress string,
+) error {
+	if input.ExpectedVersion < 1 {
+		return problem.New(400, "invalid_tenant_lifecycle_version", "expectedVersion must be a positive integer.")
+	}
+	reason, err := normalizeLifecycleReason(input.Reason)
+	if err != nil {
+		return err
+	}
+	return s.deleteTenant(ctx, principal, tenantID, &input.ExpectedVersion, reason, requestID, ipAddress)
+}
+
+func (s *Service) deleteTenant(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID uuid.UUID,
+	expectedVersion *int64,
+	reason string,
+	requestID string,
+	ipAddress string,
+) error {
+	if _, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantDelete); err != nil {
 		return err
 	}
 	var executionEvents []persistence.SessionEvent
@@ -207,6 +385,14 @@ func (s *Service) DeleteTenant(
 		}
 		if lockErr != nil {
 			return problem.Wrap(500, "tenant_lock_failed", "Failed to lock the tenant for deletion.", lockErr)
+		}
+		if expectedVersion != nil && tenant.LifecycleVersion != *expectedVersion {
+			return problem.New(409, "tenant_lifecycle_version_conflict", "Tenant lifecycle changed; reload it before retrying.")
+		}
+		if held, err := retentiongate.HasActiveTenantHold(tx.WithContext(ctx), tenantID); err != nil {
+			return problem.Wrap(500, "tenant_legal_hold_check_failed", "Tenant Legal Holds could not be checked.", err)
+		} else if held {
+			return problem.New(409, "tenant_legal_hold_active", "Tenant deletion is blocked while any Legal Hold is active.")
 		}
 
 		if s.executionCoordinator != nil {
@@ -243,7 +429,10 @@ func (s *Service) DeleteTenant(
 			return problem.Wrap(500, "tenant_workspace_cleanup_intent_failed", "Failed to schedule Tenant Workspace cleanup.", err)
 		}
 		result := tx.Model(&persistence.Tenant{}).Where("id = ? AND deleted_at IS NULL", tenantID).
-			Updates(map[string]any{"status": "deleting", "deleted_at": now})
+			Updates(map[string]any{
+				"status": "deleting", "deleted_at": now,
+				"lifecycle_version": gorm.Expr("lifecycle_version + 1"),
+			})
 		if result.Error != nil {
 			return problem.Wrap(500, "tenant_delete_failed", "Failed to delete the tenant.", result.Error)
 		}
@@ -254,6 +443,11 @@ func (s *Service) DeleteTenant(
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "tenant.deleted", ResourceType: "tenant", ResourceID: &tenantID,
 			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"fromStatus": tenant.Status, "toStatus": "deleting",
+				"fromVersion": tenant.LifecycleVersion, "toVersion": tenant.LifecycleVersion + 1,
+				"reason": reason,
+			},
 		})
 	})
 	if err == nil && s.executionCoordinator != nil {
@@ -263,7 +457,7 @@ func (s *Service) DeleteTenant(
 }
 
 func (s *Service) ListTenantMembers(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]TenantMember, error) {
-	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantMembersRead); err != nil {
+	if _, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantMembersRead); err != nil {
 		return nil, err
 	}
 	items := make([]TenantMember, 0)
@@ -287,7 +481,7 @@ func (s *Service) InviteTenantMember(
 	requestID string,
 	ipAddress string,
 ) (Invitation, error) {
-	actorRole, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantMembersInvite)
+	actorRole, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantMembersInvite)
 	if err != nil {
 		return Invitation{}, err
 	}
@@ -356,6 +550,7 @@ func (s *Service) AcceptInvitation(
 		return Tenant{}, problem.New(400, "invalid_invitation", "Invitation token is required.")
 	}
 	var tenantID uuid.UUID
+	var tenantRole string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var invitation persistence.TenantInvitation
 		err := persistence.WithLocking(tx, "UPDATE", "").
@@ -371,6 +566,7 @@ func (s *Service) AcceptInvitation(
 			return problem.New(403, "invitation_email_mismatch", "This invitation belongs to a different email address.")
 		}
 		tenantID = invitation.TenantID
+		tenantRole = invitation.Role
 		now := time.Now().UTC()
 		var existingMembership persistence.TenantMembership
 		existingMembershipError := tx.Where("tenant_id = ? AND user_id = ?", tenantID, principal.UserID).
@@ -418,7 +614,7 @@ func (s *Service) AcceptInvitation(
 	if err != nil {
 		return Tenant{}, err
 	}
-	return s.GetTenant(ctx, principal, tenantID)
+	return s.loadTenantForRole(ctx, tenantID, tenantRole)
 }
 
 func (s *Service) UpdateTenantMember(
@@ -428,7 +624,7 @@ func (s *Service) UpdateTenantMember(
 	input UpdateTenantMemberInput,
 	requestID, ipAddress string,
 ) (TenantMember, error) {
-	actorRole, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantMembersUpdate)
+	actorRole, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantMembersUpdate)
 	if err != nil {
 		return TenantMember{}, err
 	}
@@ -462,12 +658,13 @@ func (s *Service) UpdateTenantMember(
 	if len(updates) == 0 {
 		return TenantMember{}, problem.New(400, "empty_update", "Provide a role or status to update.")
 	}
+	var suspension tenantuseraccess.SuspensionResult
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if status, ok := updates["status"]; ok && status == "suspended" {
-			if err := tx.Model(&persistence.OrganizationMembership{}).
-				Where("tenant_id = ? AND user_id = ? AND status = ?", tenantID, userID, "active").
-				Update("status", "suspended").Error; err != nil {
-				return problem.Wrap(500, "tenant_member_update_failed", "Failed to suspend organization memberships.", err)
+			var err error
+			suspension, err = tenantuseraccess.Suspend(ctx, tx, tenantID, userID, principal.UserID, time.Now().UTC())
+			if err != nil {
+				return err
 			}
 		}
 		result := tx.Model(&persistence.TenantMembership{}).
@@ -478,10 +675,28 @@ func (s *Service) UpdateTenantMember(
 		if result.RowsAffected == 0 {
 			return problem.New(404, "tenant_member_not_found", "Tenant member not found.")
 		}
+		if role, changingRole := updates["role"].(string); changingRole {
+			finalStatus := target.Status
+			if status, changingStatus := updates["status"].(string); changingStatus {
+				finalStatus = status
+			}
+			if err := syncRootOrganizationMembershipForTenantRole(
+				ctx, tx, tenantID, userID, target.Role, role, finalStatus,
+			); err != nil {
+				return err
+			}
+		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "tenant.member_updated", ResourceType: "user", ResourceID: &userID,
 			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"fromRole": target.Role, "toRole": updates["role"],
+				"fromStatus": target.Status, "toStatus": updates["status"],
+				"revokedSessionCount":           suspension.RevokedSessionCount,
+				"revokedCredentialCount":        suspension.RevokedCredentialCount,
+				"revokedDesktopEnrollmentCount": suspension.RevokedDesktopEnrollmentCount,
+			},
 		})
 	}, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -493,13 +708,56 @@ func (s *Service) UpdateTenantMember(
 	return s.getTenantMember(ctx, tenantID, userID)
 }
 
+func syncRootOrganizationMembershipForTenantRole(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID, userID uuid.UUID,
+	previousRole, nextRole, membershipStatus string,
+) error {
+	var root persistence.Organization
+	if err := tx.WithContext(ctx).
+		Where("tenant_id = ? AND kind = ? AND archived_at IS NULL", tenantID, "root").
+		Take(&root).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(409, "root_organization_not_found", "The Tenant root Organization is unavailable.")
+	} else if err != nil {
+		return problem.Wrap(500, "root_organization_load_failed", "The Tenant root Organization could not be loaded.", err)
+	}
+	previousRoleGrantedRoot := previousRole == "owner" || previousRole == "admin"
+	nextRoleGrantsRoot := nextRole == "owner" || nextRole == "admin"
+	if previousRoleGrantedRoot && !nextRoleGrantsRoot {
+		if err := tx.WithContext(ctx).
+			Where(
+				"tenant_id = ? AND organization_id = ? AND user_id = ? AND role = ?",
+				tenantID, root.ID, userID, previousRole,
+			).
+			Delete(&persistence.OrganizationMembership{}).Error; err != nil {
+			return problem.Wrap(500, "root_organization_membership_revoke_failed", "The automatic root Organization role could not be revoked.", err)
+		}
+		return nil
+	}
+	if !nextRoleGrantsRoot {
+		return nil
+	}
+	membership := persistence.OrganizationMembership{
+		TenantID: tenantID, OrganizationID: root.ID, UserID: userID,
+		Role: nextRole, Status: membershipStatus,
+	}
+	if err := tx.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "organization_id"}, {Name: "user_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"role", "status", "updated_at"}),
+	}).Create(&membership).Error; err != nil {
+		return problem.Wrap(409, "root_organization_membership_update_rejected", "The automatic root Organization role could not be synchronized.", err)
+	}
+	return nil
+}
+
 func (s *Service) RemoveTenantMember(
 	ctx context.Context,
 	principal identity.Principal,
 	tenantID, userID uuid.UUID,
 	requestID, ipAddress string,
 ) error {
-	actorRole, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantMembersRemove)
+	actorRole, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.TenantMembersRemove)
 	if err != nil {
 		return err
 	}
@@ -512,7 +770,13 @@ func (s *Service) RemoveTenantMember(
 	if target.Role == "owner" && actorRole != "owner" {
 		return problem.New(403, "owner_remove_forbidden", "Only an owner can remove another owner.")
 	}
+	var suspension tenantuseraccess.SuspensionResult
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		suspension, err = tenantuseraccess.Suspend(ctx, tx, tenantID, userID, principal.UserID, time.Now().UTC())
+		if err != nil {
+			return err
+		}
 		if err := tx.Where("tenant_id = ? AND user_id = ?", tenantID, userID).
 			Delete(&persistence.OrganizationMembership{}).Error; err != nil {
 			return problem.Wrap(500, "tenant_member_remove_failed", "Failed to remove organization memberships.", err)
@@ -529,6 +793,12 @@ func (s *Service) RemoveTenantMember(
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "tenant.member_removed", ResourceType: "user", ResourceID: &userID,
 			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"role": target.Role, "status": target.Status,
+				"revokedSessionCount":           suspension.RevokedSessionCount,
+				"revokedCredentialCount":        suspension.RevokedCredentialCount,
+				"revokedDesktopEnrollmentCount": suspension.RevokedDesktopEnrollmentCount,
+			},
 		})
 	}, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if persistence.IsConstraintViolation(err) {

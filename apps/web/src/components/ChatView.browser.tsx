@@ -52,7 +52,7 @@ import {
   ControlPlaneError,
   type ControlPlaneAgentSession,
   controlPlaneClient,
-} from "../lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { createTestAgentSession, createTestPlatformProfile } from "../lib/controlPlaneTestFixtures";
 import { resetSharedControlPlaneTurnDispatcherForTests } from "../lib/controlPlaneTurnDispatch";
 import { resetStudioProjectPrewarmStateForTests } from "../lib/studioProjects";
@@ -1305,6 +1305,8 @@ function installAuthoritativeControlPlaneFixture(options?: {
       userId: "user-1",
       sessionId: "web-session-1",
       activeTenantId: "tenant-1",
+      supportAccessGrantId: null,
+      audience: "web" as const,
       email: "owner@example.com",
       displayName: "Owner",
     },
@@ -1314,7 +1316,7 @@ function installAuthoritativeControlPlaneFixture(options?: {
         slug: "tenant-1",
         name: "Tenant 1",
         status: "active" as const,
-        planCode: "enterprise",
+        entitlementProfileCode: "enterprise",
         region: "local",
         role: "owner" as const,
       },
@@ -1571,6 +1573,21 @@ const worker = setupWorker(
       sendEffectRpcExit(client, parsed.request.id, resolveWsRpc(requestBody));
     });
   }),
+  // Full-app browser cases exercise the local WebSocket-backed runtime. Make
+  // the shared Control Plane client observe the same explicit local boundary
+  // instead of falling through to the Vitest page server and rendering the
+  // authentication gate over the ChatView.
+  http.get("*/v1/platform/profile", () =>
+    HttpResponse.json(
+      {
+        error: {
+          code: "control_plane_unavailable",
+          message: "The local browser fixture does not expose an authoritative Control Plane.",
+        },
+      },
+      { status: 503 },
+    ),
+  ),
   http.post(`*${ATTACHMENT_UPLOAD_ROUTE_PATH}`, async ({ request }) => {
     const url = new URL(request.url);
     const bytes = await request.arrayBuffer();

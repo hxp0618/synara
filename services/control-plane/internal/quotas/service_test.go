@@ -19,6 +19,22 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestTenantQuotaOperationsRejectInactiveTenantBeforeStorageAccess(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil)
+
+	_, err := service.Get(ctx, principal, requestedTenantID)
+	assertQuotaProblemCode(t, err, "tenant_not_found")
+	_, err = service.Put(
+		ctx, principal, requestedTenantID, PutInput{},
+		"quota-inactive-update", "127.0.0.1",
+	)
+	assertQuotaProblemCode(t, err, "tenant_not_found")
+}
+
 func TestTenantQuotaAccessForOwnerAndBillingAdmin(t *testing.T) {
 	fixture := newQuotaFixture(t)
 	ctx := context.Background()
@@ -37,12 +53,12 @@ func TestTenantQuotaAccessForOwnerAndBillingAdmin(t *testing.T) {
 		t.Fatalf("unexpected owner quota update: %#v", updated)
 	}
 
-	billingQuota, err := fixture.service.Get(ctx, fixture.billingAdmin, fixture.tenantID)
+	costQuota, err := fixture.service.Get(ctx, fixture.billingAdmin, fixture.tenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if billingQuota.MaxConcurrentExecutions == nil || *billingQuota.MaxConcurrentExecutions != maxExecutions {
-		t.Fatalf("billing admin did not read the tenant quota: %#v", billingQuota)
+	if costQuota.MaxConcurrentExecutions == nil || *costQuota.MaxConcurrentExecutions != maxExecutions {
+		t.Fatalf("cost admin did not read the tenant quota: %#v", costQuota)
 	}
 
 	maxExecutions = 5
@@ -53,7 +69,7 @@ func TestTenantQuotaAccessForOwnerAndBillingAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.MaxConcurrentExecutions == nil || *updated.MaxConcurrentExecutions != maxExecutions || updated.MaxArtifactBytes != nil {
-		t.Fatalf("billing admin quota update did not replace the limits: %#v", updated)
+		t.Fatalf("cost admin quota update did not replace the limits: %#v", updated)
 	}
 
 	_, err = fixture.service.Get(ctx, fixture.member, fixture.tenantID)
@@ -202,12 +218,12 @@ func newQuotaFixture(t *testing.T) quotaFixture {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	billingAdminID := uuid.New()
+	costAdminID := uuid.New()
 	memberID := uuid.New()
 	models := []any{
-		&persistence.User{ID: billingAdminID, Email: uuid.NewString() + "@example.com", DisplayName: "Billing Admin", Status: "active", EmailVerifiedAt: &now},
+		&persistence.User{ID: costAdminID, Email: uuid.NewString() + "@example.com", DisplayName: "Cost Admin", Status: "active", EmailVerifiedAt: &now},
 		&persistence.User{ID: memberID, Email: uuid.NewString() + "@example.com", DisplayName: "Member", Status: "active", EmailVerifiedAt: &now},
-		&persistence.TenantMembership{TenantID: domain.TenantID, UserID: billingAdminID, Role: "billing_admin", Status: "active", JoinedAt: &now},
+		&persistence.TenantMembership{TenantID: domain.TenantID, UserID: costAdminID, Role: "cost_admin", Status: "active", JoinedAt: &now},
 		&persistence.TenantMembership{TenantID: domain.TenantID, UserID: memberID, Role: "member", Status: "active", JoinedAt: &now},
 	}
 	for _, model := range models {
@@ -220,7 +236,7 @@ func newQuotaFixture(t *testing.T) quotaFixture {
 		organizationID:    domain.OrganizationID,
 		executionTargetID: domain.ExecutionTargetID,
 		owner:             identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID},
-		billingAdmin:      identity.Principal{UserID: billingAdminID, ActiveTenantID: &domain.TenantID},
+		billingAdmin:      identity.Principal{UserID: costAdminID, ActiveTenantID: &domain.TenantID},
 		member:            identity.Principal{UserID: memberID, ActiveTenantID: &domain.TenantID},
 	}
 }

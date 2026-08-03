@@ -85,7 +85,7 @@ func (s *Service) AllocateSharedUsageCharges(
 	if input.WorkerID == uuid.Nil || input.WorkerIncarnation <= 0 {
 		return SharedUsageAllocationResult{}, problem.New(
 			400,
-			"invalid_billing_worker",
+			"invalid_cost_accounting_worker",
 			"workerId and workerIncarnation are required.",
 		)
 	}
@@ -110,7 +110,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		); lockErr != nil {
 			return problem.Wrap(
 				500,
-				"billing_shared_allocation_lock_failed",
+				"cost_accounting_shared_allocation_lock_failed",
 				"The shared billing allocation identity could not be locked.",
 				lockErr,
 			)
@@ -125,7 +125,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		); lockErr != nil {
 			return problem.Wrap(
 				500,
-				"billing_shared_allocation_snapshot_lock_failed",
+				"cost_accounting_shared_allocation_snapshot_lock_failed",
 				"The shared billing period snapshot could not be locked.",
 				lockErr,
 			)
@@ -138,14 +138,14 @@ func (s *Service) AllocateSharedUsageCharges(
 		if fact.TenantID != nil {
 			return problem.New(
 				409,
-				"billing_shared_worker_tenant_attributed",
+				"cost_accounting_shared_worker_tenant_attributed",
 				"A tenant-attributed Worker must use the ordinary usage-estimate path.",
 			)
 		}
 		if fact.CurrentState != "terminated" || fact.TerminatedAt == nil || fact.TerminalReason == nil {
 			return problem.New(
 				409,
-				"billing_shared_worker_not_terminal",
+				"cost_accounting_shared_worker_not_terminal",
 				"Shared cost allocation requires an immutable terminal Worker incarnation fact.",
 			)
 		}
@@ -163,7 +163,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		if now.Before(usageEnd) {
 			return problem.New(
 				409,
-				"billing_shared_worker_terminal_in_future",
+				"cost_accounting_shared_worker_terminal_in_future",
 				"The terminal Worker usage window ends after the allocation authority timestamp.",
 			)
 		}
@@ -175,7 +175,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		if target.TenantID != nil || target.Kind != fact.TargetKind {
 			return problem.New(
 				409,
-				"billing_shared_target_scope_invalid",
+				"cost_accounting_shared_target_scope_invalid",
 				"The Worker incarnation does not belong to a platform-shared execution Target.",
 			)
 		}
@@ -187,7 +187,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		if fact.RegisteredAt.UTC().Before(coverage.CompleteFromAt.UTC()) || coverage.SealedAt.UTC().After(now) {
 			return problem.New(
 				409,
-				"billing_shared_ledger_coverage_incomplete",
+				"cost_accounting_shared_ledger_coverage_incomplete",
 				"The shared Target ledger coverage does not authorize this Worker incarnation.",
 			)
 		}
@@ -268,7 +268,7 @@ func (s *Service) AllocateSharedUsageCharges(
 			if !sameSharedAllocationRun(existingRun, run) || !sameSharedAllocationSlices(existingSlices, slices) {
 				return problem.New(
 					409,
-					"billing_shared_allocation_conflict",
+					"cost_accounting_shared_allocation_conflict",
 					"The existing shared billing allocation does not match the authoritative ledger and tariff evidence.",
 				)
 			}
@@ -280,7 +280,7 @@ func (s *Service) AllocateSharedUsageCharges(
 		if createErr := tx.WithContext(ctx).Omit(clause.Associations).Create(&run).Error; createErr != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_allocation_create_failed",
+				"cost_accounting_shared_allocation_create_failed",
 				"The shared billing allocation run could not be created.",
 				createErr,
 			)
@@ -289,7 +289,7 @@ func (s *Service) AllocateSharedUsageCharges(
 			if createErr := tx.WithContext(ctx).Omit(clause.Associations).Create(&slices).Error; createErr != nil {
 				return problem.Wrap(
 					409,
-					"billing_shared_allocation_slice_create_failed",
+					"cost_accounting_shared_allocation_slice_create_failed",
 					"The shared billing allocation slices could not be created.",
 					createErr,
 				)
@@ -356,7 +356,7 @@ func rejectOverlappingSharedAllocationPeriod(
 	if err != nil {
 		return problem.Wrap(
 			500,
-			"billing_shared_allocation_overlap_probe_failed",
+			"cost_accounting_shared_allocation_overlap_probe_failed",
 			"The shared billing allocation period overlap check could not be completed.",
 			err,
 		)
@@ -364,7 +364,7 @@ func rejectOverlappingSharedAllocationPeriod(
 	if count > 0 {
 		return problem.New(
 			409,
-			"billing_shared_allocation_period_overlap",
+			"cost_accounting_shared_allocation_period_overlap",
 			"The requested shared billing allocation period overlaps an immutable existing run.",
 		)
 	}
@@ -383,14 +383,14 @@ func loadSharedAllocationTarget(
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.ExecutionTarget{}, problem.New(
 			404,
-			"billing_shared_target_not_found",
+			"cost_accounting_shared_target_not_found",
 			"The shared billing execution Target was not found.",
 		)
 	}
 	if err != nil {
 		return persistence.ExecutionTarget{}, problem.Wrap(
 			500,
-			"billing_shared_target_load_failed",
+			"cost_accounting_shared_target_load_failed",
 			"The shared billing execution Target could not be loaded.",
 			err,
 		)
@@ -410,14 +410,14 @@ func loadSharedLedgerCoverage(
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.BillingSharedTargetLedgerCoverage{}, problem.New(
 			409,
-			"billing_shared_ledger_coverage_missing",
+			"cost_accounting_shared_ledger_coverage_missing",
 			"The shared Target does not have an operator-sealed complete claim/release-ledger boundary.",
 		)
 	}
 	if err != nil {
 		return persistence.BillingSharedTargetLedgerCoverage{}, problem.Wrap(
 			500,
-			"billing_shared_ledger_coverage_load_failed",
+			"cost_accounting_shared_ledger_coverage_load_failed",
 			"The shared Target ledger coverage could not be loaded.",
 			err,
 		)
@@ -443,7 +443,7 @@ func loadAndValidateSharedClaimLedger(
 		Find(&claims).Error; err != nil {
 		return nil, nil, nil, "", problem.Wrap(
 			500,
-			"billing_shared_claim_ledger_load_failed",
+			"cost_accounting_shared_claim_ledger_load_failed",
 			"The shared Worker claim ledger could not be loaded.",
 			err,
 		)
@@ -451,7 +451,7 @@ func loadAndValidateSharedClaimLedger(
 	if int64(len(claims)) != fact.ClaimCount {
 		return nil, nil, nil, "", problem.New(
 			409,
-			"billing_shared_claim_ledger_incomplete",
+			"cost_accounting_shared_claim_ledger_incomplete",
 			"The shared Worker claim count does not match its immutable claim ledger.",
 		)
 	}
@@ -468,7 +468,7 @@ func loadAndValidateSharedClaimLedger(
 			Find(&releases).Error; err != nil {
 			return nil, nil, nil, "", problem.Wrap(
 				500,
-				"billing_shared_release_ledger_load_failed",
+				"cost_accounting_shared_release_ledger_load_failed",
 				"The shared Worker release ledger could not be loaded.",
 				err,
 			)
@@ -477,7 +477,7 @@ func loadAndValidateSharedClaimLedger(
 	if len(releases) != len(claims) {
 		return nil, nil, nil, "", problem.New(
 			409,
-			"billing_shared_release_ledger_incomplete",
+			"cost_accounting_shared_release_ledger_incomplete",
 			"Every shared Worker claim requires one immutable release fact before allocation.",
 		)
 	}
@@ -493,7 +493,7 @@ func loadAndValidateSharedClaimLedger(
 		if !found {
 			return nil, nil, nil, "", problem.New(
 				409,
-				"billing_shared_release_ledger_incomplete",
+				"cost_accounting_shared_release_ledger_incomplete",
 				"Every shared Worker claim requires one immutable release fact before allocation.",
 			)
 		}
@@ -507,7 +507,7 @@ func loadAndValidateSharedClaimLedger(
 			release.RecordedAt.UTC().Before(releasedAt) {
 			return nil, nil, nil, "", problem.New(
 				409,
-				"billing_shared_claim_interval_invalid",
+				"cost_accounting_shared_claim_interval_invalid",
 				"The shared Worker claim/release ledger contains an invalid scope or timeline.",
 			)
 		}
@@ -530,7 +530,7 @@ func loadAndValidateSharedClaimLedger(
 		if intervals[index].StartAt.Before(intervals[index-1].EndAt) {
 			return nil, nil, nil, "", problem.New(
 				409,
-				"billing_shared_claim_intervals_overlap",
+				"cost_accounting_shared_claim_intervals_overlap",
 				"Shared Worker claims overlap and cannot be allocated to more than one tenant.",
 			)
 		}
@@ -540,7 +540,7 @@ func loadAndValidateSharedClaimLedger(
 	if err != nil {
 		return nil, nil, nil, "", problem.Wrap(
 			500,
-			"billing_shared_ledger_digest_failed",
+			"cost_accounting_shared_ledger_digest_failed",
 			"The shared Worker claim/release ledger digest could not be computed.",
 			err,
 		)
@@ -667,7 +667,7 @@ func buildSharedAllocationRows(
 			if billableSeconds < 0 {
 				return persistence.BillingSharedCostAllocationRun{}, nil, problem.New(
 					500,
-					"billing_shared_allocation_seconds_invalid",
+					"cost_accounting_shared_allocation_seconds_invalid",
 					"A shared billing allocation interval produced a negative duration.",
 				)
 			}
@@ -723,7 +723,7 @@ func buildSharedAllocationRows(
 	if allocatedSeconds != wholeSecondsBetween(usageStart, usageEnd) {
 		return persistence.BillingSharedCostAllocationRun{}, nil, problem.New(
 			409,
-			"billing_shared_allocation_second_precision_ambiguous",
+			"cost_accounting_shared_allocation_second_precision_ambiguous",
 			"Tariff boundaries cannot conserve the complete shared Worker usage window at whole-second precision.",
 		)
 	}
@@ -738,8 +738,8 @@ func buildSharedAllocationRows(
 		if !found {
 			return persistence.BillingSharedCostAllocationRun{}, nil, problem.New(
 				500,
-				"billing_shared_request_claim_segment_missing",
-				"A shared Worker request claim did not match a billing tariff segment.",
+				"cost_accounting_shared_request_claim_segment_missing",
+				"A shared Worker request claim did not match a cost tariff segment.",
 			)
 		}
 		segment := segments[segmentIndex]
@@ -792,7 +792,7 @@ func buildSharedOwnershipIntervals(
 		if startAt.Before(cursor) {
 			return nil, problem.New(
 				409,
-				"billing_shared_claim_intervals_overlap",
+				"cost_accounting_shared_claim_intervals_overlap",
 				"Shared Worker claims overlap and cannot be allocated to more than one tenant.",
 			)
 		}
@@ -874,7 +874,7 @@ func sharedTimeChargeAmountAt(candidate sharedTimeChargeCandidate, seconds int64
 		if candidate.Resource == nil || *candidate.Resource <= 0 {
 			return 0, problem.New(
 				409,
-				"billing_shared_requested_resource_invalid",
+				"cost_accounting_shared_requested_resource_invalid",
 				"A shared Worker requested resource value is missing or invalid.",
 			)
 		}
@@ -1002,7 +1002,7 @@ func loadSharedAllocationRun(
 	if err != nil {
 		return persistence.BillingSharedCostAllocationRun{}, false, problem.Wrap(
 			500,
-			"billing_shared_allocation_load_failed",
+			"cost_accounting_shared_allocation_load_failed",
 			"The shared billing allocation run could not be loaded.",
 			err,
 		)
@@ -1021,7 +1021,7 @@ func loadSharedAllocationSlices(
 		Find(&slices).Error; err != nil {
 		return nil, problem.Wrap(
 			500,
-			"billing_shared_allocation_slice_load_failed",
+			"cost_accounting_shared_allocation_slice_load_failed",
 			"The shared billing allocation slices could not be loaded.",
 			err,
 		)

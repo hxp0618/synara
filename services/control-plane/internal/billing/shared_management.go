@@ -91,7 +91,7 @@ func (s *Service) GetSharedTargetLedgerCoverageAuthorized(
 	if executionTargetID == uuid.Nil {
 		return SharedTargetLedgerCoverage{}, problem.New(
 			400,
-			"billing_shared_target_required",
+			"cost_accounting_shared_target_required",
 			"executionTargetId is required.",
 		)
 	}
@@ -102,7 +102,7 @@ func (s *Service) GetSharedTargetLedgerCoverageAuthorized(
 	if !found {
 		return SharedTargetLedgerCoverage{}, problem.New(
 			404,
-			"billing_shared_ledger_coverage_not_found",
+			"cost_accounting_shared_ledger_coverage_not_found",
 			"The shared Target ledger coverage was not found.",
 		)
 	}
@@ -126,7 +126,7 @@ func (s *Service) SealSharedTargetLedgerCoverageAuthorized(
 	if executionTargetID == uuid.Nil {
 		return SharedTargetLedgerCoverage{}, false, problem.New(
 			400,
-			"billing_shared_target_required",
+			"cost_accounting_shared_target_required",
 			"executionTargetId is required.",
 		)
 	}
@@ -147,7 +147,7 @@ func (s *Service) SealSharedTargetLedgerCoverageAuthorized(
 		if lockErr := acquireSharedTargetCoverageLock(ctx, tx, executionTargetID); lockErr != nil {
 			return problem.Wrap(
 				500,
-				"billing_shared_ledger_coverage_lock_failed",
+				"cost_accounting_shared_ledger_coverage_lock_failed",
 				"The shared Target ledger coverage authority could not be locked.",
 				lockErr,
 			)
@@ -164,7 +164,7 @@ func (s *Service) SealSharedTargetLedgerCoverageAuthorized(
 			if !sameSharedTargetLedgerCoverageAssertion(existing, normalized) {
 				return problem.New(
 					409,
-					"billing_shared_ledger_coverage_conflict",
+					"cost_accounting_shared_ledger_coverage_conflict",
 					"The shared Target already has a different immutable ledger coverage assertion.",
 				)
 			}
@@ -184,15 +184,15 @@ func (s *Service) SealSharedTargetLedgerCoverageAuthorized(
 		if createErr := tx.WithContext(ctx).Omit(clause.Associations).Create(&coverage).Error; createErr != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_ledger_coverage_create_failed",
+				"cost_accounting_shared_ledger_coverage_create_failed",
 				"The shared Target ledger coverage assertion could not be sealed.",
 				createErr,
 			)
 		}
 		if auditErr := s.recordAuditTx(ctx, tx, audit.Entry{
 			TenantID: operatorTenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action:       "billing.shared_target_ledger_coverage_sealed",
-			ResourceType: "billing_shared_target_ledger_coverage", ResourceID: &coverage.ID,
+			Action:       "cost_accounting.shared_target_ledger_coverage_sealed",
+			ResourceType: "cost_accounting_shared_target_ledger_coverage", ResourceID: &coverage.ID,
 			RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
 				"executionTargetId":           executionTargetID,
@@ -229,7 +229,7 @@ func (s *Service) SweepSharedUsageChargesAuthorized(
 	if err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		return s.recordAuditTx(ctx, tx, audit.Entry{
 			TenantID: operatorTenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action:       "billing.shared_cost_allocation_sweep_requested",
+			Action:       "cost_accounting.shared_cost_allocation_sweep_requested",
 			ResourceType: "execution_target", ResourceID: &normalized.ExecutionTargetID,
 			RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
@@ -284,7 +284,7 @@ func (s *Service) sweepSharedUsageCharges(
 		if err := query.Order("worker_id, worker_incarnation").Limit(sharedAllocationSweepPageSize).Find(&facts).Error; err != nil {
 			return result, problem.Wrap(
 				500,
-				"billing_shared_allocation_sweep_facts_load_failed",
+				"cost_accounting_shared_allocation_sweep_facts_load_failed",
 				"The shared billing allocation sweep could not load Worker incarnation facts.",
 				err,
 			)
@@ -331,14 +331,14 @@ func (s *Service) normalizeSharedUsageSweep(
 	if s == nil || s.db == nil {
 		return normalizedSharedUsageSweep{}, problem.New(
 			500,
-			"billing_shared_allocation_sweeper_unavailable",
+			"cost_accounting_shared_allocation_sweeper_unavailable",
 			"The shared billing allocation sweeper is not initialized.",
 		)
 	}
 	if input.ExecutionTargetID == uuid.Nil {
 		return normalizedSharedUsageSweep{}, problem.New(
 			400,
-			"billing_shared_target_required",
+			"cost_accounting_shared_target_required",
 			"executionTargetId is required.",
 		)
 	}
@@ -357,7 +357,7 @@ func (s *Service) normalizeSharedUsageSweep(
 	if periodEnd.After(s.now().UTC()) {
 		return normalizedSharedUsageSweep{}, problem.New(
 			409,
-			"billing_shared_allocation_period_open",
+			"cost_accounting_shared_allocation_period_open",
 			"Shared cost allocation requires a billing period that has already closed.",
 		)
 	}
@@ -379,28 +379,28 @@ func (s *Service) requireSharedBillingOperator(
 	principal identity.Principal,
 	operatorTenantID uuid.UUID,
 ) error {
-	if err := requireBillingTenant(principal, operatorTenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, operatorTenantID); err != nil {
 		return err
 	}
 	if _, err := s.authorizer.RequireTenant(
 		ctx,
 		principal.UserID,
 		operatorTenantID,
-		authorization.BillingManage,
+		authorization.CostManage,
 	); err != nil {
 		return err
 	}
 	if s.platformBillingOperatorTenantID == uuid.Nil {
 		return problem.New(
 			503,
-			"billing_shared_management_unavailable",
+			"cost_accounting_shared_management_unavailable",
 			"Shared billing management requires an explicitly configured platform billing operator Tenant.",
 		)
 	}
 	if operatorTenantID != s.platformBillingOperatorTenantID {
 		return problem.New(
 			403,
-			"billing_shared_operator_forbidden",
+			"cost_accounting_shared_operator_forbidden",
 			"This Tenant is not the configured platform billing operator.",
 		)
 	}
@@ -417,28 +417,28 @@ func normalizeSharedTargetLedgerCoverageInput(
 	if input.CompleteFromAt.IsZero() {
 		return SealSharedTargetLedgerCoverageInput{}, problem.New(
 			400,
-			"billing_shared_ledger_coverage_time_required",
+			"cost_accounting_shared_ledger_coverage_time_required",
 			"completeFromAt is required.",
 		)
 	}
 	if input.CompleteFromAt.After(sealedAt) {
 		return SealSharedTargetLedgerCoverageInput{}, problem.New(
 			409,
-			"billing_shared_ledger_coverage_in_future",
+			"cost_accounting_shared_ledger_coverage_in_future",
 			"completeFromAt cannot be later than the sealing authority timestamp.",
 		)
 	}
 	if !sharedLedgerWriterVersionPattern.MatchString(input.MinimumWriterVersion) {
 		return SealSharedTargetLedgerCoverageInput{}, problem.New(
 			400,
-			"billing_shared_ledger_writer_version_invalid",
+			"cost_accounting_shared_ledger_writer_version_invalid",
 			"minimumWriterVersion must use 1 to 80 version-safe characters.",
 		)
 	}
 	if !sharedLedgerAttestationPattern.MatchString(input.DeploymentAttestationSHA256) {
 		return SealSharedTargetLedgerCoverageInput{}, problem.New(
 			400,
-			"billing_shared_ledger_attestation_invalid",
+			"cost_accounting_shared_ledger_attestation_invalid",
 			"deploymentAttestationSHA256 must be a lowercase SHA-256 digest.",
 		)
 	}
@@ -464,15 +464,15 @@ func requirePlatformSharedTarget(ctx context.Context, db *gorm.DB, targetID uuid
 		Where("id = ?", targetID).
 		First(&target).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return problem.New(404, "billing_shared_target_not_found", "The shared execution Target was not found.")
+		return problem.New(404, "cost_accounting_shared_target_not_found", "The shared execution Target was not found.")
 	}
 	if err != nil {
-		return problem.Wrap(500, "billing_shared_target_load_failed", "The shared execution Target could not be loaded.", err)
+		return problem.Wrap(500, "cost_accounting_shared_target_load_failed", "The shared execution Target could not be loaded.", err)
 	}
 	if target.TenantID != nil {
 		return problem.New(
 			409,
-			"billing_shared_target_scope_invalid",
+			"cost_accounting_shared_target_scope_invalid",
 			"Shared billing management requires a platform-shared execution Target.",
 		)
 	}
@@ -492,7 +492,7 @@ func findSharedTargetLedgerCoverage(
 	if err != nil {
 		return persistence.BillingSharedTargetLedgerCoverage{}, false, problem.Wrap(
 			500,
-			"billing_shared_ledger_coverage_load_failed",
+			"cost_accounting_shared_ledger_coverage_load_failed",
 			"The shared Target ledger coverage could not be loaded.",
 			err,
 		)
@@ -512,7 +512,7 @@ func getSharedTargetLedgerCoverage(
 	if !found {
 		return persistence.BillingSharedTargetLedgerCoverage{}, problem.New(
 			409,
-			"billing_shared_ledger_coverage_missing",
+			"cost_accounting_shared_ledger_coverage_missing",
 			"The shared Target has no sealed complete claim/release ledger coverage.",
 		)
 	}
@@ -553,7 +553,7 @@ func sharedUsageAllocationSweepFailure(
 ) SharedUsageAllocationSweepFailure {
 	failure := SharedUsageAllocationSweepFailure{
 		WorkerID: fact.WorkerID, WorkerIncarnation: fact.WorkerIncarnation,
-		ErrorCode:    "billing_shared_allocation_failed",
+		ErrorCode:    "cost_accounting_shared_allocation_failed",
 		ErrorMessage: "The Worker shared-cost allocation failed and must be retried.",
 	}
 	var apiError *problem.Error

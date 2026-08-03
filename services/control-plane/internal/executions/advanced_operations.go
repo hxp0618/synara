@@ -19,6 +19,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenantstate"
 )
 
 type primaryOperationRequest struct {
@@ -161,11 +162,11 @@ func (s *Service) requestPrimaryOperation(
 	}, func(tx *gorm.DB) (QueuedSessionOperation, error) {
 		var tenant persistence.Tenant
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Select("id", "status").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
+			Select("id", "status", "trial_expires_at").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(404, "tenant_not_found", "Tenant not found.", err)
 		}
-		if tenant.Status != "active" {
-			return QueuedSessionOperation{}, problem.New(409, "tenant_suspended", "The tenant is suspended and cannot create new executions.")
+		if !tenantstate.IsOperational(tenant.Status, tenant.TrialExpiresAt, s.now()) {
+			return QueuedSessionOperation{}, problem.New(409, "tenant_suspended", "The tenant is not operational and cannot create new executions.")
 		}
 		var session persistence.AgentSession
 		sessionErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").

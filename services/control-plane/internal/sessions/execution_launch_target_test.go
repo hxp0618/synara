@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -107,8 +108,14 @@ func TestCreateTurnPersistsCurrentSchedulingPolicySnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	traceID := trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	spanID := trace.SpanID{17, 18, 19, 20, 21, 22, 23, 24}
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
+	})
+	requestContext := trace.ContextWithSpanContext(context.Background(), spanContext)
 	turn, err := fixture.service.CreateTurn(
-		context.Background(),
+		requestContext,
 		fixture.principal,
 		fixture.sessionID,
 		CreateTurnInput{InputText: "freeze scheduling policy"},
@@ -131,6 +138,14 @@ func TestCreateTurnPersistsCurrentSchedulingPolicySnapshot(t *testing.T) {
 	}
 	if execution.SchedulingDecisionID == nil {
 		t.Fatal("persisted Execution omitted its immutable scheduling decision identity")
+	}
+	expectedTraceparent := "00-" + traceID.String() + "-" + spanID.String() + "-01"
+	if execution.Traceparent == nil || *execution.Traceparent != expectedTraceparent {
+		t.Fatalf("persisted Execution traceparent = %#v, want %q", execution.Traceparent, expectedTraceparent)
+	}
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", execution.ID).
+		Update("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01").Error; err == nil {
+		t.Fatal("database allowed immutable Execution trace context mutation")
 	}
 	var decision persistence.ExecutionSchedulingDecision
 	if err := fixture.db.Where("tenant_id = ? AND execution_id = ?", fixture.tenantID, execution.ID).

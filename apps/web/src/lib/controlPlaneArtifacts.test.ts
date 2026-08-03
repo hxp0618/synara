@@ -1,7 +1,7 @@
 import type { OrchestrationThreadActivity } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
-import type { ControlPlaneArtifact } from "./controlPlaneClient";
+import type { ControlPlaneArtifact } from "@synara/control-plane-client";
 import {
   controlPlaneArtifactDisplayName,
   latestControlPlaneArtifactReadySequence,

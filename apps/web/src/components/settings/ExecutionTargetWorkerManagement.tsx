@@ -1,5 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
+import { enterpriseTenantWorkersQueryKey } from "@synara/enterprise-ui";
 
 import {
   ControlPlaneInlineError,
@@ -15,7 +16,7 @@ import {
   type ControlPlaneExecutionTarget,
   type ControlPlaneWorker,
   type ControlPlaneWorkerRevocationResult,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 import { randomUUID } from "~/lib/utils";
 
 const EMPTY_WORKERS: ReadonlyArray<ControlPlaneWorker> = [];
@@ -25,8 +26,7 @@ const timestampFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 
-export const tenantWorkersQueryKey = (tenantId: string | null) =>
-  ["control-plane", "tenants", tenantId, "workers"] as const;
+export const tenantWorkersQueryKey = enterpriseTenantWorkersQueryKey;
 
 export function ExecutionTargetWorkerManagement(props: {
   tenantId: string;

@@ -34,6 +34,7 @@ import {
 import {
   AppSnapSettingsPanel,
   NotificationsSettingsPanel,
+  SaaSConnectionSettingsPanel,
 } from "~/components/settings/DesktopSettingsPanels";
 import { ModelsSettingsPanel } from "~/components/settings/ModelsSettingsPanel";
 import {
@@ -45,8 +46,9 @@ import ReleaseHistoryDialog from "../components/ReleaseHistoryDialog";
 import { KeyboardShortcutsSettingsPanel } from "../components/settings/KeyboardShortcutsSettingsPanel";
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
-import { TenantOrganizationSettingsPanel } from "../components/settings/TenantOrganizationSettingsPanel";
 import { ExternalMcpSettingsPanel } from "../components/settings/ExternalMcpSettingsPanel";
+import { EnterpriseSettingsFeature } from "~/features/enterprise/EnterpriseSettingsFeature";
+import { isEnterpriseSettingsSection } from "@synara/enterprise-ui";
 import {
   SettingResetButton,
   SettingsSegmentedControl,
@@ -186,6 +188,7 @@ function SettingsRouteView() {
   const activeSection = normalizeSettingsSection(routeSearch.section);
   const settingsTarget = typeof routeSearch.target === "string" ? routeSearch.target : null;
   const activeSectionItem = SETTINGS_NAV_ITEMS.find((item) => item.id === activeSection)!;
+  const activeSectionIsEnterprise = isEnterpriseSettingsSection(activeSection);
 
   const {
     isDefaultActiveTheme,
@@ -994,6 +997,9 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
+    if (activeSectionIsEnterprise) {
+      return <EnterpriseSettingsFeature destination={activeSection} />;
+    }
     switch (activeSection) {
       case "general":
         return renderGeneralPanel();
@@ -1009,8 +1015,6 @@ function SettingsRouteView() {
         return <SkillsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
-      case "tenancy":
-        return <TenantOrganizationSettingsPanel />;
       default:
         return null;
     }
@@ -1065,7 +1069,7 @@ function SettingsRouteView() {
                       {activeSectionItem.description}
                     </p>
                   </div>
-                  {activeSection !== "tenancy" ? (
+                  {!activeSectionIsEnterprise ? (
                     <Button
                       size="xs"
                       variant="outline"
@@ -1090,6 +1094,7 @@ function SettingsRouteView() {
                   defaults={defaults}
                   updateSettings={updateSettings}
                 />
+                <SaaSConnectionSettingsPanel active={activeSection === "saas"} />
                 <AppSnapSettingsPanel
                   active={activeSection === "appsnap"}
                   settings={settings}

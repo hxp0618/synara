@@ -7,7 +7,7 @@ import type {
   ControlPlaneExecutionTarget,
   ControlPlaneWorkerManifest,
   ControlPlaneWorkerReleaseOverview,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 const target: ControlPlaneExecutionTarget = {
   id: "target-1",

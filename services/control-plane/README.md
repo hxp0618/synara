@@ -1,6 +1,6 @@
-# Synara SaaS control plane
+# Synara self-hosted control plane
 
-The Go control plane owns SaaS identity, tenants, organizations, memberships, RBAC, audit, sessions,
+The Go control plane owns deployment identity, tenants, organizations, memberships, RBAC, audit, sessions,
 executions, leases, worker registration, and the revised Deployment Profile/Execution Target
 foundations. The existing TypeScript server remains the Provider Runtime during the gradual migration.
 
@@ -136,20 +136,20 @@ tariffs plus durable requested-resource facts, estimates, and reconciliation. Na
 AWS/GCP/Azure billing exports and cloud Workload Identity are deferred.
 
 - `billing_provider_tariffs` is a shared global provider catalog. Rows are append-only and immutable after insert.
-- `GET /v1/tenants/{tenantID}/billing/tariffs` requires the caller's active tenant plus `billing.manage`.
+- `GET /v1/tenants/{tenantID}/cost-accounting/tariffs` requires the caller's active tenant plus `cost.manage`.
   `POST` additionally requires that exact Tenant to match the platform-owned
-  `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`; the same configured Tenant owns shared-Target coverage sealing and
+  `SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID`; the same configured Tenant owns shared-Target coverage sealing and
   allocation sweeps. Non-Personal deployments fail closed when it is unset. Personal deployments bind these platform
   billing operations to their bootstrapped Tenant automatically.
 - Provider/region/currency mutations are serialized both by the service and by a PostgreSQL transaction advisory
   lock inside the overlap trigger. SQLite enforces the same insert-time non-overlap boundary.
 - Provider-shaped actual invoice imports and reconciliation remain implemented as an
   internal compatibility surface through
-  `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}` and
-  `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`; it is not an
+  `POST /v1/tenants/{tenantID}/cost-accounting/imports/{provider}/{externalImportID}` and
+  `POST /v1/tenants/{tenantID}/cost-accounting/imports/{importID}/reconcile`; it is not an
   advertised cloud connector in the current release.
 - Runtime import stays disabled in the supported profile with
-  `SYNARA_BILLING_BLOB_SOURCE=disabled`. The `s3`, `gcs`, and `azure` sources and
+  `SYNARA_COST_ACCOUNTING_BLOB_SOURCE=disabled`. The `s3`, `gcs`, and `azure` sources and
   provider-shaped mappings are retained for compatibility/testing only. Controlled
   self-hosted MinIO exercises may use the explicit custom-S3 endpoint opt-in, but
   production cost estimates do not depend on a native cloud export or cloud SDK
@@ -158,11 +158,11 @@ AWS/GCP/Azure billing exports and cloud Workload Identity are deferred.
   sweep. Exact sweep replay is idempotent, partial Worker failures return `retry-required`, and unavailable history
   remains fail-closed; the control plane does not invent cloud cost history that the Worker facts do not provide.
 - Account-level actual invoice lines can be connected to one shared Target through
-  `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`.
+  `POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`.
   This operator-only path requires a source-scope attestation digest, exact provider/currency/period/resource/kind
   matches, and an already sealed shared estimate graph. Migration `000082` atomically seals a signed-micros-conserving
   immutable Run/Line/Slice graph; unmatched account lines remain explicit rather than being assigned by guesswork.
-- `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON` enables leader-scoped unattended retries. A mapping is either one
+- `SYNARA_COST_ACCOUNTING_SHARED_ALLOCATION_MAPPINGS_JSON` enables leader-scoped unattended retries. A mapping is either one
   explicit static RFC3339 period or `calendar: "monthly-utc"` with an exact `firstPeriodStartAt` UTC month boundary and
   optional `lastPeriodEndAt`. No local time zone or provider calendar is inferred, and calendar/static mappings cannot
   be mixed for the same Target/provider/currency. Migration `000080` persists each generated period's due time, claim,

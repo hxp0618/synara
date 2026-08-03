@@ -71,6 +71,68 @@ spec:
                 configMapKeyRef:
                   name: synara-control-plane-config
                   key: public-control-plane-url
+            - name: SYNARA_PUBLIC_ADMIN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: public-admin-url
+            - name: SYNARA_INTERNAL_STATUS_BOARD_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: internal-status-board-url
+            - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: internal-incident-publisher-url
+            - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: synara-control-plane-secrets
+                  key: internal-incident-publisher-hmac-key
+                  optional: true
+            - name: SYNARA_INTERNAL_INCIDENT_PUBLISHER_TIMEOUT
+              value: 10s
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-exporter-otlp-endpoint
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-exporter-otlp-protocol
+            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-exporter-otlp-certificate
+            - name: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE
+              value: /var/run/secrets/synara/otel/client.crt
+            - name: OTEL_EXPORTER_OTLP_CLIENT_KEY
+              value: /var/run/secrets/synara/otel/client.key
+            - name: SYNARA_OTEL_TRACE_SAMPLE_RATIO
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-trace-sample-ratio
+            - name: SYNARA_OTEL_COLLECTOR_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-collector-region
+            - name: SYNARA_OTEL_TRACE_RETENTION_DAYS
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: otel-trace-retention-days
+            - name: SYNARA_COMMERCIALIZATION_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: commercialization-mode
             - name: SYNARA_LOGIN_COOKIE_SECURE
               value: "true"
             - name: SYNARA_LOGIN_COOKIE_PATH
@@ -115,8 +177,15 @@ spec:
               value: 720h
             - name: SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL
               value: 5m
+            - name: SYNARA_PLATFORM_OPERATOR_TENANT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: platform-operator-tenant-id
             - name: SYNARA_CREDENTIAL_KMS_PROVIDER
               value: local
+            - name: SYNARA_CREDENTIAL_KMS_KEY_ID
+              value: local-v1
             - name: SYNARA_CREDENTIAL_MASTER_KEY
               valueFrom:
                 secretKeyRef:
@@ -147,32 +216,32 @@ spec:
                 configMapKeyRef:
                   name: synara-control-plane-config
                   key: artifact-use-path-style
-            - name: SYNARA_ARTIFACT_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: synara-control-plane-secrets
-                  key: artifact-access-key-id
-            - name: SYNARA_ARTIFACT_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: synara-control-plane-secrets
-                  key: artifact-secret-access-key
             - name: AWS_EC2_METADATA_DISABLED
               value: "true"
-            - name: SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID
+            - name: SYNARA_COST_ACCOUNTING_OPERATOR_TENANT_ID
               valueFrom:
                 configMapKeyRef:
                   name: synara-control-plane-config
-                  key: billing-tariff-operator-tenant-id
+                  key: cost-accounting-operator-tenant-id
                   optional: true
-            - name: SYNARA_BILLING_BLOB_SOURCE
+            - name: SYNARA_COST_ACCOUNTING_BLOB_SOURCE
               valueFrom:
                 configMapKeyRef:
                   name: synara-control-plane-config
-                  key: billing-blob-source
+                  key: cost-accounting-blob-source
                   optional: true
             - name: SYNARA_KUBERNETES_RECONCILE_INTERVAL
               value: 5s
+            - name: SYNARA_DOCKER_WORKER_OBSERVABILITY_ROOT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: docker-worker-observability-root
+            - name: SYNARA_SSH_WORKER_OBSERVABILITY_ROOT
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: ssh-worker-observability-root
             - name: SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD
               value: 2m
             - name: SYNARA_WORKER_POOL_AUTOSCALING_INTERVAL
@@ -256,6 +325,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: otel-client-identity
+              mountPath: /var/run/secrets/synara/otel
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: otel-client-identity
+          secret:
+            secretName: synara-control-plane-secrets
+            defaultMode: 0440
+            items:
+              - key: otel-client-certificate
+                path: client.crt
+              - key: otel-client-key
+                path: client.key

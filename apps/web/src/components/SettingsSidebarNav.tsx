@@ -14,10 +14,12 @@ import { SidebarLeadingIcon } from "./SidebarLeadingIcon";
 import {
   SETTINGS_NAV_GROUPS,
   SETTINGS_NAV_ITEMS,
+  type SettingsNavItem,
   type SettingsSectionId,
 } from "../settingsNavigation";
 import {
   rankSettingsSearchEntries,
+  SETTINGS_SEARCH_ENTRIES,
   settingsSearchEntryTarget,
   settingsSectionLabel,
   type SettingsSearchEntry,
@@ -85,14 +87,19 @@ function SettingsSearchResultRow(props: {
 
 export function SettingsSidebarNav(props: {
   activeSection: SettingsSectionId;
+  items?: readonly SettingsNavItem[];
   onBack: () => void;
   onSelectSection: (section: SettingsSectionId, options?: { target?: string }) => void;
 }) {
   const { onSelectSection } = props;
+  const items = props.items ?? SETTINGS_NAV_ITEMS;
   const [query, setQuery] = useState("");
   const trimmedQuery = query.trim();
   const isSearching = trimmedQuery.length > 0;
-  const results = rankSettingsSearchEntries(trimmedQuery, SETTINGS_SEARCH_RESULTS_LIMIT);
+  const visibleSections = new Set(items.map((item) => item.id));
+  const results = rankSettingsSearchEntries(trimmedQuery, SETTINGS_SEARCH_ENTRIES.length)
+    .filter((entry) => visibleSections.has(entry.section))
+    .slice(0, SETTINGS_SEARCH_RESULTS_LIMIT);
 
   const handleSelectResult = (entry: SettingsSearchEntry) => {
     const target = settingsSearchEntryTarget(entry);
@@ -162,8 +169,8 @@ export function SettingsSidebarNav(props: {
       ) : (
         <nav aria-label="Settings sections" className="flex flex-col">
           {SETTINGS_NAV_GROUPS.map((group) => {
-            const items = SETTINGS_NAV_ITEMS.filter((item) => item.group === group.id);
-            if (items.length === 0) {
+            const groupItems = items.filter((item) => item.group === group.id);
+            if (groupItems.length === 0) {
               return null;
             }
 
@@ -180,7 +187,7 @@ export function SettingsSidebarNav(props: {
                   {group.label}
                 </h2>
                 <ul className={cn("flex flex-col", SETTINGS_SIDEBAR_LIST_GAP_CLASS_NAME)}>
-                  {items.map((item) => {
+                  {groupItems.map((item) => {
                     const isActive = item.id === props.activeSection;
                     return (
                       <li key={item.id}>

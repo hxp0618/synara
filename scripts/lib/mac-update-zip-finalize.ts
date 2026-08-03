@@ -26,10 +26,18 @@ import {
   resolveSingleTopLevelMacAppBundle,
   updateMacUpdateManifestZipEntry,
 } from "./mac-update-zip.ts";
+import {
+  collectMachOBinaries,
+  type MacArtifactArch,
+  verifyMacBundleArchitectures,
+  verifyMacBundleTeamIdentity,
+} from "./mac-bundle-validation.ts";
 
 export interface FinalizeMacUpdateZipOptions {
   readonly stageDistDir: string;
   readonly signed: boolean;
+  readonly requireManifest?: boolean;
+  readonly expectedArch?: MacArtifactArch;
   readonly verbose?: boolean;
 }
 
@@ -124,12 +132,22 @@ function assertMacZipFrameworkSymlinks(zipPath: string): string {
   return appBundleName;
 }
 
-function verifyMacAppSignature(appBundlePath: string, requireSignature: boolean): void {
+function verifyMacAppBundle(
+  appBundlePath: string,
+  requireSignature: boolean,
+  expectedArch: MacArtifactArch | undefined,
+): void {
+  const binaries = expectedArch
+    ? verifyMacBundleArchitectures(appBundlePath, expectedArch)
+    : undefined;
   const codeResourcesPath = join(appBundlePath, "Contents", "_CodeSignature", "CodeResources");
   if (!requireSignature && !existsSync(codeResourcesPath)) {
     return;
   }
   runTextCommand("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appBundlePath]);
+  if (requireSignature) {
+    verifyMacBundleTeamIdentity(appBundlePath, binaries ?? collectMachOBinaries(appBundlePath));
+  }
 }
 
 function computeSha512Base64(filePath: string): Promise<string> {
@@ -172,12 +190,16 @@ export async function finalizeMacUpdateZip(
   });
 
   const zippedAppBundleName = assertMacZipFrameworkSymlinks(zipPath);
-  verifyMacAppSignature(appBundlePath, options.signed);
+  verifyMacAppBundle(appBundlePath, options.signed, options.expectedArch);
 
   const extractedZipRoot = mkdtempSync(join(tmpdir(), "synara-mac-update-zip-"));
   try {
     runTextCommand("ditto", ["-x", "-k", zipPath, extractedZipRoot], { verbose });
-    verifyMacAppSignature(join(extractedZipRoot, zippedAppBundleName), options.signed);
+    verifyMacAppBundle(
+      join(extractedZipRoot, zippedAppBundleName),
+      options.signed,
+      options.expectedArch,
+    );
   } finally {
     rmSync(extractedZipRoot, { force: true, recursive: true });
   }
@@ -189,7 +211,10 @@ export async function finalizeMacUpdateZip(
   const sha512 = await computeSha512Base64(zipPath);
 
   const updatedManifestPaths: string[] = [];
-  for (const manifestName of resolveMacUpdateManifestFileNames(distEntries)) {
+  for (const manifestName of resolveMacUpdateManifestFileNames(
+    distEntries,
+    options.requireManifest !== false,
+  )) {
     const manifestPath = join(options.stageDistDir, manifestName);
     const manifest = readFileSync(manifestPath, "utf8");
     const nextManifest = updateMacUpdateManifestZipEntry(manifest, zipFileName, {

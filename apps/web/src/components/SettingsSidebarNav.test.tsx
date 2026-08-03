@@ -7,7 +7,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { SettingsSidebarNav } from "./SettingsSidebarNav";
-import { settingRowAnchorId } from "../settingsNavigation";
+import {
+  CORE_SETTINGS_NAV_ITEMS,
+  normalizeSettingsSection,
+  settingRowAnchorId,
+} from "../settingsNavigation";
 import {
   SETTINGS_SEARCH_ENTRIES,
   rankSettingsSearchEntries,
@@ -38,6 +42,12 @@ describe("rankSettingsSearchEntries", () => {
   it("includes the activity toasts notification row", () => {
     const results = rankSettingsSearchEntries("toasts", 12);
     expect(results.some((entry) => entry.id === "notifications:activity-toasts")).toBe(true);
+  });
+
+  it("indexes the registered enterprise destinations", () => {
+    const results = rankSettingsSearchEntries("SCIM", 12);
+    expect(results[0]?.section).toBe("organization-identity");
+    expect(results[0]?.id).toBe("organization-identity:governance");
   });
 
   it("indexes environment instructions and the system UI font row", () => {
@@ -98,5 +108,23 @@ describe("SettingsSidebarNav", () => {
     expect(markup).toContain("Archived threads");
     expect(markup).not.toContain(">App<");
     expect(markup).not.toContain(">Synara<");
+  });
+
+  it("renders only host-resolved destinations", () => {
+    const markup = renderToStaticMarkup(
+      <SettingsSidebarNav
+        activeSection="general"
+        items={CORE_SETTINGS_NAV_ITEMS}
+        onBack={vi.fn()}
+        onSelectSection={vi.fn()}
+      />,
+    );
+
+    expect(markup).not.toContain("Organization overview");
+    expect(markup).not.toContain(">Organization<");
+  });
+
+  it("preserves the original Organization deep link as an overview alias", () => {
+    expect(normalizeSettingsSection("tenancy")).toBe("organization-overview");
   });
 });

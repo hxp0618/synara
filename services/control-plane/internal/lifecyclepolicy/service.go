@@ -171,7 +171,7 @@ func (s *Service) GetTenant(
 	principal identity.Principal,
 	tenantID uuid.UUID,
 ) (Policy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Policy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.LifecycleRead); err != nil {
@@ -187,7 +187,7 @@ func (s *Service) UpdateTenant(
 	input UpdateInput,
 	requestID, ipAddress string,
 ) (Policy, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return Policy{}, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.LifecycleManage); err != nil {
@@ -364,7 +364,7 @@ func (s *Service) authorizeProject(
 	tenantID, projectID uuid.UUID,
 	permission authorization.Permission,
 ) (persistence.Project, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return persistence.Project{}, err
 	}
 	var project persistence.Project
@@ -525,13 +525,6 @@ func recordPolicyAudit(
 			"projectId": projectID, "overrides": overrides,
 		},
 	})
-}
-
-func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
-	}
-	return nil
 }
 
 func cloneOverrides(value Overrides) Overrides {

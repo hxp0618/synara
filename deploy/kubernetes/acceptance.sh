@@ -412,14 +412,26 @@ apply_bucket_job
 database_url="postgres://synara:$postgres_password@synara-stage2-postgres.$namespace.svc.cluster.local:5432/synara?sslmode=disable"
 "${kube[@]}" -n "$namespace" create configmap synara-control-plane-config \
   --from-literal=public-control-plane-url=https://synara-control-plane.test \
+  --from-literal=public-admin-url=https://admin.synara-control-plane.test \
+  --from-literal=internal-status-board-url= \
+  --from-literal=internal-incident-publisher-url= \
+  --from-literal=otel-exporter-otlp-endpoint= \
+  --from-literal=otel-exporter-otlp-protocol=http/protobuf \
+  --from-literal=otel-exporter-otlp-certificate= \
+  --from-literal=otel-trace-sample-ratio=0.1 \
+  --from-literal=otel-collector-region= \
+  --from-literal=otel-trace-retention-days=30 \
   --from-literal=trusted-proxy-cidrs= \
+  --from-literal=platform-operator-tenant-id=00000000-0000-0000-0000-000000000000 \
   --from-literal=artifact-bucket=synara-artifacts \
   --from-literal=artifact-region=us-east-1 \
   --from-literal=artifact-endpoint="http://synara-stage2-minio.$namespace.svc.cluster.local:9000" \
   --from-literal=artifact-public-endpoint="http://synara-stage2-minio.$namespace.svc.cluster.local:9000" \
   --from-literal=artifact-use-path-style=true \
-  --from-literal=billing-tariff-operator-tenant-id= \
-  --from-literal=billing-blob-source=disabled \
+  --from-literal=cost-accounting-operator-tenant-id= \
+  --from-literal=cost-accounting-blob-source=disabled \
+  --from-literal=docker-worker-observability-root= \
+  --from-literal=ssh-worker-observability-root= \
   --from-literal=platform-routing-publishers-json='[]' \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 "${kube[@]}" -n "$namespace" create secret generic synara-control-plane-secrets \
@@ -429,6 +441,8 @@ database_url="postgres://synara:$postgres_password@synara-stage2-postgres.$names
   --from-literal=credential-master-key="$credential_master_key" \
   --from-literal=artifact-access-key-id="$minio_user" \
   --from-literal=artifact-secret-access-key="$minio_password" \
+  --from-literal=otel-client-certificate= \
+  --from-literal=otel-client-key= \
   --dry-run=client -o yaml | "${kube[@]}" apply -f - >/dev/null
 
 overlay_dir="$work_dir/kustomize"

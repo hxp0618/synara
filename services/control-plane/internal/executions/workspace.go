@@ -27,7 +27,7 @@ func (s *Service) MarkWorkspaceReady(
 		return OperationResult[WorkspaceState]{}, err
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.ready", map[string]any{
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "workspace.ready", executionID, input.LeaseInput, map[string]any{
 		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
 		"repositoryFingerprint": input.RepositoryFingerprint, "currentBranch": input.CurrentBranch,
 		"baseCommit": input.BaseCommit, "headCommit": input.HeadCommit,
@@ -110,7 +110,7 @@ func (s *Service) MarkWorkspaceFailed(
 		return OperationResult[WorkspaceState]{}, problem.New(400, "invalid_workspace_failure", "failureMessage must not exceed 10000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.failed", map[string]any{
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "workspace.failed", executionID, input.LeaseInput, map[string]any{
 		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
 		"failureCode": input.FailureCode, "failureMessage": input.FailureMessage,
 	}, 200, func(tx *gorm.DB) (WorkspaceState, error) {
@@ -164,7 +164,7 @@ func (s *Service) MarkWorkspaceDirty(
 		return OperationResult[WorkspaceState]{}, err
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.dirty", map[string]any{
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "workspace.dirty", executionID, input.LeaseInput, map[string]any{
 		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
 		"currentBranch": input.CurrentBranch, "headCommit": input.HeadCommit,
 	}, 200, func(tx *gorm.DB) (WorkspaceState, error) {

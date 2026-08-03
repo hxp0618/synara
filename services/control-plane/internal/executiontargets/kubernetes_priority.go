@@ -12,7 +12,7 @@ import (
 
 const (
 	kubernetesWorkerDefaultPriorityClassName = "synara-worker-nonpreempting-v1"
-	kubernetesWorkerPodSpecRevision          = "v2-nonpreempting-priority"
+	kubernetesWorkerPodSpecRevision          = "v3-operator-observability"
 )
 
 type kubernetesPriorityClass struct {

@@ -331,7 +331,7 @@ import {
   reserveSharedControlPlaneModelSwitchIdempotencyKey,
   type ControlPlaneSourceProposedPlan,
 } from "~/lib/controlPlaneTurnDispatch";
-import { ControlPlaneError } from "~/lib/controlPlaneClient";
+import { ControlPlaneError } from "@synara/control-plane-client";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import { readFavoriteModelSlugs } from "~/lib/modelFavorites";
 import {
@@ -4994,12 +4994,12 @@ export default function ChatView({
       });
       if (dispatchKind === "queue-unsupported") {
         throw new Error(
-          "Wait for the active SaaS Turn to finish before sending another queued message.",
+          "Wait for the active Control Plane Turn to finish before sending another queued message.",
         );
       }
       if (dispatchKind === "steer") {
         if (!input.persistedSessionId) {
-          throw new Error("The SaaS Session is not ready to steer yet.");
+          throw new Error("The Control Plane Session is not ready to steer yet.");
         }
         await controlPlane.steerActiveTurn(
           input.persistedSessionId,
@@ -7412,7 +7412,7 @@ export default function ChatView({
       if (composerImagesForSend.length > 0 || composerFilesForSend.length > 0) {
         setThreadError(
           threadIdForSend,
-          "File and image attachments are not supported for SaaS chat turns yet.",
+          "File and image attachments are not supported for Control Plane chat turns yet.",
         );
         return false;
       }

@@ -44,9 +44,11 @@ Web/Proxy：
 cd apps/server
 bun run test src/controlPlaneProxy.test.ts
 
-cd ../web
-bun run test src/lib/controlPlaneClient.test.ts \
-  src/controlPlaneStoreProjection.test.ts \
+cd ../../packages/control-plane-client
+bun run test
+
+cd ../../apps/web
+bun run test src/controlPlaneStoreProjection.test.ts \
   src/lib/controlPlaneProjection.test.ts \
   src/lib/controlPlaneTenantScope.test.ts \
   src/lib/controlPlaneTurnDispatch.test.ts \

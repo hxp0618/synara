@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
@@ -104,6 +105,26 @@ func TestSecurityHeadersDisableCaching(t *testing.T) {
 	})).ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/auth/session", nil))
 	if recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestRequestContextPropagatesW3CTraceAndPreservesXTraceCompatibility(t *testing.T) {
+	server := &Server{}
+	wantTraceID := "11111111111111111111111111111111"
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	request.Header.Set("Traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+	request.Header.Set("X-Trace-ID", wantTraceID)
+	recorder := httptest.NewRecorder()
+	server.withRequestContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		spanContext := trace.SpanContextFromContext(r.Context())
+		if !spanContext.IsValid() || spanContext.TraceID().String() != wantTraceID {
+			t.Fatalf("request SpanContext = %#v", spanContext)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(recorder, request)
+	if recorder.Header().Get("X-Trace-ID") != wantTraceID ||
+		!strings.HasPrefix(recorder.Header().Get("Traceparent"), "00-"+wantTraceID+"-") {
+		t.Fatalf("trace response headers = %#v", recorder.Header())
 	}
 }
 

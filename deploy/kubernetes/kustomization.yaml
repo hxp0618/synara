@@ -9,3 +9,5 @@ resources:
   - pod-disruption-budget.yaml
   - deployment.yaml
   - service.yaml
+  - admin-deployment.yaml
+  - admin-service.yaml

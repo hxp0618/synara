@@ -3,12 +3,26 @@ package httpapi
 import (
 	"net/http"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 )
 
+type internalStatusBoardProfile struct {
+	Configured bool   `json:"configured"`
+	URL        string `json:"url,omitempty"`
+}
+
 func (s *Server) getPlatformProfile(w http.ResponseWriter, _ *http.Request) {
 	profile := s.config.Platform.Public()
+	commercializationMode := s.config.CommercializationMode
+	if commercializationMode == "" {
+		commercializationMode = config.CommercializationModeInternalSelfHosted
+	}
+	statusBoard := internalStatusBoardProfile{
+		Configured: s.config.InternalStatusBoardURL != "",
+		URL:        s.config.InternalStatusBoardURL,
+	}
 	resourceLifecyclePolicy := s.config.ResourceLifecycle
 	if s.lifecyclePolicies != nil {
 		resourceLifecyclePolicy = s.lifecyclePolicies.PublicConfig()
@@ -24,6 +38,8 @@ func (s *Server) getPlatformProfile(w http.ResponseWriter, _ *http.Request) {
 		"artifactPayloadMigration": profile.ArtifactPayloadMigration,
 		"metadataExportImport":     profile.MetadataExportImport,
 		"resourceLifecyclePolicy":  resourceLifecyclePolicy,
+		"internalStatusBoard":      statusBoard,
+		"commercializationMode":    commercializationMode,
 	})
 }
 

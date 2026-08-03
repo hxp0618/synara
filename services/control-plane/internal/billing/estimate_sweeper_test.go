@@ -91,7 +91,7 @@ func TestBuiltInEstimateSweeperRejectsSharedOrForeignTargets(t *testing.T) {
 		},
 		TenantID: fixture.tenantID, Provider: "aws", ExecutionTargetIDs: []uuid.UUID{sharedTargetID},
 	})
-	assertProblemCode(t, err, "billing_estimate_sweep_target_scope_mismatch")
+	assertProblemCode(t, err, "cost_accounting_estimate_sweep_target_scope_mismatch")
 }
 
 func TestBuiltInEstimateSweeperContinuesAfterRequestDeltaFailure(t *testing.T) {
@@ -111,7 +111,7 @@ func TestBuiltInEstimateSweeperContinuesAfterRequestDeltaFailure(t *testing.T) {
 		TenantID: fixture.tenantID, Provider: "aws",
 		ExecutionTargetIDs: []uuid.UUID{fixture.worker.ExecutionTargetID},
 	})
-	assertProblemCode(t, err, "billing_estimate_sweep_partial_failure")
+	assertProblemCode(t, err, "cost_accounting_estimate_sweep_partial_failure")
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Status != 409 ||
 		apiError.Details["failedWorkerCount"] != 1 {

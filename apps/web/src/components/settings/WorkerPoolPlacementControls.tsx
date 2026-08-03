@@ -16,7 +16,7 @@ import {
   type ControlPlaneWorkerPoolStatus,
   type ControlPlaneExecutionPlacementState,
   type ControlPlaneExecutionTarget,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 export function workerPoolPlacementQueryKey(tenantId: string, targetId: string) {
   return ["control-plane", "execution-placement", tenantId, targetId] as const;

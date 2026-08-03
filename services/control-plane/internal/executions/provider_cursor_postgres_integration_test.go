@@ -636,7 +636,7 @@ func TestProviderCursorCASDoesNotOverwriteNewerCiphertext(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		replaced, err := replaceProviderCursorCAS(ctx, tx, execution, stale, newer, payload)
+		replaced, err := replaceProviderCursorCAS(ctx, tx, execution, stale, newer, "", payload)
 		if err != nil || !replaced {
 			t.Fatalf("first Cursor CAS failed: replaced=%t err=%v", replaced, err)
 		}
@@ -649,7 +649,7 @@ func TestProviderCursorCASDoesNotOverwriteNewerCiphertext(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		replaced, err = replaceProviderCursorCAS(ctx, tx, execution, stale, staleReplacement, payload)
+		replaced, err = replaceProviderCursorCAS(ctx, tx, execution, stale, staleReplacement, "", payload)
 		if err != nil {
 			return err
 		}

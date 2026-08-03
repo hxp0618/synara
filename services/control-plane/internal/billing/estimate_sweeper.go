@@ -26,8 +26,8 @@ func (s *Service) SweepImportedInvoice(
 	if s == nil || s.db == nil {
 		return ScheduledEstimateSweepResult{}, problem.New(
 			500,
-			"billing_estimate_sweeper_unavailable",
-			"The billing estimate sweeper is not initialized.",
+			"cost_accounting_estimate_sweeper_unavailable",
+			"The cost estimate sweeper is not initialized.",
 		)
 	}
 	provider, currency, periodStart, periodEnd, targetIDs, err := normalizeEstimateSweepRequest(request)
@@ -58,8 +58,8 @@ func (s *Service) SweepImportedInvoice(
 		if err := query.Order("worker_id, worker_incarnation").Limit(estimateSweepPageSize).Find(&facts).Error; err != nil {
 			return result, problem.Wrap(
 				500,
-				"billing_estimate_sweep_facts_load_failed",
-				"The billing estimate sweep could not load Worker incarnation facts.",
+				"cost_accounting_estimate_sweep_facts_load_failed",
+				"The cost estimate sweep could not load Worker incarnation facts.",
 				err,
 			)
 		}
@@ -98,7 +98,7 @@ func (s *Service) SweepImportedInvoice(
 	}
 	err = problem.Wrap(
 		status,
-		"billing_estimate_sweep_partial_failure",
+		"cost_accounting_estimate_sweep_partial_failure",
 		"One or more Worker usage estimates could not be derived; reconciliation must wait for a successful retry.",
 		errors.Join(failures...),
 	)
@@ -118,8 +118,8 @@ func normalizeEstimateSweepRequest(
 	if request.TenantID == uuid.Nil || request.Import.TenantID == uuid.Nil || request.Import.TenantID != request.TenantID {
 		return "", "", time.Time{}, time.Time{}, nil, problem.New(
 			409,
-			"billing_estimate_sweep_import_scope_mismatch",
-			"The billing estimate sweep import does not belong to the configured tenant.",
+			"cost_accounting_estimate_sweep_import_scope_mismatch",
+			"The cost estimate sweep import does not belong to the configured Tenant.",
 		)
 	}
 	provider, err := normalizeProvider(request.Provider)
@@ -130,8 +130,8 @@ func normalizeEstimateSweepRequest(
 	if err != nil || importProvider != provider {
 		return "", "", time.Time{}, time.Time{}, nil, problem.New(
 			409,
-			"billing_estimate_sweep_import_provider_mismatch",
-			"The billing estimate sweep import does not match the configured provider.",
+			"cost_accounting_estimate_sweep_import_provider_mismatch",
+			"The cost estimate sweep import does not match the configured provider.",
 		)
 	}
 	currency, err := normalizeCurrency(request.Import.CurrencyCode)
@@ -151,15 +151,15 @@ func normalizeEstimateSweepRequest(
 		if targetID == uuid.Nil {
 			return "", "", time.Time{}, time.Time{}, nil, problem.New(
 				400,
-				"billing_estimate_sweep_target_required",
-				"Every billing estimate sweep executionTargetId must be a UUID.",
+				"cost_accounting_estimate_sweep_target_required",
+				"Every cost estimate sweep executionTargetId must be a UUID.",
 			)
 		}
 		if _, duplicate := seen[targetID]; duplicate {
 			return "", "", time.Time{}, time.Time{}, nil, problem.New(
 				400,
-				"billing_estimate_sweep_target_duplicated",
-				"The billing estimate sweep repeats an executionTargetId.",
+				"cost_accounting_estimate_sweep_target_duplicated",
+				"The cost estimate sweep repeats an executionTargetId.",
 			)
 		}
 		seen[targetID] = struct{}{}
@@ -168,8 +168,8 @@ func normalizeEstimateSweepRequest(
 	if len(targetIDs) == 0 {
 		return "", "", time.Time{}, time.Time{}, nil, problem.New(
 			400,
-			"billing_estimate_sweep_targets_required",
-			"The billing estimate sweep requires explicit tenant-owned executionTargetIds.",
+			"cost_accounting_estimate_sweep_targets_required",
+			"The cost estimate sweep requires explicit Tenant-owned executionTargetIds.",
 		)
 	}
 	return provider, currency, periodStart, periodEnd, targetIDs, nil
@@ -188,24 +188,24 @@ func validateEstimateSweepTargetScope(
 		Find(&targets).Error; err != nil {
 		return problem.Wrap(
 			500,
-			"billing_estimate_sweep_targets_load_failed",
-			"The billing estimate sweep could not load its configured Execution Targets.",
+			"cost_accounting_estimate_sweep_targets_load_failed",
+			"The cost estimate sweep could not load its configured Execution Targets.",
 			err,
 		)
 	}
 	if len(targets) != len(targetIDs) {
 		return problem.New(
 			409,
-			"billing_estimate_sweep_target_scope_mismatch",
-			"A configured billing estimate Execution Target is missing or outside the tenant boundary.",
+			"cost_accounting_estimate_sweep_target_scope_mismatch",
+			"A configured cost estimate Execution Target is missing or outside the Tenant boundary.",
 		)
 	}
 	for _, target := range targets {
 		if target.TenantID == nil || *target.TenantID != tenantID {
 			return problem.New(
 				409,
-				"billing_estimate_sweep_target_scope_mismatch",
-				"A configured billing estimate Execution Target is shared or belongs to another tenant.",
+				"cost_accounting_estimate_sweep_target_scope_mismatch",
+				"A configured cost estimate Execution Target is shared or belongs to another Tenant.",
 			)
 		}
 	}

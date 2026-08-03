@@ -183,6 +183,28 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     readSnapshot: () => ipcRenderer.sendSync(IPC.storageMigration.read),
     acknowledgeSnapshot: () => ipcRenderer.invoke(IPC.storageMigration.acknowledge),
   },
+  saas: {
+    getMode: () => ipcRenderer.invoke(IPC.saas.getMode),
+    setMode: (mode) => ipcRenderer.invoke(IPC.saas.setMode, mode),
+    onMode: (listener) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+        if (typeof state !== "object" || state === null) return;
+        listener(state as Parameters<typeof listener>[0]);
+      };
+      ipcRenderer.on(IPC.saas.mode, wrappedListener);
+      return () => ipcRenderer.removeListener(IPC.saas.mode, wrappedListener);
+    },
+    getState: () => ipcRenderer.invoke(IPC.saas.getState),
+    disconnect: () => ipcRenderer.invoke(IPC.saas.disconnect),
+    onState: (listener) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+        if (typeof state !== "object" || state === null) return;
+        listener(state as Parameters<typeof listener>[0]);
+      };
+      ipcRenderer.on(IPC.saas.state, wrappedListener);
+      return () => ipcRenderer.removeListener(IPC.saas.state, wrappedListener);
+    },
+  },
   server: {
     transcribeVoice: (input) => ipcRenderer.invoke(IPC.transcribeVoice, input),
   },

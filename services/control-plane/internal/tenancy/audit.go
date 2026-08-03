@@ -35,7 +35,7 @@ func (s *Service) ListAuditLogs(
 	tenantID uuid.UUID,
 	query AuditLogQuery,
 ) (AuditLogPage, error) {
-	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.AuditRead); err != nil {
+	if _, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.AuditRead); err != nil {
 		return AuditLogPage{}, err
 	}
 	normalized, cursor, err := normalizeAuditQuery(query, true)
@@ -74,7 +74,7 @@ func (s *Service) ExportAuditLogs(
 	format, requestID, ipAddress string,
 	yield func(AuditLogEntry) error,
 ) error {
-	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.AuditRead); err != nil {
+	if _, err := s.requireTenantPermission(ctx, principal, tenantID, authorization.AuditRead); err != nil {
 		return err
 	}
 	normalized, _, err := normalizeAuditQuery(query, false)

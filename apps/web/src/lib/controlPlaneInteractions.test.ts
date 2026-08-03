@@ -1,7 +1,7 @@
 import { EventId, type OrchestrationThreadActivity } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
-import type { ControlPlanePendingInteraction } from "./controlPlaneClient";
+import type { ControlPlanePendingInteraction } from "@synara/control-plane-client";
 import {
   latestControlPlaneInteractionSequence,
   projectPendingControlPlaneInteractions,

@@ -13,6 +13,7 @@ import { SynaraLogo } from "~/components/SynaraLogo";
 
 import { ChangelogAccordion } from "../whatsNew/ChangelogAccordion";
 import { FeatureSection } from "../whatsNew/FeatureSection";
+import { ReleaseNoticeSection } from "../whatsNew/ReleaseNoticeSection";
 import type { WhatsNewEntry } from "../whatsNew/logic";
 import { Button } from "./ui/button";
 import {
@@ -103,6 +104,9 @@ function WhatsNewDialogContent({
       <DialogPanel className="max-h-[min(62vh,520px)] px-4 py-3">
         {view === "current" ? (
           <div className="flex flex-col gap-8 py-1">
+            {currentEntry.notices?.map((notice) => (
+              <ReleaseNoticeSection key={notice.id} notice={notice} />
+            ))}
             {currentEntry.features.map((feature) => (
               <FeatureSection key={feature.id} feature={feature} />
             ))}

@@ -220,6 +220,409 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Worker Release revisions are append-only');
 		 END`,
+		`INSERT OR IGNORE INTO saas_plans
+		 (code, display_name, status, version, trial_days, created_at, updated_at)
+		 SELECT DISTINCT plan_code, plan_code, 'active', 1,
+		   CASE WHEN plan_code = 'free' THEN 14 ELSE 0 END,
+		   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		 FROM tenants`,
+		`INSERT OR IGNORE INTO saas_plans
+		 (code, display_name, status, version, trial_days, created_at, updated_at)
+		 VALUES
+		 ('free', 'Free', 'active', 1, 14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+		 ('enterprise', 'Enterprise', 'active', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+		 ('personal', 'Personal', 'active', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO tenant_subscriptions
+		 (tenant_id, plan_code, status, version, trial_ends_at, current_period_start,
+		  current_period_end, assignment_source, created_at, updated_at)
+		 SELECT id, plan_code,
+		   CASE
+		     WHEN status = 'trialing' THEN 'trialing'
+		     WHEN status = 'active' THEN 'active'
+		     WHEN status = 'suspended' THEN 'suspended'
+		     ELSE 'cancelled'
+		   END,
+		   1,
+		   CASE WHEN status = 'trialing' THEN trial_expires_at ELSE NULL END,
+		   CURRENT_TIMESTAMP, datetime(CURRENT_TIMESTAMP, '+1 month'), 'migration',
+		   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		 FROM tenants`,
+		`INSERT OR IGNORE INTO plan_entitlements
+		 (plan_code, entitlement_key, value_kind, integer_value, created_at, updated_at)
+		 VALUES
+		 ('free', 'usage.execution_seconds_per_period', 'integer', 72000, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+		 ('free', 'usage.soft_warning_percent', 'integer', 80, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`INSERT OR IGNORE INTO feature_flags
+		 (key, description, status, default_enabled, version, created_at, updated_at)
+		 VALUES
+		 ('identity.sso', 'Enterprise OIDC and SAML identity connections.', 'active', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+		 ('provider.byok', 'Tenant or user supplied Provider credentials.', 'active', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+		 ('audit.export', 'Tenant audit log export.', 'active', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_usage_quota_alerts_threshold
+		 ON tenant_usage_quota_alerts (
+		   tenant_id, subscription_version, metric_key, period_start, threshold_percent
+		 )`,
+		`DROP TRIGGER IF EXISTS trg_tenant_usage_quota_alerts_insert`,
+		`CREATE TRIGGER trg_tenant_usage_quota_alerts_insert
+		 BEFORE INSERT ON tenant_usage_quota_alerts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Tenant Usage quota alert')
+		   WHERE NEW.subscription_version <= 0
+		      OR NEW.metric_key <> 'execution_seconds'
+		      OR NEW.threshold_percent NOT BETWEEN 1 AND 100
+		      OR NEW.limit_units <= 0 OR NEW.observed_units < 0
+		      OR NEW.observed_units * 100 < NEW.limit_units * NEW.threshold_percent
+		      OR julianday(NEW.period_end) <= julianday(NEW.period_start)
+		      OR julianday(NEW.last_observed_at) < julianday(NEW.first_observed_at)
+		      OR NOT (
+		        (NEW.threshold_percent = 100 AND NEW.severity = 'limit_reached')
+		        OR (NEW.threshold_percent < 100 AND NEW.severity = 'warning')
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM tenant_subscriptions AS subscription
+		        WHERE subscription.tenant_id = NEW.tenant_id
+		          AND subscription.version = NEW.subscription_version
+		          AND julianday(subscription.current_period_start) = julianday(NEW.period_start)
+		          AND julianday(subscription.current_period_end) = julianday(NEW.period_end)
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_tenant_usage_quota_alerts_update`,
+		`CREATE TRIGGER trg_tenant_usage_quota_alerts_update
+		 BEFORE UPDATE ON tenant_usage_quota_alerts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Tenant Usage quota alert update')
+		   WHERE NEW.id IS NOT OLD.id
+		      OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.subscription_version <> OLD.subscription_version
+		      OR NEW.metric_key <> OLD.metric_key
+		      OR NEW.period_start <> OLD.period_start
+		      OR NEW.threshold_percent <> OLD.threshold_percent
+		      OR NEW.observed_units < OLD.observed_units
+		      OR julianday(NEW.last_observed_at) < julianday(OLD.last_observed_at)
+		      OR NEW.limit_units <= 0
+		      OR NEW.observed_units * 100 < NEW.limit_units * NEW.threshold_percent;
+		 END`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_support_access_grants_pending
+		 ON support_access_grants (tenant_id, requester_user_id) WHERE status = 'pending'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_support_access_grants_active
+		 ON support_access_grants (tenant_id, requester_user_id) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS idx_support_access_grants_authorization
+		 ON support_access_grants (requester_user_id, tenant_id, status, expires_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_support_access_grants_operator_authorization
+		 ON support_access_grants (operator_tenant_id, requester_user_id, tenant_id, status, expires_at, id)`,
+		`DROP TRIGGER IF EXISTS trg_tenant_support_policies_insert`,
+		`CREATE TRIGGER trg_tenant_support_policies_insert
+		 BEFORE INSERT ON tenant_support_policies
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Tenant Support policy')
+		   WHERE NEW.version <= 0
+		      OR length(trim(NEW.reason)) NOT BETWEEN 10 AND 1000
+		      OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id AND deleted_at IS NULL)
+		      OR NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.updated_by AND status = 'active' AND deleted_at IS NULL);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_tenant_support_policies_update`,
+		`CREATE TRIGGER trg_tenant_support_policies_update
+		 BEFORE UPDATE ON tenant_support_policies
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Tenant Support policy update')
+		   WHERE NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.version <> OLD.version + 1
+		      OR length(trim(NEW.reason)) NOT BETWEEN 10 AND 1000
+		      OR NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.updated_by AND status = 'active' AND deleted_at IS NULL);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_support_access_grants_insert`,
+		`CREATE TRIGGER trg_support_access_grants_insert
+		 BEFORE INSERT ON support_access_grants
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Support Access grant')
+		   WHERE NEW.version <= 0
+		      OR NEW.operator_tenant_id IS NULL
+		      OR NEW.operator_tenant_id IS NEW.tenant_id
+		      OR NEW.requested_duration_seconds NOT BETWEEN 300 AND 14400
+		      OR length(trim(NEW.reason)) NOT BETWEEN 10 AND 1000
+		      OR NEW.status <> 'pending'
+		      OR NEW.decided_by IS NOT NULL OR NEW.decision_reason IS NOT NULL OR NEW.decided_at IS NOT NULL
+		      OR NEW.expires_at IS NOT NULL OR NEW.revoked_by IS NOT NULL
+		      OR NEW.revocation_reason IS NOT NULL OR NEW.revoked_at IS NOT NULL
+		      OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id AND deleted_at IS NULL)
+		      OR NOT EXISTS (
+		        SELECT 1
+		        FROM tenant_memberships AS operator_membership
+		        JOIN tenants AS operator_tenant ON operator_tenant.id = operator_membership.tenant_id
+		        WHERE operator_membership.tenant_id = NEW.operator_tenant_id
+		          AND operator_membership.user_id = NEW.requester_user_id
+		          AND operator_membership.status = 'active'
+		          AND operator_membership.role IN ('owner', 'admin', 'security_admin')
+		          AND operator_tenant.status = 'active'
+		          AND operator_tenant.deleted_at IS NULL
+		      )
+		      OR NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.requester_user_id AND status = 'active' AND deleted_at IS NULL);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_support_access_grants_update`,
+		`CREATE TRIGGER trg_support_access_grants_update
+		 BEFORE UPDATE ON support_access_grants
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Support Access grant update')
+		   WHERE NEW.id IS NOT OLD.id
+		      OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.operator_tenant_id IS NOT OLD.operator_tenant_id
+		      OR NEW.requester_user_id IS NOT OLD.requester_user_id
+		      OR NEW.reason <> OLD.reason
+		      OR NEW.requested_duration_seconds <> OLD.requested_duration_seconds
+		      OR NEW.requested_at <> OLD.requested_at
+		      OR NEW.version <> OLD.version + 1
+		      OR NEW.status NOT IN ('active', 'denied', 'revoked', 'expired')
+		      OR NEW.decided_by IS NULL OR NEW.decided_by = NEW.requester_user_id
+		      OR length(trim(ifnull(NEW.decision_reason, ''))) NOT BETWEEN 10 AND 1000
+		      OR NEW.decided_at IS NULL
+		      OR (
+		        NEW.status = 'denied' AND (
+		          OLD.status <> 'pending' OR NEW.expires_at IS NOT NULL OR NEW.revoked_by IS NOT NULL
+		          OR NEW.revocation_reason IS NOT NULL OR NEW.revoked_at IS NOT NULL
+		        )
+		      )
+		      OR (
+		        NEW.status = 'active' AND (
+		          OLD.status <> 'pending' OR NEW.expires_at IS NULL
+		          OR julianday(NEW.expires_at) <= julianday(NEW.decided_at)
+		          OR NEW.revoked_by IS NOT NULL OR NEW.revocation_reason IS NOT NULL OR NEW.revoked_at IS NOT NULL
+		        )
+		      )
+		      OR (
+		        NEW.status = 'revoked' AND (
+		          OLD.status <> 'active' OR NEW.expires_at IS NULL OR NEW.revoked_by IS NULL
+		          OR length(trim(ifnull(NEW.revocation_reason, ''))) NOT BETWEEN 10 AND 1000
+		          OR NEW.revoked_at IS NULL OR julianday(NEW.revoked_at) < julianday(NEW.decided_at)
+		        )
+		      )
+		      OR (
+		        NEW.status = 'expired' AND (
+		          OLD.status <> 'active' OR NEW.expires_at IS NULL
+		          OR julianday(NEW.expires_at) > julianday(CURRENT_TIMESTAMP)
+		          OR NEW.revoked_by IS NOT NULL OR NEW.revocation_reason IS NOT NULL OR NEW.revoked_at IS NOT NULL
+		        )
+		      );
+			 END`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_legal_holds_active_scope_matter
+		 ON legal_holds (tenant_id, scope_type, scope_id, lower(matter_reference))
+		 WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS idx_legal_holds_retention_gate
+		 ON legal_holds (tenant_id, status, scope_type, scope_id, id)`,
+		`DROP TRIGGER IF EXISTS trg_legal_holds_insert`,
+		`CREATE TRIGGER trg_legal_holds_insert
+		 BEFORE INSERT ON legal_holds
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Legal Hold')
+		   WHERE NEW.status <> 'active'
+		      OR NEW.version <> 1
+		      OR NEW.scope_type NOT IN ('tenant', 'user', 'organization', 'project', 'session')
+		      OR length(trim(NEW.name)) NOT BETWEEN 1 AND 160
+		      OR length(trim(NEW.matter_reference)) NOT BETWEEN 1 AND 160
+		      OR length(trim(NEW.reason)) NOT BETWEEN 10 AND 2000
+		      OR NEW.released_by IS NOT NULL OR NEW.release_reason IS NOT NULL OR NEW.released_at IS NOT NULL
+		      OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id AND deleted_at IS NULL)
+		      OR NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.created_by AND status = 'active' AND deleted_at IS NULL)
+		      OR (NEW.scope_type = 'tenant' AND NEW.scope_id IS NOT NEW.tenant_id)
+		      OR (NEW.scope_type = 'user' AND NOT EXISTS (
+		        SELECT 1 FROM tenant_memberships WHERE tenant_id = NEW.tenant_id AND user_id = NEW.scope_id
+		      ))
+		      OR (NEW.scope_type = 'organization' AND NOT EXISTS (
+		        SELECT 1 FROM organizations WHERE tenant_id = NEW.tenant_id AND id = NEW.scope_id
+		      ))
+		      OR (NEW.scope_type = 'project' AND NOT EXISTS (
+		        SELECT 1 FROM projects WHERE tenant_id = NEW.tenant_id AND id = NEW.scope_id
+		      ))
+		      OR (NEW.scope_type = 'session' AND NOT EXISTS (
+		        SELECT 1 FROM agent_sessions WHERE tenant_id = NEW.tenant_id AND id = NEW.scope_id
+		      ))
+		      OR EXISTS (
+		        SELECT 1 FROM privacy_requests
+		        WHERE tenant_id = NEW.tenant_id AND request_type = 'erasure' AND status = 'processing'
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_legal_holds_update`,
+		`CREATE TRIGGER trg_legal_holds_update
+		 BEFORE UPDATE ON legal_holds
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Legal Hold update')
+		   WHERE NEW.id IS NOT OLD.id
+		      OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.scope_type <> OLD.scope_type
+		      OR NEW.scope_id IS NOT OLD.scope_id
+		      OR NEW.name <> OLD.name
+		      OR NEW.matter_reference <> OLD.matter_reference
+		      OR NEW.reason <> OLD.reason
+		      OR NEW.created_by IS NOT OLD.created_by
+		      OR NEW.created_at <> OLD.created_at
+		      OR OLD.status <> 'active' OR NEW.status <> 'released'
+		      OR NEW.version <> OLD.version + 1
+		      OR NEW.released_by IS NULL
+		      OR length(trim(ifnull(NEW.release_reason, ''))) NOT BETWEEN 10 AND 2000
+		      OR NEW.released_at IS NULL
+		      OR julianday(NEW.released_at) < julianday(NEW.created_at);
+			 END`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_privacy_requests_active_subject_type
+		 ON privacy_requests (tenant_id, subject_user_id, request_type)
+		 WHERE status IN ('requested', 'verified', 'approved', 'processing', 'failed')`,
+		`CREATE INDEX IF NOT EXISTS idx_privacy_requests_tenant_queue
+		 ON privacy_requests (tenant_id, status, due_at, created_at, id)`,
+		`DROP TRIGGER IF EXISTS trg_privacy_requests_insert`,
+		`CREATE TRIGGER trg_privacy_requests_insert
+		 BEFORE INSERT ON privacy_requests
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Privacy Request')
+		   WHERE NEW.request_type NOT IN ('access_export', 'erasure')
+		      OR NEW.status <> 'requested' OR NEW.version <> 1
+		      OR length(trim(NEW.intake_reason)) NOT BETWEEN 10 AND 2000
+		      OR length(trim(NEW.last_transition_reason)) NOT BETWEEN 10 AND 2000
+		      OR julianday(NEW.due_at) < julianday(NEW.created_at)
+		      OR NEW.completed_at IS NOT NULL OR NEW.result_digest_sha256 IS NOT NULL
+		      OR NOT EXISTS (
+		        SELECT 1 FROM tenant_memberships
+		        WHERE tenant_id = NEW.tenant_id AND user_id = NEW.subject_user_id
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM tenant_memberships
+		        WHERE tenant_id = NEW.tenant_id AND user_id = NEW.requested_by AND status = 'active'
+		      )
+		      OR NEW.last_transition_by IS NOT NEW.requested_by;
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_privacy_requests_update`,
+		`CREATE TRIGGER trg_privacy_requests_update
+		 BEFORE UPDATE ON privacy_requests
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Privacy Request transition')
+		   WHERE NEW.id IS NOT OLD.id
+		      OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.subject_user_id IS NOT OLD.subject_user_id
+		      OR NEW.request_type <> OLD.request_type
+		      OR NEW.requested_by IS NOT OLD.requested_by
+		      OR NEW.intake_reason <> OLD.intake_reason
+		      OR NEW.due_at <> OLD.due_at
+		      OR NEW.created_at <> OLD.created_at
+		      OR NEW.version <> OLD.version + 1
+		      OR length(trim(NEW.last_transition_reason)) NOT BETWEEN 10 AND 2000
+		      OR NOT (
+		        (OLD.status = 'requested' AND NEW.status IN ('verified', 'denied', 'cancelled'))
+		        OR (OLD.status = 'verified' AND NEW.status IN ('approved', 'denied', 'cancelled'))
+		        OR (OLD.status = 'approved' AND NEW.status IN ('processing', 'cancelled'))
+		        OR (OLD.status = 'processing' AND NEW.status IN ('completed', 'failed'))
+		        OR (OLD.status = 'failed' AND NEW.status IN ('approved', 'denied'))
+		      )
+		      OR (NEW.request_type = 'erasure' AND NEW.status = 'processing' AND EXISTS (
+		        SELECT 1
+		        FROM legal_holds AS legal_hold
+		        WHERE legal_hold.tenant_id = NEW.tenant_id
+		          AND legal_hold.status = 'active'
+		          AND (
+		            legal_hold.scope_type = 'tenant'
+		            OR (legal_hold.scope_type = 'user' AND legal_hold.scope_id = NEW.subject_user_id)
+		            OR (legal_hold.scope_type IN ('organization', 'project', 'session') AND EXISTS (
+		              SELECT 1 FROM agent_sessions AS held_session
+		              WHERE held_session.tenant_id = NEW.tenant_id
+		                AND (held_session.created_by = NEW.subject_user_id OR EXISTS (
+		                  SELECT 1 FROM agent_turns AS held_turn
+		                  WHERE held_turn.tenant_id = held_session.tenant_id
+		                    AND held_turn.session_id = held_session.id
+		                    AND held_turn.created_by = NEW.subject_user_id
+		                ))
+		                AND (
+		                  (legal_hold.scope_type = 'organization' AND legal_hold.scope_id = held_session.organization_id)
+		                  OR (legal_hold.scope_type = 'project' AND legal_hold.scope_id = held_session.project_id)
+		                  OR (legal_hold.scope_type = 'session' AND legal_hold.scope_id = held_session.id)
+		                )
+		            ))
+		          )
+		      ))
+		      OR ((NEW.status = 'completed') <> (NEW.completed_at IS NOT NULL))
+		      OR (NEW.result_digest_sha256 IS NOT NULL AND (
+		        length(NEW.result_digest_sha256) <> 64
+		        OR NEW.result_digest_sha256 GLOB '*[^0-9a-f]*'
+		      ));
+		 END`,
+		`CREATE INDEX IF NOT EXISTS idx_privacy_request_events_history
+		 ON privacy_request_events (tenant_id, privacy_request_id, version)`,
+		`DROP TRIGGER IF EXISTS trg_privacy_request_events_insert`,
+		`CREATE TRIGGER trg_privacy_request_events_insert
+		 BEFORE INSERT ON privacy_request_events
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Privacy Request event')
+		   WHERE NEW.version <= 0
+		      OR NEW.to_status NOT IN ('requested', 'verified', 'approved', 'processing', 'completed', 'denied', 'cancelled', 'failed')
+		      OR length(trim(NEW.reason)) NOT BETWEEN 10 AND 2000
+		      OR NOT (
+		        (NEW.version = 1 AND NEW.from_status IS NULL AND NEW.to_status = 'requested')
+		        OR (NEW.version > 1 AND NEW.from_status IS NOT NULL)
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM privacy_requests AS request
+		        WHERE request.tenant_id = NEW.tenant_id
+		          AND request.id = NEW.privacy_request_id
+		          AND request.version = NEW.version
+		          AND request.status = NEW.to_status
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_privacy_request_events_update`,
+		`CREATE TRIGGER trg_privacy_request_events_update
+		 BEFORE UPDATE ON privacy_request_events
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Privacy Request events are immutable');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_privacy_request_events_delete`,
+		`CREATE TRIGGER trg_privacy_request_events_delete
+		 BEFORE DELETE ON privacy_request_events
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Privacy Request events are immutable');
+			 END`,
+		`CREATE INDEX IF NOT EXISTS idx_tenant_data_exports_history
+		 ON tenant_data_exports (tenant_id, created_at DESC, id)`,
+		`DROP TRIGGER IF EXISTS trg_tenant_data_exports_insert`,
+		`CREATE TRIGGER trg_tenant_data_exports_insert
+		 BEFORE INSERT ON tenant_data_exports
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Tenant data export receipt')
+		   WHERE length(NEW.schema_version) NOT BETWEEN 1 AND 80
+		      OR length(NEW.digest_sha256) <> 64
+		      OR NEW.digest_sha256 GLOB '*[^0-9a-f]*'
+		      OR NEW.byte_count <= 0
+		      OR NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id)
+		      OR NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.requested_by);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_tenant_data_exports_update`,
+		`CREATE TRIGGER trg_tenant_data_exports_update
+		 BEFORE UPDATE ON tenant_data_exports
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Tenant data export receipts are immutable');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_tenant_data_exports_delete`,
+		`CREATE TRIGGER trg_tenant_data_exports_delete
+		 BEFORE DELETE ON tenant_data_exports
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Tenant data export receipts are immutable');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_agent_executions_traceparent_insert`,
+		`CREATE TRIGGER trg_agent_executions_traceparent_insert
+		 BEFORE INSERT ON agent_executions
+		 WHEN NEW.traceparent IS NOT NULL
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Execution trace context')
+		   WHERE length(NEW.traceparent) <> 55
+		      OR substr(NEW.traceparent, 1, 3) <> '00-'
+		      OR substr(NEW.traceparent, 36, 1) <> '-'
+		      OR substr(NEW.traceparent, 53, 1) <> '-'
+		      OR substr(NEW.traceparent, 4, 32) GLOB '*[^0-9a-f]*'
+		      OR substr(NEW.traceparent, 37, 16) GLOB '*[^0-9a-f]*'
+		      OR substr(NEW.traceparent, 54, 2) GLOB '*[^0-9a-f]*'
+		      OR substr(NEW.traceparent, 4, 32) = '00000000000000000000000000000000'
+		      OR substr(NEW.traceparent, 37, 16) = '0000000000000000';
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_agent_executions_traceparent_update`,
+		`CREATE TRIGGER trg_agent_executions_traceparent_update
+		 BEFORE UPDATE OF traceparent ON agent_executions
+		 WHEN NEW.traceparent IS NOT OLD.traceparent
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution trace context is immutable');
+		 END`,
 		`UPDATE agent_sessions
 		 SET resource_state = CASE
 		       WHEN EXISTS (
@@ -3441,6 +3844,12 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	if err := migrateCredentialScopeSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateKMSRewrapSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateRuntimeSecretRekeySQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateWorkerRevocationSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
@@ -3489,7 +3898,61 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	if err := migrateExecutionSchedulingDecisionsSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateUsageSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateWorkerStorageScrubSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateDesktopEnrollmentSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateCommercialBillingSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateInternalSelfHostedCostRoleSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateProjectCostAllocationSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateReleaseGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateIncidentGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateSLOGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateRecoveryGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migratePenetrationGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateCapacityGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateIncidentExerciseGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOperationsExerciseGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateBillingExerciseGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateInternalCostGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateComplianceGovernanceSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateProviderCommercialAuthorizationSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateGovernanceAuthoritySQLiteSafety(ctx, db); err != nil {
 		return err
 	}
 	return migrateWorkerReleaseSQLiteSafety(ctx, db)

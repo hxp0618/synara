@@ -2,7 +2,8 @@ import { useState, type FormEvent, type ReactNode } from "react";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { useControlPlane } from "../controlPlaneContext";
-import { controlPlaneClient } from "../lib/controlPlaneClient";
+import { controlPlaneClient } from "@synara/control-plane-client";
+import { isControlPlaneTenantOperational } from "@synara/enterprise-ui";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -11,6 +12,9 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [tenantSlug, setTenantSlug] = useState("");
+  const [newTenantName, setNewTenantName] = useState("");
+  const [newTenantSlug, setNewTenantSlug] = useState("");
+  const [newTenantRegion, setNewTenantRegion] = useState("default");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<Error | null>(null);
 
@@ -40,6 +44,16 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
       if (!connection) throw new Error("No active SSO connection was found for this Tenant.");
       const result = await controlPlaneClient.startSSO(connection.id, window.location.pathname);
       window.location.assign(result.authorizationUrl);
+    });
+  };
+  const createTenant = (event: FormEvent) => {
+    event.preventDefault();
+    void run("create-tenant", async () => {
+      await controlPlane.createTenant({
+        name: newTenantName,
+        slug: newTenantSlug,
+        region: newTenantRegion,
+      });
     });
   };
   const error = actionError ?? controlPlane.error ?? controlPlane.projectionError;
@@ -101,7 +115,7 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
                   value={displayName}
                 />
                 <Button disabled={pendingAction !== null} type="submit">
-                  {pendingAction === "dev-login" ? "Signing in…" : "Sign in for local SaaS"}
+                  {pendingAction === "dev-login" ? "Signing in…" : "Sign in to local Control Plane"}
                 </Button>
               </form>
             ) : null}
@@ -129,7 +143,7 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
               {controlPlane.session?.tenants.map((tenant) => (
                 <Button
                   key={tenant.id}
-                  disabled={pendingAction !== null || tenant.status !== "active"}
+                  disabled={pendingAction !== null || !isControlPlaneTenantOperational(tenant)}
                   onClick={() =>
                     void run(`tenant-${tenant.id}`, () => controlPlane.setActiveTenant(tenant.id))
                   }
@@ -144,6 +158,42 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
                 This account has no active Tenant membership.
               </p>
             ) : null}
+            <form className="mt-5 grid gap-3 border-t border-border pt-5" onSubmit={createTenant}>
+              <div>
+                <h2 className="text-sm font-semibold">Create an internal Tenant</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The Tenant starts on the Standard internal profile. Capacity and feature
+                  entitlements are controlled by a Platform Admin; no payment flow is involved.
+                </p>
+              </div>
+              <Input
+                autoComplete="organization"
+                onChange={(event) => setNewTenantName(event.target.value)}
+                placeholder="Tenant name"
+                required
+                value={newTenantName}
+              />
+              <Input
+                autoCapitalize="none"
+                autoComplete="off"
+                onChange={(event) => setNewTenantSlug(event.target.value.toLowerCase())}
+                pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"
+                placeholder="tenant-slug"
+                required
+                value={newTenantSlug}
+              />
+              <Input
+                autoCapitalize="none"
+                autoComplete="off"
+                onChange={(event) => setNewTenantRegion(event.target.value.toLowerCase())}
+                placeholder="Region code"
+                required
+                value={newTenantRegion}
+              />
+              <Button disabled={pendingAction !== null} type="submit">
+                {pendingAction === "create-tenant" ? "Creating…" : "Create internal Tenant"}
+              </Button>
+            </form>
             {error ? <p className="mt-3 text-sm text-destructive">{error.message}</p> : null}
           </div>
         )}

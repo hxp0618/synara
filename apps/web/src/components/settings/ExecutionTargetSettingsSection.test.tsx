@@ -12,7 +12,7 @@ import type {
   ControlPlaneWorker,
   ControlPlaneWorkerManifest,
   ControlPlaneWorkerProviderManifest,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 const observedCapabilities = {
   discovery: "native",

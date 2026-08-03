@@ -23,6 +23,11 @@ This document covers build-only native validation and publishing desktop release
 - Publishes the CLI package (`apps/server`, npm package `@synara/cli`) with OIDC trusted publishing.
 - Published macOS and Windows artifacts must be signed. Build-only runs may
   produce unsigned artifacts when signing secrets are unavailable.
+- Every native matrix job uses GitHub `actions/attest@v4` to create signed SLSA build provenance for the collected payloads
+  and provenance manifest. The retained `artifact-<platform>-<arch>.attestation.json` bundle is uploaded with the workflow
+  artifact and published release. The same job verifies the primary installer with `gh attestation verify` and retains its
+  bounded JSON result as `artifact-<platform>-<arch>.attestation-verification.json`; verification pins the repository,
+  `.github/workflows/release.yml` signer, candidate source commit and GitHub-hosted runner boundary.
 
 ## Desktop auto-update notes
 
@@ -52,11 +57,42 @@ This document covers build-only native validation and publishing desktop release
   - The build initially emits `latest-mac.yml` for both Intel and Apple Silicon.
   - The workflow merges the per-arch macOS metadata, then keeps the merged manifest as `latest-mac.yml` and copies it to `synara-mac.yml` for stable releases.
   - The desktop build script repacks the macOS update `.zip` with `ditto`, verifies Electron framework symlinks, extracts the zip, validates the extracted app signature, patches the matching `latest-mac*.yml` hash/size, and removes the stale `.zip.blockmap`.
+  - Signed publication provenance re-extracts that ZIP and read-only mounts the final DMG. Both must contain exactly one real top-level `Synara.app`; every nested Mach-O must contain the requested architecture, pass deep signing, and share the expected Apple Team ID before either artifact can enter the same-run release set.
   - macOS updater downloads intentionally use the full zip payload so Squirrel.Mac installs the exact signed archive validated by release build.
 - Local smoke test:
   - Run `bun run release:smoke:mac-update -- --skip-build --build-version 0.1.5` on macOS after local desktop/server/web dist files exist.
   - The smoke builds a mock update artifact, validates manifest hash/size, serves a HEAD-only local endpoint, confirms the manifest and zip are addressable without downloading the zip body, then cleans up its temp output.
   - Boolean env flags for release scripts accept `true/false`, `1/0`, `yes/no`, and `on/off`; CLI flags are still preferred for repeatable local commands.
+
+## Desktop Enrollment packaging and deployment
+
+The release gate is defined by
+[`Desktop installed acceptance v1`](contracts/desktop-installed-acceptance-v1.md) and the
+[`native release acceptance runbook`](runbooks/desktop-native-release-acceptance.md). Validate the final four-host bundle
+with `scripts/stage6-desktop/validate_desktop_native_acceptance.py`; build/startup smoke alone is not installed acceptance.
+
+- Packaged macOS, Windows, and Linux artifacts declare `synara://` as the Desktop Enrollment
+  protocol. Canary must use its separately declared `synara-canary://` identity before a Canary
+  Enrollment release is approved.
+- Set `SYNARA_DESKTOP_CONTROL_PLANE_ORIGINS` to a comma-separated list of exact normalized public
+  Control Plane base URLs accepted by that Desktop deployment. HTTPS is required. A fixed deployment
+  path such as `https://gateway.example/control-plane` is supported and is part of the exact match.
+- Generic public builds intentionally have an empty allowlist until the deployment config supplies
+  one. A parsed link whose `control_plane` value is absent from the allowlist performs no network I/O.
+- Development loopback HTTP requires both an explicit loopback URL in
+  `SYNARA_DESKTOP_CONTROL_PLANE_ORIGINS` and
+  `SYNARA_DESKTOP_ALLOW_LOOPBACK_CONTROL_PLANE=1`. Packaged builds ignore that loopback opt-in.
+- Development protocol registration is off by default. Set
+  `SYNARA_DESKTOP_REGISTER_PROTOCOL=1` only while testing the local Electron entry point.
+- Before release approval, create a fresh short-lived self-Enrollment for every attempt and verify
+  the installed, signed artifact through the OS launcher:
+  - macOS: `open 'synara://connect?...'`;
+  - Windows: `Start-Process 'synara://connect?...'`;
+  - Linux: `xdg-open 'synara://connect?...'`.
+- For every target, record protocol dispatch, OS credential-store backend, complete initial
+  Session/Tenant/Organization/Entitlement hydration, restart persistence, rotation, remote
+  revocation, local disconnect, and secret-scan evidence. Source tests and an unpackaged Electron
+  run do not satisfy this gate.
 
 ## 0) npm OIDC trusted publishing setup (CLI)
 
@@ -85,6 +121,8 @@ Checklist:
 - Optional jobs stay disabled unless repository variables enable them:
   - `SYNARA_PUBLISH_CLI=1`
   - `SYNARA_FINALIZE_RELEASE=1`
+- `SYNARA_PUBLISH_CLI=1` applies only to ordinary releases. Protected Stage 6 Enterprise GA candidates always skip npm
+  CLI publication because the CLI package is not part of the candidate Desktop artifact set or Final Review archive.
 
 ## 1) Build-only native CI validation
 
@@ -96,8 +134,118 @@ Use this before publication to validate the real native macOS, Linux, and Window
 3. Wait for `.github/workflows/release.yml` to finish.
 4. Confirm preflight and all four native matrix builds pass.
 5. Download the workflow artifacts and sanity-check installation on each OS.
+6. Verify every primary installer against the repository identity, for example
+   `gh attestation verify PATH/TO/INSTALLER -R OWNER/REPOSITORY`.
 
-To publish from a manual dispatch instead of a tag push, pass `publish_release=true`. This is intentionally opt-in.
+For Stage 6 Enterprise GA, use the protected same-run publication mode below. A build-only run is useful rehearsal but
+cannot later be promoted by rebuilding: signed/notarized bytes may change, so the rebuild is a new Desktop candidate.
+
+To publish an ordinary release from a manual dispatch instead of a tag-push event, select the exact existing release tag
+as the workflow ref and pass `publish_release=true`. Branch publication is reserved for the protected Enterprise GA mode
+below, where the planned tag must still be absent.
+
+### Stage 6 protected exact-artifact publication
+
+Enterprise GA keeps the four signed native Artifact sets in one workflow run while external acceptance executes:
+
+1. Create the `stage6-enterprise-ga` GitHub environment before dispatch. Configure two to six independent required
+   reviewers, enable **Prevent self-review**, and disable **Allow administrators to bypass configured protection rules**.
+   GitHub technically releases the waiting job after any one configured reviewer approves it; the copied Stage 6 checklist
+   remains the authority for the separate Engineering, Operations, Security, Product, and applicable Privacy/Legal roles.
+   After source-branch protection is active, prepare the API-supported Environment baseline:
+
+   ```bash
+   bun run stage6:environment:baseline -- \
+     --repository owner/repo --branch release-branch --expected-head COMMIT \
+     --reviewer User:ID --reviewer Team:ID
+   ```
+
+   Review its plan digest, then repeat the exact command with `--apply --confirm-sha256 SHA256`. The API path creates or
+   verifies the Environment, reviewers, self-review prevention and protected-branch-only policy. GitHub exposes
+   administrator bypass as read-only through its documented API, so the
+   resulting receipt remains `environment-baseline-applied-manual-admin-bypass-required` until an authorized administrator
+   disables that one setting in GitHub Settings and the same command verifies
+   `environment-baseline-ready-not-release-approved`.
+
+2. Prepare a clean protected release branch whose package versions already match the intended `vX.Y.Z` tag. The branch
+   must enforce administrators, stale-review dismissal, at least one approval, strict required status checks, and deny
+   force-push and deletion. The tag must not exist locally or on `origin`.
+3. Dispatch from that branch with `publish_release=true` and `enterprise_ga_candidate=true`. Do not push the tag; the
+   protected run reserves it and will create it only after approval.
+4. Wait for preflight and all four native build jobs. The `stage6_enterprise_approval` job remains behind the protected
+   `stage6-enterprise-ga` environment. The unprotected `finalize_release_assets` job first merges/copies updater metadata,
+   writes and verifies `release-final-asset-set.json`, and uploads `finalized-release-assets`; download that artifact and the
+   raw `desktop-*` artifacts from this still-running workflow.
+5. Execute native installed acceptance and the remaining production/production-like controls. Generate the
+   `stage-6-candidate-evidence-bundle-v3` receipt with `bun run stage6:candidate:prepare -- ...`, using the planned tag as
+   candidate ID, this source commit, and this GitHub run ID. The preparer computes all input digests, validates all ten
+   receipts before publishing, and refuses to overwrite prior evidence. Rebuilding or starting another run invalidates
+   that association. Complete the review within 30 days; GitHub automatically fails a waiting job after that deadline.
+6. Generate the protected configuration:
+
+   ```bash
+   bun run stage6:environment:prepare -- \
+     --receipt ... --candidate-id ... --source-commit ... --build-run-id ... \
+     --output /secure/.../protected-environment.json
+   ```
+
+   The command revalidates the exact receipt, derives the hashes/base64, writes a private non-overwriting configuration and
+   sidecar, and prints no secret value. GitHub's documented Environment API cannot disable administrator bypass, so an
+   authorized administrator must first disable that setting in the existing `stage6-enterprise-ga` Environment. Then apply
+   the reviewed configuration:
+
+   ```bash
+   bun run stage6:environment:apply -- \
+     --configuration /secure/.../protected-environment.json --repository owner/repo \
+     --reviewer User:<id> --reviewer Team:<id> \
+     --output /secure/.../environment-application.json
+   ```
+
+   The apply command first reads the exact Actions run and its source-branch protection, rejecting a different repository,
+   workflow, commit, rerun, completed run or inadequately protected branch before any write. It also refuses any write while
+   bypass remains enabled, requires two to six unique reviewers, enables prevent-self-review and protected-branch-only
+   deployment, writes the candidate values with the secret supplied to `gh` only on stdin, and reads back the Environment,
+   variables and secret presence. It emits a private non-overwriting application receipt, not an approval. The exact
+   candidate-specific Environment variables are:
+   `SYNARA_STAGE6_CANDIDATE_ID`, `SYNARA_STAGE6_CANDIDATE_SOURCE_COMMIT`,
+   `SYNARA_STAGE6_CANDIDATE_BUILD_RUN_ID`, `SYNARA_STAGE6_CANDIDATE_BUNDLE_RECEIPT_SHA256`, and
+   `SYNARA_STAGE6_DESKTOP_ARTIFACT_SET_SHA256`. Also set the protected environment secret
+   `SYNARA_STAGE6_CANDIDATE_BUNDLE_RECEIPT_BASE64` to the single-line base64 encoding of the exact v3 validation receipt.
+   Keep both generated files outside source control and dispose of them under the private release-evidence retention policy.
+   The receipt remains bounded so its single-line base64
+   fits GitHub's documented [48 KiB secret limit](https://docs.github.com/en/actions/reference/security/secrets).
+
+7. Approve the environment only after the copied GA checklist authorizes publication. Copy the exact structured review
+   comment shown in the preflight job summary (`SYNARA_STAGE6_APPROVE <tag> <run-id>`); a generic approval comment or workflow
+   rerun is rejected. The workflow verifies every declared value, decodes and semantically validates the actual receipt,
+   independently rejects any empty or malformed projected control receipt and revalidates candidate Artifact/origin/Region/
+   Migration identity plus Release Evidence, Desktop, Recovery and Residency boundaries,
+   downloads and hashes the four same-run provenance/payload sets, proves that every non-YAML final public byte is identical
+   to the approved raw candidate, and records `stage6-enterprise-ga-approval.json`. The publication job repeats the receipt,
+   raw, final and raw-to-final checks before publishing the accepted payloads and tag. It performs no updater merge, copy,
+   delete or other asset mutation after that verification.
+
+The workflow independently reads GitHub's exact run, source-branch protection, current environment protection rules and
+actual deployment review history. It fails unless the run is an active first-attempt `release.yml` workflow dispatch for
+the exact repository/commit, its branch satisfies the protection policy, two to six reviewers are configured, self-review
+prevention is enabled, administrator bypass is disabled, exactly one approval identifies this environment, and the actual
+reviewer differs from both workflow actors. The v2 environment approval and v4 release approval retain the source branch,
+normalized environment configuration, actual reviewer, actor identities and comment/configuration/review digests. GitHub
+still releases the waiting job after one configured reviewer; the separate role-specific checklist remains mandatory. The
+approval JSON does not claim GA by itself. The candidate receipt is retained in the private workflow artifact but is not
+selected as a public release asset. Ordinary tag-triggered releases retain their existing path and do not enter Enterprise
+GA mode.
+
+Every published release includes `release-final-asset-set.json` and its sidecar. Platform provenance continues to prove the
+native lane's signed installers, update archives and blockmaps; the final manifest separately covers the exact public
+installers, blockmaps, updater YAML, provenance and attestation files after all deterministic feed preparation is complete.
+Its updater-feed summary also verifies default/channel aliases are byte-identical and every manifest version, basename,
+size, SHA-512, architecture and Windows blockmap reference matches the final local payload bytes.
+
+The workflow-level `GITHUB_TOKEN` defaults to `contents: read`. Native build jobs receive only attestation/OIDC writes, and
+only the GitHub Release publication job receives `contents: write`; the version-bump finalizer pushes through its separately
+scoped Release App token. Every remote Action is pinned to a full commit SHA with its major version retained as a comment,
+and every checkout except the explicit Release App push discards persisted credentials.
 
 ## 2) Apple signing + notarization setup (macOS)
 

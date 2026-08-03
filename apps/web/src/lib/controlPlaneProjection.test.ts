@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { deriveWorkLogEntries } from "../session-logic";
-import type { ControlPlaneAgentSession, ControlPlaneSessionEvent } from "./controlPlaneClient";
+import type {
+  ControlPlaneAgentSession,
+  ControlPlaneSessionEvent,
+} from "@synara/control-plane-client";
 import { createTestAgentSession } from "./controlPlaneTestFixtures";
 import {
   applyControlPlaneSessionEvent,

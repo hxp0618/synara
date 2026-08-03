@@ -55,6 +55,43 @@ func kubernetesRegistrationTokenMainMount() map[string]any {
 	}
 }
 
+func kubernetesObservabilityConfigMapName(targetID uuid.UUID) string {
+	return kubernetesObservabilityConfigMapPrefix + targetID.String()
+}
+
+var kubernetesForbiddenWorkerObservabilityEnvironment = map[string]struct{}{
+	"OTEL_EXPORTER_OTLP_HEADERS":                   {},
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":            {},
+	"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE":        {},
+	"OTEL_EXPORTER_OTLP_CLIENT_KEY":                {},
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE": {},
+	"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY":         {},
+	"OTEL_EXPORTER_OTLP_INSECURE":                  {},
+	"OTEL_EXPORTER_OTLP_TRACES_INSECURE":           {},
+}
+
+func kubernetesObservabilityEnvironment(targetID uuid.UUID) []any {
+	result := make([]any, 0, 6)
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE",
+		"SYNARA_OTEL_TRACE_SAMPLE_RATIO",
+		"SYNARA_OTEL_COLLECTOR_REGION",
+		"SYNARA_OTEL_TRACE_RETENTION_DAYS",
+	} {
+		result = append(result, map[string]any{
+			"name": name,
+			"valueFrom": map[string]any{
+				"configMapKeyRef": map[string]any{
+					"name": kubernetesObservabilityConfigMapName(targetID), "key": name, "optional": true,
+				},
+			},
+		})
+	}
+	return result
+}
+
 func kubernetesNetworkBoundaryInitContainer(
 	image string,
 	imagePullPolicy string,
@@ -380,6 +417,7 @@ func (r *KubernetesReconciler) executionPod(
 	}
 	environment = append(environment, kubernetesRuntimeIsolationEnvironment(configuration)...)
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
+	environment = append(environment, kubernetesObservabilityEnvironment(target.ID)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
 	}
@@ -585,6 +623,7 @@ func (r *KubernetesReconciler) warmPoolPod(
 	}
 	environment = append(environment, kubernetesRuntimeIsolationEnvironment(configuration)...)
 	environment = append(environment, kubernetesTenantNetworkEnvironment(configuration)...)
+	environment = append(environment, kubernetesObservabilityEnvironment(target.ID)...)
 	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
 	}

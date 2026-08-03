@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ type SSHProvisioningConfig struct {
 	WorkerLeaseTTL         time.Duration
 	WorkerHeartbeatTimeout time.Duration
 	Timeout                time.Duration
+	ObservabilityRoot      string
 }
 
 const protectedCgroupSupervisorSubgroupName = "synara-agentd"
@@ -423,17 +425,18 @@ func ensureSSHInstallProtectedCgroupPaths(
 }
 
 type sshProvisionPaths struct {
-	prefix              string
-	serviceName         string
-	installRoot         string
-	workspaceRoot       string
-	gitCacheRoot        string
-	binaryPath          string
-	envPath             string
-	unitPath            string
-	temporaryBinaryPath string
-	temporaryEnvPath    string
-	temporaryUnitPath   string
+	prefix                       string
+	serviceName                  string
+	installRoot                  string
+	workspaceRoot                string
+	gitCacheRoot                 string
+	binaryPath                   string
+	envPath                      string
+	unitPath                     string
+	temporaryBinaryPath          string
+	temporaryEnvPath             string
+	temporaryUnitPath            string
+	observabilityEnvironmentPath string
 }
 
 func (p *SSHProvisioner) connect(ctx context.Context, configuration sshTargetConfiguration) (sshRemote, error) {
@@ -469,7 +472,7 @@ func (p *SSHProvisioner) loadTargetMetadata(
 	principal identity.Principal,
 	tenantID, targetID uuid.UUID,
 ) (persistence.ExecutionTarget, error) {
-	if err := requireActiveTenant(principal, tenantID); err != nil {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
 		return persistence.ExecutionTarget{}, err
 	}
 	if _, err := p.targets.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
@@ -668,6 +671,16 @@ func (p *SSHProvisioner) normalize(
 		temporaryEnvPath:    temporaryPrefix + ".env",
 		temporaryUnitPath:   temporaryPrefix + ".service",
 	}
+	if root := strings.TrimSpace(p.config.ObservabilityRoot); root != "" {
+		if !strings.HasPrefix(root, "/") || pathpkg.Clean(root) == "/" {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				500,
+				"ssh_worker_observability_authority_invalid",
+				"SSH Worker observability root must be a non-root absolute directory.",
+			)
+		}
+		paths.observabilityEnvironmentPath = pathpkg.Join(root, target.ID.String(), "observability.env")
+	}
 	return configuration, paths, nil
 }
 
@@ -711,6 +724,12 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_DRAIN_TIMEOUT", "20s"},
 		{"SYNARA_AGENTD_WORKSPACE_ROOT", paths.workspaceRoot},
 		{"SYNARA_AGENTD_GIT_CACHE_ROOT", paths.gitCacheRoot},
+	}
+	if paths.observabilityEnvironmentPath != "" {
+		values = append(values, [2]string{
+			"SYNARA_AGENTD_OBSERVABILITY_ENV_FILE",
+			paths.observabilityEnvironmentPath,
+		})
 	}
 	if configuration.AgentdBuildGitSHA != "" {
 		values = append(values, [2]string{"SYNARA_AGENTD_BUILD_GIT_SHA", configuration.AgentdBuildGitSHA})

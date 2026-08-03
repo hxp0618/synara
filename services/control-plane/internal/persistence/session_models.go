@@ -24,6 +24,19 @@ type Project struct {
 
 func (Project) TableName() string { return "projects" }
 
+type ProjectCostAllocation struct {
+	TenantID       uuid.UUID `gorm:"column:tenant_id;type:uuid;primaryKey"`
+	ProjectID      uuid.UUID `gorm:"column:project_id;type:uuid;primaryKey"`
+	CostCenterCode string    `gorm:"column:cost_center_code"`
+	DepartmentCode string    `gorm:"column:department_code"`
+	Version        int64     `gorm:"column:version;not null;default:1"`
+	UpdatedBy      uuid.UUID `gorm:"column:updated_by;type:uuid"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+	UpdatedAt      time.Time `gorm:"column:updated_at"`
+}
+
+func (ProjectCostAllocation) TableName() string { return "project_cost_allocations" }
+
 type AgentSession struct {
 	ID                                    uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
 	TenantID                              uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
@@ -42,6 +55,7 @@ type AgentSession struct {
 	RoutingPolicyVersion                  *int64     `gorm:"column:routing_policy_version"`
 	PreferredExecutionRegion              *string    `gorm:"column:preferred_execution_region"`
 	ProviderResumeCursorEncrypted         []byte     `gorm:"column:provider_resume_cursor_encrypted"`
+	ProviderResumeCursorKeyID             *string    `gorm:"column:provider_resume_cursor_key_id"`
 	ProviderResumeCursorState             string     `gorm:"column:provider_resume_cursor_state;default:absent"`
 	ProviderResumeCursorSourceExecutionID *uuid.UUID `gorm:"column:provider_resume_cursor_source_execution_id;type:uuid"`
 	ProviderResumeCursorSourceGeneration  *int64     `gorm:"column:provider_resume_cursor_source_generation"`

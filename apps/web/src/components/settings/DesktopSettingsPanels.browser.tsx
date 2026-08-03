@@ -4,7 +4,7 @@
 
 import "../../index.css";
 
-import type { DesktopAppSnapState } from "@synara/contracts";
+import type { DesktopAppSnapState, DesktopSaaSConnectionState } from "@synara/contracts";
 import type { AppSettingsBinding } from "~/appSettings";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
@@ -44,7 +44,11 @@ vi.mock("~/components/ui/toast", () => ({
   toastManager: { add: harness.toastAdd },
 }));
 
-import { AppSnapSettingsPanel, NotificationsSettingsPanel } from "./DesktopSettingsPanels";
+import {
+  AppSnapSettingsPanel,
+  NotificationsSettingsPanel,
+  SaaSConnectionSettingsPanel,
+} from "./DesktopSettingsPanels";
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -79,6 +83,36 @@ const READY_STATE: DesktopAppSnapState = {
   shortcut: { kind: "both-option-keys" },
   inputMonitoringPermission: "granted",
   screenRecordingPermission: "granted",
+  message: null,
+};
+
+const CONNECTED_SAAS_STATE: DesktopSaaSConnectionState = {
+  status: "connected",
+  controlPlaneBaseUrl: "https://control.example.com/control-plane",
+  deviceId: "device-1",
+  userId: "user-1",
+  email: "owner@example.com",
+  displayName: "Owner",
+  tenantId: "tenant-1",
+  tenantName: "Northstar Labs",
+  organizationId: "organization-1",
+  organizationName: "Platform",
+  credentialExpiresAt: "2026-09-01T00:00:00Z",
+  message: null,
+};
+
+const DISCONNECTED_SAAS_STATE: DesktopSaaSConnectionState = {
+  status: "disconnected",
+  controlPlaneBaseUrl: null,
+  deviceId: null,
+  userId: null,
+  email: null,
+  displayName: null,
+  tenantId: null,
+  tenantName: null,
+  organizationId: null,
+  organizationName: null,
+  credentialExpiresAt: null,
   message: null,
 };
 
@@ -122,6 +156,117 @@ describe("NotificationsSettingsPanel", () => {
       );
     });
 
+    await mounted.unmount();
+  });
+});
+
+describe("SaaSConnectionSettingsPanel", () => {
+  it("shows only connection metadata and disconnects through the main-process bridge", async () => {
+    const unsubscribe = vi.fn();
+    const unsubscribeMode = vi.fn();
+    const disconnectedState = {
+      ...CONNECTED_SAAS_STATE,
+      status: "disconnected" as const,
+      controlPlaneBaseUrl: null,
+      deviceId: null,
+      userId: null,
+      email: null,
+      displayName: null,
+      tenantId: null,
+      tenantName: null,
+      organizationId: null,
+      organizationName: null,
+      credentialExpiresAt: null,
+    };
+    const disconnect = vi.fn().mockResolvedValue(disconnectedState);
+    const confirm = vi.fn().mockResolvedValue(true);
+    setDesktopBridge({
+      confirm,
+      saas: {
+        getMode: vi.fn().mockResolvedValue({ mode: "cloud", persisted: true }),
+        setMode: vi.fn(),
+        onMode: vi.fn(() => unsubscribeMode),
+        getState: vi.fn().mockResolvedValue(CONNECTED_SAAS_STATE),
+        disconnect,
+        onState: vi.fn(() => unsubscribe),
+      },
+    });
+
+    const mounted = await render(<SaaSConnectionSettingsPanel active />);
+
+    await expect.element(mounted.getByText("owner@example.com")).toBeVisible();
+    await expect.element(mounted.getByText("Northstar Labs")).toBeVisible();
+    await expect.element(mounted.getByText("Platform")).toBeVisible();
+    expect(document.body.textContent).not.toContain("device-1");
+
+    await mounted.getByRole("button", { name: "Disconnect" }).click();
+    await vi.waitFor(() => {
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(harness.toastAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Desktop disconnected" }),
+      );
+    });
+
+    await mounted.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribeMode).toHaveBeenCalledOnce();
+  });
+
+  it("switches to local mode without deleting the saved Cloud Panel connection", async () => {
+    const setMode = vi.fn().mockResolvedValue({ mode: "local", persisted: true });
+    const disconnect = vi.fn();
+    setDesktopBridge({
+      confirm: vi.fn(),
+      saas: {
+        getMode: vi.fn().mockResolvedValue({ mode: "cloud", persisted: true }),
+        setMode,
+        onMode: vi.fn(() => () => undefined),
+        getState: vi.fn().mockResolvedValue(CONNECTED_SAAS_STATE),
+        disconnect,
+        onState: vi.fn(() => () => undefined),
+      },
+    });
+
+    const mounted = await render(<SaaSConnectionSettingsPanel active />);
+    await mounted.getByRole("button", { name: "Use local" }).click();
+
+    await vi.waitFor(() => expect(setMode).toHaveBeenCalledWith("local"));
+    expect(disconnect).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it("switches from local mode to Cloud Panel mode", async () => {
+    const setMode = vi.fn().mockResolvedValue({ mode: "cloud", persisted: true });
+    setDesktopBridge({
+      confirm: vi.fn(),
+      saas: {
+        getMode: vi.fn().mockResolvedValue({ mode: "local", persisted: true }),
+        setMode,
+        onMode: vi.fn(() => () => undefined),
+        getState: vi.fn().mockResolvedValue(DISCONNECTED_SAAS_STATE),
+        disconnect: vi.fn(),
+        onState: vi.fn(() => () => undefined),
+      },
+    });
+
+    const mounted = await render(<SaaSConnectionSettingsPanel active />);
+    await mounted.getByRole("button", { name: "Use Cloud Panel" }).click();
+
+    await vi.waitFor(() => expect(setMode).toHaveBeenCalledWith("cloud"));
+    await mounted.unmount();
+  });
+
+  it("explains that browser-only hosts cannot manage a device connection", async () => {
+    const mounted = await render(<SaaSConnectionSettingsPanel active />);
+    await expect
+      .element(
+        mounted.getByText(
+          "Cloud Panel device connections are available in the installed Synara Desktop app.",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(mounted.getByRole("button", { name: "Disconnect" })).toBeDisabled();
     await mounted.unmount();
   });
 });

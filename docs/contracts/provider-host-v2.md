@@ -150,7 +150,7 @@ The Provider Host Send Turn Error that follows is confirmation of the same inter
 
 `SteerTurn` uses the same durable channel without terminating the active Execution. Control Plane persists the
 user intent before delivery, agentd correlates it to the active `SendTurn`, and the Host returns a terminal
-acknowledgement for the Steer command while the original Turn remains active. The Web SaaS projection renders
+acknowledgement for the Steer command while the original Turn remains active. The Web Control Plane projection renders
 the persisted Steer intent as a marked user message and clears the composer only after Control Plane accepts it.
 Queue delivery during an active remote Turn remains explicitly unsupported rather than being converted into
 Steer or a new Turn.

@@ -34,23 +34,24 @@ import (
 )
 
 const (
-	kubernetesManagedLabel                = "synara.io/managed"
-	kubernetesTargetLabel                 = "synara.io/execution-target-id"
-	kubernetesExecutionLabel              = "synara.io/execution-id"
-	kubernetesGenerationLabel             = "synara.io/generation"
-	kubernetesReleaseLabel                = "synara.io/worker-release-revision-id"
-	kubernetesChannelLabel                = "synara.io/worker-release-channel"
-	kubernetesWarmSlotLabel               = "synara.io/warm-slot"
-	kubernetesConfigAnnotation            = "synara.io/config-sha256"
-	kubernetesWorkloadIdentityVolume      = "workload-identity"
-	kubernetesRegistrationTokenVolume     = "registration-token"
-	kubernetesWorkloadIdentityTokenPath   = platform.KubernetesWorkloadIdentityTokenPath
-	kubernetesStagedRegistrationTokenPath = platform.KubernetesStagedRegistrationTokenPath
-	kubernetesNetworkBoundaryInitName     = "network-boundary-init"
-	kubernetesRegistrationTokenInitName   = "registration-token-init"
-	kubernetesLocalClusterID              = "kubernetes"
-	kubernetesWorkerProtocolVersion       = 2
-	kubernetesPodBoundRegistrationTrust   = "kubernetes-pod-bound-v1"
+	kubernetesManagedLabel                 = "synara.io/managed"
+	kubernetesTargetLabel                  = "synara.io/execution-target-id"
+	kubernetesExecutionLabel               = "synara.io/execution-id"
+	kubernetesGenerationLabel              = "synara.io/generation"
+	kubernetesReleaseLabel                 = "synara.io/worker-release-revision-id"
+	kubernetesChannelLabel                 = "synara.io/worker-release-channel"
+	kubernetesWarmSlotLabel                = "synara.io/warm-slot"
+	kubernetesConfigAnnotation             = "synara.io/config-sha256"
+	kubernetesWorkloadIdentityVolume       = "workload-identity"
+	kubernetesRegistrationTokenVolume      = "registration-token"
+	kubernetesObservabilityConfigMapPrefix = "synara-agentd-observability-config-"
+	kubernetesWorkloadIdentityTokenPath    = platform.KubernetesWorkloadIdentityTokenPath
+	kubernetesStagedRegistrationTokenPath  = platform.KubernetesStagedRegistrationTokenPath
+	kubernetesNetworkBoundaryInitName      = "network-boundary-init"
+	kubernetesRegistrationTokenInitName    = "registration-token-init"
+	kubernetesLocalClusterID               = "kubernetes"
+	kubernetesWorkerProtocolVersion        = 2
+	kubernetesPodBoundRegistrationTrust    = "kubernetes-pod-bound-v1"
 
 	KubernetesPodFailureApplyFailed    = "pod-apply-failed"
 	KubernetesPodFailurePendingTimeout = "pending-timeout"

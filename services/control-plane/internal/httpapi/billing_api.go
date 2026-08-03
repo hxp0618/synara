@@ -225,7 +225,7 @@ func (s *Server) requireBillingService(w http.ResponseWriter, r *http.Request) *
 	if s.billing != nil {
 		return s.billing
 	}
-	s.writeError(w, r, problem.New(503, "billing_unavailable", "Billing is not configured."))
+	s.writeError(w, r, problem.New(503, "cost_accounting_unavailable", "Cost accounting is not configured."))
 	return nil
 }
 
@@ -247,7 +247,7 @@ func parseBillingTariffListQuery(r *http.Request) (billing.ListTariffsFilter, er
 	if raw := strings.TrimSpace(values.Get("effectiveAt")); raw != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, raw)
 		if err != nil {
-			return billing.ListTariffsFilter{}, problem.New(400, "invalid_billing_tariff_time", "effectiveAt must use RFC3339.")
+			return billing.ListTariffsFilter{}, problem.New(400, "invalid_cost_accounting_tariff_time", "effectiveAt must use RFC3339.")
 		}
 		parsed = parsed.UTC()
 		filter.EffectiveAt = &parsed

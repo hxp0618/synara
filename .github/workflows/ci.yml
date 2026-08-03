@@ -187,6 +187,9 @@ jobs:
       - name: Verify Synara identity
         run: bun run brand:check
 
+      - name: Verify Stage 6 engineering source gates
+        run: bun run stage6:engineering:check
+
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
 

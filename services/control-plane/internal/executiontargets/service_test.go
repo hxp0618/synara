@@ -23,6 +23,35 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestExecutionTargetMutationsRejectInactiveTenantBeforePolicyOrStorage(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	config, err := platform.Defaults(platform.ProfilePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, config, nil)
+
+	_, err = service.Create(ctx, principal, requestedTenantID, CreateInput{})
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, err = service.UpdateProviderPolicy(ctx, principal, requestedTenantID, uuid.New(), nil)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, err = service.UpdateProcessContainmentPolicy(ctx, principal, requestedTenantID, uuid.New(), nil)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, err = service.UpdateRuntimeIsolationPolicy(
+		ctx, principal, requestedTenantID, uuid.New(), nil,
+		"execution-target-inactive-runtime-isolation", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, _, err = service.DisableManagedKubernetesTarget(
+		ctx, principal, requestedTenantID, uuid.New(),
+		"execution-target-inactive-disable", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+}
+
 func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	ctx := context.Background()
 	config, _ := platform.Defaults(platform.ProfilePersonal)
@@ -38,7 +67,9 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x23}, 32))
+	cipher, err := secret.NewCursorCipherWithKeyring(secret.CipherKey{
+		ID: "runtime-v2", Key: bytes.Repeat([]byte{0x23}, 32),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +116,13 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 	}
 	if len(persisted.ConfigurationEncrypted) == 0 || bytes.Contains(persisted.ConfigurationEncrypted, []byte("secret-value")) {
 		t.Fatal("execution target configuration was not encrypted")
+	}
+	if persisted.ConfigurationKeyID == nil || *persisted.ConfigurationKeyID != "runtime-v2" {
+		t.Fatalf("execution target configuration omitted its runtime key ID: %#v", persisted.ConfigurationKeyID)
+	}
+	decoded, metadata, err := cipher.DecryptWithMetadata(persisted.ConfigurationEncrypted)
+	if err != nil || !metadata.Primary || !metadata.Keyed || !strings.Contains(decoded, "secret-value") {
+		t.Fatalf("execution target keyed envelope = %q, %#v, %v", decoded, metadata, err)
 	}
 	if _, err := service.Create(ctx, principal, domain.TenantID, CreateInput{
 		OrganizationID: &domain.OrganizationID, Kind: "local", Name: "unsafe-capabilities",

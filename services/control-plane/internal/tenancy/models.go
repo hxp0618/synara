@@ -7,16 +7,21 @@ import (
 )
 
 type Tenant struct {
-	ID        uuid.UUID      `json:"id"`
-	Slug      string         `json:"slug"`
-	Name      string         `json:"name"`
-	Status    string         `json:"status"`
-	PlanCode  string         `json:"planCode"`
-	Region    string         `json:"region"`
-	Settings  map[string]any `json:"settings"`
-	Role      string         `json:"role"`
-	CreatedAt time.Time      `json:"createdAt"`
-	UpdatedAt time.Time      `json:"updatedAt"`
+	ID                  uuid.UUID      `json:"id"`
+	Slug                string         `json:"slug"`
+	Name                string         `json:"name"`
+	Status              string         `json:"status"`
+	LifecycleVersion    int64          `json:"lifecycleVersion"`
+	TrialExpiresAt      *time.Time     `json:"evaluationExpiresAt"`
+	SuspendedAt         *time.Time     `json:"suspendedAt"`
+	ClosedAt            *time.Time     `json:"closedAt"`
+	DeletionRequestedAt *time.Time     `json:"deletionRequestedAt"`
+	PlanCode            string         `json:"entitlementProfileCode"`
+	Region              string         `json:"region"`
+	Settings            map[string]any `json:"settings"`
+	Role                string         `json:"role"`
+	CreatedAt           time.Time      `json:"createdAt"`
+	UpdatedAt           time.Time      `json:"updatedAt"`
 }
 
 type TenantMember struct {
@@ -59,10 +64,36 @@ type OrganizationMember struct {
 }
 
 type CreateTenantInput struct {
-	Slug     string `json:"slug"`
-	Name     string `json:"name"`
-	Region   string `json:"region"`
-	PlanCode string `json:"planCode"`
+	Slug           string     `json:"slug"`
+	Name           string     `json:"name"`
+	Region         string     `json:"region"`
+	PlanCode       string     `json:"entitlementProfileCode"`
+	Status         string     `json:"status"`
+	TrialExpiresAt *time.Time `json:"evaluationExpiresAt"`
+}
+
+type ProvisionTenantInput struct {
+	OwnerEmail     string     `json:"ownerEmail"`
+	Slug           string     `json:"slug"`
+	Name           string     `json:"name"`
+	Region         string     `json:"region"`
+	PlanCode       string     `json:"entitlementProfileCode"`
+	Status         string     `json:"status"`
+	TrialExpiresAt *time.Time `json:"evaluationExpiresAt"`
+}
+
+type ProvisionedTenant struct {
+	ID               uuid.UUID  `json:"id"`
+	Slug             string     `json:"slug"`
+	Name             string     `json:"name"`
+	Status           string     `json:"status"`
+	LifecycleVersion int64      `json:"lifecycleVersion"`
+	TrialExpiresAt   *time.Time `json:"evaluationExpiresAt"`
+	PlanCode         string     `json:"entitlementProfileCode"`
+	Region           string     `json:"region"`
+	OwnerUserID      uuid.UUID  `json:"ownerUserId"`
+	OwnerEmail       string     `json:"ownerEmail"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 
 type UpdateTenantInput struct {
@@ -70,6 +101,23 @@ type UpdateTenantInput struct {
 	Status   *string         `json:"status"`
 	Region   *string         `json:"region"`
 	Settings *map[string]any `json:"settings"`
+}
+
+type TransitionTenantInput struct {
+	ToStatus        string     `json:"toStatus"`
+	ExpectedVersion int64      `json:"expectedVersion"`
+	Reason          string     `json:"reason"`
+	TrialExpiresAt  *time.Time `json:"evaluationExpiresAt"`
+}
+
+type RestoreTenantInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	Reason          string `json:"reason"`
+}
+
+type DeleteTenantInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	Reason          string `json:"reason"`
 }
 
 type InviteTenantMemberInput struct {

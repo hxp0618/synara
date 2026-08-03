@@ -29,6 +29,9 @@ import {
 } from "../test/effectRpcWebSocketMock";
 import { createBrowserTestServerConfig, createFullscreenTestHost } from "../test/browserHarness";
 import { resetWsNativeApiForTest } from "../wsNativeApi";
+// Pre-transform the full chat route before the first browser case; otherwise
+// Vite's cold auto-split chunk can outlive the mount readiness timeout.
+import "./ChatView";
 
 const THREAD_ID = "thread-kb-toast-test" as ThreadId;
 const PROJECT_ID = "project-1" as ProjectId;
@@ -242,6 +245,17 @@ const worker = setupWorker(
       sendEffectRpcExit(client, parsed.request.id, resolveWsRpc(method));
     });
   }),
+  http.get("*/v1/platform/profile", () =>
+    HttpResponse.json(
+      {
+        error: {
+          code: "control_plane_unavailable",
+          message: "The local browser fixture does not expose an authoritative Control Plane.",
+        },
+      },
+      { status: 503 },
+    ),
+  ),
   http.get("*/attachments/:attachmentId", () => new HttpResponse(null, { status: 204 })),
   http.get("*/api/project-favicon", () => new HttpResponse(null, { status: 204 })),
 );
@@ -305,6 +319,9 @@ async function mountApp(): Promise<{ cleanup: () => Promise<void> }> {
       },
       { timeout: 20_000, interval: 16 },
     );
+    // Allow the root effect to finish registering the config-update listener
+    // after the child route opens the stream.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
   } catch (cause) {
     await screen.unmount();
     if (host.isConnected) host.remove();

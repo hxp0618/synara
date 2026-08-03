@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -124,11 +125,17 @@ type Service struct {
 	identity   *identity.Service
 	cipher     *credentialkms.EnvelopeCipher
 	httpClient *http.Client
+	lookupTXT  func(context.Context, string) ([]string, error)
 	now        func() time.Time
 }
 
 func NewService(db *gorm.DB, identityService *identity.Service, cipher *credentialkms.EnvelopeCipher) *Service {
-	return &Service{db: db, authorizer: authorization.NewAuthorizer(db), identity: identityService, cipher: cipher, httpClient: &http.Client{Timeout: 15 * time.Second}, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{
+		db: db, authorizer: authorization.NewAuthorizer(db), identity: identityService, cipher: cipher,
+		httpClient: &http.Client{Timeout: 15 * time.Second},
+		lookupTXT:  net.DefaultResolver.LookupTXT,
+		now:        func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]Connection, error) {
@@ -154,7 +161,7 @@ func (s *Service) ListPublic(ctx context.Context, tenantSlug string) ([]PublicCo
 	var models []persistence.IdentityConnection
 	err := s.db.WithContext(ctx).Table("identity_connections AS ic").Select("ic.*").
 		Joins("JOIN tenants AS t ON t.id = ic.tenant_id").
-		Where("LOWER(t.slug) = ? AND t.status = ? AND t.deleted_at IS NULL AND ic.status = ?", tenantSlug, "active", "active").
+		Where("LOWER(t.slug) = ? AND t.deleted_at IS NULL AND (t.status = ? OR (t.status = ? AND t.trial_expires_at > CURRENT_TIMESTAMP)) AND ic.status = ?", tenantSlug, "active", "trialing", "active").
 		Order("LOWER(ic.name), ic.id").Find(&models).Error
 	if err != nil {
 		return nil, problem.Wrap(500, "identity_connections_load_failed", "Identity connections could not be loaded.", err)
@@ -196,7 +203,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 		if s.cipher == nil {
 			return Connection{}, problem.New(503, "identity_kms_unavailable", "Identity connection KMS is not configured.")
 		}
-		envelope, err := s.cipher.Encrypt(ctx, protectedSecret, connectionAAD(tenantID, id, normalized.Kind))
+		envelope, err := s.cipher.Encrypt(ctx, protectedSecret, ConnectionEnvelopeAAD(tenantID, id, normalized.Kind))
 		if err != nil {
 			return Connection{}, problem.Wrap(503, "identity_secret_encryption_failed", "Identity connection secret could not be encrypted.", err)
 		}
@@ -225,6 +232,27 @@ func (s *Service) Disable(ctx context.Context, principal identity.Principal, ten
 		return err
 	}
 	return persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var policy persistence.TenantIdentityPolicy
+		policyErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("tenant_id = ?", tenantID).Take(&policy).Error
+		if policyErr != nil && !errors.Is(policyErr, gorm.ErrRecordNotFound) {
+			return policyErr
+		}
+		if policyErr == nil && policy.SSOEnforcement == "required" {
+			var otherActive int64
+			if err := tx.Model(&persistence.IdentityConnection{}).
+				Where("tenant_id = ? AND id <> ? AND status = ?", tenantID, connectionID, "active").Count(&otherActive).Error; err != nil {
+				return err
+			}
+			if otherActive == 0 {
+				return problem.New(409, "sso_enforcement_requires_connection", "Disable SSO enforcement before disabling the last active Identity Connection.")
+			}
+		}
+		now := s.now()
+		if err := tx.Model(&persistence.LoginSession{}).
+			Where("identity_connection_id = ? AND revoked_at IS NULL", connectionID).
+			Update("revoked_at", now).Error; err != nil {
+			return problem.Wrap(500, "identity_connection_session_revoke_failed", "Identity Connection Sessions could not be revoked.", err)
+		}
 		result := tx.Model(&persistence.IdentityConnection{}).Where("tenant_id = ? AND id = ? AND status <> ?", tenantID, connectionID, "disabled").Updates(map[string]any{"status": "disabled", "updated_by": principal.UserID})
 		if result.Error != nil {
 			return result.Error
@@ -246,6 +274,14 @@ func (s *Service) Disable(ctx context.Context, principal identity.Principal, ten
 func (s *Service) ListMappings(ctx context.Context, principal identity.Principal, tenantID, connectionID uuid.UUID) ([]Mapping, error) {
 	if err := s.authorize(ctx, principal, tenantID, authorization.IdentityRead); err != nil {
 		return nil, err
+	}
+	var connection persistence.IdentityConnection
+	if err := s.db.WithContext(ctx).Select("id").
+		Where("tenant_id = ? AND id = ?", tenantID, connectionID).
+		Take(&connection).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, problem.New(404, "identity_connection_not_found", "Identity connection not found.")
+	} else if err != nil {
+		return nil, problem.Wrap(500, "identity_connection_load_failed", "Identity connection could not be loaded.", err)
 	}
 	var models []persistence.IdentityGroupMapping
 	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND connection_id = ?", tenantID, connectionID).Order("LOWER(external_group), organization_id, id").Find(&models).Error; err != nil {
@@ -443,7 +479,7 @@ func (s *Service) loadOIDCConnection(ctx context.Context, connectionID uuid.UUID
 
 func (s *Service) loadActiveConnection(ctx context.Context, connectionID uuid.UUID) (persistence.IdentityConnection, error) {
 	var connection persistence.IdentityConnection
-	err := s.db.WithContext(ctx).Table("identity_connections AS ic").Select("ic.*").Joins("JOIN tenants AS t ON t.id = ic.tenant_id").Where("ic.id = ? AND ic.status = ? AND t.status = ? AND t.deleted_at IS NULL", connectionID, "active", "active").Take(&connection).Error
+	err := s.db.WithContext(ctx).Table("identity_connections AS ic").Select("ic.*").Joins("JOIN tenants AS t ON t.id = ic.tenant_id").Where("ic.id = ? AND ic.status = ? AND t.deleted_at IS NULL AND (t.status = ? OR (t.status = ? AND t.trial_expires_at > CURRENT_TIMESTAMP))", connectionID, "active", "active", "trialing").Take(&connection).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.IdentityConnection{}, problem.New(404, "identity_connection_not_found", "Active identity connection not found.")
 	}
@@ -457,7 +493,7 @@ func (s *Service) createLoginAttempt(ctx context.Context, connection persistence
 	if s.cipher == nil {
 		return problem.New(503, "identity_kms_unavailable", "Identity connection KMS is not configured.")
 	}
-	envelope, err := s.cipher.Encrypt(ctx, payload, attemptAAD(connection.TenantID, attemptID, connection.ID))
+	envelope, err := s.cipher.Encrypt(ctx, payload, LoginAttemptEnvelopeAAD(connection.TenantID, attemptID, connection.ID))
 	if err != nil {
 		return problem.Wrap(503, protocol+"_attempt_encryption_failed", strings.ToUpper(protocol)+" login attempt could not be protected.", err)
 	}
@@ -495,7 +531,7 @@ func (s *Service) restoreAttemptPayload(ctx context.Context, attempt persistence
 	payload, err := s.cipher.Decrypt(ctx, credentialkms.Envelope{
 		EncryptedPayload: attempt.EncryptedPayload, EncryptedDataKey: attempt.EncryptedDataKey,
 		KMSProvider: attempt.KMSProvider, KMSKeyID: attempt.KMSKeyID,
-	}, attemptAAD(attempt.TenantID, attempt.ID, attempt.ConnectionID))
+	}, LoginAttemptEnvelopeAAD(attempt.TenantID, attempt.ID, attempt.ConnectionID))
 	if err != nil {
 		return attemptPayload{}, problem.Wrap(503, protocol+"_attempt_decryption_failed", strings.ToUpper(protocol)+" login attempt could not be restored.", err)
 	}
@@ -525,7 +561,7 @@ func (s *Service) decryptConnectionSecret(ctx context.Context, connection persis
 	if s.cipher == nil || connection.KMSProvider == nil || connection.KMSKeyID == nil {
 		return "", problem.New(503, "identity_kms_unavailable", "Identity connection KMS is not configured.")
 	}
-	plaintext, err := s.cipher.Decrypt(ctx, credentialkms.Envelope{EncryptedPayload: connection.EncryptedSecret, EncryptedDataKey: connection.EncryptedDataKey, KMSProvider: *connection.KMSProvider, KMSKeyID: *connection.KMSKeyID}, connectionAAD(connection.TenantID, connection.ID, connection.Kind))
+	plaintext, err := s.cipher.Decrypt(ctx, credentialkms.Envelope{EncryptedPayload: connection.EncryptedSecret, EncryptedDataKey: connection.EncryptedDataKey, KMSProvider: *connection.KMSProvider, KMSKeyID: *connection.KMSKeyID}, ConnectionEnvelopeAAD(connection.TenantID, connection.ID, connection.Kind))
 	if err != nil {
 		return "", problem.Wrap(503, "identity_secret_decryption_failed", "Identity connection secret could not be decrypted.", err)
 	}
@@ -564,8 +600,8 @@ func (s *Service) resolveGroupGrants(ctx context.Context, connection persistence
 }
 
 func (s *Service) authorize(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, permission authorization.Permission) error {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return problem.New(404, "tenant_not_found", "Tenant not found.")
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return err
 	}
 	_, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, permission)
 	return err
@@ -767,11 +803,11 @@ func normalizeReturnTo(value string) string {
 	return value
 }
 
-func connectionAAD(tenantID, connectionID uuid.UUID, kind string) []byte {
+func ConnectionEnvelopeAAD(tenantID, connectionID uuid.UUID, kind string) []byte {
 	return []byte(strings.Join([]string{"synara-identity-connection-v1", tenantID.String(), connectionID.String(), kind}, "\x00"))
 }
 
-func attemptAAD(tenantID, attemptID, connectionID uuid.UUID) []byte {
+func LoginAttemptEnvelopeAAD(tenantID, attemptID, connectionID uuid.UUID) []byte {
 	return []byte(strings.Join([]string{"synara-identity-attempt-v1", tenantID.String(), attemptID.String(), connectionID.String()}, "\x00"))
 }
 
@@ -790,7 +826,7 @@ func valueOrEmpty(value *string) string {
 	return *value
 }
 
-var tenantRoles = map[string]int{"member": 1, "auditor": 2, "billing_admin": 3, "security_admin": 4, "admin": 5, "owner": 6}
+var tenantRoles = map[string]int{"member": 1, "auditor": 2, "cost_admin": 3, "security_admin": 4, "admin": 5, "owner": 6}
 var organizationRoles = map[string]int{"viewer": 1, "member": 2, "agent_operator": 3, "admin": 4, "owner": 5}
 
 func validTenantRole(role string) bool       { _, valid := tenantRoles[role]; return valid }

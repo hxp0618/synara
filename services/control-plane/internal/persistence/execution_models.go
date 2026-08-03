@@ -134,6 +134,7 @@ type AgentExecution struct {
 	RoutingReason                       *string    `gorm:"column:routing_reason"`
 	SchedulingDecisionID                *uuid.UUID `gorm:"column:scheduling_decision_id;type:uuid"`
 	PredecessorExecutionID              *uuid.UUID `gorm:"column:predecessor_execution_id;type:uuid"`
+	Traceparent                         *string    `gorm:"column:traceparent"`
 	WarmPoolModeSnapshot                string     `gorm:"column:warm_pool_mode_snapshot;default:disabled"`
 	Provider                            *string    `gorm:"column:provider"`
 	WorkerID                            *uuid.UUID `gorm:"column:worker_id;type:uuid"`
@@ -254,15 +255,19 @@ type WorkerLease struct {
 func (WorkerLease) TableName() string { return "worker_leases" }
 
 type WorkerRequestReceipt struct {
-	WorkerID          uuid.UUID      `gorm:"column:worker_id;type:uuid;primaryKey"`
-	WorkerIncarnation int64          `gorm:"column:worker_incarnation;default:1"`
-	RequestID         string         `gorm:"column:request_id;primaryKey"`
-	Operation         string         `gorm:"column:operation"`
-	RequestHash       string         `gorm:"column:request_hash"`
-	StatusCode        int            `gorm:"column:status_code"`
-	Response          map[string]any `gorm:"column:response;serializer:json"`
-	CreatedAt         time.Time      `gorm:"column:created_at"`
-	ExpiresAt         time.Time      `gorm:"column:expires_at"`
+	WorkerID            uuid.UUID      `gorm:"column:worker_id;type:uuid;primaryKey"`
+	WorkerIncarnation   int64          `gorm:"column:worker_incarnation;default:1"`
+	RequestID           string         `gorm:"column:request_id;primaryKey"`
+	Operation           string         `gorm:"column:operation"`
+	RequestHash         string         `gorm:"column:request_hash"`
+	StatusCode          int            `gorm:"column:status_code"`
+	Response            map[string]any `gorm:"column:response;serializer:json"`
+	TenantID            *uuid.UUID     `gorm:"column:tenant_id;type:uuid"`
+	ExecutionID         *uuid.UUID     `gorm:"column:execution_id;type:uuid"`
+	ExecutionTargetID   *uuid.UUID     `gorm:"column:execution_target_id;type:uuid"`
+	ExecutionGeneration *int64         `gorm:"column:execution_generation"`
+	CreatedAt           time.Time      `gorm:"column:created_at"`
+	ExpiresAt           time.Time      `gorm:"column:expires_at"`
 }
 
 func (WorkerRequestReceipt) TableName() string { return "worker_request_receipts" }
@@ -275,6 +280,7 @@ type ExecutionTarget struct {
 	Name                   string         `gorm:"column:name"`
 	Status                 string         `gorm:"column:status"`
 	ConfigurationEncrypted []byte         `gorm:"column:configuration_encrypted"`
+	ConfigurationKeyID     *string        `gorm:"column:configuration_key_id"`
 	Capabilities           map[string]any `gorm:"column:capabilities;serializer:json"`
 	SSHOperationGeneration int64          `gorm:"column:ssh_operation_generation;not null;default:0"`
 	SSHOperationKind       *string        `gorm:"column:ssh_operation_kind"`

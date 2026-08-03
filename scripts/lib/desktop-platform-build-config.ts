@@ -11,8 +11,13 @@ export const MAC_INHERITED_ENTITLEMENTS_PATH =
 export const MAC_APPSNAP_HELPER_STAGE_PATH =
   "apps/desktop/native/appsnap/build/synara-appsnap-helper";
 export const MAC_APPSNAP_HELPER_ASAR_EXCLUSION = "!apps/desktop/native/appsnap/build/**";
+export const MAC_X64_PREBUILD_EXCLUSION = "!**/prebuilds/darwin-x64/**";
+export const MAC_ARM64_PREBUILD_EXCLUSION = "!**/prebuilds/darwin-arm64/**";
 export const MAC_APPSNAP_HELPER_BUNDLE_PATH = "Contents/Helpers/synara-appsnap-helper";
 export const WINDOWS_INSTALLER_GUID = "368107a8-afe6-5db5-ab3b-d4f331684868";
+export const DESKTOP_ENROLLMENT_PROTOCOLS = [
+  { name: "Synara Desktop Enrollment", schemes: ["synara"] },
+] as const;
 const MAC_DMG_ICON_PATH = "icon.icns";
 export const NODE_PTY_ASAR_UNPACK_GLOBS = ["node_modules/node-pty/**"] as const;
 
@@ -24,13 +29,19 @@ export interface DesktopPlatformBuildConfig {
   readonly linux?: Record<string, unknown>;
   readonly mac?: Record<string, unknown>;
   readonly nsis?: Record<string, unknown>;
+  readonly protocols?: ReadonlyArray<{
+    readonly name: string;
+    readonly schemes: ReadonlyArray<string>;
+  }>;
   readonly win?: Record<string, unknown>;
 }
 
 export interface CreateDesktopPlatformBuildConfigInput {
   readonly platform: "linux" | "mac" | "win";
   readonly target: string;
+  readonly arch?: "arm64" | "x64" | "universal";
   readonly signed?: boolean;
+  readonly macDevelopmentIdentity?: string;
   readonly windowsAzureSignOptions?: Record<string, string>;
 }
 
@@ -39,6 +50,33 @@ export interface DesktopNativeBuildHostInput {
   readonly hostArch: string;
   readonly hostPlatform: NodeJS.Platform;
   readonly platform: "linux" | "mac" | "win";
+}
+
+export interface DesktopDependencyInstallTarget {
+  readonly cpu: "arm64" | "x64" | "*";
+  readonly os: "darwin" | "linux" | "win32";
+}
+
+export function resolveDesktopArtifactName(input: {
+  readonly platform: "linux" | "mac" | "win";
+  readonly signed?: boolean;
+  readonly macDevelopmentIdentity?: string;
+}): string {
+  const unsignedMacBuild =
+    input.platform === "mac" && input.signed !== true && !input.macDevelopmentIdentity?.trim();
+  return unsignedMacBuild
+    ? "Synara-${version}-${arch}-unsigned-build-only.${ext}"
+    : "Synara-${version}-${arch}.${ext}";
+}
+
+export function resolveDesktopDependencyInstallTarget(input: {
+  readonly arch: "arm64" | "x64" | "universal";
+  readonly platform: "linux" | "mac" | "win";
+}): DesktopDependencyInstallTarget {
+  return {
+    cpu: input.arch === "universal" ? "*" : input.arch,
+    os: input.platform === "mac" ? "darwin" : input.platform === "win" ? "win32" : "linux",
+  };
 }
 
 export function validateDesktopNativeBuildHost(input: DesktopNativeBuildHostInput): string | null {
@@ -66,17 +104,31 @@ export function createDesktopPlatformBuildConfig(
   input: CreateDesktopPlatformBuildConfigInput,
 ): DesktopPlatformBuildConfig {
   const nativePackaging = { asarUnpack: [...NODE_PTY_ASAR_UNPACK_GLOBS] };
+  const desktopEnrollmentProtocol = {
+    protocols: DESKTOP_ENROLLMENT_PROTOCOLS.map((protocol) => ({
+      name: protocol.name,
+      schemes: [...protocol.schemes],
+    })),
+  };
 
   if (input.platform === "mac") {
+    const codeSigned = input.signed === true || Boolean(input.macDevelopmentIdentity);
+    const oppositeArchPrebuildExclusion =
+      input.arch === "arm64"
+        ? MAC_X64_PREBUILD_EXCLUSION
+        : input.arch === "x64"
+          ? MAC_ARM64_PREBUILD_EXCLUSION
+          : undefined;
     const mac = {
       target: input.target === "dmg" ? [input.target, "zip"] : [input.target],
       icon: MAC_DMG_ICON_PATH,
       category: "public.app-category.developer-tools",
-      hardenedRuntime: input.signed === true,
+      hardenedRuntime: codeSigned,
       notarize: input.signed === true,
       entitlements: MAC_ENTITLEMENTS_PATH,
       entitlementsInherit: MAC_INHERITED_ENTITLEMENTS_PATH,
       binaries: [MAC_APPSNAP_HELPER_BUNDLE_PATH],
+      ...(input.macDevelopmentIdentity ? { identity: input.macDevelopmentIdentity } : {}),
       // The universal build stages the same pre-lipo'd helper in both app trees.
       // @electron/universal needs this pattern to preserve that existing fat binary.
       x64ArchFiles: MAC_APPSNAP_HELPER_BUNDLE_PATH,
@@ -87,14 +139,21 @@ export function createDesktopPlatformBuildConfig(
 
     return {
       ...nativePackaging,
+      ...desktopEnrollmentProtocol,
       dmg: {
+        // Apple Development signing is intentionally app-only local QA. A distributable
+        // DMG is signed, notarized, and stapled only by the production `signed` flow.
         sign: input.signed === true,
         // The signed release flow notarizes and staples the DMG after electron-builder exits.
         // Do not emit a blockmap/update entry whose hashes would describe the pre-stapled image;
         // macOS auto-updates use the separately finalized ZIP artifact.
         writeUpdateInfo: false,
       },
-      files: ["**/*", MAC_APPSNAP_HELPER_ASAR_EXCLUSION],
+      files: [
+        "**/*",
+        MAC_APPSNAP_HELPER_ASAR_EXCLUSION,
+        ...(oppositeArchPrebuildExclusion ? [oppositeArchPrebuildExclusion] : []),
+      ],
       extraFiles: [
         {
           from: MAC_APPSNAP_HELPER_STAGE_PATH,
@@ -108,6 +167,7 @@ export function createDesktopPlatformBuildConfig(
   if (input.platform === "linux") {
     return {
       ...nativePackaging,
+      ...desktopEnrollmentProtocol,
       linux: {
         target: [input.target],
         executableName: "synara",
@@ -124,6 +184,7 @@ export function createDesktopPlatformBuildConfig(
 
   return {
     ...nativePackaging,
+    ...desktopEnrollmentProtocol,
     // Keep the Windows product registration stable while the public app ID changes.
     // This lets NSIS updates replace the existing installation and own its uninstaller.
     nsis: {

@@ -459,6 +459,28 @@ export interface SynaraStorageSnapshot {
   readonly entries: Readonly<Record<string, string>>;
 }
 
+export type DesktopSaaSConnectionState = {
+  readonly status: "disconnected" | "connecting" | "connected" | "disconnecting" | "error";
+  readonly controlPlaneBaseUrl: string | null;
+  readonly deviceId: string | null;
+  readonly userId: string | null;
+  readonly email: string | null;
+  readonly displayName: string | null;
+  readonly tenantId: string | null;
+  readonly tenantName: string | null;
+  readonly organizationId: string | null;
+  readonly organizationName: string | null;
+  readonly credentialExpiresAt: string | null;
+  readonly message: string | null;
+};
+
+export type DesktopConnectionMode = "unselected" | "local" | "cloud";
+
+export type DesktopConnectionModeState = {
+  readonly mode: DesktopConnectionMode;
+  readonly persisted: boolean;
+};
+
 export interface DesktopBridge {
   getWsUrl: () => string | null;
   /**
@@ -523,6 +545,16 @@ export interface DesktopBridge {
   storageMigration: {
     readSnapshot: () => SynaraStorageSnapshot | null;
     acknowledgeSnapshot: () => Promise<void>;
+  };
+  saas?: {
+    getMode: () => Promise<DesktopConnectionModeState>;
+    setMode: (
+      mode: Exclude<DesktopConnectionMode, "unselected">,
+    ) => Promise<DesktopConnectionModeState>;
+    onMode: (listener: (state: DesktopConnectionModeState) => void) => () => void;
+    getState: () => Promise<DesktopSaaSConnectionState>;
+    disconnect: () => Promise<DesktopSaaSConnectionState>;
+    onState: (listener: (state: DesktopSaaSConnectionState) => void) => () => void;
   };
   server?: {
     transcribeVoice: (

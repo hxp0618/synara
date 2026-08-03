@@ -111,14 +111,14 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 	if input.ExecutionTargetID == uuid.Nil {
 		return SharedActualInvoiceAllocationResult{}, problem.New(
 			400,
-			"billing_shared_target_required",
+			"cost_accounting_shared_target_required",
 			"executionTargetId is required.",
 		)
 	}
 	if input.InvoiceImportID == uuid.Nil {
 		return SharedActualInvoiceAllocationResult{}, problem.New(
 			400,
-			"billing_shared_actual_invoice_required",
+			"cost_accounting_shared_actual_invoice_required",
 			"invoiceImportId is required.",
 		)
 	}
@@ -126,7 +126,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 	if !sharedLedgerAttestationPattern.MatchString(input.SourceScopeAttestationSHA256) {
 		return SharedActualInvoiceAllocationResult{}, problem.New(
 			400,
-			"billing_shared_actual_source_scope_attestation_invalid",
+			"cost_accounting_shared_actual_source_scope_attestation_invalid",
 			"sourceScopeAttestationSHA256 must be a lowercase SHA-256 digest.",
 		)
 	}
@@ -141,7 +141,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		if err := acquireSharedActualInvoiceLock(ctx, tx, operatorTenantID, input.InvoiceImportID); err != nil {
 			return problem.Wrap(
 				500,
-				"billing_shared_actual_allocation_lock_failed",
+				"cost_accounting_shared_actual_allocation_lock_failed",
 				"The shared actual-invoice allocation identity could not be locked.",
 				err,
 			)
@@ -155,7 +155,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		if invoiceImport.BillingPeriodEndAt.UTC().After(now) {
 			return problem.New(
 				409,
-				"billing_shared_actual_invoice_period_open",
+				"cost_accounting_shared_actual_invoice_period_open",
 				"Shared actual-invoice allocation requires a billing period that has already closed.",
 			)
 		}
@@ -169,7 +169,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		); err != nil {
 			return problem.Wrap(
 				500,
-				"billing_shared_actual_snapshot_lock_failed",
+				"cost_accounting_shared_actual_snapshot_lock_failed",
 				"The shared estimate snapshot could not be locked.",
 				err,
 			)
@@ -211,7 +211,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 				!sameSharedActualChargeSlices(existingSlices, plan.Slices) {
 				return problem.New(
 					409,
-					"billing_shared_actual_allocation_conflict",
+					"cost_accounting_shared_actual_allocation_conflict",
 					"The existing shared actual-invoice allocation does not match the sealed invoice and estimate evidence.",
 				)
 			}
@@ -230,7 +230,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		if err := tx.WithContext(ctx).Omit(clause.Associations).Create(&buildingRun).Error; err != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_actual_allocation_create_failed",
+				"cost_accounting_shared_actual_allocation_create_failed",
 				"The shared actual-invoice allocation run could not be created.",
 				err,
 			)
@@ -239,7 +239,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 			CreateInBatches(&plan.Lines, sharedActualAllocationInsertBatchSize).Error; err != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_actual_allocation_line_create_failed",
+				"cost_accounting_shared_actual_allocation_line_create_failed",
 				"The shared actual-invoice allocation lines could not be created.",
 				err,
 			)
@@ -248,7 +248,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 			CreateInBatches(&plan.Slices, sharedActualAllocationInsertBatchSize).Error; err != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_actual_allocation_slice_create_failed",
+				"cost_accounting_shared_actual_allocation_slice_create_failed",
 				"The shared actual-invoice allocation slices could not be created.",
 				err,
 			)
@@ -263,7 +263,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		if seal.Error != nil {
 			return problem.Wrap(
 				409,
-				"billing_shared_actual_allocation_seal_failed",
+				"cost_accounting_shared_actual_allocation_seal_failed",
 				"The shared actual-invoice allocation did not pass conservation sealing.",
 				seal.Error,
 			)
@@ -271,7 +271,7 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 		if seal.RowsAffected != 1 {
 			return problem.New(
 				409,
-				"billing_shared_actual_allocation_seal_conflict",
+				"cost_accounting_shared_actual_allocation_seal_conflict",
 				"The shared actual-invoice allocation could not be sealed from its expected state.",
 			)
 		}
@@ -279,8 +279,8 @@ func (s *Service) AllocateSharedActualInvoiceAuthorized(
 			TenantID:     operatorTenantID,
 			ActorType:    "user",
 			ActorID:      &principal.UserID,
-			Action:       "billing.shared_actual_invoice_allocated",
-			ResourceType: "billing_shared_actual_allocation_run",
+			Action:       "cost_accounting.shared_actual_invoice_allocated",
+			ResourceType: "cost_accounting_shared_actual_allocation_run",
 			ResourceID:   &plan.Run.ID,
 			RequestID:    requestID,
 			IPAddress:    ipAddress,
@@ -365,14 +365,14 @@ func loadSharedActualInvoiceImport(
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.BillingActualInvoiceImport{}, problem.New(
 			404,
-			"billing_shared_actual_invoice_not_found",
+			"cost_accounting_shared_actual_invoice_not_found",
 			"The operator-owned actual invoice import was not found.",
 		)
 	}
 	if err != nil {
 		return persistence.BillingActualInvoiceImport{}, problem.Wrap(
 			500,
-			"billing_shared_actual_invoice_load_failed",
+			"cost_accounting_shared_actual_invoice_load_failed",
 			"The operator-owned actual invoice import could not be loaded.",
 			err,
 		)
@@ -396,7 +396,7 @@ func buildSharedActualAllocationPlan(
 	if importAggregate.LineCount <= 0 {
 		return sharedActualAllocationPlan{}, problem.New(
 			409,
-			"billing_shared_actual_invoice_empty",
+			"cost_accounting_shared_actual_invoice_empty",
 			"The actual invoice import has no immutable lines to allocate.",
 		)
 	}
@@ -427,14 +427,14 @@ func buildSharedActualAllocationPlan(
 	if matchCount <= 0 {
 		return sharedActualAllocationPlan{}, problem.New(
 			409,
-			"billing_shared_actual_allocation_basis_missing",
+			"cost_accounting_shared_actual_allocation_basis_missing",
 			"No shared estimated charge slices exactly match this invoice and Target.",
 		)
 	}
 	if matchCount > sharedActualAllocationMaxSlices {
 		return sharedActualAllocationPlan{}, problem.New(
 			409,
-			"billing_shared_actual_allocation_too_large",
+			"cost_accounting_shared_actual_allocation_too_large",
 			"The shared actual-invoice allocation exceeds the bounded slice limit.",
 		)
 	}
@@ -457,7 +457,7 @@ func buildSharedActualAllocationPlan(
 	if len(plannedLines) > sharedActualAllocationMaxLines {
 		return sharedActualAllocationPlan{}, problem.New(
 			409,
-			"billing_shared_actual_allocation_too_large",
+			"cost_accounting_shared_actual_allocation_too_large",
 			"The shared actual-invoice allocation exceeds the bounded line limit.",
 		)
 	}
@@ -511,7 +511,7 @@ func buildSharedActualAllocationPlan(
 		if err != nil {
 			return sharedActualAllocationPlan{}, problem.Wrap(
 				409,
-				"billing_shared_actual_allocation_amount_overflow",
+				"cost_accounting_shared_actual_allocation_amount_overflow",
 				"The selected actual invoice line total exceeds the supported micros range.",
 				err,
 			)
@@ -572,7 +572,7 @@ func loadSharedActualImportAggregate(
 	if err != nil {
 		return sharedActualImportAggregate{}, problem.Wrap(
 			500,
-			"billing_shared_actual_invoice_aggregate_failed",
+			"cost_accounting_shared_actual_invoice_aggregate_failed",
 			"The actual invoice import totals could not be loaded.",
 			err,
 		)
@@ -585,7 +585,7 @@ func parseSharedActualAggregate(value string) (int64, error) {
 	if _, ok := parsed.SetString(strings.TrimSpace(value), 10); !ok || !parsed.IsInt64() {
 		return 0, problem.New(
 			409,
-			"billing_shared_actual_allocation_amount_overflow",
+			"cost_accounting_shared_actual_allocation_amount_overflow",
 			"The actual invoice total exceeds the supported micros range.",
 		)
 	}
@@ -621,7 +621,7 @@ func rejectAmbiguousSharedActualMatches(
 	if err != nil {
 		return problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_ambiguity_probe_failed",
+			"cost_accounting_shared_actual_allocation_ambiguity_probe_failed",
 			"The shared actual-invoice allocation scope could not be checked.",
 			err,
 		)
@@ -629,7 +629,7 @@ func rejectAmbiguousSharedActualMatches(
 	if ambiguous > 0 {
 		return problem.New(
 			409,
-			"billing_shared_actual_allocation_target_ambiguous",
+			"cost_accounting_shared_actual_allocation_target_ambiguous",
 			"At least one actual invoice line matches shared estimate history in more than one Target.",
 		)
 	}
@@ -647,7 +647,7 @@ func countSharedActualMatches(
 	if err != nil {
 		return 0, problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_match_count_failed",
+			"cost_accounting_shared_actual_allocation_match_count_failed",
 			"The matching shared estimate slices could not be counted.",
 			err,
 		)
@@ -677,7 +677,7 @@ func loadSharedActualMatches(
 	if err != nil {
 		return nil, problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_matches_load_failed",
+			"cost_accounting_shared_actual_allocation_matches_load_failed",
 			"The matching shared estimate slices could not be loaded.",
 			err,
 		)
@@ -685,7 +685,7 @@ func loadSharedActualMatches(
 	if int64(len(rows)) != expectedCount {
 		return nil, problem.New(
 			409,
-			"billing_shared_actual_allocation_snapshot_changed",
+			"cost_accounting_shared_actual_allocation_snapshot_changed",
 			"The shared estimate snapshot changed while actual allocation was being planned.",
 		)
 	}
@@ -716,7 +716,7 @@ func groupSharedActualMatches(rows []sharedActualMatchRow) ([]sharedActualPlanne
 		if row.ActualInvoiceLineID == uuid.Nil || row.EstimatedSliceID == uuid.Nil || row.EstimatedAmountMicros < 0 {
 			return nil, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_invalid",
+				"cost_accounting_shared_actual_allocation_basis_invalid",
 				"A matching shared estimate slice has an invalid immutable allocation weight.",
 			)
 		}
@@ -724,14 +724,14 @@ func groupSharedActualMatches(rows []sharedActualMatchRow) ([]sharedActualPlanne
 			row.EstimatedAllocation != SharedAllocationKindPlatformIdle {
 			return nil, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_invalid",
+				"cost_accounting_shared_actual_allocation_basis_invalid",
 				"A matching shared estimate slice has an invalid allocation kind.",
 			)
 		}
 		if (row.EstimatedAllocation == SharedAllocationKindTenantClaim) != (row.EstimatedTenantID != nil) {
 			return nil, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_invalid",
+				"cost_accounting_shared_actual_allocation_basis_invalid",
 				"A matching shared estimate slice has inconsistent Tenant attribution.",
 			)
 		}
@@ -746,14 +746,14 @@ func groupSharedActualMatches(rows []sharedActualMatchRow) ([]sharedActualPlanne
 		if line.ExternalLineID != row.ExternalLineID || line.SourceAmountMicros != row.SourceAmountMicros {
 			return nil, problem.New(
 				409,
-				"billing_shared_actual_allocation_source_changed",
+				"cost_accounting_shared_actual_allocation_source_changed",
 				"An immutable actual invoice line changed while allocation was being planned.",
 			)
 		}
 		if len(line.Matches) > 0 && line.Matches[len(line.Matches)-1].EstimatedSliceID == row.EstimatedSliceID {
 			return nil, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_duplicate",
+				"cost_accounting_shared_actual_allocation_basis_duplicate",
 				"A shared estimate slice matched the same actual invoice line more than once.",
 			)
 		}
@@ -768,7 +768,7 @@ func allocateSharedActualMicros(total int64, weights []int64) ([]int64, int64, e
 		if weight < 0 {
 			return nil, 0, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_invalid",
+				"cost_accounting_shared_actual_allocation_basis_invalid",
 				"Shared actual-invoice allocation weights cannot be negative.",
 			)
 		}
@@ -777,7 +777,7 @@ func allocateSharedActualMicros(total int64, weights []int64) ([]int64, int64, e
 	if !weightTotal.IsInt64() {
 		return nil, 0, problem.New(
 			409,
-			"billing_shared_actual_allocation_amount_overflow",
+			"cost_accounting_shared_actual_allocation_amount_overflow",
 			"The shared estimate allocation basis exceeds the supported micros range.",
 		)
 	}
@@ -787,7 +787,7 @@ func allocateSharedActualMicros(total int64, weights []int64) ([]int64, int64, e
 		if total != 0 {
 			return nil, 0, problem.New(
 				409,
-				"billing_shared_actual_allocation_basis_zero",
+				"cost_accounting_shared_actual_allocation_basis_zero",
 				"A nonzero actual invoice line cannot be allocated over a zero estimated-cost basis.",
 			)
 		}
@@ -808,7 +808,7 @@ func allocateSharedActualMicros(total int64, weights []int64) ([]int64, int64, e
 		if !delta.IsInt64() {
 			return nil, 0, problem.New(
 				409,
-				"billing_shared_actual_allocation_amount_overflow",
+				"cost_accounting_shared_actual_allocation_amount_overflow",
 				"A proportional actual-invoice slice exceeds the supported micros range.",
 			)
 		}
@@ -869,7 +869,7 @@ func sharedActualCanonicalSHA256(value any) (string, error) {
 	if err != nil {
 		return "", problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_digest_failed",
+			"cost_accounting_shared_actual_allocation_digest_failed",
 			"The shared actual-invoice allocation digest could not be created.",
 			err,
 		)
@@ -883,7 +883,7 @@ func subtractSharedActualInt64(left, right int64) (int64, error) {
 	if !value.IsInt64() {
 		return 0, problem.New(
 			409,
-			"billing_shared_actual_allocation_amount_overflow",
+			"cost_accounting_shared_actual_allocation_amount_overflow",
 			"The unallocated actual invoice total exceeds the supported micros range.",
 		)
 	}
@@ -932,7 +932,7 @@ func loadSharedActualAllocationRun(
 	if err != nil {
 		return persistence.BillingSharedActualAllocationRun{}, false, problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_load_failed",
+			"cost_accounting_shared_actual_allocation_load_failed",
 			"The shared actual-invoice allocation run could not be loaded.",
 			err,
 		)
@@ -952,7 +952,7 @@ func loadSharedActualAllocationGraph(
 		Find(&lines).Error; err != nil {
 		return nil, nil, problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_lines_load_failed",
+			"cost_accounting_shared_actual_allocation_lines_load_failed",
 			"The shared actual-invoice allocation lines could not be loaded.",
 			err,
 		)
@@ -967,7 +967,7 @@ func loadSharedActualAllocationGraph(
 		Find(&slices).Error; err != nil {
 		return nil, nil, problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_slices_load_failed",
+			"cost_accounting_shared_actual_allocation_slices_load_failed",
 			"The shared actual-invoice allocation slices could not be loaded.",
 			err,
 		)
@@ -1002,7 +1002,7 @@ func rejectOccupiedSharedActualAuthorities(
 		Scan(&occupiedLines).Error; err != nil {
 		return problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_occupancy_probe_failed",
+			"cost_accounting_shared_actual_allocation_occupancy_probe_failed",
 			"Existing shared actual-invoice allocation lines could not be checked.",
 			err,
 		)
@@ -1010,7 +1010,7 @@ func rejectOccupiedSharedActualAuthorities(
 	if occupiedLines > 0 {
 		return problem.New(
 			409,
-			"billing_shared_actual_invoice_line_already_allocated",
+			"cost_accounting_shared_actual_invoice_line_already_allocated",
 			"At least one actual invoice line already belongs to another immutable shared allocation.",
 		)
 	}
@@ -1036,7 +1036,7 @@ func rejectOccupiedSharedActualAuthorities(
 		Scan(&occupiedSlices).Error; err != nil {
 		return problem.Wrap(
 			500,
-			"billing_shared_actual_allocation_occupancy_probe_failed",
+			"cost_accounting_shared_actual_allocation_occupancy_probe_failed",
 			"Existing shared actual-invoice allocation slices could not be checked.",
 			err,
 		)
@@ -1044,7 +1044,7 @@ func rejectOccupiedSharedActualAuthorities(
 	if occupiedSlices > 0 {
 		return problem.New(
 			409,
-			"billing_shared_estimate_slice_already_allocated",
+			"cost_accounting_shared_estimate_slice_already_allocated",
 			"At least one shared estimate slice already belongs to another immutable actual allocation.",
 		)
 	}

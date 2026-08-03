@@ -3,7 +3,7 @@ import type {
   ControlPlanePlatformProfile,
   ControlPlaneResourceLifecycleConfig,
   ControlPlaneResourceLifecycleEffective,
-} from "./controlPlaneClient";
+} from "@synara/control-plane-client";
 
 export const testResourceLifecycleEffective: ControlPlaneResourceLifecycleEffective = {
   waitingKeepAliveSeconds: 900,
@@ -76,6 +76,8 @@ export function createTestPlatformProfile(
     artifactPayloadMigration: false,
     metadataExportImport: false,
     resourceLifecyclePolicy: testResourceLifecycleConfig,
+    internalStatusBoard: { configured: false },
+    commercializationMode: "internal-self-hosted",
     ...overrides,
   };
 }

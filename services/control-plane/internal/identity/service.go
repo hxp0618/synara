@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/productprofile"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
@@ -35,21 +37,28 @@ type PersonalDomain struct {
 }
 
 type Principal struct {
-	UserID         uuid.UUID  `json:"userId"`
-	SessionID      uuid.UUID  `json:"sessionId"`
-	ActiveTenantID *uuid.UUID `json:"activeTenantId"`
-	Email          string     `json:"email"`
-	DisplayName    string     `json:"displayName"`
+	UserID               uuid.UUID  `json:"userId"`
+	SessionID            uuid.UUID  `json:"sessionId"`
+	ActiveTenantID       *uuid.UUID `json:"activeTenantId"`
+	SupportAccessGrantID *uuid.UUID `json:"supportAccessGrantId"`
+	Audience             string     `json:"audience"`
+	DesktopDeviceID      *uuid.UUID `json:"desktopDeviceId,omitempty"`
+	Email                string     `json:"email"`
+	DisplayName          string     `json:"displayName"`
 }
 
 type TenantAccess struct {
-	ID       uuid.UUID `json:"id"`
-	Slug     string    `json:"slug"`
-	Name     string    `json:"name"`
-	Status   string    `json:"status"`
-	PlanCode string    `json:"planCode"`
-	Region   string    `json:"region"`
-	Role     string    `json:"role"`
+	ID               uuid.UUID  `json:"id"`
+	Slug             string     `json:"slug"`
+	Name             string     `json:"name"`
+	Status           string     `json:"status"`
+	LifecycleVersion int64      `json:"lifecycleVersion"`
+	TrialExpiresAt   *time.Time `json:"evaluationExpiresAt"`
+	SuspendedAt      *time.Time `json:"suspendedAt"`
+	ClosedAt         *time.Time `json:"closedAt"`
+	PlanCode         string     `json:"entitlementProfileCode"`
+	Region           string     `json:"region"`
+	Role             string     `json:"role"`
 }
 
 type SessionState struct {
@@ -101,6 +110,65 @@ func NewService(db *gorm.DB, sessionTTL, sessionIdleTTL time.Duration, personal 
 }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (Principal, error) {
+	return s.authenticateAudience(ctx, token, "web")
+}
+
+func (s *Service) AuthenticateDesktop(ctx context.Context, token string) (Principal, error) {
+	return s.AuthenticateDesktopRequest(ctx, token, "", "")
+}
+
+func (s *Service) AuthenticateDesktopRequest(
+	ctx context.Context,
+	token, requestID, ipAddress string,
+) (Principal, error) {
+	principal, err := s.authenticateAudience(ctx, token, "desktop")
+	if err == nil || strings.TrimSpace(token) == "" {
+		return principal, err
+	}
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Status != 401 {
+		return Principal{}, err
+	}
+	hash := sha256.Sum256([]byte(token))
+	var replayed persistence.LoginSession
+	lookupErr := s.db.WithContext(ctx).
+		Where("refresh_token_hash = ? AND audience = ?", hash[:], "desktop").
+		Take(&replayed).Error
+	if lookupErr != nil || replayed.RotatedToSessionID == nil || replayed.CredentialFamilyID == nil ||
+		replayed.DesktopDeviceID == nil || replayed.ActiveTenantID == nil {
+		return Principal{}, problem.New(401, "invalid_desktop_session", "The Desktop session is invalid or expired.")
+	}
+	now := s.now()
+	if requestID == "" {
+		requestID = "desktop-replay-" + uuid.NewString()
+	}
+	replayErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.WithContext(ctx).Model(&persistence.LoginSession{}).
+			Where("credential_family_id = ? AND audience = ? AND revoked_at IS NULL", *replayed.CredentialFamilyID, "desktop").
+			Update("revoked_at", now).Error; err != nil {
+			return err
+		}
+		if err := tx.WithContext(ctx).Model(&persistence.LoginSession{}).
+			Where("id = ? AND replay_detected_at IS NULL", replayed.ID).
+			Update("replay_detected_at", now).Error; err != nil {
+			return err
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: *replayed.ActiveTenantID, ActorType: "user", ActorID: &replayed.UserID,
+			Action: "desktop.device_credential_replay_detected", ResourceType: "desktop_device", ResourceID: replayed.DesktopDeviceID,
+			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{
+				"sessionId": replayed.ID, "credentialFamilyId": *replayed.CredentialFamilyID,
+			},
+		})
+	})
+	if replayErr != nil {
+		return Principal{}, problem.Wrap(500, "desktop_credential_replay_revoke_failed", "The Desktop credential replay boundary could not be enforced.", replayErr)
+	}
+	return Principal{}, problem.New(401, "invalid_desktop_session", "The Desktop session is invalid or expired.")
+}
+
+func (s *Service) authenticateAudience(ctx context.Context, token, audience string) (Principal, error) {
 	if strings.TrimSpace(token) == "" {
 		return Principal{}, problem.New(401, "authentication_required", "Authentication is required.")
 	}
@@ -109,9 +177,10 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	var principal Principal
 	err := s.db.WithContext(ctx).
 		Table("login_sessions AS ls").
-		Select("ls.user_id, ls.id AS session_id, ls.active_tenant_id, u.email, u.display_name").
+		Select("ls.user_id, ls.id AS session_id, ls.active_tenant_id, ls.audience, ls.desktop_device_id, u.email, u.display_name").
 		Joins("JOIN users AS u ON u.id = ls.user_id").
 		Where("ls.refresh_token_hash = ?", hash[:]).
+		Where("ls.audience = ?", audience).
 		Where("ls.revoked_at IS NULL AND ls.expires_at > ? AND ls.last_seen_at > ?", now, now.Add(-s.sessionIdleTTL)).
 		Where("u.status = ? AND u.deleted_at IS NULL", "active").
 		Take(&principal).Error
@@ -120,6 +189,52 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	}
 	if err != nil {
 		return Principal{}, problem.Wrap(500, "session_lookup_failed", "Failed to load the login session.", err)
+	}
+	if audience == "desktop" && principal.DesktopDeviceID == nil {
+		return Principal{}, problem.New(401, "invalid_desktop_session", "The Desktop session is invalid or expired.")
+	}
+	if audience == "desktop" {
+		var deviceCount int64
+		if err := s.db.WithContext(ctx).Model(&persistence.DesktopDevice{}).
+			Where("id = ? AND user_id = ? AND status = ?", *principal.DesktopDeviceID, principal.UserID, "active").
+			Count(&deviceCount).Error; err != nil {
+			return Principal{}, problem.Wrap(500, "desktop_device_lookup_failed", "The Desktop device could not be validated.", err)
+		}
+		if deviceCount != 1 {
+			return Principal{}, problem.New(401, "invalid_desktop_session", "The Desktop session is invalid or expired.")
+		}
+	}
+	if principal.ActiveTenantID != nil {
+		var membershipCount int64
+		membershipQuery := s.db.WithContext(ctx).Model(&persistence.TenantMembership{}).
+			Joins("JOIN tenants ON tenants.id = tenant_memberships.tenant_id").
+			Where("tenant_memberships.tenant_id = ? AND tenant_memberships.user_id = ? AND tenant_memberships.status = ?", *principal.ActiveTenantID, principal.UserID, "active")
+		if audience == "desktop" {
+			membershipQuery = membershipQuery.Where("tenants.status IN ? AND tenants.deleted_at IS NULL", []string{"trialing", "active"})
+		}
+		if err := membershipQuery.
+			Count(&membershipCount).Error; err != nil {
+			return Principal{}, problem.Wrap(500, "session_tenant_access_failed", "Active Tenant access could not be validated.", err)
+		}
+		if membershipCount == 0 {
+			if audience == "desktop" {
+				return Principal{}, problem.New(401, "invalid_desktop_session", "The Desktop session is invalid or expired.")
+			}
+			grantID, active, err := s.authorizer.ActiveSupportGrant(ctx, principal.UserID, *principal.ActiveTenantID)
+			if err != nil {
+				return Principal{}, err
+			}
+			if active {
+				principal.SupportAccessGrantID = &grantID
+			} else {
+				if err := s.db.WithContext(ctx).Model(&persistence.LoginSession{}).
+					Where("id = ? AND user_id = ? AND revoked_at IS NULL", principal.SessionID, principal.UserID).
+					Update("active_tenant_id", nil).Error; err != nil {
+					return Principal{}, problem.Wrap(500, "active_tenant_clear_failed", "Expired active Tenant access could not be cleared.", err)
+				}
+				principal.ActiveTenantID = nil
+			}
+		}
 	}
 
 	refreshInterval := 5 * time.Minute
@@ -194,6 +309,7 @@ func (s *Service) DevLogin(
 		now := s.now()
 		return tx.Create(&persistence.LoginSession{
 			ID: sessionID, UserID: userID, ActiveTenantID: &activeTenantID,
+			AuthMethod: "local", Audience: "web",
 			RefreshTokenHash: tokenHash, IPAddress: optionalString(ipAddress),
 			UserAgent: optionalString(userAgent), ExpiresAt: now.Add(s.sessionTTL), LastSeenAt: now,
 		}).Error
@@ -208,7 +324,7 @@ func (s *Service) DevLogin(
 
 	principal := Principal{
 		UserID: userID, SessionID: sessionID, ActiveTenantID: &activeTenantID,
-		Email: email, DisplayName: displayName,
+		Audience: "web", Email: email, DisplayName: displayName,
 	}
 	state, err := s.GetSessionState(ctx, principal)
 	if err != nil {
@@ -297,6 +413,9 @@ func (s *Service) CompleteExternalLogin(
 		membershipErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("tenant_id = ? AND user_id = ?", input.TenantID, userID).Take(&current).Error
 		tenantRole := input.TenantRole
 		if membershipErr == nil {
+			if current.Status != "active" {
+				return problem.New(403, "external_identity_membership_suspended", "This enterprise membership is suspended and must be reactivated by the identity administrator.")
+			}
 			tenantRole = strongerTenantRole(current.Role, tenantRole)
 		} else if !errors.Is(membershipErr, gorm.ErrRecordNotFound) {
 			return membershipErr
@@ -327,7 +446,8 @@ func (s *Service) CompleteExternalLogin(
 		}
 		sessionID = uuid.New()
 		if err := tx.Create(&persistence.LoginSession{
-			ID: sessionID, UserID: userID, ActiveTenantID: &input.TenantID, RefreshTokenHash: tokenHash,
+			ID: sessionID, UserID: userID, ActiveTenantID: &input.TenantID, Audience: "web", RefreshTokenHash: tokenHash,
+			AuthMethod: "sso", IdentityConnectionID: &input.ConnectionID,
 			IPAddress: optionalString(ipAddress), UserAgent: optionalString(userAgent),
 			ExpiresAt: now.Add(s.sessionTTL), LastSeenAt: now,
 		}).Error; err != nil {
@@ -342,7 +462,7 @@ func (s *Service) CompleteExternalLogin(
 	if err != nil {
 		return IssuedSession{}, err
 	}
-	principal := Principal{UserID: userID, SessionID: sessionID, ActiveTenantID: &input.TenantID, Email: email, DisplayName: displayName}
+	principal := Principal{UserID: userID, SessionID: sessionID, ActiveTenantID: &input.TenantID, Audience: "web", Email: email, DisplayName: displayName}
 	state, err := s.GetSessionState(ctx, principal)
 	if err != nil {
 		return IssuedSession{}, err
@@ -366,8 +486,8 @@ func (s *Service) RevokeTenantUserSessions(
 	tenantID, userID uuid.UUID,
 	requestID, ipAddress string,
 ) (int64, error) {
-	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
-		return 0, problem.New(409, "active_tenant_mismatch", "The requested tenant must be the active tenant.")
+	if err := RequireActiveTenant(principal, tenantID); err != nil {
+		return 0, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.IdentitySessionsRevoke); err != nil {
 		return 0, err
@@ -412,17 +532,46 @@ func (s *Service) SetActiveTenant(ctx context.Context, principal Principal, tena
 	err := s.db.WithContext(ctx).
 		Where("tenant_id = ? AND user_id = ? AND status = ?", tenantID, principal.UserID, "active").
 		Take(&membership).Error
+	supportGrantID := uuid.Nil
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return Principal{}, problem.New(403, "tenant_forbidden", "You do not have access to this tenant.")
+		var active bool
+		supportGrantID, active, err = s.authorizer.ActiveSupportGrant(ctx, principal.UserID, tenantID)
+		if err != nil {
+			return Principal{}, err
+		}
+		if !active {
+			return Principal{}, problem.New(403, "tenant_forbidden", "You do not have access to this tenant.")
+		}
+		membership.Role = authorization.SupportReadOnlyRole
 	}
 	if err != nil {
 		return Principal{}, problem.Wrap(500, "active_tenant_update_failed", "Failed to validate tenant access.", err)
 	}
 	var tenant persistence.Tenant
-	if err := s.db.WithContext(ctx).
-		Where("id = ? AND status = ? AND deleted_at IS NULL", tenantID, "active").
-		Take(&tenant).Error; err != nil {
+	tenantQuery := s.db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", tenantID)
+	if membership.Role != authorization.SupportReadOnlyRole {
+		tenantQuery = tenantQuery.Where("status = ? OR (status = ? AND trial_expires_at > CURRENT_TIMESTAMP)", "active", "trialing")
+	}
+	if err := tenantQuery.Take(&tenant).Error; err != nil {
 		return Principal{}, problem.New(403, "tenant_forbidden", "You do not have access to this tenant.")
+	}
+	var policy persistence.TenantIdentityPolicy
+	policyErr := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&policy).Error
+	if policyErr != nil && !errors.Is(policyErr, gorm.ErrRecordNotFound) {
+		return Principal{}, problem.Wrap(500, "tenant_identity_policy_load_failed", "Tenant identity policy could not be loaded.", policyErr)
+	}
+	if membership.Role != authorization.SupportReadOnlyRole && policyErr == nil && policy.SSOEnforcement == "required" &&
+		(policy.RecoveryUserID == nil || *policy.RecoveryUserID != principal.UserID) {
+		var authorizedSessions int64
+		if err := s.db.WithContext(ctx).Table("login_sessions AS ls").
+			Joins("JOIN identity_connections AS ic ON ic.id = ls.identity_connection_id AND ic.tenant_id = ? AND ic.status = ?", tenantID, "active").
+			Where("ls.id = ? AND ls.user_id = ? AND ls.auth_method = ? AND ls.revoked_at IS NULL", principal.SessionID, principal.UserID, "sso").
+			Count(&authorizedSessions).Error; err != nil {
+			return Principal{}, problem.Wrap(500, "sso_enforcement_check_failed", "SSO enforcement could not be checked.", err)
+		}
+		if authorizedSessions != 1 {
+			return Principal{}, problem.New(403, "sso_required", "This Tenant requires sign-in through an active enterprise Identity Connection.")
+		}
 	}
 	result := s.db.WithContext(ctx).Model(&persistence.LoginSession{}).
 		Where("id = ? AND user_id = ? AND revoked_at IS NULL", principal.SessionID, principal.UserID).
@@ -434,6 +583,10 @@ func (s *Service) SetActiveTenant(ctx context.Context, principal Principal, tena
 		return Principal{}, problem.New(401, "invalid_session", "The login session is invalid or expired.")
 	}
 	principal.ActiveTenantID = &tenantID
+	principal.SupportAccessGrantID = nil
+	if supportGrantID != uuid.Nil {
+		principal.SupportAccessGrantID = &supportGrantID
+	}
 	return principal, nil
 }
 
@@ -441,7 +594,7 @@ func (s *Service) listTenantAccess(ctx context.Context, userID uuid.UUID) ([]Ten
 	result := make([]TenantAccess, 0)
 	err := s.db.WithContext(ctx).
 		Table("tenant_memberships AS tm").
-		Select("t.id, t.slug, t.name, t.status, t.plan_code, t.region, tm.role").
+		Select("t.id, t.slug, t.name, t.status, t.lifecycle_version, t.trial_expires_at, t.suspended_at, t.closed_at, t.plan_code, t.region, tm.role").
 		Joins("JOIN tenants AS t ON t.id = tm.tenant_id").
 		Where("tm.user_id = ? AND tm.status = ? AND t.deleted_at IS NULL", userID, "active").
 		Order("LOWER(t.name), t.id").
@@ -449,6 +602,31 @@ func (s *Service) listTenantAccess(ctx context.Context, userID uuid.UUID) ([]Ten
 	if err != nil {
 		return nil, problem.Wrap(500, "tenants_load_failed", "Failed to load tenant memberships.", err)
 	}
+	var supportTenants []TenantAccess
+	err = s.db.WithContext(ctx).Table("support_access_grants AS support_grant").
+		Select("t.id, t.slug, t.name, t.status, t.lifecycle_version, t.trial_expires_at, t.suspended_at, t.closed_at, t.plan_code, t.region, ? AS role", authorization.SupportReadOnlyRole).
+		Joins("JOIN tenant_support_policies AS policy ON policy.tenant_id = support_grant.tenant_id AND policy.support_access_enabled = ?", true).
+		Joins("JOIN tenant_memberships AS operator_membership ON operator_membership.tenant_id = support_grant.operator_tenant_id AND operator_membership.user_id = support_grant.requester_user_id AND operator_membership.status = ? AND operator_membership.role IN ?", "active", []string{"owner", "admin", "security_admin"}).
+		Joins("JOIN tenants AS operator_tenant ON operator_tenant.id = support_grant.operator_tenant_id AND operator_tenant.status = ? AND operator_tenant.deleted_at IS NULL", "active").
+		Joins("JOIN tenants AS t ON t.id = support_grant.tenant_id AND t.deleted_at IS NULL").
+		Where("support_grant.requester_user_id = ? AND support_grant.status = ? AND support_grant.expires_at > CURRENT_TIMESTAMP", userID, "active").
+		Where("NOT EXISTS (SELECT 1 FROM tenant_memberships AS membership WHERE membership.tenant_id = support_grant.tenant_id AND membership.user_id = ? AND membership.status = ?)", userID, "active").
+		Scan(&supportTenants).Error
+	if err != nil {
+		return nil, problem.Wrap(500, "support_tenants_load_failed", "Support Access Tenants could not be loaded.", err)
+	}
+	result = append(result, supportTenants...)
+	for index := range result {
+		result[index].Status = productprofile.PublicLifecycleStatus(result[index].Status)
+		result[index].PlanCode = productprofile.PublicProfileCode(result[index].PlanCode)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := strings.ToLower(result[i].Name), strings.ToLower(result[j].Name)
+		if left == right {
+			return result[i].ID.String() < result[j].ID.String()
+		}
+		return left < right
+	})
 	return result, nil
 }
 
@@ -462,19 +640,19 @@ func upsertDevUser(ctx context.Context, tx *gorm.DB, email, displayName string) 
 			ID: uuid.New(), Email: email, DisplayName: displayName, Status: "active", EmailVerifiedAt: &now,
 		}
 		if err := tx.Create(&user).Error; err != nil {
-			return uuid.Nil, problem.Wrap(500, "user_create_failed", "Failed to create the local SaaS user.", err)
+			return uuid.Nil, problem.Wrap(500, "user_create_failed", "Failed to create the local Control Plane user.", err)
 		}
 		return user.ID, nil
 	}
 	if err != nil {
-		return uuid.Nil, problem.Wrap(500, "user_lookup_failed", "Failed to load the local SaaS user.", err)
+		return uuid.Nil, problem.Wrap(500, "user_lookup_failed", "Failed to load the local Control Plane user.", err)
 	}
 	updates := map[string]any{"display_name": displayName, "status": "active"}
 	if user.EmailVerifiedAt == nil {
 		updates["email_verified_at"] = now
 	}
 	if err := tx.Model(&persistence.User{}).Where("id = ?", user.ID).Updates(updates).Error; err != nil {
-		return uuid.Nil, problem.Wrap(500, "user_update_failed", "Failed to update the local SaaS user.", err)
+		return uuid.Nil, problem.Wrap(500, "user_update_failed", "Failed to update the local Control Plane user.", err)
 	}
 	return user.ID, nil
 }
@@ -548,7 +726,7 @@ func optionalString(value string) *string {
 }
 
 var tenantRoleRank = map[string]int{
-	"member": 1, "auditor": 2, "billing_admin": 3, "security_admin": 4, "admin": 5, "owner": 6,
+	"member": 1, "auditor": 2, "cost_admin": 3, "security_admin": 4, "admin": 5, "owner": 6,
 }
 
 func validTenantRole(role string) bool {

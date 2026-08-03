@@ -91,6 +91,7 @@ import { isGenericChatThreadTitle } from "@synara/shared/chatThreads";
 import { getDefaultModel } from "@synara/shared/model";
 import { pluralize } from "@synara/shared/text";
 import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
+import { resolveControlPlaneInternalStatusBoardURL } from "@synara/control-plane-client";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
@@ -330,7 +331,8 @@ import {
 } from "../lib/threadHandoff";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { useDiffRouteSearch } from "../hooks/useDiffRouteSearch";
-import { normalizeSettingsSection } from "../settingsNavigation";
+import { CORE_SETTINGS_NAV_ITEMS, normalizeSettingsSection } from "../settingsNavigation";
+import { resolveEnterpriseSettingsNavItems } from "@synara/enterprise-ui";
 import {
   sidebarHoverRevealHideClassName,
   SIDEBAR_HEADER_ROW_CLASS_NAME,
@@ -886,9 +888,11 @@ const SYNARA_DOCS_URL = "https://trysynara.com/docs";
 function SidebarHelpMenu({
   onOpenShortcuts,
   onOpenFeedback,
+  internalStatusBoardURL,
 }: {
   onOpenShortcuts: () => void;
   onOpenFeedback: () => void;
+  internalStatusBoardURL: string | null;
 }) {
   return (
     <Menu>
@@ -927,6 +931,15 @@ function SidebarHelpMenu({
             <SidebarContextMenuIcon icon={BookIcon} />
             <span>Docs</span>
           </MenuItem>
+          {internalStatusBoardURL ? (
+            <MenuItem
+              className={SIDEBAR_CONTEXT_MENU_ITEM_CLASS_NAME}
+              onClick={() => openExternalLink(internalStatusBoardURL)}
+            >
+              <SidebarContextMenuIcon icon={ExternalLinkIcon} />
+              <span>Internal status</span>
+            </MenuItem>
+          ) : null}
         </MenuGroup>
       </ComposerPickerMenuPopup>
     </Menu>
@@ -1356,6 +1369,16 @@ export default function Sidebar() {
   const routeSearch = useDiffRouteSearch();
   const settingsSectionSearch = useSearch({ strict: false }) as Record<string, unknown>;
   const activeSettingsSection = normalizeSettingsSection(settingsSectionSearch.section);
+  const settingsNavItems = [
+    ...CORE_SETTINGS_NAV_ITEMS,
+    ...resolveEnterpriseSettingsNavItems({
+      availability: controlPlane.availability,
+      authentication: controlPlane.authentication,
+      hasSession: controlPlane.session !== null,
+      hasActiveTenant: controlPlane.activeTenant !== null,
+      capabilities: controlPlane.capabilities,
+    }),
+  ];
   const activeSplitView = useSplitViewStore(
     useMemo(() => selectSplitView(routeSearch.splitViewId ?? null), [routeSearch.splitViewId]),
   );
@@ -5615,6 +5638,7 @@ export default function Sidebar() {
           <SidebarGroup className="p-0">
             <SettingsSidebarNav
               activeSection={activeSettingsSection}
+              items={settingsNavItems}
               onBack={handleBackToAppFromSettings}
               onSelectSection={(section, options) => {
                 void navigate({
@@ -6059,6 +6083,9 @@ export default function Sidebar() {
                       void navigate({ to: "/settings", search: { section: "shortcuts" } })
                     }
                     onOpenFeedback={openFeedbackDialog}
+                    internalStatusBoardURL={resolveControlPlaneInternalStatusBoardURL(
+                      controlPlane.profile,
+                    )}
                   />
                 )}
               </div>

@@ -394,6 +394,58 @@ func TestProviderResumeMetricLabelsAreBounded(t *testing.T) {
 	}
 }
 
+func TestMetricLabelsRejectIdentifiersAndSecretsBeforeRendering(t *testing.T) {
+	for _, key := range []string{
+		"tenant_id", "user", "session_uuid", "execution_id", "credential_hash", "trace_id",
+		"evidence_digest", "auth_token", "customer_email", "artifact_url", "subject_reference", "bad-key",
+	} {
+		t.Run("key/"+key, func(t *testing.T) {
+			assertUnsafeMetricLabelPanicsWithoutValue(t, func() { labels(map[string]string{key: "bounded"}) }, key)
+		})
+	}
+
+	for _, value := range []string{
+		uuid.NewString(),
+		strings.Repeat("a", 40),
+		"sha256:" + strings.Repeat("b", 64),
+		"https://tenant.example.test/private/evidence",
+		"customer@example.test",
+		"sk_live_sensitive_value",
+		strings.Repeat("x", 129),
+	} {
+		t.Run("value", func(t *testing.T) {
+			assertUnsafeMetricLabelPanicsWithoutValue(t, func() { labels(map[string]string{"state": value}) }, value)
+		})
+	}
+
+	if got := labels(map[string]string{
+		"provider": "aws", "recovery_reason": "initial-claim", "target_kind": "kubernetes",
+	}); got != `{provider="aws",recovery_reason="initial-claim",target_kind="kubernetes"}` {
+		t.Fatalf("safe bounded labels = %q", got)
+	}
+	if got := addLabel(`{result="success"}`, "le", "+Inf"); got != `{result="success",le="+Inf"}` {
+		t.Fatalf("safe appended label = %q", got)
+	}
+}
+
+func assertUnsafeMetricLabelPanicsWithoutValue(t *testing.T, render func(), sensitiveValue string) {
+	t.Helper()
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("unsafe metric label was accepted")
+		}
+		message, ok := recovered.(string)
+		if !ok || message != "unsafe metric label rejected" {
+			t.Fatalf("unsafe metric panic = %v", recovered)
+		}
+		if sensitiveValue != "" && strings.Contains(message, sensitiveValue) {
+			t.Fatal("unsafe metric panic leaked the rejected value")
+		}
+	}()
+	render()
+}
+
 func TestProviderCredentialAccessLeaseCountsUseFrozenGrantAndSemanticWindows(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

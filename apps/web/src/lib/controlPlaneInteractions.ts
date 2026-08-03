@@ -6,7 +6,7 @@ import {
   type PendingApproval,
   type PendingUserInput,
 } from "../session-logic";
-import type { ControlPlanePendingInteraction } from "./controlPlaneClient";
+import type { ControlPlanePendingInteraction } from "@synara/control-plane-client";
 
 const INTERACTION_REFRESH_KINDS = new Set<OrchestrationThreadActivity["kind"]>([
   "approval.requested",

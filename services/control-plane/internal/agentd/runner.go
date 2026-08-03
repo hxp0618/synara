@@ -17,6 +17,12 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	controltracing "github.com/synara-ai/synara/services/control-plane/internal/tracing"
 )
 
 type Runner struct {
@@ -136,7 +142,24 @@ func (r *Runner) RunControlled(
 	primary *RunnerPrimaryOperationControl,
 	controls <-chan RunnerControl,
 	handle func(context.Context, RunnerMessage) error,
-) (RunnerResult, error) {
+) (result RunnerResult, runErr error) {
+	ctx, span := otel.Tracer("synara/agentd").Start(
+		ctx,
+		"provider.run",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("synara.execution.id", input.Execution.ID.String()),
+			attribute.Int64("synara.execution.generation", input.Execution.Generation),
+			attribute.String("synara.provider", traceProviderName(input.Execution.Provider)),
+		),
+	)
+	defer func() {
+		if runErr != nil {
+			span.RecordError(runErr)
+			span.SetStatus(codes.Error, "Provider run failed")
+		}
+		span.End()
+	}()
 	if r.protocol == RunnerProtocolV2 {
 		return r.runProviderHostV2(ctx, input, credential, primary, controls, handle)
 	}
@@ -180,6 +203,7 @@ func (r *Runner) runLegacy(
 	}()
 	command.Dir = input.WorkspaceDirectory
 	command.Env = providerProcessEnvironment(runnerEnvironment(os.Environ()), r.providerOuterSandboxProfile)
+	command.Env = withTraceEnvironment(ctx, command.Env)
 	for _, name := range providerHostPackageEnvironmentAllowlist {
 		if value, found := input.ProviderEnvironment[name]; found {
 			if !filepath.IsAbs(value) || strings.ContainsAny(value, "\r\n\x00") {
@@ -360,6 +384,20 @@ func (r *Runner) runLegacy(
 		return RunnerResult{}, errors.Join(errors.New("runner exited without a result message"), releaseProcessTree())
 	}
 	return *result, errors.Join(outcome.terminateErr, releaseProcessTree())
+}
+
+func withTraceEnvironment(ctx context.Context, environment []string) []string {
+	if traceparent := controltracing.TraceparentFromContext(ctx); traceparent != "" {
+		return replaceEnvironmentValue(environment, "SYNARA_TRACEPARENT", traceparent)
+	}
+	return environment
+}
+
+func traceProviderName(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func runnerEnvironment(source []string) []string {

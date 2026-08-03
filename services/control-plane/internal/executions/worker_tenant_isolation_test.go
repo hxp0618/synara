@@ -2,6 +2,7 @@ package executions
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,8 +15,163 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
+
+func TestWorkerRequestReceiptReplayIsFencedAfterGenerationOrTargetChange(t *testing.T) {
+	setupStartedExecution := func(t *testing.T, label string) (*gorm.DB, *Service, persistence.ExecutionTarget, workerTenantIsolationExecution, persistence.WorkerInstance, LeaseInput, string) {
+		t.Helper()
+		db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationPinned)
+		execution := seedWorkerTenantIsolationExecution(t, db, target, label, time.Now().UTC())
+		_, worker := registerWorkerTenantIsolationTestWorker(t, service, target, label+"-worker", uuid.NewString())
+		claim := claimWorkerTenantIsolationExecution(t, service, worker, target, label+"-claim")
+		lease := LeaseInput{
+			TenantID: execution.TenantID, Generation: claim.Value.Lease.Generation,
+			LeaseToken: claim.Value.Lease.LeaseToken,
+		}
+		requestID := label + "-start"
+		started, err := service.Start(context.Background(), worker, execution.ExecutionID, lease, requestID)
+		if err != nil || started.Replayed {
+			t.Fatalf("start = %#v, %v", started, err)
+		}
+		replayed, err := service.Start(context.Background(), worker, execution.ExecutionID, lease, requestID)
+		if err != nil || !replayed.Replayed {
+			t.Fatalf("current-authority replay = %#v, %v", replayed, err)
+		}
+		var receipt persistence.WorkerRequestReceipt
+		if err := db.Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error; err != nil {
+			t.Fatal(err)
+		}
+		if receipt.TenantID == nil || *receipt.TenantID != execution.TenantID ||
+			receipt.ExecutionID == nil || *receipt.ExecutionID != execution.ExecutionID ||
+			receipt.ExecutionTargetID == nil || *receipt.ExecutionTargetID != target.ID ||
+			receipt.ExecutionGeneration == nil || *receipt.ExecutionGeneration != lease.Generation {
+			t.Fatalf("receipt authority = %#v", receipt)
+		}
+		return db, service, target, execution, worker, lease, requestID
+	}
+
+	t.Run("generation", func(t *testing.T) {
+		_, service, target, execution, worker, lease, requestID := setupStartedExecution(t, "receipt-generation-fence")
+		if _, err := service.Release(context.Background(), worker, execution.ExecutionID, ReleaseLeaseInput{
+			LeaseInput: lease, Reason: "exercise a successor generation",
+		}, "receipt-generation-release"); err != nil {
+			t.Fatal(err)
+		}
+		successor, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+			ExecutionTargetID: target.ID, TargetKind: target.Kind, ExecutionID: &execution.ExecutionID,
+		}, "receipt-generation-successor")
+		if err != nil || successor.Value.Lease == nil || successor.Value.Lease.Generation <= lease.Generation {
+			t.Fatalf("successor claim = %#v, %v", successor, err)
+		}
+		_, err = service.Start(context.Background(), worker, execution.ExecutionID, lease, requestID)
+		assertProblemCode(t, err, "generation_fenced")
+	})
+
+	t.Run("legacy-unbound", func(t *testing.T) {
+		db, service, _, execution, worker, lease, requestID := setupStartedExecution(t, "receipt-legacy-unbound")
+		if err := db.Model(&persistence.WorkerRequestReceipt{}).
+			Where("worker_id = ? AND request_id = ?", worker.ID, requestID).
+			Updates(map[string]any{
+				"tenant_id": nil, "execution_id": nil, "execution_target_id": nil,
+				"execution_generation": nil,
+			}).Error; err != nil {
+			t.Fatal(err)
+		}
+		_, err := service.Start(context.Background(), worker, execution.ExecutionID, lease, requestID)
+		assertProblemCode(t, err, "worker_request_authority_unbound")
+	})
+
+	t.Run("target", func(t *testing.T) {
+		db, service, _, execution, worker, lease, requestID := setupStartedExecution(t, "receipt-target-fence")
+		if _, err := service.Release(context.Background(), worker, execution.ExecutionID, ReleaseLeaseInput{
+			LeaseInput: lease, Reason: "move the recovering execution to another target",
+		}, "receipt-target-release"); err != nil {
+			t.Fatal(err)
+		}
+		destination := seedWorkerTenantIsolationTarget(t, db, placement.TenantIsolationPinned)
+		if err := db.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+			Update("execution_target_id", destination.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		_, err := service.Start(context.Background(), worker, execution.ExecutionID, lease, requestID)
+		assertProblemCode(t, err, "worker_execution_target_mismatch")
+	})
+}
+
+func TestReregisteredWorkerFencesCredentialHeartbeatAndLeaseReplay(t *testing.T) {
+	db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationPinned)
+	execution := seedWorkerTenantIsolationExecution(t, db, target, "worker-incarnation-fence", time.Now().UTC())
+	registered, staleWorker := registerWorkerTenantIsolationTestWorker(t, service, target, "worker-incarnation-fence", uuid.NewString())
+	claim := claimWorkerTenantIsolationExecution(t, service, staleWorker, target, "worker-incarnation-fence-claim")
+	lease := LeaseInput{
+		TenantID: execution.TenantID, Generation: claim.Value.Lease.Generation,
+		LeaseToken: claim.Value.Lease.LeaseToken,
+	}
+
+	replacementUID := uuid.NewString()
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
+		ExecutionTargetID: target.ID, TargetKind: platform.TargetKubernetes, InstanceUID: replacementUID,
+		ClusterID: staleWorker.ClusterID, Namespace: staleWorker.Namespace, PodName: staleWorker.PodName,
+	})
+	replacement, err := service.Register(context.Background(), RegisterWorkerInput{
+		ExecutionTargetID: target.ID, TargetKind: target.Kind, InstanceUID: replacementUID,
+		ClusterID: staleWorker.ClusterID, Namespace: staleWorker.Namespace, PodName: staleWorker.PodName,
+		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
+		LeaseSupported: true, FencingSupported: true,
+		RegistrationTrustMode: WorkerRegistrationTrustKubernetesPodBoundV1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentWorker, err := service.Authenticate(context.Background(), replacement.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentWorker.ID != staleWorker.ID || currentWorker.Incarnation != staleWorker.Incarnation+1 {
+		t.Fatalf("replacement Worker = %#v", currentWorker)
+	}
+	_, err = service.Authenticate(context.Background(), registered.Token)
+	assertProblemCode(t, err, "invalid_worker_token")
+
+	assertIncarnationFenced := func(operation string, err error) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "worker_incarnation_fenced" {
+			t.Fatalf("%s returned %v", operation, err)
+		}
+	}
+	_, err = service.Heartbeat(context.Background(), staleWorker, HeartbeatInput{ProtocolVersion: WorkerProtocolVersion})
+	assertIncarnationFenced("heartbeat", err)
+	_, err = service.PullControlCommands(context.Background(), staleWorker, execution.ExecutionID, PullControlCommandsInput{LeaseInput: lease})
+	assertIncarnationFenced("control-command pull", err)
+	_, err = service.PullInteractionResolutions(context.Background(), staleWorker, execution.ExecutionID, PullInteractionResolutionsInput{LeaseInput: lease})
+	assertIncarnationFenced("interaction-resolution pull", err)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		_, err := service.AuthorizeLease(context.Background(), tx, staleWorker, execution.ExecutionID, lease)
+		return err
+	}); err != nil {
+		assertIncarnationFenced("lease authorization", err)
+	} else {
+		t.Fatal("stale lease authorization succeeded")
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		_, err := service.AuthorizeArtifactWrite(context.Background(), tx, staleWorker, execution.ExecutionID, lease)
+		return err
+	}); err != nil {
+		assertIncarnationFenced("Artifact authorization", err)
+	} else {
+		t.Fatal("stale Artifact authorization succeeded")
+	}
+	_, err = service.Renew(context.Background(), staleWorker, execution.ExecutionID, RenewLeaseInput{LeaseInput: lease}, "worker-incarnation-stale-renew")
+	assertIncarnationFenced("stale renewal", err)
+	_, err = service.Renew(context.Background(), currentWorker, execution.ExecutionID, RenewLeaseInput{LeaseInput: lease}, "worker-incarnation-inherited-renew")
+	assertIncarnationFenced("inherited renewal", err)
+}
 
 func TestPinnedGeneralWorkerBindsFirstTenantAcrossClaimsAndReregistration(t *testing.T) {
 	db, service, target := setupWorkerTenantIsolationTest(t, placement.TenantIsolationPinned)

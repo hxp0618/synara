@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,9 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercommercial"
+	"github.com/synara-ai/synara/services/control-plane/internal/testsupport/stage6authority"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
@@ -249,6 +253,102 @@ func TestClaimPersistsProviderCredentialGrantAndReplaysSameGrant(t *testing.T) {
 		replayed.Value.Workload.ProviderCredentialGrantID == nil ||
 		*replayed.Value.Workload.ProviderCredentialGrantID != grantID {
 		t.Fatalf("Claim receipt replay changed the Provider Credential Grant: %#v", replayed)
+	}
+}
+
+func TestEnterpriseClaimRequiresActiveProviderCommercialAuthorization(t *testing.T) {
+	ctx := context.Background()
+	profile, err := platform.Defaults(platform.ProfilePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := database.OpenMetadataStore(ctx, profile, "", filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	service.providerCommercialAuthorizationRequired = true
+	service.providerCommercialOperatorTenantID = fixture.TenantID
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "commercial-authorization-claim")
+	cleanupWorkers(t, db, worker.ID)
+	claimInput := ClaimExecutionInput{ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID}
+
+	_, err = service.Claim(ctx, worker, claimInput, "commercial-authorization-missing")
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "provider_commercial_authorization_required" {
+		t.Fatalf("claim without commercial authorization = %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	approvers := make([]uuid.UUID, 0, 4)
+	for index := range 4 {
+		user := persistence.User{ID: uuid.New(), Email: "claim-commercial-" + string(rune('a'+index)) + "@example.test", DisplayName: "Claim Commercial " + string(rune('A'+index)), Status: "active", EmailVerifiedAt: &now, CreatedAt: now, UpdatedAt: now}
+		if err := db.Create(&user).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&persistence.TenantMembership{TenantID: fixture.TenantID, UserID: user.ID, Role: "admin", Status: "active", JoinedAt: &now, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+			t.Fatal(err)
+		}
+		approvers = append(approvers, user.ID)
+	}
+	for index, role := range []string{"legal", "privacy", "security", "product"} {
+		if err := db.Create(&persistence.Stage6GovernanceAuthorityGrant{
+			ID: uuid.New(), OperatorTenantID: fixture.TenantID, UserID: approvers[index], AuthorityKey: "provider_commercial." + role,
+			Status: "active", Version: 1, ExpiresAt: now.Add(90 * 24 * time.Hour), GrantedBy: fixture.UserID,
+			Reason:            "Owner assigned the exact Provider commercial claim approval function.",
+			EvidenceReference: "https://evidence.example.test/claim/authority/" + role, CreatedAt: now, UpdatedAt: now,
+			EvidenceSHA256: stage6authority.DigestPointer("claim-authority-" + role),
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	governance := providercommercial.NewService(db, fixture.TenantID)
+	authorization, err := governance.Create(ctx, fixture.UserID, providercommercial.CreateInput{
+		AuthorizationKey: "claim-openai-2026", Provider: "codex", ProviderProduct: "OpenAI API",
+		AccountType: "Enterprise API organization", ContractingEntity: "OpenAI contracting entity",
+		CredentialMode: "customer_byok", AllowedCredentialScopes: []string{"organization"}, AllowedRegions: []string{"default"},
+		DataUsePolicy: "no_training", RetentionPolicy: "Approved enterprise API retention policy applies.",
+		TermsEffectiveAt: now.Add(-24 * time.Hour), TermsReference: "https://evidence.example.test/claim/terms",
+		TermsSHA256:        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		AgreementReference: "https://evidence.example.test/claim/agreement", DPAReference: "https://evidence.example.test/claim/dpa",
+		AgreementSHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", DPASHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		ProhibitedUseSummary:        "Consumer login sharing and safety-control bypass are prohibited.",
+		TerminationRunbookReference: "https://evidence.example.test/claim/termination", ReviewExpiresAt: now.Add(90 * 24 * time.Hour),
+		TerminationRunbookSHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}, "claim-authorization-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err = governance.Transition(ctx, fixture.UserID, authorization.ID, providercommercial.TransitionInput{ExpectedVersion: authorization.Version, TargetState: "ready_for_review", Reason: "Submit exact hosted use for separated review."}, "claim-authorization-ready", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, role := range []string{"legal", "privacy", "security", "product"} {
+		authorization, err = governance.RecordApproval(ctx, approvers[index], authorization.ID, providercommercial.ApprovalInput{
+			Role: role, Decision: "approved", Reason: "Approved the exact Provider commercial use and data boundary.",
+			EvidenceReference: "https://evidence.example.test/claim/approval/" + role,
+			EvidenceSHA256:    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		}, "claim-approval-"+role, "127.0.0.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = governance.Transition(ctx, fixture.UserID, authorization.ID, providercommercial.TransitionInput{ExpectedVersion: authorization.Version, TargetState: "active", Reason: "Activate after all separated approvals committed."}, "claim-authorization-active", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := service.Claim(ctx, worker, claimInput, "commercial-authorization-active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Value.Workload == nil || claimed.Value.Workload.ProviderCredentialGrantID == nil {
+		t.Fatalf("authorized hosted claim omitted Provider credential grant: %#v", claimed.Value)
 	}
 }
 

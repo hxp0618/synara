@@ -117,7 +117,7 @@ func TestPostgresConcurrentInitialInvoiceImportsSerializeByIdentity(t *testing.T
 			t.Fatal(err)
 		}
 		second := <-outcomes
-		assertProblemCode(t, second.err, "billing_invoice_import_conflict")
+		assertProblemCode(t, second.err, "cost_accounting_invoice_import_conflict")
 		assertPostgresInvoiceIdentityRowCounts(t, ctx, db, domain.TenantID, externalImportID, 1, 1)
 	})
 }

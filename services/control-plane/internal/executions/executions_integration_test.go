@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
+	"github.com/synara-ai/synara/services/control-plane/internal/testsupport/postgresisolation"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
@@ -300,7 +302,8 @@ func TestSuspendedTenantExecutionIsNotClaimed(t *testing.T) {
 	service := integrationService(t, db)
 	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-suspended")
 	cleanupWorkers(t, db, worker.ID)
-	if err := db.Model(&persistence.Tenant{}).Where("id = ?", fixture.TenantID).Update("status", "suspended").Error; err != nil {
+	if err := db.Model(&persistence.Tenant{}).Where("id = ?", fixture.TenantID).
+		Updates(map[string]any{"status": "suspended", "suspended_at": time.Now().UTC()}).Error; err != nil {
 		t.Fatal(err)
 	}
 	result, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
@@ -311,6 +314,62 @@ func TestSuspendedTenantExecutionIsNotClaimed(t *testing.T) {
 	}
 	if result.Value.Execution != nil || result.Value.Lease != nil {
 		t.Fatalf("suspended tenant execution was claimed: %#v", result.Value)
+	}
+}
+
+func TestExecutionUsageProjectionAndNetworkReport(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-usage")
+	cleanupWorkers(t, db, worker.ID)
+	claimed, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+	}, "usage-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := *claimed.Value.Lease
+	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
+	events := []RuntimeEventInput{
+		{LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "turn.started", Payload: map[string]any{"model": "gpt-5.6-sol"}},
+		{LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "thread.token-usage.updated", Payload: map[string]any{"usage": map[string]any{
+			"usedTokens": 300, "lastUsedTokens": 300, "lastInputTokens": 200,
+			"lastCachedInputTokens": 50, "lastOutputTokens": 100, "durationMs": 4000,
+		}}},
+		{LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "turn.completed", Payload: map[string]any{"state": "completed", "totalCostUsd": 0.02}},
+	}
+	for index, event := range events {
+		if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, event, fmt.Sprintf("usage-event-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := service.ReportExecutionUsage(context.Background(), worker, fixture.ExecutionID, ExecutionUsageReportInput{
+		LeaseInput: leaseInput, ReportSequence: 1, NetworkIngressBytes: 1024, NetworkEgressBytes: 2048,
+	}, "usage-network-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Value.ReportSequence != 1 {
+		t.Fatalf("first Usage report = %#v", first.Value)
+	}
+	_, err = service.ReportExecutionUsage(context.Background(), worker, fixture.ExecutionID, ExecutionUsageReportInput{
+		LeaseInput: leaseInput, ReportSequence: 2, NetworkIngressBytes: 1000, NetworkEgressBytes: 3000,
+	}, "usage-network-regressed")
+	assertProblemCode(t, err, "execution_usage_counter_regressed")
+	if _, err := service.ReportExecutionUsage(context.Background(), worker, fixture.ExecutionID, ExecutionUsageReportInput{
+		LeaseInput: leaseInput, ReportSequence: 2, NetworkIngressBytes: 4096, NetworkEgressBytes: 8192,
+	}, "usage-network-2"); err != nil {
+		t.Fatal(err)
+	}
+	var summary persistence.ExecutionUsageSummary
+	if err := db.Where("tenant_id = ? AND execution_id = ? AND generation = ?", fixture.TenantID, fixture.ExecutionID, lease.Generation).Take(&summary).Error; err != nil {
+		t.Fatal(err)
+	}
+	if summary.InputTokens != 200 || summary.CachedInputTokens != 50 || summary.OutputTokens != 100 ||
+		summary.TotalTokens != 300 || summary.DurationMillis != 4000 || summary.ProviderCostMicros != 20000 ||
+		!summary.ProviderCostReported || summary.NetworkIngressBytes != 4096 || summary.NetworkEgressBytes != 8192 || summary.NetworkReportSequence != 2 || !summary.Final {
+		t.Fatalf("Execution Usage summary = %#v", summary)
 	}
 }
 
@@ -464,6 +523,101 @@ func TestClaimReplayRotatesTokenWithoutPersistingPlaintext(t *testing.T) {
 	}}, "renew-current-token"); err != nil {
 		t.Fatalf("current rotated lease token was rejected: %v", err)
 	}
+}
+
+func TestWorkerRequestReceiptReplayIsFencedAfterGenerationOrTargetChangePostgres(t *testing.T) {
+	assertProblemCode := func(t *testing.T, err error, code string) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != code {
+			t.Fatalf("replay returned %v, want %s", err, code)
+		}
+	}
+
+	setupStartedExecution := func(t *testing.T, label string) (*gorm.DB, executionFixture, *Service, persistence.WorkerInstance, LeaseInput, string) {
+		t.Helper()
+		db := integrationDB(t)
+		fixture := seedExecutionFixture(t, db)
+		service := integrationService(t, db)
+		worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, label)
+		cleanupWorkers(t, db, worker.ID)
+		claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+			ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+		}, label+"-claim")
+		if err != nil || claim.Value.Lease == nil {
+			t.Fatalf("claim = %#v, %v", claim, err)
+		}
+		lease := LeaseInput{
+			TenantID: fixture.TenantID, Generation: claim.Value.Lease.Generation,
+			LeaseToken: claim.Value.Lease.LeaseToken,
+		}
+		requestID := label + "-start"
+		started, err := service.Start(context.Background(), worker, fixture.ExecutionID, lease, requestID)
+		if err != nil || started.Replayed {
+			t.Fatalf("start = %#v, %v", started, err)
+		}
+		replayed, err := service.Start(context.Background(), worker, fixture.ExecutionID, lease, requestID)
+		if err != nil || !replayed.Replayed {
+			t.Fatalf("current-authority replay = %#v, %v", replayed, err)
+		}
+		var receipt persistence.WorkerRequestReceipt
+		if err := db.Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error; err != nil {
+			t.Fatal(err)
+		}
+		if receipt.TenantID == nil || *receipt.TenantID != fixture.TenantID ||
+			receipt.ExecutionID == nil || *receipt.ExecutionID != fixture.ExecutionID ||
+			receipt.ExecutionTargetID == nil || *receipt.ExecutionTargetID != fixture.TargetID ||
+			receipt.ExecutionGeneration == nil || *receipt.ExecutionGeneration != lease.Generation {
+			t.Fatalf("receipt authority = %#v", receipt)
+		}
+		return db, fixture, service, worker, lease, requestID
+	}
+
+	t.Run("generation", func(t *testing.T) {
+		_, fixture, service, worker, lease, requestID := setupStartedExecution(t, "receipt-generation-fence")
+		if _, err := service.Release(context.Background(), worker, fixture.ExecutionID, ReleaseLeaseInput{
+			LeaseInput: lease, Reason: "exercise a successor generation",
+		}, "receipt-generation-release"); err != nil {
+			t.Fatal(err)
+		}
+		successor, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+			ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+			ExecutionID: &fixture.ExecutionID,
+		}, "receipt-generation-successor")
+		if err != nil || successor.Value.Lease == nil || successor.Value.Lease.Generation <= lease.Generation {
+			t.Fatalf("successor claim = %#v, %v", successor, err)
+		}
+		_, err = service.Start(context.Background(), worker, fixture.ExecutionID, lease, requestID)
+		assertProblemCode(t, err, "generation_fenced")
+	})
+
+	t.Run("target", func(t *testing.T) {
+		db, fixture, service, worker, lease, requestID := setupStartedExecution(t, "receipt-target-fence")
+		if _, err := service.Release(context.Background(), worker, fixture.ExecutionID, ReleaseLeaseInput{
+			LeaseInput: lease, Reason: "move the recovering execution to another target",
+		}, "receipt-target-release"); err != nil {
+			t.Fatal(err)
+		}
+		var source persistence.ExecutionTarget
+		if err := db.Where("id = ?", fixture.TargetID).Take(&source).Error; err != nil {
+			t.Fatal(err)
+		}
+		destination := persistence.ExecutionTarget{
+			ID: uuid.New(), TenantID: source.TenantID, OrganizationID: source.OrganizationID,
+			Kind: source.Kind, Name: "receipt-target-destination", Status: "active",
+			ConfigurationEncrypted: []byte{}, Capabilities: source.Capabilities,
+		}
+		if err := db.Create(&destination).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).
+			Update("execution_target_id", destination.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		_, err := service.Start(context.Background(), worker, fixture.ExecutionID, lease, requestID)
+		assertProblemCode(t, err, "worker_execution_target_mismatch")
+	})
 }
 
 func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
@@ -2585,6 +2739,7 @@ func integrationDB(t *testing.T) *gorm.DB {
 	if databaseURL == "" {
 		t.Skip("SYNARA_TEST_DATABASE_URL is not configured")
 	}
+	databaseURL = postgresisolation.URL(t, databaseURL)
 	db, err := database.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -2592,6 +2747,11 @@ func integrationDB(t *testing.T) *gorm.DB {
 	if err := database.Migrate(context.Background(), db, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
 

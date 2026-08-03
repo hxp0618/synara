@@ -32,7 +32,7 @@ import {
   type ControlPlaneWorker,
   type ControlPlaneWorkerManifest,
   type ControlPlaneWorkerProviderManifest,
-} from "~/lib/controlPlaneClient";
+} from "@synara/control-plane-client";
 
 export const EXECUTION_TARGET_CAPABILITIES_PLACEHOLDER =
   '{"workspaceModes":["local","worktree"],"providerPolicy":{"experimentalProviders":["codex","claudeAgent"]}}';

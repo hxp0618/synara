@@ -307,7 +307,7 @@ func (s *Service) MarkResourceSuspendQuiesced(
 		return OperationResult[ResourceSuspendQuiesceReceipt]{}, problem.New(400, "invalid_resource_suspend_quiesce", "suspendAttemptId is required.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.quiesced", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.quiesced", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID                        `json:"executionId"`
 		Input       MarkResourceSuspendQuiescedInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (ResourceSuspendQuiesceReceipt, error) {
@@ -392,7 +392,7 @@ func (s *Service) MarkResourceSuspendCheckpointReady(
 		)
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.checkpoint-ready", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.checkpoint-ready", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID                               `json:"executionId"`
 		Input       MarkResourceSuspendCheckpointReadyInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (ResourceSuspendCheckpointReadyReceipt, error) {
@@ -483,7 +483,7 @@ func (s *Service) CompleteResourceSuspend(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_resource_suspend_completion", "suspendAttemptId and a ready or unchanged checkpointStatus are required.")
 	}
 	appended := make([]persistence.SessionEvent, 0, 2)
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.complete", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.complete", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID                    `json:"executionId"`
 		Input       CompleteResourceSuspendInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
@@ -851,7 +851,7 @@ func (s *Service) AbortResourceSuspend(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_resource_suspend_failure", "The suspend failure payload is invalid.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.abort", struct {
+	result, err := runExecutionIdempotent(ctx, s, worker, requestID, "execution.resource-suspend.abort", executionID, input.LeaseInput, struct {
 		ExecutionID uuid.UUID                 `json:"executionId"`
 		Input       AbortResourceSuspendInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {

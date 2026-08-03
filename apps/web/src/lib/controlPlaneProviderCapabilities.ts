@@ -82,10 +82,10 @@ function capabilityMessage(input: {
   const provider = PROVIDER_DISPLAY_NAMES[input.provider];
   const capability = capabilityLabel(input.capabilityId);
   if (input.status === "loading") {
-    return `Checking whether ${provider} can use ${capability} on this SaaS target.`;
+    return `Checking whether ${provider} can use ${capability} on this Control Plane target.`;
   }
   if (input.status === "error") {
-    return `Could not verify whether ${provider} can use ${capability} on this SaaS target.`;
+    return `Could not verify whether ${provider} can use ${capability} on this Control Plane target.`;
   }
   if (input.status === "unobserved" || input.reasonCode === "worker_manifest_required") {
     return input.allowed
@@ -94,15 +94,15 @@ function capabilityMessage(input: {
   }
   switch (input.reasonCode) {
     case "provider_not_installed":
-      return `${provider} is not installed on this SaaS target.`;
+      return `${provider} is not installed on this Control Plane target.`;
     case "provider_version_incompatible":
-      return `${provider} is installed, but its runtime version is incompatible with this SaaS target.`;
+      return `${provider} is installed, but its runtime version is incompatible with this Control Plane target.`;
     case "execution_target_unavailable":
-      return "The selected SaaS execution target is unavailable.";
+      return "The selected Control Plane execution target is unavailable.";
     case "provider_cursor_required":
       return `${provider} needs one completed Turn with a usable native resume cursor before ${capability} is available.`;
     default:
-      return `${provider} does not support ${capability} on this SaaS target.`;
+      return `${provider} does not support ${capability} on this Control Plane target.`;
   }
 }
 
@@ -273,7 +273,9 @@ export function assertControlPlaneCapabilityAllowed(
   decision: ControlPlaneCapabilityDecision | ControlPlaneDispatchDecision,
 ): void {
   if (decision.allowed) return;
-  throw new Error(decision.message ?? "This action is unavailable on the selected SaaS target.");
+  throw new Error(
+    decision.message ?? "This action is unavailable on the selected Control Plane target.",
+  );
 }
 
 export function providerCanStartSaaSSession(input: {

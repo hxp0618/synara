@@ -1114,6 +1114,7 @@ func (r *Runner) startProviderHostV2WithCredential(
 		return nil, err
 	}
 	command.Env = providerProcessEnvironment(command.Env, r.providerOuterSandboxProfile)
+	command.Env = withTraceEnvironment(ctx, command.Env)
 	var credentialHandoff *providerHostCredentialHandoff
 	credentialHandoffOwned := false
 	defer func() {

@@ -158,6 +158,34 @@ func TestResolvePlatformRequiresEnterprisePolicyAndSeparateAutoSelect(t *testing
 	if selection == nil || selection.Credential.ID != platformCredential.ID || selection.Explicit {
 		t.Fatalf("enabled Platform auto-selection = %#v", selection)
 	}
+	if err := fixture.db.Model(&persistence.TenantSubscription{}).
+		Where("tenant_id = ?", fixture.tenantID).Update("status", "suspended").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = Resolve(context.Background(), fixture.db, fixture.request(&model, &explicit))
+	assertScopeProblem(t, err, "platform_credential_not_entitled")
+	selection, err = Resolve(context.Background(), fixture.db, fixture.request(&model, nil))
+	if err != nil || selection != nil {
+		t.Fatalf("suspended Subscription automatic Platform selection = %#v, err=%v", selection, err)
+	}
+	if err := fixture.db.Model(&persistence.TenantSubscription{}).
+		Where("tenant_id = ?", fixture.tenantID).Update("status", "active").Error; err != nil {
+		t.Fatal(err)
+	}
+	selection, err = Resolve(context.Background(), fixture.db, fixture.request(&model, &explicit))
+	if err != nil || selection == nil || !selection.Explicit {
+		t.Fatalf("recovered Platform selection = %#v, err=%v", selection, err)
+	}
+	if err := fixture.db.Model(&persistence.TenantSubscription{}).
+		Where("tenant_id = ?", fixture.tenantID).Update("status", "cancelled").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = Resolve(context.Background(), fixture.db, fixture.request(&model, &explicit))
+	assertScopeProblem(t, err, "platform_credential_not_entitled")
+	if err := fixture.db.Model(&persistence.TenantSubscription{}).
+		Where("tenant_id = ?", fixture.tenantID).Update("status", "active").Error; err != nil {
+		t.Fatal(err)
+	}
 
 	if err := fixture.db.Model(&persistence.PlatformInstallation{}).
 		Where("key = ?", "control-plane").Update("profile", "single-node").Error; err != nil {
@@ -187,6 +215,7 @@ func newResolverFixture(t *testing.T, profile, planCode string) resolverFixture 
 		&persistence.PlatformInstallation{}, &persistence.User{}, &persistence.Tenant{},
 		&persistence.TenantMembership{}, &persistence.Organization{},
 		&persistence.ProviderCredential{}, &persistence.ProviderCredentialScopePolicy{},
+		&persistence.TenantSubscription{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +227,10 @@ func newResolverFixture(t *testing.T, profile, planCode string) resolverFixture 
 		&persistence.Tenant{ID: tenantID, Slug: "scope-test", Name: "Scope Test", Status: "active", PlanCode: planCode, Region: "default", Settings: map[string]any{}, CreatedBy: userID},
 		&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "owner", Status: "active", JoinedAt: &now},
 		&persistence.Organization{ID: organizationID, TenantID: tenantID, Slug: "root", Name: "Root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.TenantSubscription{
+			TenantID: tenantID, PlanCode: planCode, Status: "active", Version: 1,
+			CurrentPeriodStart: now, CurrentPeriodEnd: now.AddDate(0, 1, 0), AssignmentSource: "migration",
+		},
 	}
 	for _, model := range models {
 		if err := db.Create(model).Error; err != nil {

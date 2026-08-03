@@ -485,7 +485,7 @@ func TestSuspendedInteractionExpiryFailsWholeSetRegardlessResolutionOrder(t *tes
 					"suspend-expiry-order-late-resolve-audit", "127.0.0.1",
 				)
 				var apiError *problem.Error
-				if !errors.As(err, &apiError) || apiError.Code != "interaction_not_pending" {
+				if !errors.As(err, &apiError) || apiError.Code != "interaction_expired" {
 					t.Fatalf("late resolution after required expiry error = %v", err)
 				}
 			}

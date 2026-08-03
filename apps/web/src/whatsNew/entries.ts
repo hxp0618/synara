@@ -17,6 +17,9 @@
 //     `title`, a marketing `description`, and optionally an `image`
 //     (absolute path from `apps/web/public`, e.g. `/whats-new/0.0.29/foo.png`)
 //     plus `details` for the longer technical note shown under the image.
+//   - Put customer action, breaking changes, or an urgent security exception
+//     in `notices`. Those structured records render ahead of feature cards and
+//     are validated by `entries.test.ts`; do not bury mandatory action in prose.
 
 import type { WhatsNewEntry } from "./logic";
 

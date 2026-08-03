@@ -10,6 +10,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/retentiongate"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
@@ -31,17 +32,20 @@ func (s *Service) ApplyWorkspaceCheckpointRetention(
 	}
 	result := WorkspaceCheckpointRetentionResult{}
 	var terminalExecutionIDs []uuid.UUID
-	if err := s.db.WithContext(ctx).Model(&persistence.AgentExecution{}).
+	executionQuery := s.db.WithContext(ctx).Model(&persistence.AgentExecution{}).
 		Select("id").
 		Where("tenant_id = ? AND restore_checkpoint_id IS NOT NULL AND status IN ?", tenantID, terminalExecutionStatuses).
-		Order("COALESCE(finished_at, queued_at), id").Limit(limit).Scan(&terminalExecutionIDs).Error; err != nil {
+		Where("1 = 1")
+	executionQuery = retentiongate.ExcludeExecutions(executionQuery, "agent_executions")
+	if err := executionQuery.Order("COALESCE(finished_at, queued_at), id").Limit(limit).Scan(&terminalExecutionIDs).Error; err != nil {
 		return result, problem.Wrap(500, "checkpoint_restore_references_load_failed", "Checkpoint retention could not load terminal restore references.", err)
 	}
 	if len(terminalExecutionIDs) > 0 {
-		cleared := s.db.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		clearQuery := s.db.WithContext(ctx).Model(&persistence.AgentExecution{}).
 			Where("tenant_id = ? AND id IN ? AND restore_checkpoint_id IS NOT NULL AND status IN ?",
-				tenantID, terminalExecutionIDs, terminalExecutionStatuses).
-			Update("restore_checkpoint_id", nil)
+				tenantID, terminalExecutionIDs, terminalExecutionStatuses)
+		clearQuery = retentiongate.ExcludeExecutions(clearQuery, "agent_executions")
+		cleared := clearQuery.Update("restore_checkpoint_id", nil)
 		if cleared.Error != nil {
 			return result, problem.Wrap(500, "checkpoint_restore_references_clear_failed", "Checkpoint retention could not release terminal restore references.", cleared.Error)
 		}
@@ -49,7 +53,7 @@ func (s *Service) ApplyWorkspaceCheckpointRetention(
 	}
 
 	var checkpointIDs []uuid.UUID
-	if err := s.db.WithContext(ctx).Table("workspace_checkpoints AS checkpoint").
+	checkpointQuery := s.db.WithContext(ctx).Table("workspace_checkpoints AS checkpoint").
 		Select("checkpoint.id").
 		Joins("JOIN agent_sessions AS session ON session.tenant_id = checkpoint.tenant_id AND session.id = checkpoint.session_id").
 		Where("checkpoint.tenant_id = ? AND checkpoint.status IN ?", tenantID, []string{"ready", "failed", "superseded"}).
@@ -66,13 +70,14 @@ func (s *Service) ApplyWorkspaceCheckpointRetention(
 			SELECT 1 FROM agent_executions execution
 			WHERE execution.tenant_id = checkpoint.tenant_id
 			  AND execution.restore_checkpoint_id = checkpoint.id
-		)`).
-		Order("COALESCE(checkpoint.expires_at, checkpoint.ready_at, checkpoint.failed_at, checkpoint.created_at), checkpoint.id").
+		)`)
+	checkpointQuery = retentiongate.ExcludeCheckpoints(checkpointQuery, "checkpoint")
+	if err := checkpointQuery.Order("COALESCE(checkpoint.expires_at, checkpoint.ready_at, checkpoint.failed_at, checkpoint.created_at), checkpoint.id").
 		Limit(limit).Scan(&checkpointIDs).Error; err != nil {
 		return result, problem.Wrap(500, "checkpoint_retention_load_failed", "Checkpoint retention could not load eligible Checkpoints.", err)
 	}
 	for _, checkpointID := range checkpointIDs {
-		updated := s.db.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
+		updateQuery := s.db.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
 			Where("tenant_id = ? AND id = ? AND status IN ?", tenantID, checkpointID, []string{"ready", "failed", "superseded"}).
 			Where(`NOT EXISTS (
 				SELECT 1 FROM remote_workspaces workspace
@@ -83,8 +88,9 @@ func (s *Service) ApplyWorkspaceCheckpointRetention(
 				SELECT 1 FROM agent_executions execution
 				WHERE execution.tenant_id = workspace_checkpoints.tenant_id
 				  AND execution.restore_checkpoint_id = workspace_checkpoints.id
-			)`).
-			Update("status", "expired")
+			)`)
+		updateQuery = retentiongate.ExcludeCheckpoints(updateQuery, "workspace_checkpoints")
+		updated := updateQuery.Update("status", "expired")
 		if updated.Error != nil {
 			return result, problem.Wrap(409, "checkpoint_retention_conflict", "Checkpoint retention conflicted with a new recovery reference.", updated.Error)
 		}

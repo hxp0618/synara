@@ -1,0 +1,1811 @@
+{
+  "schemaVersion": "synara.tenant-isolation-matrix.v1",
+  "scope": "focused-high-risk-resource-families-not-exhaustive",
+  "assessment": "focused-tenant-isolation-evidence-validated-not-audit-passed",
+  "trustedInternalEntrypoints": [
+    {
+      "entrypoint": "./internal/executions:Service.RevokeExecutionTargetWorkersInTransaction",
+      "sourceFile": "services/control-plane/internal/executions/worker_revocation.go",
+      "contractMarker": "RevokeExecutionTargetWorkersInTransaction assumes the caller already\n// authorized the principal and holds the supplied SSH Target FOR UPDATE in tx.",
+      "reason": "Internal SSH revocation callback; the caller authorizes the principal and locks the exact Tenant-owned Target before invocation."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "shared-active-tenant-guard",
+      "family": "User session Tenant context",
+      "boundary": "single-source-fail-closed-active-tenant",
+      "operations": ["accept exact", "reject missing", "reject zero", "reject substitution"],
+      "package": "./internal/identity",
+      "testFile": "services/control-plane/internal/identity/tenant_context_test.go",
+      "testName": "TestRequireActiveTenantFailsClosed"
+    },
+    {
+      "id": "entitlement-active-context",
+      "family": "Tenant Plan, Entitlement and Feature projection",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["get Entitlement snapshot"],
+      "entrypoints": ["Service.Get"],
+      "package": "./internal/entitlements",
+      "testFile": "services/control-plane/internal/entitlements/service_test.go",
+      "testName": "TestEntitlementReadRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "desktop-enrollment-session-audience-boundary",
+      "family": "Desktop Enrollment and device session lifecycle",
+      "boundary": "platform-web-versus-desktop-audience-before-storage",
+      "operations": [
+        "list Platform Desktop access",
+        "issue Enrollment",
+        "mark Enrollment opened",
+        "revoke Enrollment",
+        "revoke device",
+        "rotate Desktop session",
+        "disconnect Desktop"
+      ],
+      "entrypoints": [
+        "Service.ListPlatform",
+        "Service.Issue",
+        "Service.MarkOpened",
+        "Service.RevokeEnrollment",
+        "Service.RevokeDevice",
+        "Service.Rotate",
+        "Service.Disconnect"
+      ],
+      "package": "./internal/desktopenrollment",
+      "testFile": "services/control-plane/internal/desktopenrollment/service_test.go",
+      "testName": "TestDesktopEnrollmentOperationsRejectWrongSessionAudienceBeforeStorage"
+    },
+    {
+      "id": "resource-lifecycle-active-context",
+      "family": "Tenant and Project Resource Lifecycle policy",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": [
+        "get Tenant policy",
+        "update Tenant policy",
+        "get Project policy",
+        "update Project policy"
+      ],
+      "entrypoints": [
+        "Service.GetTenant",
+        "Service.UpdateTenant",
+        "Service.GetProject",
+        "Service.UpdateProject"
+      ],
+      "package": "./internal/lifecyclepolicy",
+      "testFile": "services/control-plane/internal/lifecyclepolicy/service_test.go",
+      "testName": "TestLifecyclePoliciesRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "agent-memory-active-context",
+      "family": "Agent Memory publication",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["publish immutable Revision"],
+      "entrypoints": ["Service.Publish"],
+      "package": "./internal/memories",
+      "testFile": "services/control-plane/internal/memories/service_test.go",
+      "testName": "TestAgentMemoryPublishRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "agent-memory-session-owner",
+      "family": "Effective Agent Memory Session view",
+      "boundary": "active-tenant-and-session-id",
+      "operations": ["read effective Session Memory"],
+      "entrypoints": ["Service.ListEffectiveForSession"],
+      "package": "./internal/memories",
+      "testFile": "services/control-plane/internal/memories/service_test.go",
+      "testName": "TestAgentMemorySessionReadRejectsCrossTenantSessionSubstitution"
+    },
+    {
+      "id": "pool-autoscaling-active-context",
+      "family": "Worker Pool Autoscaling policy",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["get policy", "update policy"],
+      "entrypoints": ["Service.Get", "Service.Put"],
+      "package": "./internal/poolautoscaling",
+      "testFile": "services/control-plane/internal/poolautoscaling/service_test.go",
+      "testName": "TestWorkerPoolAutoscalingRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "retention-policy-active-context",
+      "family": "Tenant Retention policy",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["get policy", "update policy"],
+      "entrypoints": ["Service.Get", "Service.Update"],
+      "package": "./internal/retention",
+      "testFile": "services/control-plane/internal/retention/service_test.go",
+      "testName": "TestRetentionPolicyRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "tenant-usage-active-context",
+      "family": "Tenant Usage and soft-quota projection",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["read billing period Usage", "project soft-quota alerts"],
+      "entrypoints": ["Service.GetTenantUsage"],
+      "package": "./internal/usage",
+      "testFile": "services/control-plane/internal/usage/service_test.go",
+      "testName": "TestTenantUsageRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "internal-cost-allocation-active-context",
+      "family": "Internal cost allocation report, ownership and export audit",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": [
+        "read allocation report",
+        "assign Project cost dimensions",
+        "record CSV export"
+      ],
+      "entrypoints": [
+        "Service.GetInternalCostAllocationReport",
+        "Service.PutProjectCostAllocation",
+        "Service.RecordInternalCostAllocationExport"
+      ],
+      "package": "./internal/usage",
+      "testFile": "services/control-plane/internal/usage/service_test.go",
+      "testName": "TestInternalCostAllocationRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "session-usage-owner",
+      "family": "Session Usage and cost explanation",
+      "boundary": "active-tenant-and-session-id",
+      "operations": ["read Session Usage"],
+      "entrypoints": ["Service.GetSessionUsage"],
+      "package": "./internal/usage",
+      "testFile": "services/control-plane/internal/usage/service_test.go",
+      "testName": "TestSessionUsageRejectsCrossTenantSessionSubstitution"
+    },
+    {
+      "id": "support-policy-active-context",
+      "family": "Tenant Support Access policy and history",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": [
+        "get policy",
+        "update policy",
+        "list support history",
+        "read aggregate operations overview"
+      ],
+      "entrypoints": [
+        "Service.GetPolicy",
+        "Service.UpdatePolicy",
+        "Service.ListTenant",
+        "Service.GetTenantOverview"
+      ],
+      "package": "./internal/supportaccess",
+      "testFile": "services/control-plane/internal/supportaccess/service_test.go",
+      "testName": "TestTenantSupportPolicyRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "platform-support-operator-context",
+      "family": "Platform Support operations",
+      "boundary": "operator-tenant-before-storage",
+      "operations": [
+        "list Grants",
+        "list Tenant operations",
+        "require Platform Admin",
+        "require Platform Operator",
+        "deny Grant"
+      ],
+      "entrypoints": [
+        "Service.ListPlatform",
+        "Service.ListPlatformTenants",
+        "Service.RequirePlatformAdmin",
+        "Service.RequirePlatformOperator",
+        "Service.Deny"
+      ],
+      "package": "./internal/supportaccess",
+      "testFile": "services/control-plane/internal/supportaccess/service_test.go",
+      "testName": "TestPlatformSupportOperationsRejectCustomerContextBeforeStorageAccess"
+    },
+    {
+      "id": "support-grant-nested-id",
+      "family": "Controlled Support Access Grant",
+      "boundary": "four-eyes-active-tenant-and-grant-id",
+      "operations": [
+        "request",
+        "approve",
+        "reject cross-Tenant revoke",
+        "preserve Grant state",
+        "revalidate Platform authority after offboarding",
+        "clear stale customer Session context"
+      ],
+      "entrypoints": [
+        "Service.Request",
+        "Service.Approve",
+        "Service.Revoke",
+        "Service.RecordAccess"
+      ],
+      "package": "./internal/supportaccess",
+      "testFile": "services/control-plane/internal/supportaccess/service_test.go",
+      "testName": "TestControlledSupportAccessRequiresFourEyesAndRemainsReadOnly"
+    },
+    {
+      "id": "support-operator-authority-postgres",
+      "family": "Controlled Support Access Platform authority",
+      "boundary": "immutable-operator-tenant-and-live-offboarding",
+      "operations": [
+        "persist exact Platform Operator Tenant",
+        "reject Grant authority mutation",
+        "deny customer read after Platform offboarding"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/supportaccess",
+      "testFile": "services/control-plane/internal/supportaccess/postgres_integration_test.go",
+      "testName": "TestPostgresConcurrentSupportApprovalHasOneWinner"
+    },
+    {
+      "id": "tenant-active-context",
+      "family": "Tenant, Organization and Audit administration",
+      "boundary": "active-tenant-context-and-membership-inventory",
+      "operations": [
+        "list caller Tenants",
+        "get Tenant",
+        "update Tenant",
+        "list Tenant members",
+        "list Audit",
+        "list Organizations",
+        "get Organization",
+        "create Organization",
+        "update Organization",
+        "archive Organization",
+        "list Organization members",
+        "put Organization member",
+        "update Organization member",
+        "remove Organization member",
+        "request Tenant deletion",
+        "transition Tenant"
+      ],
+      "entrypoints": [
+        "Service.ListTenants",
+        "Service.GetTenant",
+        "Service.UpdateTenant",
+        "Service.ListTenantMembers",
+        "Service.ListAuditLogs",
+        "Service.ListOrganizations",
+        "Service.GetOrganization",
+        "Service.CreateOrganization",
+        "Service.UpdateOrganization",
+        "Service.ArchiveOrganization",
+        "Service.ListOrganizationMembers",
+        "Service.PutOrganizationMember",
+        "Service.UpdateOrganizationMember",
+        "Service.RemoveOrganizationMember",
+        "Service.RequestTenantDeletion",
+        "Service.TransitionTenant"
+      ],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_active_context_test.go",
+      "testName": "TestTenantAndOrganizationOperationsRejectInactiveTenantContext"
+    },
+    {
+      "id": "joiner-mover-leaver",
+      "family": "Tenant member and Credential lifecycle",
+      "boundary": "transactional-access-revocation-and-audit",
+      "operations": ["invite", "accept", "change role", "suspend", "remove"],
+      "entrypoints": [
+        "Service.InviteTenantMember",
+        "Service.AcceptInvitation",
+        "Service.UpdateTenantMember",
+        "Service.RemoveTenantMember"
+      ],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_member_lifecycle_test.go",
+      "testName": "TestJoinerMoverLeaverCredentialLifecycleHasCompleteAuditChain"
+    },
+    {
+      "id": "desktop-identity-offboarding",
+      "family": "Tenant member Desktop identity lifecycle",
+      "boundary": "transactional-terminal-revocation-without-reactivation",
+      "operations": [
+        "suspend member manually",
+        "revoke Web Login Session",
+        "revoke Desktop Bearer Session",
+        "revoke user Credential",
+        "terminally revoke pending Desktop Enrollment",
+        "preserve user-global Desktop Device registration without authorization",
+        "preserve Enrollment revocation after member reactivation",
+        "preserve revoked Session and Enrollment after member reactivation"
+      ],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_member_lifecycle_test.go",
+      "testName": "TestManualTenantMemberSuspensionUsesSharedOffboardingClosure"
+    },
+    {
+      "id": "desktop-identity-offboarding-postgres",
+      "family": "Tenant member Desktop identity lifecycle PostgreSQL authority",
+      "boundary": "terminal-enrollment-device-and-session-revocation",
+      "operations": [
+        "connect Desktop before offboarding",
+        "issue second pending Enrollment",
+        "revoke Desktop credential during offboarding",
+        "terminally revoke pending Enrollment",
+        "preserve user-global Desktop Device registration",
+        "reactivate Tenant Membership",
+        "reject pre-offboarding Enrollment after reactivation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/desktopenrollment",
+      "testFile": "services/control-plane/internal/desktopenrollment/postgres_integration_test.go",
+      "testName": "TestPostgresOffboardingTerminallyRevokesDesktopIdentity"
+    },
+    {
+      "id": "tenant-deletion-recovery",
+      "family": "Tenant lifecycle deletion recovery",
+      "boundary": "owner-recovery-inventory-and-versioned-restore",
+      "operations": ["create Tenant", "list deleting Tenants", "restore Tenant"],
+      "entrypoints": [
+        "Service.CreateTenant",
+        "Service.ListDeletingTenants",
+        "Service.RestoreTenant"
+      ],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/lifecycle_test.go",
+      "testName": "TestTenantLifecycleTransitionsDeletionRecoveryAndAudit"
+    },
+    {
+      "id": "self-service-tenant-entitlement-boundary",
+      "family": "Self-service Tenant creation",
+      "boundary": "standard-profile-and-no-evaluation-escalation",
+      "operations": ["create self-service Tenant"],
+      "entrypoints": ["Service.CreateSelfServiceTenant"],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_provisioning_test.go",
+      "testName": "TestSelfServiceTenantCreationCannotClaimEnterpriseProfileOrEvaluation"
+    },
+    {
+      "id": "platform-tenant-provisioning-boundary",
+      "family": "Platform Tenant provisioning",
+      "boundary": "customer-owner-without-operator-membership",
+      "operations": ["provision enterprise Tenant"],
+      "entrypoints": ["Service.ProvisionTenant"],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_provisioning_test.go",
+      "testName": "TestPlatformProvisioningAssignsExistingCustomerOwnerWithoutOperatorMembership"
+    },
+    {
+      "id": "tenant-final-cleanup",
+      "family": "Tenant final deletion",
+      "boundary": "tenant-scoped-cancellation-and-workspace-cleanup",
+      "operations": ["delete Tenant"],
+      "entrypoints": ["Service.DeleteTenant"],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/tenant_cleanup_test.go",
+      "testName": "TestDeleteTenantSchedulesAllNonCleanedWorkspaceMaterializationsImmediately"
+    },
+    {
+      "id": "explicit-tenant-route-context",
+      "family": "Explicit Tenant HTTP routes",
+      "boundary": "pre-handler-active-tenant-context",
+      "operations": ["all 117 non-recovery explicit Tenant routes"],
+      "package": "./internal/httpapi",
+      "testFile": "services/control-plane/internal/httpapi/tenant_route_active_context_test.go",
+      "testName": "TestEveryExplicitTenantRouteRejectsInactiveTenantContextBeforeHandling"
+    },
+    {
+      "id": "project-nested-id",
+      "family": "Project",
+      "boundary": "nested-id-substitution",
+      "operations": ["get", "list", "create", "idempotent create", "update", "archive"],
+      "entrypoints": [
+        "Service.Get",
+        "Service.List",
+        "Service.Create",
+        "Service.CreateWithIdempotency",
+        "Service.Update",
+        "Service.Archive"
+      ],
+      "package": "./internal/projects",
+      "testFile": "services/control-plane/internal/projects/git_credentials_test.go",
+      "testName": "TestProjectOperationsRejectCrossTenantNestedIDSubstitution"
+    },
+    {
+      "id": "project-active-context",
+      "family": "Project service",
+      "boundary": "active-tenant-context",
+      "operations": ["get", "list", "create", "update", "archive"],
+      "package": "./internal/projects",
+      "testFile": "services/control-plane/internal/projects/git_credentials_test.go",
+      "testName": "TestProjectOperationsRejectInactiveTenantContextWithoutMutation"
+    },
+    {
+      "id": "session-nested-id",
+      "family": "Session, Turn and Event",
+      "boundary": "nested-id-substitution",
+      "operations": [
+        "get",
+        "list",
+        "create",
+        "idempotent create",
+        "create Turn",
+        "idempotent create Turn",
+        "archive",
+        "idempotent archive",
+        "suspend",
+        "resume",
+        "switch model",
+        "idempotent switch model",
+        "fork",
+        "rollback",
+        "subscribe events",
+        "sanitize subscribed event"
+      ],
+      "entrypoints": [
+        "Service.Get",
+        "Service.ListByProject",
+        "Service.Create",
+        "Service.CreateWithIdempotency",
+        "Service.CreateTurn",
+        "Service.CreateTurnWithIdempotency",
+        "Service.ListEvents",
+        "Service.Archive",
+        "Service.ArchiveWithIdempotency",
+        "Service.Suspend",
+        "Service.Resume",
+        "Service.SwitchModel",
+        "Service.SwitchModelWithIdempotency",
+        "Service.Fork",
+        "Service.Rollback",
+        "Service.SubscribeEvents",
+        "Service.SanitizeSubscribedEvent"
+      ],
+      "package": "./internal/sessions",
+      "testFile": "services/control-plane/internal/sessions/tenant_isolation_test.go",
+      "testName": "TestSessionOperationsRejectCrossTenantNestedIDSubstitution"
+    },
+    {
+      "id": "user-execution-operations",
+      "family": "User Execution control and Interaction",
+      "boundary": "active-tenant-and-nested-id",
+      "operations": [
+        "cancel",
+        "resume",
+        "resume Session active Turn",
+        "interrupt",
+        "steer",
+        "list interactions",
+        "list runtime isolation decisions",
+        "list pending interactions",
+        "resolve approval",
+        "resolve user input",
+        "compact",
+        "review",
+        "project Provider capabilities",
+        "Session Provider capabilities",
+        "list Workers",
+        "list Worker manifests",
+        "revoke Worker",
+        "revoke Target Workers"
+      ],
+      "entrypoints": [
+        "Service.Cancel",
+        "Service.ResumeActiveTurn",
+        "Service.ResumeActiveTurnForSession",
+        "Service.RequestInterrupt",
+        "Service.RequestSteer",
+        "Service.ListInteractions",
+        "Service.ListRuntimeIsolationDecisions",
+        "Service.ListPendingInteractions",
+        "Service.ResolveApproval",
+        "Service.ResolveUserInput",
+        "Service.RequestCompact",
+        "Service.RequestReview",
+        "Service.ProjectProviderCapabilitiesForProject",
+        "Service.ProjectProviderCapabilitiesForSession",
+        "Service.ListWorkers",
+        "Service.ListWorkerManifests",
+        "Service.RevokeWorker",
+        "Service.RevokeExecutionTargetWorkers"
+      ],
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/tenant_operation_isolation_test.go",
+      "testName": "TestUserExecutionOperationsRejectCrossTenantIDsWithoutMutation"
+    },
+    {
+      "id": "artifact-content",
+      "family": "Artifact metadata and content grant",
+      "boundary": "tenant-object-and-content-token",
+      "operations": ["create", "complete", "get", "list", "download", "delete"],
+      "entrypoints": [
+        "Service.Create",
+        "Service.Complete",
+        "Service.Get",
+        "Service.List",
+        "Service.Download",
+        "Service.Delete"
+      ],
+      "package": "./internal/artifacts",
+      "testFile": "services/control-plane/internal/artifacts/service_test.go",
+      "testName": "TestLocalArtifactLifecycleAndTenantIsolation"
+    },
+    {
+      "id": "artifact-storage-security-configuration",
+      "family": "Artifact object-store runtime configuration",
+      "boundary": "endpoint-credential-and-presign-fail-closed",
+      "operations": [
+        "accept enterprise workload identity",
+        "reject enterprise HTTP endpoint",
+        "reject endpoint credentials or path",
+        "reject presign TTL above 15 minutes",
+        "reject long-lived enterprise static credentials",
+        "accept temporary session credentials",
+        "reject partial credential pairs",
+        "reject ignored Local-store credentials"
+      ],
+      "package": "./internal/config",
+      "testFile": "services/control-plane/internal/config/config_test.go",
+      "testName": "TestLoadHardensArtifactStorageCredentialsEndpointsAndPresignTTL"
+    },
+    {
+      "id": "identity-connection",
+      "family": "Identity Connection and mapping",
+      "boundary": "nested-id-substitution",
+      "operations": ["list", "disable"],
+      "entrypoints": ["Service.List", "Service.ListMappings", "Service.Disable"],
+      "package": "./internal/enterpriseidentity",
+      "testFile": "services/control-plane/internal/enterpriseidentity/service_test.go",
+      "testName": "TestIdentityOperationsRejectCrossTenantConnectionSubstitution"
+    },
+    {
+      "id": "enterprise-identity-active-context",
+      "family": "Enterprise Identity connection, domain and SSO policy",
+      "boundary": "pre-dns-secret-and-storage-active-tenant-context",
+      "operations": [
+        "create connection",
+        "list domains",
+        "create domain challenge",
+        "verify domain",
+        "revoke domain",
+        "get SSO policy",
+        "update SSO policy",
+        "replace group mappings"
+      ],
+      "entrypoints": [
+        "Service.Create",
+        "Service.ListDomains",
+        "Service.CreateDomain",
+        "Service.VerifyDomain",
+        "Service.RevokeDomain",
+        "Service.GetIdentityPolicy",
+        "Service.UpdateIdentityPolicy",
+        "Service.ReplaceMappings"
+      ],
+      "package": "./internal/enterpriseidentity",
+      "testFile": "services/control-plane/internal/enterpriseidentity/governance_test.go",
+      "testName": "TestEnterpriseIdentityOperationsRejectInactiveTenantBeforeDNSSecretsOrStorage"
+    },
+    {
+      "id": "credential-lifecycle",
+      "family": "Provider Credential",
+      "boundary": "tenant-object-and-secret",
+      "operations": ["list", "resolve", "revoke"],
+      "entrypoints": ["Service.List", "Service.Revoke"],
+      "package": "./internal/credentials",
+      "testFile": "services/control-plane/internal/credentials/service_test.go",
+      "testName": "TestCredentialRevokeExpiryAndTenantIsolation"
+    },
+    {
+      "id": "credential-active-context",
+      "family": "Provider Credential mutation and scope policy",
+      "boundary": "pre-secret-and-storage-active-tenant-context",
+      "operations": [
+        "create",
+        "rotate",
+        "set auto-select",
+        "get scope policy",
+        "update scope policy"
+      ],
+      "entrypoints": [
+        "Service.Create",
+        "Service.Rotate",
+        "Service.SetAutoSelect",
+        "Service.GetScopePolicy",
+        "Service.UpdateScopePolicy"
+      ],
+      "package": "./internal/credentials",
+      "testFile": "services/control-plane/internal/credentials/service_test.go",
+      "testName": "TestCredentialOperationsRejectInactiveTenantBeforeSecretsOrStorage"
+    },
+    {
+      "id": "credential-binding-owner",
+      "family": "Credential Binding",
+      "boundary": "nested-parent-substitution",
+      "operations": ["list"],
+      "entrypoints": ["Service.List"],
+      "package": "./internal/credentialbindings",
+      "testFile": "services/control-plane/internal/credentialbindings/service_test.go",
+      "testName": "TestCredentialBindingListRejectsCrossTenantOwnerSubstitution"
+    },
+    {
+      "id": "credential-binding-active-context",
+      "family": "Credential Binding mutation",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["create", "disable"],
+      "entrypoints": ["Service.Create", "Service.Disable"],
+      "package": "./internal/credentialbindings",
+      "testFile": "services/control-plane/internal/credentialbindings/service_test.go",
+      "testName": "TestCredentialBindingMutationsRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "service-account",
+      "family": "Service Account",
+      "boundary": "nested-id-substitution",
+      "operations": ["rotate", "revoke"],
+      "entrypoints": ["Service.RotateToken", "Service.Revoke"],
+      "package": "./internal/serviceaccounts",
+      "testFile": "services/control-plane/internal/serviceaccounts/service_test.go",
+      "testName": "TestServiceAccountOperationsRejectCrossTenantAccountSubstitution"
+    },
+    {
+      "id": "service-account-active-context",
+      "family": "Service Account creation and inventory",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["create", "list"],
+      "entrypoints": ["Service.Create", "Service.List"],
+      "package": "./internal/serviceaccounts",
+      "testFile": "services/control-plane/internal/serviceaccounts/service_test.go",
+      "testName": "TestServiceAccountCreateAndListRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "service-account-token-lifecycle",
+      "family": "Service Account authentication",
+      "boundary": "token-and-operational-tenant-revalidation",
+      "operations": [
+        "authenticate active",
+        "authenticate current trial",
+        "reject expired trial",
+        "reject suspended",
+        "reject closed",
+        "reject deleting",
+        "reject expired token",
+        "reject revoked token"
+      ],
+      "package": "./internal/serviceaccounts",
+      "testFile": "services/control-plane/internal/serviceaccounts/service_test.go",
+      "testName": "TestServiceAccountAuthenticationRechecksTokenAndTenantLifecycle"
+    },
+    {
+      "id": "delivery-outbox",
+      "family": "Delivery Outbox",
+      "boundary": "active-tenant-and-nested-id",
+      "operations": ["list", "replay"],
+      "entrypoints": ["Service.ListForTenant", "Service.ReplayAuthorized"],
+      "package": "./internal/outbox",
+      "testFile": "services/control-plane/internal/outbox/service_test.go",
+      "testName": "TestTenantOutboxRejectsActiveTenantAndMessageIDSubstitution"
+    },
+    {
+      "id": "audit-export",
+      "family": "Audit search and export",
+      "boundary": "tenant-query-and-cursor",
+      "operations": ["list", "export"],
+      "entrypoints": ["Service.ExportAuditLogs"],
+      "package": "./internal/tenancy",
+      "testFile": "services/control-plane/internal/tenancy/audit_test.go",
+      "testName": "TestAuditLogFilteringPaginationExportAndIsolation"
+    },
+    {
+      "id": "legal-hold-retention",
+      "family": "Legal Hold and retention",
+      "boundary": "database-scope-and-retention-gate",
+      "operations": ["create", "release", "list", "archive", "delete"],
+      "entrypoints": ["Service.Create", "Service.Release", "Service.List"],
+      "package": "./internal/legalholds",
+      "testFile": "services/control-plane/internal/legalholds/service_test.go",
+      "testName": "TestSessionLegalHoldGatesRetentionArtifactDeletionAndTenantDeletion"
+    },
+    {
+      "id": "privacy-request-nested-id",
+      "family": "Privacy Request",
+      "boundary": "nested-id-substitution",
+      "operations": ["get", "transition"],
+      "entrypoints": ["Service.Get", "Service.Transition"],
+      "package": "./internal/privacy",
+      "testFile": "services/control-plane/internal/privacy/service_test.go",
+      "testName": "TestPrivacyRequestRejectsCrossTenantIDSubstitutionWithoutMutation"
+    },
+    {
+      "id": "privacy-export-erasure",
+      "family": "Privacy export and erasure",
+      "boundary": "tenant-subject-and-secret-redaction",
+      "operations": ["create", "export", "erase"],
+      "entrypoints": [
+        "Service.Create",
+        "Service.ExecuteExport",
+        "Service.ExecuteTenantExport",
+        "Service.ExecuteErasure"
+      ],
+      "package": "./internal/privacy",
+      "testFile": "services/control-plane/internal/privacy/service_test.go",
+      "testName": "TestPrivacyExportAndErasureWorkflow"
+    },
+    {
+      "id": "privacy-list-active-context",
+      "family": "Privacy Request inventory",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["list"],
+      "entrypoints": ["Service.List"],
+      "package": "./internal/privacy",
+      "testFile": "services/control-plane/internal/privacy/service_test.go",
+      "testName": "TestPrivacyRequestListRejectsInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "composite-foreign-keys",
+      "family": "Tenant-owned relational graph",
+      "boundary": "database-composite-foreign-key",
+      "operations": ["insert", "update"],
+      "executionMode": "source-reference-only",
+      "package": "./internal/persistence",
+      "testFile": "services/control-plane/internal/persistence/phase2_integration_test.go",
+      "testName": "TestPhase2CompositeForeignKeysRejectCrossTenantAssociations"
+    },
+    {
+      "id": "scoped-execution-quota",
+      "family": "Execution quota",
+      "boundary": "exact-scope-and-cas",
+      "operations": ["read", "update"],
+      "entrypoints": ["Service.GetScoped", "Service.PutScoped"],
+      "package": "./internal/quotas",
+      "testFile": "services/control-plane/internal/quotas/service_test.go",
+      "testName": "TestScopedExecutionQuotaUsesExactScopeAndCAS"
+    },
+    {
+      "id": "tenant-quota-active-context",
+      "family": "Tenant quota policy",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["get", "update"],
+      "entrypoints": ["Service.Get", "Service.Put"],
+      "package": "./internal/quotas",
+      "testFile": "services/control-plane/internal/quotas/service_test.go",
+      "testName": "TestTenantQuotaOperationsRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "placement-policy",
+      "family": "Placement Policy",
+      "boundary": "tenant-target-scope-and-cas",
+      "operations": ["create", "get", "update", "delete"],
+      "entrypoints": ["Service.List", "Service.UpdatePolicy"],
+      "package": "./internal/placement",
+      "testFile": "services/control-plane/internal/placement/service_test.go",
+      "testName": "TestUpdatePolicyEnforcesCASAndTargetScope"
+    },
+    {
+      "id": "worker-pool-active-context",
+      "family": "Worker Pool lifecycle",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["create", "update"],
+      "entrypoints": ["Service.CreatePool", "Service.UpdatePool"],
+      "package": "./internal/placement",
+      "testFile": "services/control-plane/internal/placement/service_test.go",
+      "testName": "TestWorkerPoolMutationsRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "managed-worker-release",
+      "family": "Managed Worker Release",
+      "boundary": "tenant-manifest-visibility",
+      "operations": ["resolve", "validate digest"],
+      "entrypoints": ["Service.CreateRevision"],
+      "package": "./internal/workerreleases",
+      "testFile": "services/control-plane/internal/workerreleases/service_test.go",
+      "testName": "TestManagedWorkerReleaseHidesAnotherTenantsManifestBeforeDigestValidation"
+    },
+    {
+      "id": "worker-release-active-context",
+      "family": "Managed Worker Release policy",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["list", "promote", "start canary", "rollback"],
+      "entrypoints": ["Service.List", "Service.Promote", "Service.StartCanary", "Service.Rollback"],
+      "package": "./internal/workerreleases",
+      "testFile": "services/control-plane/internal/workerreleases/service_test.go",
+      "testName": "TestWorkerReleaseOperationsRejectInactiveTenantBeforeStorageAccess"
+    },
+    {
+      "id": "tenant-worker-management",
+      "family": "Tenant Worker management",
+      "boundary": "permission-active-tenant-and-idempotency",
+      "operations": ["read", "manage", "retry"],
+      "package": "./internal/httpapi",
+      "testFile": "services/control-plane/internal/httpapi/worker_management_api_test.go",
+      "testName": "TestTenantWorkerRoutesEnforceReadManageActiveTenantAndIdempotency"
+    },
+    {
+      "id": "organization-scheduling-policy",
+      "family": "Organization execution scheduling policy",
+      "boundary": "exact-organization-authority",
+      "operations": ["read", "update"],
+      "package": "./internal/httpapi",
+      "testFile": "services/control-plane/internal/httpapi/execution_scheduling_policy_api_test.go",
+      "testName": "TestOrganizationExecutionSchedulingPolicyRoutesUseExactOrganizationAuthority"
+    },
+    {
+      "id": "internal-cost-invoice-reconciliation",
+      "family": "Imported cloud cost reconciliation",
+      "boundary": "tenant-cost-accounting",
+      "operations": ["import", "reconcile"],
+      "package": "./internal/billing",
+      "testFile": "services/control-plane/internal/billing/service_test.go",
+      "testName": "TestImportAndReconcileActualInvoiceIsolatesTenants"
+    },
+    {
+      "id": "internal-cost-management-active-context",
+      "family": "Internal cost tariff, cloud invoice and shared-cost management",
+      "boundary": "pre-configuration-and-storage-active-tenant-context",
+      "operations": [
+        "list tariffs",
+        "create tariff",
+        "import configured cloud cost",
+        "reconcile cloud cost",
+        "get shared ledger coverage",
+        "seal shared ledger coverage",
+        "sweep shared usage",
+        "allocate shared cloud cost"
+      ],
+      "entrypoints": [
+        "Service.ListTariffsAuthorized",
+        "Service.CreateTariffAuthorized",
+        "Service.ImportConfiguredInvoiceAuthorized",
+        "Service.ReconcileActualInvoiceImportAuthorized",
+        "Service.GetSharedTargetLedgerCoverageAuthorized",
+        "Service.SealSharedTargetLedgerCoverageAuthorized",
+        "Service.SweepSharedUsageChargesAuthorized",
+        "Service.AllocateSharedActualInvoiceAuthorized"
+      ],
+      "package": "./internal/billing",
+      "testFile": "services/control-plane/internal/billing/service_test.go",
+      "testName": "TestCostManagementRejectsInactiveTenantBeforeConfigurationOrStorage"
+    },
+    {
+      "id": "scim-provisioning",
+      "family": "SCIM provisioning",
+      "boundary": "tenant-directory-final-owner-and-desktop-identity-offboarding",
+      "operations": [
+        "create",
+        "update",
+        "deactivate",
+        "protect final owner",
+        "revoke Desktop Bearer Session",
+        "revoke user Credential",
+        "terminally revoke pending Desktop Enrollment",
+        "preserve user-global Desktop Device registration without cross-Tenant revocation",
+        "record exact Desktop revocation counts"
+      ],
+      "package": "./internal/scim",
+      "testFile": "services/control-plane/internal/scim/service_test.go",
+      "testName": "TestSCIMProvisioningStaysTenantScopedAndProtectsFinalOwner"
+    },
+    {
+      "id": "interaction-renewal",
+      "family": "Execution interaction lease",
+      "boundary": "tenant-worker-binding",
+      "operations": ["renew"],
+      "executionMode": "source-reference-only",
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/interaction_expiry_integration_test.go",
+      "testName": "TestRenewRejectsCrossTenantWorkerWithoutExpiringInteraction"
+    },
+    {
+      "id": "provider-cursor-binding",
+      "family": "Provider Cursor ciphertext",
+      "boundary": "tenant-session-associated-data",
+      "operations": ["encrypt", "decrypt", "reject substitution"],
+      "package": "./internal/secret",
+      "testFile": "services/control-plane/internal/secret/cursor_test.go",
+      "testName": "TestCursorCipherV2RoundTripAndBindingIsolation"
+    },
+    {
+      "id": "execution-target-product-surface",
+      "family": "Execution Target product surface",
+      "boundary": "tenant-visibility-and-trust-policy",
+      "operations": ["list", "get", "exclude weak shared target"],
+      "entrypoints": ["Service.List", "Service.Get"],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/service_test.go",
+      "testName": "TestPlatformSharedWeakTargetsAreExcludedFromTenantProductSurface"
+    },
+    {
+      "id": "execution-target-active-context",
+      "family": "Execution Target lifecycle and runtime policy",
+      "boundary": "pre-policy-and-storage-active-tenant-context",
+      "operations": [
+        "create",
+        "update Provider policy",
+        "update process containment",
+        "update runtime isolation policy",
+        "disable managed Kubernetes"
+      ],
+      "entrypoints": [
+        "Service.Create",
+        "Service.UpdateProviderPolicy",
+        "Service.UpdateProcessContainmentPolicy",
+        "Service.UpdateRuntimeIsolationPolicy",
+        "Service.DisableManagedKubernetesTarget"
+      ],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/service_test.go",
+      "testName": "TestExecutionTargetMutationsRejectInactiveTenantBeforePolicyOrStorage"
+    },
+    {
+      "id": "credential-scope-sqlite",
+      "family": "Credential scope persistence",
+      "boundary": "database-shape-and-emergency-toggle",
+      "operations": ["reject invalid shape", "preserve emergency toggle"],
+      "package": "./internal/database",
+      "testFile": "services/control-plane/internal/database/credential_scope_sqlite_test.go",
+      "testName": "TestSQLiteCredentialScopeSafetyRejectsInvalidShapeAndPreservesEmergencyToggle"
+    },
+    {
+      "id": "support-readonly",
+      "family": "Support Access",
+      "boundary": "all-explicit-tenant-routes-exceptional-readonly-access",
+      "operations": [
+        "allow active Support Grant GET access across every explicit Tenant route",
+        "deny active Support Grant writes across every explicit Tenant route",
+        "audit every Support read and blocked control attempt",
+        "allow only active-Tenant and logout controls for leaving Support context",
+        "clear a Platform operator customer context when no active Support Grant exists",
+        "deny Platform operator access across every non-recovery explicit Tenant route without a Grant",
+        "deny Platform operator deletion recovery through the real owner-authorized handler",
+        "preserve the explicit deletion-recovery middleware exception without weakening service authorization"
+      ],
+      "package": "./internal/httpapi",
+      "testFile": "services/control-plane/internal/httpapi/support_access_middleware_test.go",
+      "testName": "TestSupportAccessMiddlewareAuditsEveryRequestAndBlocksWrites"
+    },
+    {
+      "id": "telemetry-export-policy-denial",
+      "family": "Trace collector export boundary",
+      "boundary": "endpoint-transport-credential-fail-closed",
+      "operations": [
+        "reject relative endpoint",
+        "reject embedded URL credentials",
+        "reject authentication Header over HTTP",
+        "reject non-HTTP protobuf protocol",
+        "reject insecure transport override",
+        "reject incomplete mTLS identity",
+        "reject enterprise HTTP endpoint",
+        "reject enterprise exporter without mTLS"
+      ],
+      "package": "./internal/tracing",
+      "testFile": "services/control-plane/internal/tracing/tracing_test.go",
+      "testName": "TestExporterSettingsFailClosedForUnsafeEndpointsAndCredentials"
+    },
+    {
+      "id": "telemetry-region-retention-policy",
+      "family": "Trace collector data policy",
+      "boundary": "bounded-region-retention-resource-declaration",
+      "operations": [
+        "reject missing enterprise collector Region",
+        "reject retention above 90 days"
+      ],
+      "package": "./internal/tracing",
+      "testFile": "services/control-plane/internal/tracing/tracing_test.go",
+      "testName": "TestEnterpriseExporterRejectsMissingOrUnboundedDataPolicy"
+    },
+    {
+      "id": "telemetry-enterprise-exporter-shape",
+      "family": "Trace collector enterprise configuration",
+      "boundary": "https-mtls-region-retention",
+      "operations": [
+        "accept HTTPS OTLP HTTP exporter",
+        "accept absolute mTLS files",
+        "project bounded Region and retention resource metadata"
+      ],
+      "package": "./internal/tracing",
+      "testFile": "services/control-plane/internal/tracing/tracing_test.go",
+      "testName": "TestEnterpriseExporterRequiresBoundedRegionRetentionAndAbsoluteMTLSFiles"
+    },
+    {
+      "id": "telemetry-enterprise-worker-exporter-shape",
+      "family": "Trace collector Worker configuration",
+      "boundary": "credentialless-https-or-explicit-ip-loopback-relay",
+      "operations": [
+        "accept credentialless HTTPS",
+        "accept IPv4 loopback relay",
+        "accept IPv6 loopback relay",
+        "reject remote HTTP",
+        "reject DNS localhost",
+        "reject loopback without explicit port",
+        "reject Header credential",
+        "reject client identity files"
+      ],
+      "package": "./internal/tracing",
+      "testFile": "services/control-plane/internal/tracing/tracing_test.go",
+      "testName": "TestEnterpriseWorkerExporterRequiresCredentiallessHTTPSOrLoopbackRelay"
+    },
+    {
+      "id": "telemetry-kubernetes-worker-exporter-authority",
+      "family": "Trace collector Worker deployment authority",
+      "boundary": "target-scoped-credentialless-optional-config",
+      "operations": [
+        "reject renamed Collector ConfigMap",
+        "reject required Collector ConfigMap reference",
+        "reject client identity injection",
+        "reject Header credential injection",
+        "reject insecure override injection"
+      ],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/kubernetes_workload_identity_test.go",
+      "testName": "TestVerifyKubernetesWorkloadIdentityRejectsWeakenedOuterSandbox"
+    },
+    {
+      "id": "telemetry-sandbox-template-exporter-authority",
+      "family": "Trace collector external Sandbox template authority",
+      "boundary": "fixed-optional-credentialless-config",
+      "operations": [
+        "reject renamed template Collector ConfigMap",
+        "reject required template ConfigMap reference",
+        "reject template client identity injection"
+      ],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/kubernetes_sandbox_client_test.go",
+      "testName": "TestKubernetesSandboxTemplateObservabilityRequiresFixedOperatorAuthority"
+    },
+    {
+      "id": "telemetry-agentd-file-allowlist",
+      "family": "Trace collector remote Worker configuration",
+      "boundary": "target-scoped-file-key-allowlist",
+      "operations": [
+        "reject Local worker file injection",
+        "reject another Target path",
+        "reject Header credential",
+        "reject insecure override",
+        "reject duplicate key",
+        "reject server-CA path escape",
+        "reject client identity key"
+      ],
+      "package": "./internal/agentd",
+      "testFile": "services/control-plane/internal/agentd/observability_environment_test.go",
+      "testName": "TestLoadObservabilityEnvironmentRejectsUnsafeAuthorityAndSyntax"
+    },
+    {
+      "id": "telemetry-agentd-file-authority",
+      "family": "Trace collector remote Worker file authority",
+      "boundary": "no-symlink-no-writable-no-ambient-conflict",
+      "operations": [
+        "reject symlink",
+        "reject writable authority",
+        "reject conflicting ambient value",
+        "reject ambient Header bypass"
+      ],
+      "package": "./internal/agentd",
+      "testFile": "services/control-plane/internal/agentd/observability_environment_test.go",
+      "testName": "TestLoadObservabilityEnvironmentRejectsSymlinkWritableAndAmbientConflict"
+    },
+    {
+      "id": "telemetry-agentd-file-atomicity",
+      "family": "Trace collector remote Worker configuration atomicity",
+      "boundary": "validate-before-environment-mutation",
+      "operations": ["reject invalid file without partial environment application"],
+      "package": "./internal/agentd",
+      "testFile": "services/control-plane/internal/agentd/observability_environment_test.go",
+      "testName": "TestLoadObservabilityEnvironmentDoesNotPartiallyApplyInvalidFile"
+    },
+    {
+      "id": "telemetry-docker-worker-file-authority",
+      "family": "Trace collector managed Docker authority",
+      "boundary": "operator-root-target-child-readonly-bind",
+      "operations": [
+        "derive full Target UUID child",
+        "bind Target directory read-only",
+        "inject only bounded observability file path"
+      ],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/docker_reconciler_test.go",
+      "testName": "TestDockerPoolReconcilerMountsTargetScopedObservabilityAuthority"
+    },
+    {
+      "id": "telemetry-ssh-worker-file-authority",
+      "family": "Trace collector managed SSH authority",
+      "boundary": "operator-root-derived-remote-file",
+      "operations": [
+        "derive full Target UUID child",
+        "inject remote observability file path",
+        "exclude Collector secret bytes from generated environment"
+      ],
+      "package": "./internal/executiontargets",
+      "testFile": "services/control-plane/internal/executiontargets/ssh_provisioner_test.go",
+      "testName": "TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets"
+    },
+    {
+      "id": "provider-commercial-authorization-separated-approval",
+      "family": "Stage 6 Provider commercial authorization",
+      "boundary": "exact-hosted-use-four-role-authorization-and-revocation",
+      "operations": [
+        "create exact immutable hosted Provider use",
+        "reject authorization creator self-approval",
+        "record four distinct Legal Privacy Security Product approvals",
+        "activate only after required decisions",
+        "allow matching Provider Credential scope and Region",
+        "reject unauthorized Region",
+        "revoke authorization immediately",
+        "reject hosted use after revocation",
+        "reject authorization mutation",
+        "reject approval deletion",
+        "write every operation to Platform Audit"
+      ],
+      "package": "./internal/providercommercial",
+      "testFile": "services/control-plane/internal/providercommercial/service_test.go",
+      "testName": "TestProviderCommercialAuthorizationRequiresSeparatedApprovalAndFencesHostedExecution"
+    },
+    {
+      "id": "stage6-governance-authority-lifecycle",
+      "family": "Stage 6 functional governance authority",
+      "boundary": "owner-assigned-exact-role-expiry-offboarding-and-revocation",
+      "operations": [
+        "reject Admin authority assignment",
+        "grant exact functional authority from a distinct Owner",
+        "allow only the assigned functional role",
+        "reject another self-asserted role",
+        "deny authority while the Operator Membership is suspended",
+        "deny authority after expiry",
+        "reject authority identity mutation",
+        "reject authority history deletion",
+        "revoke with version fencing",
+        "deny the role immediately after revocation",
+        "audit grant and revocation"
+      ],
+      "package": "./internal/governanceauthority",
+      "testFile": "services/control-plane/internal/governanceauthority/service_test.go",
+      "testName": "TestGovernanceAuthorityRequiresOwnerGrantAndFencesRoleClaims"
+    },
+    {
+      "id": "stage6-governance-authority-postgres",
+      "family": "Stage 6 functional governance authority PostgreSQL authority",
+      "boundary": "concurrent-active-grant-uniqueness-immutability-and-revocation",
+      "operations": [
+        "apply Migration 114",
+        "converge concurrent grants to one active authority",
+        "enforce exact functional authority",
+        "reject a backdated decision without matching current authority",
+        "reject authority mutation",
+        "revoke with database fencing",
+        "deny the role immediately after revocation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/governanceauthority",
+      "testFile": "services/control-plane/internal/governanceauthority/postgres_integration_test.go",
+      "testName": "TestGovernanceAuthorityPostgresConcurrentGrantAndImmediateRevocation"
+    },
+    {
+      "id": "provider-commercial-authorization-denial",
+      "family": "Stage 6 Provider commercial authorization",
+      "boundary": "local-only-reference-expiry-and-scope-fail-closed",
+      "operations": [
+        "reject local-only Provider hosted authorization",
+        "reject credential-bearing agreement reference",
+        "reject activation without complete approvals",
+        "reject credential scope without active matching authorization",
+        "preserve local-only Provider on local Target"
+      ],
+      "package": "./internal/providercommercial",
+      "testFile": "services/control-plane/internal/providercommercial/service_test.go",
+      "testName": "TestProviderCommercialAuthorizationRejectsLocalOnlyIncompleteExpiredAndScopeMismatch"
+    },
+    {
+      "id": "provider-commercial-enterprise-claim-gate",
+      "family": "Enterprise remote Provider execution claim",
+      "boundary": "commercial-authorization-before-credential-grant-and-lease",
+      "operations": [
+        "reject remote claim without active commercial authorization",
+        "allow exact claim after four-role authorization"
+      ],
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/credential_grants_test.go",
+      "testName": "TestEnterpriseClaimRequiresActiveProviderCommercialAuthorization"
+    },
+    {
+      "id": "provider-commercial-postgres-authority",
+      "family": "Stage 6 Provider commercial authorization PostgreSQL authority",
+      "boundary": "concurrent-separated-approval-hosted-fence-and-immutability",
+      "operations": [
+        "apply Migration 113",
+        "converge four concurrent role approvals",
+        "activate only after committed decisions",
+        "allow exact hosted Provider use",
+        "reject authorization mutation",
+        "reject approval mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/providercommercial",
+      "testFile": "services/control-plane/internal/providercommercial/postgres_integration_test.go",
+      "testName": "TestProviderCommercialAuthorizationPostgresConcurrentApprovalAndHostedFence"
+    },
+    {
+      "id": "compliance-governance-separated-start-gate",
+      "family": "Stage 6 Compliance Governance",
+      "boundary": "seven-control-family-four-role-record-completeness",
+      "operations": [
+        "create immutable compliance scope",
+        "assign all seven control families",
+        "submit hashed evidence metadata",
+        "reject evidence submitter self-review",
+        "accept independently reviewed release manifest",
+        "reject program creator self-approval",
+        "record four distinct start-gate role decisions",
+        "freeze record-complete state",
+        "preserve not-audit-active assessment",
+        "reject scope mutation",
+        "reject evidence deletion",
+        "write every operation to Platform Audit"
+      ],
+      "package": "./internal/compliancegovernance",
+      "testFile": "services/control-plane/internal/compliancegovernance/service_test.go",
+      "testName": "TestComplianceGovernanceRequiresCompleteSeparatedStartGate"
+    },
+    {
+      "id": "compliance-governance-incomplete-gate-denial",
+      "family": "Stage 6 Compliance Governance",
+      "boundary": "record-completeness-and-retention-fail-closed",
+      "operations": [
+        "reject credential-bearing compliance reference query",
+        "reject evidence submission by user without active Platform operator authority",
+        "reject record completion without approvals and accepted manifest",
+        "reject duplicate decision role",
+        "reject evidence shorter than program retention policy"
+      ],
+      "package": "./internal/compliancegovernance",
+      "testFile": "services/control-plane/internal/compliancegovernance/service_test.go",
+      "testName": "TestComplianceGovernanceRejectsIncompleteGateEvidenceDriftAndDuplicateDecisions"
+    },
+    {
+      "id": "compliance-governance-postgres-authority",
+      "family": "Stage 6 Compliance Governance PostgreSQL authority",
+      "boundary": "concurrent-separated-decision-and-append-only-evidence",
+      "operations": [
+        "apply Migration 112",
+        "converge four concurrent start-gate decisions",
+        "freeze only after complete control and evidence record",
+        "reject credential-bearing reference at database boundary",
+        "reject evidence mutation",
+        "reject program scope mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/compliancegovernance",
+      "testFile": "services/control-plane/internal/compliancegovernance/postgres_integration_test.go",
+      "testName": "TestComplianceGovernancePostgresStartGateAndAppendOnlyEvidence"
+    },
+    {
+      "id": "release-governance-separated-approval",
+      "family": "Stage 6 Release Governance",
+      "boundary": "exact-candidate-four-role-separated-final-decision-and-slo-recovery-penetration-capacity-incident-operations-and-internal-cost-gates",
+      "operations": [
+        "reject candidate creator self-approval",
+        "record four distinct required role approvals",
+        "reject release approval without an approved candidate-bound SLO window",
+        "reject direct database approval without the SLO gate",
+        "consume an eligible four-role-approved SLO window for the exact candidate",
+        "reject release approval without an approved candidate-bound Recovery drill",
+        "reject direct database approval without the Recovery gate",
+        "reject a Recovery drill approved for another candidate",
+        "consume an eligible five-role-approved Recovery drill for the exact candidate",
+        "reject release approval without an approved candidate-bound Penetration engagement",
+        "reject direct database approval without the Penetration gate",
+        "reject a Penetration engagement approved for another candidate",
+        "consume an eligible three-role-approved Penetration engagement for the exact candidate",
+        "reject release approval without an approved candidate-bound Capacity run",
+        "reject direct database approval without the Capacity gate",
+        "reject a Capacity run approved for another candidate",
+        "consume an eligible two-role-approved Capacity run for the exact candidate",
+        "reject release approval without an approved candidate-bound Incident exercise",
+        "reject direct database approval without the Incident exercise gate",
+        "reject an Incident exercise approved for another candidate",
+        "consume an eligible two-role-approved Incident exercise for the exact candidate",
+        "reject release approval without an approved candidate-bound Operations exercise",
+        "reject direct database approval without the Operations exercise gate",
+        "reject an Operations exercise approved for another candidate",
+        "consume an eligible two-role-approved Operations exercise for the exact candidate",
+        "reject release approval without an approved candidate-bound internal cost review",
+        "reject direct database approval without the internal cost gate",
+        "reject an internal cost review approved for another candidate",
+        "consume an eligible two-role-approved internal cost review for the exact candidate",
+        "require approval before deployment",
+        "record deployment observation",
+        "record explicit final decision",
+        "record residual-risk disposition",
+        "write every operation to Platform Audit",
+        "reject candidate identity mutation",
+        "reject approval history deletion"
+      ],
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/service_test.go",
+      "testName": "TestReleaseGovernanceRequiresSeparatedApprovalsAndRecordsFinalDecision"
+    },
+    {
+      "id": "release-governance-transition-denial",
+      "family": "Stage 6 Release Governance",
+      "boundary": "versioned-state-and-risk-fail-closed",
+      "operations": [
+        "reject incomplete approval set",
+        "reject stale candidate version",
+        "reject contradictory residual-risk disposition"
+      ],
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/service_test.go",
+      "testName": "TestReleaseGovernanceRejectsIncompleteApprovalVersionReuseAndRiskDrift"
+    },
+    {
+      "id": "release-governance-rejection-immutability",
+      "family": "Stage 6 Release Governance",
+      "boundary": "unique-role-atomic-terminal-rejection",
+      "operations": [
+        "reject duplicate role decision",
+        "atomically reject candidate from role decision",
+        "preserve immutable approval history"
+      ],
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/service_test.go",
+      "testName": "TestReleaseGovernanceRejectionIsAtomicAndRoleDecisionsAreUnique"
+    },
+    {
+      "id": "release-governance-impact-derived-privacy-legal",
+      "family": "Stage 6 Release Governance",
+      "boundary": "immutable-impact-scope-and-conditional-fifth-approval",
+      "operations": [
+        "derive Privacy and Legal requirement from commercial impact",
+        "expose exact required approval roles",
+        "reject approval without Privacy and Legal decision",
+        "require exact Privacy and Legal functional authority",
+        "approve after five separated decisions",
+        "reject release impact-scope mutation"
+      ],
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/service_test.go",
+      "testName": "TestReleaseGovernanceImpactScopeRequiresPrivacyLegalApproval"
+    },
+    {
+      "id": "release-governance-evidence-receipt-binding",
+      "family": "Stage 6 Release Governance",
+      "boundary": "exact-byte-control-projection-and-candidate-identity-binding",
+      "operations": [
+        "hash exact uploaded evidence receipt bytes",
+        "reject evidence receipt digest mismatch",
+        "require ten exact review-ready receipt projections",
+        "reject empty projected control receipt",
+        "reject projected control schema drift",
+        "reject duplicate evidence paths",
+        "reject Desktop artifact set projection drift",
+        "preserve Recovery and Residency external authority boundaries",
+        "reject incomplete candidate Artifact projection",
+        "bind candidate commit lockfile environment and Desktop artifact set",
+        "persist exact receipt bytes and bounded verification summary",
+        "reject bound receipt mutation",
+        "reject receipt candidate identity drift"
+      ],
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/service_test.go",
+      "testName": "TestReleaseGovernanceBindsExactEligibleEvidenceReceipt"
+    },
+    {
+      "id": "release-governance-postgres-authority",
+      "family": "Stage 6 Release Governance PostgreSQL authority",
+      "boundary": "impact-derived-concurrent-separated-approval-slo-recovery-penetration-capacity-incident-operations-and-internal-cost-gates-and-database-immutability",
+      "operations": [
+        "apply the current migration chain through Migration 160",
+        "derive Privacy and Legal approval from Provider commercial impact",
+        "converge five concurrent role approvals",
+        "reject approval before the candidate-bound SLO window is approved",
+        "reject direct database approval that bypasses the SLO gate",
+        "reject approval before the candidate-bound Recovery drill is approved",
+        "reject direct database approval that bypasses the Recovery gate",
+        "reject approval before the candidate-bound Penetration engagement is approved",
+        "reject direct database approval that bypasses the Penetration gate",
+        "reject approval before the candidate-bound Capacity run is approved",
+        "reject direct database approval that bypasses the Capacity gate",
+        "reject approval before the candidate-bound Incident exercise is approved",
+        "reject direct database approval that bypasses the Incident exercise gate",
+        "reject approval before the candidate-bound Operations exercise is approved",
+        "reject direct database approval that bypasses the Operations exercise gate",
+        "reject approval before the candidate-bound internal cost review is approved",
+        "reject direct database approval that bypasses the internal cost gate",
+        "approve only after committed role decisions and the exact SLO, Recovery, Penetration, Capacity, Incident, Operations and internal cost gates",
+        "reject approval mutation",
+        "reject candidate identity mutation",
+        "reject exact evidence receipt mutation",
+        "reject receipt reuse for another candidate identity",
+        "reject empty projected control receipt through direct database insert"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/releasegovernance",
+      "testFile": "services/control-plane/internal/releasegovernance/postgres_integration_test.go",
+      "testName": "TestReleaseGovernancePostgresSeparatedApprovalAndImmutableEvidence"
+    },
+    {
+      "id": "incident-governance-separated-internal-communication-authority",
+      "family": "Stage 6 Incident Governance",
+      "boundary": "operator-tenant-role-separation-and-status-page-origin-binding",
+      "operations": [
+        "require active Platform Operator incident roles",
+        "separate commander communications and Security Privacy authority",
+        "bind immutable independent Status Board origin",
+        "reject wrong-role internal communication",
+        "reject cross-origin internal Status Board evidence",
+        "enforce ordered immutable incident timeline",
+        "require independent Security Privacy resolution approval"
+      ],
+      "package": "./internal/incidentgovernance",
+      "testFile": "services/control-plane/internal/incidentgovernance/service_test.go",
+      "testName": "TestIncidentGovernanceRecordsSeparatedPublicTimelineAndSecurityResolution"
+    },
+    {
+      "id": "incident-governance-postgres-authority",
+      "family": "Stage 6 Incident Governance PostgreSQL authority",
+      "boundary": "serialized-internal-communication-evidence-and-database-immutable-history",
+      "operations": [
+        "apply Migration 117",
+        "serialize concurrent internal communication evidence",
+        "reject stale internal update version",
+        "reject internal timeline mutation",
+        "reject incident history deletion"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/incidentgovernance",
+      "testFile": "services/control-plane/internal/incidentgovernance/postgres_integration_test.go",
+      "testName": "TestIncidentGovernancePostgresSerializesPublicEvidenceAndRetainsHistory"
+    },
+    {
+      "id": "slo-window-exact-receipt-and-separated-authority",
+      "family": "Stage 6 SLO Window Governance",
+      "boundary": "exact-receipt-release-identity-and-four-separated-functional-authorities",
+      "operations": [
+        "bind exact validated SLO receipt bytes and digest",
+        "recompute objective error budgets and release eligibility",
+        "retain failed or not assessable windows",
+        "reject creator self review",
+        "require Engineering Operations Security and Product authority",
+        "prevent one operator from deciding multiple roles",
+        "reject approval for ineligible window",
+        "protect objective approval and receipt history"
+      ],
+      "package": "./internal/slogovernance",
+      "testFile": "services/control-plane/internal/slogovernance/service_test.go",
+      "testName": "TestSLOGovernanceImportsExactWindowAndRequiresFourSeparatedAuthorities"
+    },
+    {
+      "id": "slo-window-postgres-authority",
+      "family": "Stage 6 SLO Window Governance PostgreSQL authority",
+      "boundary": "concurrent-separated-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 118",
+        "converge four concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact receipt mutation",
+        "reject approval history mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/slogovernance",
+      "testFile": "services/control-plane/internal/slogovernance/postgres_integration_test.go",
+      "testName": "TestSLOGovernancePostgresConvergesSeparatedApprovalsAndProtectsReceipt"
+    },
+    {
+      "id": "recovery-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 Recovery Governance",
+      "boundary": "exact-candidate-recovery-subject-and-five-separated-functional-authorities",
+      "operations": [
+        "bind exact Recovery v2 receipt bytes and digest",
+        "bind candidate and restored release identity",
+        "recompute four component RPO and RTO projections",
+        "bind five source decisions to one Recovery subject digest",
+        "preserve external backup approver and signature verification boundary",
+        "reject candidate component subject and boundary drift",
+        "retain ineligible Recovery evidence",
+        "reject creator self review",
+        "require Database KMS Operations Security and Storage authority",
+        "prevent one operator from deciding multiple roles",
+        "protect receipt component approval and drill history"
+      ],
+      "package": "./internal/recoverygovernance",
+      "testFile": "services/control-plane/internal/recoverygovernance/service_test.go",
+      "testName": "TestRecoveryGovernanceImportsExactReceiptAndRequiresFiveAuthorities"
+    },
+    {
+      "id": "recovery-governance-postgres-authority",
+      "family": "Stage 6 Recovery Governance PostgreSQL authority",
+      "boundary": "concurrent-five-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 121",
+        "converge five concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact Recovery receipt mutation",
+        "reject Recovery approval history mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/recoverygovernance",
+      "testFile": "services/control-plane/internal/recoverygovernance/postgres_integration_test.go",
+      "testName": "TestRecoveryGovernancePostgresConvergesFiveAuthoritiesAndProtectsReceipt"
+    },
+    {
+      "id": "penetration-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 Penetration Governance",
+      "boundary": "exact-candidate-artifact-scope-and-three-separated-functional-authorities",
+      "operations": [
+        "bind exact Penetration receipt bytes and candidate bundle digest",
+        "bind release commit environment and four candidate artifact digests",
+        "revalidate Stage 5 dependency scope and third-party independence declaration",
+        "require complete six-area scope and methodology coverage",
+        "reject unaccepted High or Critical finding projections",
+        "preserve external assessor report signature and execution verification boundary",
+        "reject candidate receipt and finding projection drift",
+        "reject creator self review",
+        "require Engineering Product and Security authority",
+        "prevent one operator from deciding multiple roles",
+        "protect receipt asset approval and engagement history",
+        "reject direct database approval without three decisions"
+      ],
+      "package": "./internal/penetrationgovernance",
+      "testFile": "services/control-plane/internal/penetrationgovernance/service_test.go",
+      "testName": "TestPenetrationGovernanceBindsExactReceiptAndRequiresThreeAuthorities"
+    },
+    {
+      "id": "penetration-governance-postgres-authority",
+      "family": "Stage 6 Penetration Governance PostgreSQL authority",
+      "boundary": "concurrent-three-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 123",
+        "converge three concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact Penetration receipt mutation",
+        "reject Penetration approval history mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/penetrationgovernance",
+      "testFile": "services/control-plane/internal/penetrationgovernance/postgres_integration_test.go",
+      "testName": "TestPenetrationGovernancePostgresConvergesThreeAuthoritiesAndProtectsReceipt"
+    },
+    {
+      "id": "capacity-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 Capacity Governance",
+      "boundary": "exact-candidate-soak-projections-and-two-separated-functional-authorities",
+      "operations": [
+        "bind exact Capacity receipt bytes and candidate bundle digest",
+        "bind release commit and production or production-like environment",
+        "recompute 24 or 72 hour uninterrupted duration",
+        "recompute forecast plus headroom across four load dimensions",
+        "recompute five phases and five required disruption exercises",
+        "recompute SLO saturation and Tenant fairness projections",
+        "require three Region external probe coverage",
+        "preserve external environment telemetry signature execution and approver verification boundary",
+        "reject candidate headroom and measurement projection drift",
+        "reject creator self review",
+        "require Engineering and Operations authority",
+        "prevent one operator from deciding multiple roles",
+        "protect receipt phase approval and run history",
+        "reject direct database approval without two decisions"
+      ],
+      "package": "./internal/capacitygovernance",
+      "testFile": "services/control-plane/internal/capacitygovernance/service_test.go",
+      "testName": "TestCapacityGovernanceBindsExactReceiptAndRequiresSeparatedAuthorities"
+    },
+    {
+      "id": "capacity-governance-postgres-authority",
+      "family": "Stage 6 Capacity Governance PostgreSQL authority",
+      "boundary": "concurrent-two-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 125",
+        "converge two concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact Capacity receipt mutation",
+        "reject Capacity approval history mutation"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/capacitygovernance",
+      "testFile": "services/control-plane/internal/capacitygovernance/postgres_integration_test.go",
+      "testName": "TestCapacityGovernancePostgresConvergesAuthoritiesAndProtectsReceipt"
+    },
+    {
+      "id": "incident-exercise-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 Incident Exercise Governance",
+      "boundary": "exact-candidate-paging-internal-communication-projections-and-two-separated-functional-authorities",
+      "operations": [
+        "bind exact Incident exercise receipt bytes and candidate bundle digest",
+        "bind release commit and production or production-like environment",
+        "recompute independent Status Board origin",
+        "recompute incident role separation",
+        "recompute paging acknowledgement and escalation targets",
+        "recompute six internal service component projections",
+        "recompute internal update order and cadence",
+        "recompute employee notification delivery and recovery observation",
+        "require seven distinct evidence references",
+        "preserve internal Status Board paging employee-notification signature execution and approver verification boundary",
+        "reject candidate paging and delivery projection drift",
+        "reject creator self review",
+        "require Operations and Communications authority",
+        "prevent one operator from deciding multiple roles",
+        "protect receipt approval and exercise history",
+        "reject direct database approval without two decisions"
+      ],
+      "package": "./internal/incidentexercisegovernance",
+      "testFile": "services/control-plane/internal/incidentexercisegovernance/service_test.go",
+      "testName": "TestIncidentExerciseGovernanceBindsExactReceiptAndRequiresSeparatedAuthorities"
+    },
+    {
+      "id": "incident-exercise-governance-postgres-authority",
+      "family": "Stage 6 Incident Exercise Governance PostgreSQL authority",
+      "boundary": "concurrent-two-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 127",
+        "converge two concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact Incident exercise receipt mutation",
+        "reject Incident exercise approval history mutation",
+        "apply Migration 128 and reject Release direct database bypass"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/incidentexercisegovernance",
+      "testFile": "services/control-plane/internal/incidentexercisegovernance/postgres_integration_test.go",
+      "testName": "TestIncidentExerciseGovernancePostgresConvergesAuthoritiesAndProtectsReceipt"
+    },
+    {
+      "id": "operations-exercise-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 Operations Exercise Governance",
+      "boundary": "exact-candidate-deployed-browser-projections-and-two-separated-functional-authorities",
+      "operations": [
+        "bind exact Operations exercise receipt bytes and candidate bundle digest",
+        "bind release commit production or production-like environment artifacts and origins",
+        "recompute eleven distinct production-authenticated accounts",
+        "recompute all 49 positive operation results",
+        "recompute all 49 negative authorization denials",
+        "reject CLI database-client and developer-tools fallback",
+        "recompute Support Access four-eyes read-only revocation and Tenant Audit lifecycle",
+        "recompute Operations and Security source receipt decisions",
+        "preserve external deployment session Audit evidence signature execution and approver verification boundary",
+        "reject candidate operation and fallback projection drift",
+        "reject creator self review",
+        "require Operations and Security authority",
+        "prevent one operator from deciding multiple roles",
+        "protect receipt approval and exercise history",
+        "reject direct database approval without two decisions"
+      ],
+      "package": "./internal/operationsexercisegovernance",
+      "testFile": "services/control-plane/internal/operationsexercisegovernance/service_test.go",
+      "testName": "TestOperationsExerciseGovernanceBindsExactReceiptAndRequiresSeparatedAuthorities"
+    },
+    {
+      "id": "operations-exercise-governance-postgres-authority",
+      "family": "Stage 6 Operations Exercise Governance PostgreSQL authority",
+      "boundary": "concurrent-two-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migration 129",
+        "converge two concurrent functional decisions",
+        "approve only after all separated decisions",
+        "reject exact Operations exercise receipt mutation",
+        "reject Operations exercise approval history mutation",
+        "apply Migration 130 and reject Release direct database bypass"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/operationsexercisegovernance",
+      "testFile": "services/control-plane/internal/operationsexercisegovernance/postgres_integration_test.go",
+      "testName": "TestOperationsExerciseGovernancePostgresConvergesAuthoritiesAndProtectsReceipt"
+    },
+    {
+      "id": "actor-authentication-boundaries",
+      "family": "Login Session, Service Account and Worker credentials",
+      "boundary": "non-interchangeable-http-authentication",
+      "operations": [
+        "accept matching credential",
+        "reject Login Session as Service Account or Worker",
+        "reject Service Account as Login Session or Worker",
+        "reject Worker as Login Session or Service Account"
+      ],
+      "package": "./internal/httpapi",
+      "testFile": "services/control-plane/internal/httpapi/actor_authentication_boundary_test.go",
+      "testName": "TestActorCredentialsAreNonInterchangeableAcrossHTTPAuthenticationBoundaries"
+    },
+    {
+      "id": "worker-runtime-binding",
+      "family": "Worker runtime claim",
+      "boundary": "tenant-runtime-fencing",
+      "operations": ["claim", "re-register", "cleanup"],
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/worker_tenant_isolation_test.go",
+      "testName": "TestPinnedGeneralWorkerBindsFirstTenantAcrossClaimsAndReregistration"
+    },
+    {
+      "id": "worker-request-replay-authority",
+      "family": "Worker Execution request receipts",
+      "boundary": "generation-and-target-bound-idempotent-replay",
+      "operations": [
+        "bind receipt to Tenant Execution Generation and Target",
+        "replay only while the exact authority remains current",
+        "reject legacy receipt without Execution authority binding",
+        "reject replay after a successor Generation",
+        "reject replay after an Execution Target move"
+      ],
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/worker_tenant_isolation_test.go",
+      "testName": "TestWorkerRequestReceiptReplayIsFencedAfterGenerationOrTargetChange"
+    },
+    {
+      "id": "worker-incarnation-replay-fence",
+      "family": "Worker re-registration and lease authority",
+      "boundary": "previous-incarnation-credential-and-lease-replay-fencing",
+      "operations": [
+        "rotate Worker credential and increment incarnation on re-registration",
+        "reject previous-incarnation heartbeat",
+        "reject previous-incarnation control-command pull",
+        "reject previous-incarnation interaction-resolution pull",
+        "reject previous-incarnation lease and Artifact authorization",
+        "reject previous-incarnation lease renewal",
+        "reject replacement incarnation inheriting the previous lease",
+        "preserve current Worker and lease state after stale requests"
+      ],
+      "package": "./internal/executions",
+      "testFile": "services/control-plane/internal/executions/worker_tenant_isolation_test.go",
+      "testName": "TestReregisteredWorkerFencesCredentialHeartbeatAndLeaseReplay"
+    },
+    {
+      "id": "historical-payment-state-disabled-sqlite",
+      "family": "Internal self-hosted payment boundary SQLite",
+      "boundary": "sqlite-current-product-rejects-historical-payment-and-billing-exercise-state",
+      "operations": [
+        "accept the current cost_admin role and reject retired billing_admin",
+        "reject payment-derived Subscription state and historical Stripe rows",
+        "reject historical Billing exercise and approval inserts"
+      ],
+      "package": "./internal/database",
+      "testFile": "services/control-plane/internal/database/internal_self_hosted_payment_lockdown_sqlite_test.go",
+      "testName": "TestInternalSelfHostedSQLiteRejectsPaymentState"
+    },
+    {
+      "id": "historical-payment-state-disabled-postgres",
+      "family": "Internal self-hosted payment boundary PostgreSQL",
+      "boundary": "postgres-upgrade-normalizes-and-freezes-historical-payment-state",
+      "operations": [
+        "apply the current migration tail",
+        "normalize legacy role and Subscription state",
+        "reject new or mutated historical Stripe and Billing exercise rows"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/database",
+      "testFile": "services/control-plane/internal/database/internal_self_hosted_payment_lockdown_migration_integration_test.go",
+      "testName": "TestInternalSelfHostedPaymentLockdownNormalizesAndFreezesHistoricalPostgresState"
+    },
+    {
+      "id": "internal-cost-governance-exact-receipt-and-separated-authority",
+      "family": "Stage 6 internal usage and cost governance",
+      "boundary": "exact-candidate-token-provider-cost-platform-allocation-and-two-separated-authorities",
+      "operations": [
+        "bind exact Candidate v4 internalCost receipt bytes and migration tail",
+        "reconcile Token totals and Provider cost availability coverage",
+        "require actual platform allocation to override estimates without double counting",
+        "aggregate known cost independently by currency",
+        "reject payment fields and cost arithmetic drift",
+        "require distinct Operations and Owner decisions",
+        "protect receipt approval and review history",
+        "reject direct database approval without both decisions"
+      ],
+      "package": "./internal/internalcostgovernance",
+      "testFile": "services/control-plane/internal/internalcostgovernance/service_test.go",
+      "testName": "TestInternalCostGovernanceBindsUsageTokensCostsAndSeparatedAuthorities"
+    },
+    {
+      "id": "internal-cost-governance-postgres-authority",
+      "family": "Stage 6 internal usage and cost governance PostgreSQL authority",
+      "boundary": "concurrent-two-authority-approval-and-database-immutable-receipt",
+      "operations": [
+        "apply Migrations 152 and 153",
+        "serialize concurrent Operations and Owner decisions",
+        "approve only after both separated decisions",
+        "reject exact internal cost receipt mutation",
+        "reject internal cost approval history deletion"
+      ],
+      "executionMode": "source-reference-only",
+      "package": "./internal/internalcostgovernance",
+      "testFile": "services/control-plane/internal/internalcostgovernance/service_test.go",
+      "testName": "TestInternalCostGovernancePostgresSerializesSeparatedApprovalsAndRejectsBypass"
+    },
+    {
+      "id": "diagnostic-metric-label-boundary",
+      "family": "Prometheus diagnostic labels",
+      "boundary": "no-tenant-or-sensitive-identifier-labels",
+      "operations": [
+        "reject Tenant User Session Execution Credential and Trace identifier keys",
+        "reject generic identifier hash token secret email subject reference and URL suffixes",
+        "reject UUID commit digest URL email and known credential-shaped values",
+        "reject unbounded label values",
+        "enforce the same boundary for appended histogram and quantile labels",
+        "fail without copying the rejected key or value into the panic"
+      ],
+      "package": "./internal/observability",
+      "testFile": "services/control-plane/internal/observability/metrics_test.go",
+      "testName": "TestMetricLabelsRejectIdentifiersAndSecretsBeforeRendering"
+    }
+  ]
+}

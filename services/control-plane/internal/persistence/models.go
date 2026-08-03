@@ -53,32 +53,45 @@ type User struct {
 func (User) TableName() string { return "users" }
 
 type LoginSession struct {
-	ID               uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	UserID           uuid.UUID  `gorm:"column:user_id;type:uuid"`
-	ActiveTenantID   *uuid.UUID `gorm:"column:active_tenant_id;type:uuid"`
-	RefreshTokenHash []byte     `gorm:"column:refresh_token_hash"`
-	IPAddress        *string    `gorm:"column:ip_address;type:inet"`
-	UserAgent        *string    `gorm:"column:user_agent"`
-	ExpiresAt        time.Time  `gorm:"column:expires_at"`
-	LastSeenAt       time.Time  `gorm:"column:last_seen_at"`
-	RevokedAt        *time.Time `gorm:"column:revoked_at"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
+	ID                   uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	UserID               uuid.UUID  `gorm:"column:user_id;type:uuid"`
+	ActiveTenantID       *uuid.UUID `gorm:"column:active_tenant_id;type:uuid"`
+	AuthMethod           string     `gorm:"column:auth_method;not null;default:local"`
+	IdentityConnectionID *uuid.UUID `gorm:"column:identity_connection_id;type:uuid"`
+	Audience             string     `gorm:"column:audience;not null;default:web"`
+	DesktopDeviceID      *uuid.UUID `gorm:"column:desktop_device_id;type:uuid"`
+	CredentialFamilyID   *uuid.UUID `gorm:"column:credential_family_id;type:uuid"`
+	RotatedFromSessionID *uuid.UUID `gorm:"column:rotated_from_session_id;type:uuid"`
+	RotatedToSessionID   *uuid.UUID `gorm:"column:rotated_to_session_id;type:uuid"`
+	RotatedAt            *time.Time `gorm:"column:rotated_at"`
+	ReplayDetectedAt     *time.Time `gorm:"column:replay_detected_at"`
+	RefreshTokenHash     []byte     `gorm:"column:refresh_token_hash"`
+	IPAddress            *string    `gorm:"column:ip_address;type:inet"`
+	UserAgent            *string    `gorm:"column:user_agent"`
+	ExpiresAt            time.Time  `gorm:"column:expires_at"`
+	LastSeenAt           time.Time  `gorm:"column:last_seen_at"`
+	RevokedAt            *time.Time `gorm:"column:revoked_at"`
+	CreatedAt            time.Time  `gorm:"column:created_at"`
 }
 
 func (LoginSession) TableName() string { return "login_sessions" }
 
 type Tenant struct {
-	ID        uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
-	Slug      string         `gorm:"column:slug"`
-	Name      string         `gorm:"column:name"`
-	Status    string         `gorm:"column:status"`
-	PlanCode  string         `gorm:"column:plan_code"`
-	Region    string         `gorm:"column:region"`
-	Settings  map[string]any `gorm:"column:settings;serializer:json"`
-	CreatedBy uuid.UUID      `gorm:"column:created_by;type:uuid"`
-	CreatedAt time.Time      `gorm:"column:created_at"`
-	UpdatedAt time.Time      `gorm:"column:updated_at"`
-	DeletedAt *time.Time     `gorm:"column:deleted_at"`
+	ID               uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	Slug             string         `gorm:"column:slug"`
+	Name             string         `gorm:"column:name"`
+	Status           string         `gorm:"column:status"`
+	LifecycleVersion int64          `gorm:"column:lifecycle_version;not null;default:1"`
+	TrialExpiresAt   *time.Time     `gorm:"column:trial_expires_at"`
+	SuspendedAt      *time.Time     `gorm:"column:suspended_at"`
+	ClosedAt         *time.Time     `gorm:"column:closed_at"`
+	PlanCode         string         `gorm:"column:plan_code"`
+	Region           string         `gorm:"column:region"`
+	Settings         map[string]any `gorm:"column:settings;serializer:json"`
+	CreatedBy        uuid.UUID      `gorm:"column:created_by;type:uuid"`
+	CreatedAt        time.Time      `gorm:"column:created_at"`
+	UpdatedAt        time.Time      `gorm:"column:updated_at"`
+	DeletedAt        *time.Time     `gorm:"column:deleted_at"`
 }
 
 func (Tenant) TableName() string { return "tenants" }

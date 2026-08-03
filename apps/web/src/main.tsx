@@ -8,7 +8,10 @@ import "./index.css";
 import { appHistory } from "./appNavigation";
 import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
+import { configureWebControlPlaneClientTransport } from "./controlPlaneClientTransport";
 import { isElectron } from "./env";
+
+configureWebControlPlaneClientTransport();
 
 const router = getRouter(appHistory);
 

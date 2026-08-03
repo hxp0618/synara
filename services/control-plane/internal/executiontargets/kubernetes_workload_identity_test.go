@@ -188,6 +188,42 @@ func TestVerifyKubernetesWorkloadIdentityRejectsWeakenedOuterSandbox(t *testing.
 				"name": "host", "hostPath": map[string]any{"path": "/"},
 			})
 		}},
+		{name: "mutable observability config reference", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			for _, raw := range container["env"].([]any) {
+				item := raw.(map[string]any)
+				if item["name"] == "OTEL_EXPORTER_OTLP_ENDPOINT" {
+					item["valueFrom"].(map[string]any)["configMapKeyRef"].(map[string]any)["name"] = "tenant-selected-config"
+				}
+			}
+		}},
+		{name: "required observability config reference", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			for _, raw := range container["env"].([]any) {
+				item := raw.(map[string]any)
+				if item["name"] == "OTEL_EXPORTER_OTLP_ENDPOINT" {
+					item["valueFrom"].(map[string]any)["configMapKeyRef"].(map[string]any)["optional"] = false
+				}
+			}
+		}},
+		{name: "observability client identity", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["env"] = append(container["env"].([]any), map[string]any{
+				"name": "OTEL_EXPORTER_OTLP_CLIENT_KEY", "value": "/data/client.key",
+			})
+		}},
+		{name: "observability Header credential", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["env"] = append(container["env"].([]any), map[string]any{
+				"name": "OTEL_EXPORTER_OTLP_HEADERS", "value": "authorization=secret",
+			})
+		}},
+		{name: "observability insecure override", weaken: func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["env"] = append(container["env"].([]any), map[string]any{
+				"name": "OTEL_EXPORTER_OTLP_INSECURE", "value": "false",
+			})
+		}},
 		{name: "private temp mismatch", weaken: func(spec map[string]any) {
 			container := spec["containers"].([]any)[0].(map[string]any)
 			for _, raw := range container["env"].([]any) {
@@ -200,7 +236,13 @@ func TestVerifyKubernetesWorkloadIdentityRejectsWeakenedOuterSandbox(t *testing.
 		{name: "missing PID limit declaration", weaken: func(spec map[string]any) {
 			container := spec["containers"].([]any)[0].(map[string]any)
 			environment := container["env"].([]any)
-			container["env"] = environment[:len(environment)-1]
+			filtered := make([]any, 0, len(environment)-1)
+			for _, raw := range environment {
+				if raw.(map[string]any)["name"] != platform.KubernetesPIDsLimitEnvironment {
+					filtered = append(filtered, raw)
+				}
+			}
+			container["env"] = filtered
 		}},
 		{name: "excessive PID limit declaration", weaken: func(spec map[string]any) {
 			container := spec["containers"].([]any)[0].(map[string]any)
@@ -796,7 +838,7 @@ func hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName string, target
 				"requests": map[string]any{"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "1Gi"},
 				"limits":   map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"},
 			},
-			"env": []any{
+			"env": append([]any{
 				map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
 				map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesStagedRegistrationTokenPath},
 				map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
@@ -806,7 +848,7 @@ func hardenedKubernetesWorkloadIdentityPodSpec(serviceAccountName string, target
 					"name":  platform.KubernetesRuntimeIsolationProfileEnvironment,
 					"value": string(platform.IsolationKubernetesRestricted),
 				},
-			},
+			}, kubernetesObservabilityEnvironment(targetID)...),
 			"volumeMounts": []any{
 				map[string]any{"name": "workspace", "mountPath": "/data"},
 				map[string]any{"name": "tmp", "mountPath": "/tmp"},

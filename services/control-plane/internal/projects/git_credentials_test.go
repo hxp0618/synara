@@ -17,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/tenancy"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
@@ -132,6 +133,152 @@ func TestProjectGitCredentialUsesCredentialBindingAuthority(t *testing.T) {
 
 	if binding.ProjectID == nil || *binding.ProjectID != project.ID {
 		t.Fatalf("unexpected Binding owner: %#v", binding)
+	}
+}
+
+func TestProjectOperationsRejectCrossTenantNestedIDSubstitution(t *testing.T) {
+	fixture := newProjectGitFixture(t)
+	project := fixture.createProject(t, "Tenant A project")
+	otherTenant, err := tenancy.NewService(fixture.db).CreateTenant(
+		fixture.ctx,
+		fixture.principal,
+		tenancy.CreateTenantInput{
+			Slug: "project-other-" + uuid.NewString()[:8], Name: "Project Other Tenant",
+			PlanCode: "free", Status: "active",
+		},
+		"project-other-tenant",
+		"127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrincipal := fixture.principal
+	otherPrincipal.ActiveTenantID = &otherTenant.ID
+
+	_, err = fixture.service.Get(fixture.ctx, otherPrincipal, otherTenant.ID, project.ID)
+	assertProjectProblemCode(t, err, "project_not_found")
+	updatedName := "Cross-Tenant Rename"
+	_, err = fixture.service.Update(
+		fixture.ctx, otherPrincipal, otherTenant.ID, project.ID,
+		UpdateProjectInput{Name: &updatedName}, "project-cross-tenant-update", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "project_not_found")
+	err = fixture.service.Archive(
+		fixture.ctx, otherPrincipal, otherTenant.ID, project.ID,
+		"project-cross-tenant-archive", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "project_not_found")
+	_, err = fixture.service.List(
+		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
+	)
+	assertProjectProblemCode(t, err, "organization_not_found")
+	_, err = fixture.service.Create(
+		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
+		CreateProjectInput{Name: "Cross-Tenant Create"},
+		"project-cross-tenant-create", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "organization_not_found")
+	_, _, err = fixture.service.CreateWithIdempotency(
+		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
+		CreateProjectInput{Name: "Cross-Tenant Idempotent Create"},
+		"project-cross-tenant-create-idempotent", "project-cross-tenant-create-idempotent", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "organization_not_found")
+
+	var original persistence.Project
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, project.ID).
+		Take(&original).Error; err != nil {
+		t.Fatal(err)
+	}
+	if original.Name != "Tenant A project" || original.ArchivedAt != nil {
+		t.Fatalf("cross-Tenant operations mutated original Project: %#v", original)
+	}
+}
+
+func TestProjectOperationsRejectInactiveTenantContextWithoutMutation(t *testing.T) {
+	fixture := newProjectGitFixture(t)
+	otherTenant, err := tenancy.NewService(fixture.db).CreateTenant(
+		fixture.ctx,
+		fixture.principal,
+		tenancy.CreateTenantInput{
+			Slug: "project-inactive-" + uuid.NewString()[:8], Name: "Project Inactive Tenant",
+			PlanCode: "free", Status: "active",
+		},
+		"project-inactive-tenant",
+		"127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root persistence.Organization
+	if err := fixture.db.Where("tenant_id = ? AND kind = ?", otherTenant.ID, "root").Take(&root).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherPrincipal := fixture.principal
+	otherPrincipal.ActiveTenantID = &otherTenant.ID
+	project, err := fixture.service.Create(
+		fixture.ctx, otherPrincipal, otherTenant.ID, root.ID,
+		CreateProjectInput{Name: "Inactive context target"},
+		"project-inactive-setup", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var projectsBefore, auditsBefore int64
+	if err := fixture.db.Model(&persistence.Project{}).Where("tenant_id = ?", otherTenant.ID).
+		Count(&projectsBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.AuditLog{}).Where("tenant_id = ?", otherTenant.ID).
+		Count(&auditsBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.service.Get(fixture.ctx, fixture.principal, otherTenant.ID, project.ID)
+	assertProjectProblemCode(t, err, "tenant_not_found")
+	_, err = fixture.service.List(fixture.ctx, fixture.principal, otherTenant.ID, root.ID)
+	assertProjectProblemCode(t, err, "tenant_not_found")
+	_, err = fixture.service.Create(
+		fixture.ctx, fixture.principal, otherTenant.ID, root.ID,
+		CreateProjectInput{Name: "Inactive context create"},
+		"project-inactive-create", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "tenant_not_found")
+	updatedName := "Inactive context update"
+	_, err = fixture.service.Update(
+		fixture.ctx, fixture.principal, otherTenant.ID, project.ID,
+		UpdateProjectInput{Name: &updatedName}, "project-inactive-update", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "tenant_not_found")
+	err = fixture.service.Archive(
+		fixture.ctx, fixture.principal, otherTenant.ID, project.ID,
+		"project-inactive-archive", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "tenant_not_found")
+
+	var persisted persistence.Project
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", otherTenant.ID, project.ID).
+		Take(&persisted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Name != "Inactive context target" || persisted.ArchivedAt != nil {
+		t.Fatalf("inactive Tenant context mutated Project: %#v", persisted)
+	}
+	var projectsAfter, auditsAfter int64
+	if err := fixture.db.Model(&persistence.Project{}).Where("tenant_id = ?", otherTenant.ID).
+		Count(&projectsAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.AuditLog{}).Where("tenant_id = ?", otherTenant.ID).
+		Count(&auditsAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if projectsAfter != projectsBefore || auditsAfter != auditsBefore {
+		t.Fatalf(
+			"inactive Tenant context changed durable counts: projects %d->%d audits %d->%d",
+			projectsBefore, projectsAfter, auditsBefore, auditsAfter,
+		)
 	}
 }
 

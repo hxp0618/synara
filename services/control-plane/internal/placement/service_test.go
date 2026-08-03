@@ -16,6 +16,25 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
+func TestWorkerPoolMutationsRejectInactiveTenantBeforeStorageAccess(t *testing.T) {
+	ctx := context.Background()
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	principal := identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID}
+	service := NewService(nil)
+
+	_, err := service.CreatePool(ctx, principal, requestedTenantID, uuid.New(), CreatePoolInput{})
+	if problemCode(err) != "tenant_not_found" {
+		t.Fatalf("inactive Tenant Worker Pool create error = %v", err)
+	}
+	_, err = service.UpdatePool(
+		ctx, principal, requestedTenantID, uuid.New(), uuid.New(), UpdatePoolInput{},
+	)
+	if problemCode(err) != "tenant_not_found" {
+		t.Fatalf("inactive Tenant Worker Pool update error = %v", err)
+	}
+}
+
 func TestSelectExecutionBackfillsDefaultPoolByTargetKind(t *testing.T) {
 	fixture := newPlacementFixture(t)
 	ctx := context.Background()

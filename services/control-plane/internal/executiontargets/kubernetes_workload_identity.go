@@ -736,10 +736,7 @@ type kubernetesVerifiedContainer struct {
 		Requests map[string]string `json:"requests"`
 		Limits   map[string]string `json:"limits"`
 	} `json:"resources"`
-	Environment []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	} `json:"env"`
+	Environment  []kubernetesVerifiedEnvironmentVariable `json:"env"`
 	VolumeMounts []struct {
 		Name      string `json:"name"`
 		MountPath string `json:"mountPath"`
@@ -750,6 +747,18 @@ type kubernetesVerifiedContainer struct {
 		HostPort int32 `json:"hostPort"`
 	} `json:"ports"`
 	VolumeDevices []map[string]any `json:"volumeDevices"`
+}
+
+type kubernetesVerifiedEnvironmentVariable struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	ValueFrom struct {
+		ConfigMapKeyRef *struct {
+			Name     string `json:"name"`
+			Key      string `json:"key"`
+			Optional *bool  `json:"optional"`
+		} `json:"configMapKeyRef"`
+	} `json:"valueFrom"`
 }
 
 type kubernetesVerifiedCapabilities struct {
@@ -963,6 +972,7 @@ func verifyKubernetesPodOuterSandbox(
 	}
 	if !kubernetesOuterSandboxEnvironmentValid(
 		container.Environment,
+		targetID,
 		expectedPIDsLimit,
 		runtimeDecision.EffectiveProfile,
 	) ||
@@ -1007,10 +1017,12 @@ func containsFold(values []string, expected string) bool {
 	return false
 }
 
-func kubernetesOuterSandboxEnvironmentValid(environment []struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}, expectedPIDsLimit uint64, expectedProfile platform.ExecutionTargetIsolationProfile) bool {
+func kubernetesOuterSandboxEnvironmentValid(
+	environment []kubernetesVerifiedEnvironmentVariable,
+	targetID uuid.UUID,
+	expectedPIDsLimit uint64,
+	expectedProfile platform.ExecutionTargetIsolationProfile,
+) bool {
 	want := map[string]string{
 		"SYNARA_EXECUTION_TARGET_KIND":                        "kubernetes",
 		"SYNARA_WORKER_REGISTRATION_TOKEN_FILE":               kubernetesStagedRegistrationTokenPath,
@@ -1019,20 +1031,41 @@ func kubernetesOuterSandboxEnvironmentValid(environment []struct {
 		platform.KubernetesPIDsLimitEnvironment:               strconv.FormatUint(expectedPIDsLimit, 10),
 		platform.KubernetesRuntimeIsolationProfileEnvironment: string(expectedProfile),
 	}
+	wantConfigMap := map[string]struct{}{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":      {},
+		"OTEL_EXPORTER_OTLP_PROTOCOL":      {},
+		"OTEL_EXPORTER_OTLP_CERTIFICATE":   {},
+		"SYNARA_OTEL_TRACE_SAMPLE_RATIO":   {},
+		"SYNARA_OTEL_COLLECTOR_REGION":     {},
+		"SYNARA_OTEL_TRACE_RETENTION_DAYS": {},
+	}
 	seen := make(map[string]struct{}, len(want))
+	seenConfigMap := make(map[string]struct{}, len(wantConfigMap))
 	for _, item := range environment {
 		name := strings.TrimSpace(item.Name)
-		expected, required := want[name]
-		if !required {
-			continue
-		}
-		if _, duplicate := seen[name]; duplicate || strings.TrimSpace(item.Value) != expected {
+		if _, forbidden := kubernetesForbiddenWorkerObservabilityEnvironment[name]; forbidden {
 			return false
 		}
-		seen[name] = struct{}{}
+		if expected, required := want[name]; required {
+			if _, duplicate := seen[name]; duplicate || strings.TrimSpace(item.Value) != expected ||
+				item.ValueFrom.ConfigMapKeyRef != nil {
+				return false
+			}
+			seen[name] = struct{}{}
+			continue
+		}
+		if _, required := wantConfigMap[name]; required {
+			ref := item.ValueFrom.ConfigMapKeyRef
+			if _, duplicate := seenConfigMap[name]; duplicate || strings.TrimSpace(item.Value) != "" || ref == nil ||
+				strings.TrimSpace(ref.Name) != kubernetesObservabilityConfigMapName(targetID) || strings.TrimSpace(ref.Key) != name ||
+				ref.Optional == nil || !*ref.Optional {
+				return false
+			}
+			seenConfigMap[name] = struct{}{}
+		}
 	}
 	return expectedPIDsLimit > 0 && expectedPIDsLimit <= platform.MaximumKubernetesPIDsLimit &&
-		len(seen) == len(want)
+		len(seen) == len(want) && len(seenConfigMap) == len(wantConfigMap)
 }
 
 func kubernetesOuterSandboxVolumesValid(

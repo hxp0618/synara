@@ -1,0 +1,18 @@
+# Apply this resource separately in every Kubernetes Execution Target namespace.
+# Replace REPLACE_TARGET_UUID with the full Execution Target UUID used by the
+# generated Worker Pods. Missing resources keep export disabled. Do not choose
+# another name or add client credentials. Worker identity belongs to the external
+# relay/service-mesh boundary, never to the agentd/Provider filesystem.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synara-agentd-observability-config-REPLACE_TARGET_UUID
+data:
+  # Keep empty until the target NetworkPolicy admits this exact collector path.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  # Set only to an absolute CA path already present in the immutable Worker image.
+  OTEL_EXPORTER_OTLP_CERTIFICATE: ""
+  SYNARA_OTEL_TRACE_SAMPLE_RATIO: "0.1"
+  SYNARA_OTEL_COLLECTOR_REGION: ""
+  SYNARA_OTEL_TRACE_RETENTION_DAYS: "30"

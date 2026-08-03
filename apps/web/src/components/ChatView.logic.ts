@@ -591,7 +591,7 @@ export function resolveServerThreadModelSwitchAvailability(input: {
       selectable: false,
       label: "Switching",
       temporary: true,
-      message: "The Control Plane is switching this SaaS Session model.",
+      message: "The Control Plane is switching this Session model.",
     };
   }
   if (input.phase === "connecting") {
@@ -599,7 +599,7 @@ export function resolveServerThreadModelSwitchAvailability(input: {
       selectable: false,
       label: "Busy",
       temporary: true,
-      message: "Wait for the SaaS Session to finish connecting before switching models.",
+      message: "Wait for the Control Plane Session to finish connecting before switching models.",
     };
   }
   if (input.phase === "running" || input.hasActiveExecution) {
@@ -607,7 +607,7 @@ export function resolveServerThreadModelSwitchAvailability(input: {
       selectable: false,
       label: "Busy",
       temporary: true,
-      message: "Wait for the active SaaS Turn to finish before switching models.",
+      message: "Wait for the active Control Plane Turn to finish before switching models.",
     };
   }
   if (!input.capabilityAllowed) {

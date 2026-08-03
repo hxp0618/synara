@@ -42,8 +42,9 @@ sessions in a later phase."——Stage 7 就是那个 later phase。
   （`docs/contracts/role-permission-matrix.md`）。API Key 的权限语言不需要新发明。
 - **机器可读事件契约已存在。** `docs/contracts/runtime-event-v2.schema.json` 可直接生成 SDK 的
   事件类型。
-- **de-facto 客户端契约。** `apps/web/src/lib/controlPlaneClient.ts`（约 1400 行手写 typed
-  wrapper）是目前请求/响应形状最完整的单一来源，可作为 OpenAPI 初稿的对照物。
+- **de-facto 客户端契约。** `packages/control-plane-client/src/index.ts` 的手写 typed wrapper
+  是目前请求/响应形状最完整的单一来源，可作为 OpenAPI 初稿的对照物；它已从 Web 私有路径抽出，仍不等于
+  机器生成或公开兼容承诺。
 
 ### 1.2 三个真实缺口
 
@@ -51,7 +52,7 @@ sessions in a later phase."——Stage 7 就是那个 later phase。
    处理，部署假设 same-origin Node 代理。Service Account 的 bearer 只接在 `/scim/v2/*`，其
    principal 类型进不了基于 `identity.Principal` 的租户 handler。对外 SDK 在鉴权/传输轴上是
    greenfield。
-2. **没有 OpenAPI / route manifest。** 契约散落在 `server.go`、`controlPlaneClient.ts` 和 prose
+2. **没有 OpenAPI / route manifest。** 契约散落在 `server.go`、`packages/control-plane-client` 和 prose
    合同里，双源漂移风险已经存在。SDK 面必须先有单一机器可读来源。
 3. **第一方视角遗留的粗糙处。** 分页不一致（audit 用 cursor、events 用 `afterSequence` 且默认
    limit 100 与约定的 50 不一致、`GET /v1/projects/{id}/sessions` 无分页无上界）；只有 session

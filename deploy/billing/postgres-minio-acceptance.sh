@@ -6,12 +6,12 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 control_plane_dir="$repo_root/services/control-plane"
 fixture_file="$control_plane_dir/internal/billing/testdata/aws_cur_fixture.csv"
 
-postgres_image="${SYNARA_BILLING_ACCEPTANCE_POSTGRES_IMAGE:-postgres:17-alpine}"
-minio_image="${SYNARA_BILLING_ACCEPTANCE_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}"
-mc_image="${SYNARA_BILLING_ACCEPTANCE_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}"
-test_runtime_image="${SYNARA_BILLING_ACCEPTANCE_TEST_RUNTIME_IMAGE:-golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669}"
-evidence_file="${SYNARA_BILLING_ACCEPTANCE_EVIDENCE_FILE:-}"
-acceptance_generation="${SYNARA_BILLING_ACCEPTANCE_GENERATION:-final13}"
+postgres_image="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_POSTGRES_IMAGE:-postgres:17-alpine}"
+minio_image="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}"
+mc_image="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}"
+test_runtime_image="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_TEST_RUNTIME_IMAGE:-golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669}"
+evidence_file="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_EVIDENCE_FILE:-}"
+acceptance_generation="${SYNARA_COST_ACCOUNTING_ACCEPTANCE_GENERATION:-final13}"
 runtime_test_name='TestBillingRuntimePostgresVersionedS3ImportEstimateReconcileReplay'
 cur2_manifest_test_name='TestBillingCUR2ManifestVersionedS3Acceptance'
 cur2_child_only_subtest="${cur2_manifest_test_name}/child_only_rejected"
@@ -532,9 +532,9 @@ require_command python3
 require_command seq
 require_command shasum
 
-[[ -n "$evidence_file" ]] || fail 'SYNARA_BILLING_ACCEPTANCE_EVIDENCE_FILE must be an explicit JSON output path'
+[[ -n "$evidence_file" ]] || fail 'SYNARA_COST_ACCOUNTING_ACCEPTANCE_EVIDENCE_FILE must be an explicit JSON output path'
 if [[ ! "$acceptance_generation" =~ ^final([1-9][0-9]*)$ || "${BASH_REMATCH[1]}" -lt 13 ]]; then
-  fail 'SYNARA_BILLING_ACCEPTANCE_GENERATION must be final13 or higher'
+  fail 'SYNARA_COST_ACCOUNTING_ACCEPTANCE_GENERATION must be final13 or higher'
 fi
 [[ ! -e "$evidence_file" ]] || fail "evidence path already exists: $evidence_file"
 [[ -d "$(dirname "$evidence_file")" ]] || fail "evidence parent directory does not exist: $(dirname "$evidence_file")"
@@ -681,11 +681,11 @@ exact_object_version_pinned=true
 
 printf '%s\n' \
   "SYNARA_TEST_DATABASE_URL=$database_url" \
-  "SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_ENDPOINT=$minio_endpoint" \
-  "SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_BUCKET=$bucket_name" \
-  "SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY=$object_key" \
-  "SYNARA_BILLING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION=$object_version" \
-  'SYNARA_BILLING_RUNTIME_ACCEPTANCE_EVIDENCE_DETAIL_FILE=/acceptance/test-detail.json' \
+  "SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_ENDPOINT=$minio_endpoint" \
+  "SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_BUCKET=$bucket_name" \
+  "SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_KEY=$object_key" \
+  "SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_S3_OBJECT_VERSION=$object_version" \
+  'SYNARA_COST_ACCOUNTING_RUNTIME_ACCEPTANCE_EVIDENCE_DETAIL_FILE=/acceptance/test-detail.json' \
   "AWS_ACCESS_KEY_ID=$minio_access_key" \
   "AWS_SECRET_ACCESS_KEY=$minio_secret_key" \
   'AWS_SESSION_TOKEN=' \

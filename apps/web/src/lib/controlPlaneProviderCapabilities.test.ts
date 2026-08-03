@@ -70,7 +70,7 @@ describe("Control Plane Provider capability decisions", () => {
   });
 
   it.each(["cursor", "antigravity", "grok", "kilo", "opencode", "pi", "droid"] as const)(
-    "blocks static local-only provider %s in SaaS mode",
+    "blocks static local-only provider %s in Control Plane mode",
     (provider) => {
       expect(
         resolveControlPlaneCapabilityDecision({

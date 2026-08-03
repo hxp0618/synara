@@ -35,6 +35,7 @@ import (
 
 func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testing.T) {
 	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	fixture.provisioner.config.ObservabilityRoot = "/etc/synara/targets"
 	remote := &fakeSSHRemote{uploads: map[string][]byte{}}
 	dialer := &fakeSSHDialer{remote: remote}
 	fixture.provisioner.dialer = dialer
@@ -57,6 +58,7 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	}
 	expectedWorkspaceRoot := "/var/lib/synara/test/workspaces"
 	expectedGitCacheRoot := "/var/lib/synara/targets/" + fixture.targetID.String() + "/git-cache"
+	expectedObservabilityFile := "/etc/synara/targets/" + fixture.targetID.String() + "/observability.env"
 	var environment []byte
 	for path, payload := range remote.uploads {
 		if strings.HasSuffix(path, ".env") {
@@ -70,8 +72,13 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_SSH_BOOTSTRAP_GENERATION="1"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_WORKSPACE_ROOT="`+expectedWorkspaceRoot+`"`)) ||
-		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_GIT_CACHE_ROOT="`+expectedGitCacheRoot+`"`)) {
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_GIT_CACHE_ROOT="`+expectedGitCacheRoot+`"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_OBSERVABILITY_ENV_FILE="`+expectedObservabilityFile+`"`)) {
 		t.Fatalf("uploaded agentd environment is incomplete: %s", environment)
+	}
+	if bytes.Contains(environment, []byte("OTEL_EXPORTER_OTLP_ENDPOINT")) ||
+		bytes.Contains(environment, []byte("OTEL_EXPORTER_OTLP_CLIENT_KEY")) {
+		t.Fatalf("SSH provisioning copied Collector configuration instead of only its authority path: %s", environment)
 	}
 	if !commandsContainAll(remote.commands, "install -d -m 0755", expectedWorkspaceRoot, expectedGitCacheRoot) {
 		t.Fatalf("SSH provisioning did not create both storage roots: %#v", remote.commands)
@@ -145,6 +152,16 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 			t.Fatalf("SSH provisioning response/audit leaked %q: %s", secretValue, encoded)
 		}
 	}
+}
+
+func TestSSHProvisionerRejectsUnsafeObservabilityRoot(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	fixture.provisioner.config.ObservabilityRoot = "relative"
+	_, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-install", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_worker_observability_authority_invalid")
 }
 
 func TestSSHProvisionerRevokesAuthorityBeforeRemoteCleanup(t *testing.T) {
