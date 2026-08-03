@@ -187,6 +187,11 @@ func main() {
 	credentialCipher, err := credentialkms.New(ctx, credentialkms.Config{
 		Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
 		LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
+		Synara: credentialkms.SynaraKMSConfig{
+			Endpoint: cfg.CredentialKMSEndpoint, CAFile: cfg.CredentialKMSCAFile,
+			ClientCertFile: cfg.CredentialKMSClientCertFile, ClientKeyFile: cfg.CredentialKMSClientKeyFile,
+			Timeout: cfg.CredentialKMSTimeout,
+		},
 		DecryptKeys: credentialKMSDecryptKeys(cfg.CredentialKMSDecryptKeys),
 	})
 	if err != nil {
@@ -734,6 +739,10 @@ func credentialKMSDecryptKeys(values []config.CredentialKMSDecryptKeyConfig) []c
 	for _, value := range values {
 		result = append(result, credentialkms.DecryptKeyConfig{
 			Provider: value.Provider, KeyID: value.KeyID, LocalKey: value.LocalKey, Region: value.Region,
+			Synara: credentialkms.SynaraKMSConfig{
+				Endpoint: value.Endpoint, CAFile: value.CAFile, ClientCertFile: value.ClientCertFile,
+				ClientKeyFile: value.ClientKeyFile, Timeout: value.Timeout,
+			},
 		})
 	}
 	return result

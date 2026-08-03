@@ -10,6 +10,11 @@ mkdir -p workspace
 docker compose up --build
 ```
 
+To use the dedicated software KMS instead of the static local Credential KEK, add
+`self-hosted-kms.override.yml` and follow
+[`docs/runbooks/self-hosted-kms-worker.md`](../../docs/runbooks/self-hosted-kms-worker.md). The overlay keeps the KMS in a
+separate container/user/volume and requires mTLS plus separate lifecycle roles; it is not enabled by default.
+
 The first control-plane startup persists an installation ID when `SYNARA_INSTALLATION_ID` is empty,
 then creates the deterministic Personal Tenant, root/personal Organization, local owner memberships,
 and tenant-owned `local-default` execution target.

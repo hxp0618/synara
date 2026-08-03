@@ -31,7 +31,10 @@ services:
       SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL: ${SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL:-5m}
       SYNARA_CREDENTIAL_KMS_PROVIDER: local
       SYNARA_CREDENTIAL_KMS_KEY_ID: ${SYNARA_CREDENTIAL_KMS_KEY_ID:-personal-local-v1}
-      SYNARA_CREDENTIAL_MASTER_KEY: ${SYNARA_CREDENTIAL_MASTER_KEY:?Set SYNARA_CREDENTIAL_MASTER_KEY in deploy/personal/.env}
+      # The local provider validates this as required at process startup. Keep
+      # interpolation optional so self-hosted-kms.override.yml can replace the
+      # provider without carrying unused local key material.
+      SYNARA_CREDENTIAL_MASTER_KEY: ${SYNARA_CREDENTIAL_MASTER_KEY:-}
       SYNARA_WORKER_REGISTRATION_TOKEN: ${SYNARA_WORKER_REGISTRATION_TOKEN:?Set SYNARA_WORKER_REGISTRATION_TOKEN in deploy/personal/.env}
       SYNARA_PUBLIC_CONTROL_PLANE_URL: ${SYNARA_PUBLIC_CONTROL_PLANE_URL:-}
       SYNARA_DOCKER_RECONCILE_INTERVAL: ${SYNARA_DOCKER_RECONCILE_INTERVAL:-10s}

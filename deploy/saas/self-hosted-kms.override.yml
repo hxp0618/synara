@@ -1,0 +1,54 @@
+services:
+  kms-worker:
+    build:
+      context: ../../services/control-plane
+      dockerfile: Dockerfile.kms-worker
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    ports:
+      - "${SYNARA_KMS_BIND_ADDRESS:-127.0.0.1}:${SYNARA_KMS_HOST_PORT:-3790}:3790"
+    environment:
+      SYNARA_KMS_LISTEN_ADDRESS: 0.0.0.0:3790
+      SYNARA_KMS_DATABASE_DRIVER: sqlite
+      SYNARA_KMS_SQLITE_PATH: /data/kms/kms.db
+      SYNARA_KMS_SEAL_KEY_FILE: /run/secrets/synara-kms/seal.key
+      SYNARA_KMS_TLS_CERT_FILE: /run/secrets/synara-kms/server/tls.crt
+      SYNARA_KMS_TLS_KEY_FILE: /run/secrets/synara-kms/server/tls.key
+      SYNARA_KMS_TLS_CLIENT_CA_FILE: /run/secrets/synara-kms/server/client-ca.crt
+      SYNARA_KMS_IDENTITY_ROLES_JSON: ${SYNARA_KMS_IDENTITY_ROLES_JSON:-}
+      SYNARA_KMS_MINIMUM_DELETE_DELAY: ${SYNARA_KMS_MINIMUM_DELETE_DELAY:-168h}
+      SYNARA_KMS_INVENTORY_MAXIMUM_AGE: ${SYNARA_KMS_INVENTORY_MAXIMUM_AGE:-1h}
+    volumes:
+      - synara-kms-data:/data/kms
+      - type: bind
+        source: ${SYNARA_KMS_SEAL_KEY_FILE:?Set SYNARA_KMS_SEAL_KEY_FILE to an owner-only base64 sealing-key file}
+        target: /run/secrets/synara-kms/seal.key
+        read_only: true
+      - type: bind
+        source: ${SYNARA_KMS_SERVER_TLS_DIRECTORY:?Set SYNARA_KMS_SERVER_TLS_DIRECTORY}
+        target: /run/secrets/synara-kms/server
+        read_only: true
+
+  control-plane:
+    depends_on:
+      kms-worker:
+        condition: service_started
+    environment:
+      SYNARA_CREDENTIAL_KMS_PROVIDER: synara-kms
+      SYNARA_CREDENTIAL_KMS_KEY_ID: ${SYNARA_CREDENTIAL_KMS_KEY_ID:-}
+      SYNARA_CREDENTIAL_MASTER_KEY: ""
+      SYNARA_CREDENTIAL_KMS_AWS_REGION: ""
+      SYNARA_CREDENTIAL_KMS_ENDPOINT: https://kms-worker:3790
+      SYNARA_CREDENTIAL_KMS_CA_FILE: /run/secrets/synara-kms/client/ca.crt
+      SYNARA_CREDENTIAL_KMS_CLIENT_CERT_FILE: /run/secrets/synara-kms/client/tls.crt
+      SYNARA_CREDENTIAL_KMS_CLIENT_KEY_FILE: /run/secrets/synara-kms/client/tls.key
+      SYNARA_CREDENTIAL_KMS_TIMEOUT: ${SYNARA_CREDENTIAL_KMS_TIMEOUT:-10s}
+    volumes:
+      - type: bind
+        source: ${SYNARA_KMS_CONTROL_PLANE_TLS_DIRECTORY:?Set SYNARA_KMS_CONTROL_PLANE_TLS_DIRECTORY}
+        target: /run/secrets/synara-kms/client
+        read_only: true
+
+volumes:
+  synara-kms-data:

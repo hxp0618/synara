@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/control-plane ./cmd/api && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/control-plane-metadata ./cmd/metadata && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kms-worker ./cmd/kms-worker && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-provider-transport ./cmd/cocoon-provider-transport && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-cocoon-supervisor ./cmd/cocoon-supervisor && \
@@ -23,6 +24,7 @@ FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/control-plane /usr/local/bin/control-plane
 COPY --from=build /out/control-plane-metadata /usr/local/bin/control-plane-metadata
+COPY --from=build /out/kms-worker /usr/local/bin/kms-worker
 COPY --from=build /out/synara-agentd /usr/local/bin/synara-agentd
 COPY --from=build /out/synara-cocoon-provider-transport /usr/local/bin/synara-cocoon-provider-transport
 COPY --from=build /out/synara-cocoon-supervisor /usr/local/bin/synara-cocoon-supervisor

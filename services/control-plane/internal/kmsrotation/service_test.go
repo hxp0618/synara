@@ -267,6 +267,28 @@ func TestOnlineRewrapIsPreflightedAuditedImmutableAndIdempotent(t *testing.T) {
 		t.Fatal("malformed primary envelope did not fail closed")
 	}
 	assertCount(t, store.DB(), &persistence.KMSRewrapRun{}, 2)
+
+	versionedKeyID := uuid.NewString() + "/versions/7"
+	referenced := persistence.IdentityLoginAttempt{
+		ID: uuid.New(), TenantID: domain.TenantID, ConnectionID: connection.ID,
+		StateHash: bytes.Repeat([]byte{0x22}, 32), ReturnTo: "/settings",
+		ExpiresAt: time.Now().UTC().Add(time.Hour), CreatedAt: time.Now().UTC(),
+		EncryptedPayload: []byte("ciphertext"), EncryptedDataKey: []byte("wrapped-key"),
+		KMSProvider: "synara-kms", KMSKeyID: versionedKeyID,
+	}
+	if err := store.DB().Create(&referenced).Error; err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := service.DeletionEvidence(ctx, "synara-kms", versionedKeyID, "deployment-a", "database-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ResourceCount != 1 || evidence.Version != 7 || len(evidence.Digest) != 64 || evidence.EvidenceID == "" {
+		t.Fatalf("unexpected deletion inventory evidence: %#v", evidence)
+	}
+	if _, err := service.DeletionEvidence(ctx, "local", "local-v1", "deployment-a", "database-a"); err == nil {
+		t.Fatal("deletion evidence accepted a mutable/non-Synara key identity")
+	}
 }
 
 func applyEnvelopeToCredential(model *persistence.ProviderCredential, envelope credentialkms.Envelope) {

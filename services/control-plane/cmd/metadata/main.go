@@ -117,10 +117,19 @@ func main() {
 		operator := flags.String("operator", "", "non-secret change or incident reference (required with --execute)")
 		batchSize := flags.Int("batch-size", 200, "rows per deterministic batch (1-1000)")
 		resumeRunID := flags.String("resume-run-id", "", "resume an incomplete immutable run")
+		deletionEvidenceProvider := flags.String("deletion-evidence-provider", "", "emit deletion inventory evidence for this provider")
+		deletionEvidenceKeyID := flags.String("deletion-evidence-key-id", "", "emit deletion inventory evidence for this immutable key ID")
+		deploymentIdentity := flags.String("deployment-identity", "", "deployment identity bound into deletion evidence")
+		databaseIdentity := flags.String("database-identity", "", "database identity bound into deletion evidence")
 		_ = flags.Parse(os.Args[2:])
 		cipher, err := credentialkms.New(ctx, credentialkms.Config{
 			Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
 			LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
+			Synara: credentialkms.SynaraKMSConfig{
+				Endpoint: cfg.CredentialKMSEndpoint, CAFile: cfg.CredentialKMSCAFile,
+				ClientCertFile: cfg.CredentialKMSClientCertFile, ClientKeyFile: cfg.CredentialKMSClientKeyFile,
+				Timeout: cfg.CredentialKMSTimeout,
+			},
 			DecryptKeys: metadataCredentialKMSDecryptKeys(cfg.CredentialKMSDecryptKeys),
 		})
 		if err != nil {
@@ -133,6 +142,18 @@ func main() {
 		if !*execute {
 			if *resumeRunID != "" {
 				fatal("--resume-run-id requires --execute")
+			}
+			evidenceRequested := *deletionEvidenceProvider != "" || *deletionEvidenceKeyID != "" || *deploymentIdentity != "" || *databaseIdentity != ""
+			if evidenceRequested {
+				if *deletionEvidenceProvider == "" || *deletionEvidenceKeyID == "" || *deploymentIdentity == "" || *databaseIdentity == "" {
+					fatal("--deletion-evidence-provider, --deletion-evidence-key-id, --deployment-identity and --database-identity are required together")
+				}
+				evidence, err := service.DeletionEvidence(ctx, *deletionEvidenceProvider, *deletionEvidenceKeyID, *deploymentIdentity, *databaseIdentity)
+				if err != nil {
+					fatal(err.Error())
+				}
+				printJSON(map[string]any{"mode": "deletion-inventory", "inventory": evidence})
+				return
 			}
 			plan, err := service.Plan(ctx)
 			if err != nil {
@@ -207,6 +228,10 @@ func metadataCredentialKMSDecryptKeys(values []config.CredentialKMSDecryptKeyCon
 	for _, value := range values {
 		result = append(result, credentialkms.DecryptKeyConfig{
 			Provider: value.Provider, KeyID: value.KeyID, LocalKey: value.LocalKey, Region: value.Region,
+			Synara: credentialkms.SynaraKMSConfig{
+				Endpoint: value.Endpoint, CAFile: value.CAFile, ClientCertFile: value.ClientCertFile,
+				ClientKeyFile: value.ClientKeyFile, Timeout: value.Timeout,
+			},
 		})
 	}
 	return result

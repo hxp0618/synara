@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -53,6 +55,17 @@ type Plan struct {
 	AlreadyPrimary  int64            `json:"alreadyPrimary"`
 	PendingRewrap   int64            `json:"pendingRewrap"`
 	Unconfigured    int64            `json:"unconfigured"`
+}
+
+type DeletionInventoryEvidence struct {
+	EvidenceID         string    `json:"evidenceId"`
+	DeploymentIdentity string    `json:"deploymentIdentity"`
+	DatabaseIdentity   string    `json:"databaseIdentity"`
+	KeyID              string    `json:"keyId"`
+	Version            int64     `json:"version"`
+	ResourceCount      int64     `json:"resourceCount"`
+	Digest             string    `json:"digest"`
+	CompletedAt        time.Time `json:"completedAt"`
 }
 
 type ExecuteOptions struct {
@@ -117,6 +130,59 @@ func (s *Service) Plan(ctx context.Context) (Plan, error) {
 	return result, nil
 }
 
+func (s *Service) DeletionEvidence(
+	ctx context.Context,
+	provider, versionedKeyID, deploymentIdentity, databaseIdentity string,
+) (DeletionInventoryEvidence, error) {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	deploymentIdentity = strings.TrimSpace(deploymentIdentity)
+	databaseIdentity = strings.TrimSpace(databaseIdentity)
+	logicalKeyID, version, err := parseVersionedKeyIdentity(versionedKeyID)
+	if provider != "synara-kms" || err != nil {
+		return DeletionInventoryEvidence{}, errors.New("deletion evidence requires an immutable synara-kms UUID/version identity")
+	}
+	if deploymentIdentity == "" || len(deploymentIdentity) > 200 || databaseIdentity == "" || len(databaseIdentity) > 200 {
+		return DeletionInventoryEvidence{}, errors.New("deletion evidence deployment and database identities are required")
+	}
+	plan, err := s.Plan(ctx)
+	if err != nil {
+		return DeletionInventoryEvidence{}, err
+	}
+	counts := map[string]int64{
+		ResourceProviderCredential: 0, ResourceIdentityConnection: 0, ResourceIdentityLoginAttempt: 0,
+	}
+	for _, entry := range plan.Inventory {
+		if entry.KMSProvider == provider && entry.KMSKeyID == versionedKeyID {
+			counts[entry.ResourceType] += entry.Count
+		}
+	}
+	completedAt := s.now().UTC()
+	evidence := DeletionInventoryEvidence{
+		EvidenceID: uuid.NewString(), DeploymentIdentity: deploymentIdentity, DatabaseIdentity: databaseIdentity,
+		KeyID: logicalKeyID, Version: version,
+		ResourceCount: counts[ResourceProviderCredential] + counts[ResourceIdentityConnection] + counts[ResourceIdentityLoginAttempt],
+		CompletedAt:   completedAt,
+	}
+	digestInput := struct {
+		DeploymentIdentity string           `json:"deploymentIdentity"`
+		DatabaseIdentity   string           `json:"databaseIdentity"`
+		Provider           string           `json:"provider"`
+		VersionedKeyID     string           `json:"versionedKeyId"`
+		Counts             map[string]int64 `json:"counts"`
+		CompletedAt        time.Time        `json:"completedAt"`
+	}{
+		DeploymentIdentity: deploymentIdentity, DatabaseIdentity: databaseIdentity, Provider: provider,
+		VersionedKeyID: versionedKeyID, Counts: counts, CompletedAt: completedAt,
+	}
+	encoded, err := json.Marshal(digestInput)
+	if err != nil {
+		return DeletionInventoryEvidence{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	evidence.Digest = hex.EncodeToString(digest[:])
+	return evidence, nil
+}
+
 func (s *Service) Execute(ctx context.Context, options ExecuteOptions) (Report, error) {
 	operatorReference := strings.TrimSpace(options.OperatorReference)
 	if len(operatorReference) < 3 || len(operatorReference) > 200 {
@@ -154,6 +220,18 @@ func (s *Service) Execute(ctx context.Context, options ExecuteOptions) (Report, 
 		return Report{}, fmt.Errorf("KMS rotation did not converge: %d encrypted resources remain on non-primary keys", remaining.PendingRewrap)
 	}
 	return s.complete(ctx, run)
+}
+
+func parseVersionedKeyIdentity(value string) (string, int64, error) {
+	value = strings.TrimSpace(value)
+	logical, rawVersion, found := strings.Cut(value, "/versions/")
+	parsed, parseErr := uuid.Parse(logical)
+	var version int64
+	if _, scanErr := fmt.Sscanf(rawVersion, "%d", &version); !found || parseErr != nil || scanErr != nil ||
+		parsed.String() != logical || version <= 0 || fmt.Sprintf("%s/versions/%d", logical, version) != value {
+		return "", 0, errors.New("invalid versioned key identity")
+	}
+	return logical, version, nil
 }
 
 func (s *Service) resolveRun(

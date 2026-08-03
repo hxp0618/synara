@@ -35,6 +35,13 @@ the two-reader/one-writer keyring and audited `control-plane-metadata rewrap-kms
 [`docs/runbooks/production-secret-certificate-domain-rotation.md`](../../docs/runbooks/production-secret-certificate-domain-rotation.md);
 never replace a key in place.
 
+Deployments that need lifecycle-managed keys without a cloud KMS can add
+`self-hosted-kms.override.yml`. It runs the dedicated mTLS-only `kms-worker` with a separate data volume and sealing-key
+mount, then selects the exact `synara-kms` key version in the Control Plane. Bootstrap, rotation, provider replacement,
+sealing-key rotation, and delayed deletion are documented in
+[`docs/runbooks/self-hosted-kms-worker.md`](../../docs/runbooks/self-hosted-kms-worker.md). The overlay is opt-in and does
+not change this Compose file's `local` default.
+
 The separately named Provider Cursor key also protects Execution Target configuration. Roll the compatible binary first
 with no Key ID, then use the named primary/decrypt-only keyring and
 `control-plane-metadata rekey-runtime-secrets` procedure in the same production rotation runbook. This separation prevents

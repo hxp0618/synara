@@ -37,7 +37,11 @@ AWS Region. Up to eight decrypt-only keys are declared by `SYNARA_CREDENTIAL_KMS
 
 Local key bytes are read only from the named environment variable; key bytes in JSON are rejected by the exact JSON
 schema. Duplicate identities, a duplicate primary, reused local key bytes, missing key material, and unknown providers
-fail startup. `local` and `aws-kms` are supported; Vault may deliver a local key but Vault Transit is not a KMS provider.
+fail startup. `local`, `aws-kms`, and `synara-kms` are supported. A `synara-kms` entry contains an HTTPS endpoint plus CA,
+client-certificate, and client-key file paths; it never embeds PEM or managed key material. Its Key ID is the exact
+`<logical-key-uuid>/versions/<version>` identity defined by
+[`self-hosted-kms-worker-v1.md`](./self-hosted-kms-worker-v1.md). Vault may deliver a local key, but Vault Transit is not
+currently a credential-envelope KMS provider.
 
 ## Zero-downtime state machine
 

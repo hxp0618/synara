@@ -515,6 +515,38 @@ func TestLoadValidatesCredentialKMSConfiguration(t *testing.T) {
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must be a JSON array") {
 		t.Fatalf("expected unknown fallback field error, got %v", err)
 	}
+
+	clearConfigEnvironment(t)
+	keyID := uuid.NewString() + "/versions/1"
+	t.Setenv("SYNARA_CREDENTIAL_KMS_PROVIDER", "synara-kms")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_KEY_ID", keyID)
+	t.Setenv("SYNARA_CREDENTIAL_KMS_ENDPOINT", "https://kms.internal.example/")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_CA_FILE", "/var/run/kms/ca.crt")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_CLIENT_CERT_FILE", "/var/run/kms/tls.crt")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_CLIENT_KEY_FILE", "/var/run/kms/tls.key")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_TIMEOUT", "8s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CredentialKMSProvider != "synara-kms" || cfg.CredentialKMSKeyID != keyID ||
+		cfg.CredentialKMSEndpoint != "https://kms.internal.example" || cfg.CredentialKMSTimeout != 8*time.Second {
+		t.Fatalf("unexpected Synara KMS config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_CREDENTIAL_KMS_PROVIDER", "aws-kms")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_KEY_ID", "arn:aws:kms:eu-west-1:123456789012:key/new")
+	t.Setenv("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", `[{"provider":"synara-kms","keyId":"`+keyID+`","endpoint":"https://old-kms.internal.example","caFile":"/old/ca.crt","clientCertFile":"/old/tls.crt","clientKeyFile":"/old/tls.key","timeout":"12s"}]`)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CredentialKMSDecryptKeys) != 1 || cfg.CredentialKMSDecryptKeys[0].Provider != "synara-kms" ||
+		cfg.CredentialKMSDecryptKeys[0].Endpoint != "https://old-kms.internal.example" ||
+		cfg.CredentialKMSDecryptKeys[0].Timeout != 12*time.Second {
+		t.Fatalf("unexpected mixed-provider decrypt config: %#v", cfg.CredentialKMSDecryptKeys)
+	}
 }
 
 func TestLoadValidatesProviderCursorKeyringConfiguration(t *testing.T) {
@@ -1139,6 +1171,9 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
 		"SYNARA_CREDENTIAL_KMS_PROVIDER", "SYNARA_CREDENTIAL_KMS_KEY_ID",
 		"SYNARA_CREDENTIAL_MASTER_KEY", "SYNARA_CREDENTIAL_KMS_AWS_REGION",
+		"SYNARA_CREDENTIAL_KMS_ENDPOINT", "SYNARA_CREDENTIAL_KMS_CA_FILE",
+		"SYNARA_CREDENTIAL_KMS_CLIENT_CERT_FILE", "SYNARA_CREDENTIAL_KMS_CLIENT_KEY_FILE",
+		"SYNARA_CREDENTIAL_KMS_TIMEOUT",
 		"SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON", "SYNARA_OLD_CREDENTIAL_KEY",
 		"SYNARA_PUBLIC_CONTROL_PLANE_URL", "SYNARA_PUBLIC_ADMIN_URL", "SYNARA_INTERNAL_STATUS_BOARD_URL",
 		"SYNARA_INTERNAL_INCIDENT_PUBLISHER_URL", "SYNARA_INTERNAL_INCIDENT_PUBLISHER_HMAC_KEY",

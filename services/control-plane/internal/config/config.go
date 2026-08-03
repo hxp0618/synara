@@ -76,6 +76,11 @@ type Config struct {
 	CredentialKMSKeyID                   string
 	CredentialKMSLocalKey                []byte
 	CredentialKMSAWSRegion               string
+	CredentialKMSEndpoint                string
+	CredentialKMSCAFile                  string
+	CredentialKMSClientCertFile          string
+	CredentialKMSClientKeyFile           string
+	CredentialKMSTimeout                 time.Duration
 	CredentialKMSDecryptKeys             []CredentialKMSDecryptKeyConfig
 	PublicControlPlaneURL                string
 	PublicAdminURL                       string
@@ -123,10 +128,15 @@ type Config struct {
 const CommercializationModeInternalSelfHosted = "internal-self-hosted"
 
 type CredentialKMSDecryptKeyConfig struct {
-	Provider string
-	KeyID    string
-	LocalKey []byte
-	Region   string
+	Provider       string
+	KeyID          string
+	LocalKey       []byte
+	Region         string
+	Endpoint       string
+	CAFile         string
+	ClientCertFile string
+	ClientKeyFile  string
+	Timeout        time.Duration
 }
 
 type ProviderCursorDecryptKeyConfig struct {
@@ -144,6 +154,11 @@ type credentialKMSDecryptKeyInput struct {
 	KeyID               string `json:"keyId"`
 	LocalKeyEnvironment string `json:"localKeyEnvironment,omitempty"`
 	Region              string `json:"region,omitempty"`
+	Endpoint            string `json:"endpoint,omitempty"`
+	CAFile              string `json:"caFile,omitempty"`
+	ClientCertFile      string `json:"clientCertFile,omitempty"`
+	ClientKeyFile       string `json:"clientKeyFile,omitempty"`
+	Timeout             string `json:"timeout,omitempty"`
 }
 
 func Load() (Config, error) {
@@ -314,6 +329,13 @@ func Load() (Config, error) {
 	cfg.CredentialKMSProvider = strings.ToLower(strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_PROVIDER")))
 	cfg.CredentialKMSKeyID = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_KEY_ID"))
 	cfg.CredentialKMSAWSRegion = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_AWS_REGION"))
+	cfg.CredentialKMSEndpoint = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_ENDPOINT")), "/")
+	cfg.CredentialKMSCAFile = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_CA_FILE"))
+	cfg.CredentialKMSClientCertFile = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_CLIENT_CERT_FILE"))
+	cfg.CredentialKMSClientKeyFile = strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_KMS_CLIENT_KEY_FILE"))
+	if cfg.CredentialKMSTimeout, err = envDurationStrict("SYNARA_CREDENTIAL_KMS_TIMEOUT", 10*time.Second); err != nil {
+		return Config{}, err
+	}
 	cfg.PublicControlPlaneURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_CONTROL_PLANE_URL")), "/")
 	cfg.PublicAdminURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_ADMIN_URL")), "/")
 	if strings.TrimSpace(os.Getenv("SYNARA_PUBLIC_STATUS_PAGE_URL")) != "" {
@@ -734,12 +756,15 @@ func Load() (Config, error) {
 	}
 	switch cfg.CredentialKMSProvider {
 	case "":
-		if cfg.CredentialKMSKeyID != "" || cfg.CredentialKMSAWSRegion != "" {
+		if cfg.CredentialKMSKeyID != "" || cfg.CredentialKMSAWSRegion != "" || credentialKMSTLSConfigured(cfg) {
 			return Config{}, errors.New("SYNARA_CREDENTIAL_KMS_PROVIDER is required when credential KMS options are configured")
 		}
 	case "local":
 		if len(cfg.CredentialKMSLocalKey) != 32 {
 			return Config{}, errors.New("SYNARA_CREDENTIAL_MASTER_KEY is required for local credential KMS")
+		}
+		if cfg.CredentialKMSAWSRegion != "" || credentialKMSTLSConfigured(cfg) {
+			return Config{}, errors.New("local credential KMS must not configure AWS or Synara KMS options")
 		}
 	case "aws-kms":
 		if cfg.CredentialKMSKeyID == "" {
@@ -748,8 +773,19 @@ func Load() (Config, error) {
 		if len(cfg.CredentialKMSLocalKey) != 0 {
 			return Config{}, errors.New("SYNARA_CREDENTIAL_MASTER_KEY must not be set with AWS KMS")
 		}
+		if credentialKMSTLSConfigured(cfg) {
+			return Config{}, errors.New("AWS credential KMS must not configure Synara KMS options")
+		}
+	case "synara-kms":
+		if cfg.CredentialKMSKeyID == "" || cfg.CredentialKMSEndpoint == "" || cfg.CredentialKMSCAFile == "" ||
+			cfg.CredentialKMSClientCertFile == "" || cfg.CredentialKMSClientKeyFile == "" {
+			return Config{}, errors.New("SYNARA_CREDENTIAL_KMS_KEY_ID, SYNARA_CREDENTIAL_KMS_ENDPOINT, SYNARA_CREDENTIAL_KMS_CA_FILE, SYNARA_CREDENTIAL_KMS_CLIENT_CERT_FILE and SYNARA_CREDENTIAL_KMS_CLIENT_KEY_FILE are required for Synara KMS")
+		}
+		if len(cfg.CredentialKMSLocalKey) != 0 || cfg.CredentialKMSAWSRegion != "" {
+			return Config{}, errors.New("Synara credential KMS must not configure local or AWS KMS key material")
+		}
 	default:
-		return Config{}, errors.New("SYNARA_CREDENTIAL_KMS_PROVIDER must be local or aws-kms")
+		return Config{}, errors.New("SYNARA_CREDENTIAL_KMS_PROVIDER must be local, aws-kms or synara-kms")
 	}
 	if strings.TrimSpace(cfg.ArtifactBucket) == "" {
 		return Config{}, errors.New("SYNARA_ARTIFACT_BUCKET must not be empty")
@@ -983,6 +1019,18 @@ func parseCredentialKMSDecryptKeys(
 		keyID := strings.TrimSpace(input.KeyID)
 		region := strings.TrimSpace(input.Region)
 		keyEnvironment := strings.TrimSpace(input.LocalKeyEnvironment)
+		endpoint := strings.TrimRight(strings.TrimSpace(input.Endpoint), "/")
+		caFile := strings.TrimSpace(input.CAFile)
+		clientCertFile := strings.TrimSpace(input.ClientCertFile)
+		clientKeyFile := strings.TrimSpace(input.ClientKeyFile)
+		timeout := 10 * time.Second
+		if strings.TrimSpace(input.Timeout) != "" {
+			var err error
+			timeout, err = time.ParseDuration(strings.TrimSpace(input.Timeout))
+			if err != nil || timeout <= 0 || timeout > time.Minute {
+				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].timeout is invalid", index)
+			}
+		}
 		if keyID == "" || len(keyID) > 1024 || strings.ContainsAny(keyID, "\r\n\t") {
 			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].keyId is invalid", index)
 		}
@@ -991,10 +1039,13 @@ func parseCredentialKMSDecryptKeys(
 			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] duplicates a KMS key", index)
 		}
 		seen[identity] = struct{}{}
-		key := CredentialKMSDecryptKeyConfig{Provider: provider, KeyID: keyID, Region: region}
+		key := CredentialKMSDecryptKeyConfig{
+			Provider: provider, KeyID: keyID, Region: region, Endpoint: endpoint, CAFile: caFile,
+			ClientCertFile: clientCertFile, ClientKeyFile: clientKeyFile, Timeout: timeout,
+		}
 		switch provider {
 		case "local":
-			if !validEnvironmentName(keyEnvironment) || region != "" {
+			if !validEnvironmentName(keyEnvironment) || region != "" || endpoint != "" || caFile != "" || clientCertFile != "" || clientKeyFile != "" || strings.TrimSpace(input.Timeout) != "" {
 				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] local key configuration is invalid", index)
 			}
 			encoded := strings.TrimSpace(os.Getenv(keyEnvironment))
@@ -1010,15 +1061,24 @@ func parseCredentialKMSDecryptKeys(
 			}
 			key.LocalKey = decoded
 		case "aws-kms":
-			if keyEnvironment != "" {
+			if keyEnvironment != "" || endpoint != "" || caFile != "" || clientCertFile != "" || clientKeyFile != "" || strings.TrimSpace(input.Timeout) != "" {
 				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] AWS KMS key must not declare localKeyEnvironment", index)
 			}
+		case "synara-kms":
+			if keyEnvironment != "" || region != "" || endpoint == "" || caFile == "" || clientCertFile == "" || clientKeyFile == "" {
+				return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d] Synara KMS configuration is invalid", index)
+			}
 		default:
-			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].provider must be local or aws-kms", index)
+			return nil, fmt.Errorf("SYNARA_CREDENTIAL_KMS_DECRYPT_KEYS_JSON[%d].provider must be local, aws-kms or synara-kms", index)
 		}
 		keys = append(keys, key)
 	}
 	return keys, nil
+}
+
+func credentialKMSTLSConfigured(cfg Config) bool {
+	return cfg.CredentialKMSEndpoint != "" || cfg.CredentialKMSCAFile != "" ||
+		cfg.CredentialKMSClientCertFile != "" || cfg.CredentialKMSClientKeyFile != ""
 }
 
 func validEnvironmentName(value string) bool {
