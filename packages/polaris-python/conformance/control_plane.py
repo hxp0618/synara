@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urljoin
@@ -213,13 +214,23 @@ finally:
     stream.close()
 assert "session.created" in observed and "turn.created" in observed
 
-held = urlopen(
-    Request(
-        f"{base_url}/v1/sessions/{session.id}/events/stream?afterSequence=0",
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
-    ),
-    timeout=5,
-)
+held = None
+for _ in range(40):
+    try:
+        held = urlopen(
+            Request(
+                f"{base_url}/v1/sessions/{session.id}/events/stream?afterSequence=0",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
+            ),
+            timeout=5,
+        )
+        break
+    except HTTPError as error:
+        if error.code != 429:
+            raise
+        error.close()
+        time.sleep(0.05)
+assert held is not None, "Could not reserve the SSE connection pool after the prior stream closed."
 fallback = session.events(reconnect=False, polling_interval=0)
 fallback_types = []
 try:
