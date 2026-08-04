@@ -32,6 +32,7 @@
 | Stage 7 | 对外 SDK 与开发者平台                                    | TODO                | Stage 2、5、6    |
 | Stage 8 | 组织内协作与 Agent/人统一提及                            | TODO                | Stage 6、Stage 7 |
 | Stage 9 | 开发者工作流集成与自动化                                 | TODO                | Stage 4、5、8    |
+| Stage 10 | 计算供给弹性与成本可编程化                              | TODO                | Stage 4、6、7、8 |
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
@@ -45,7 +46,7 @@ Stage 7 的独立设计文档（文件名不带阶段编号，后续顺延不需
 > 独立计划文档的抽取时机（2026-07-27 决定）：**阶段启动时抽取，启动前留在本文件**。理由是
 > Roadmap-wide rules 要求"每个 Stage 开始前重新审计当前代码和计划状态"——启动前写的详细设计
 > 文档会在真正动工时已经过时，反而制造"文档说的和代码不一样"的负担。Stage 7 已有文档是因为
-> 其关键决策（鉴权模型、契约源、命名、免费层）已冻结且不依赖后续代码状态。Stage 5、6、8、9
+> 其关键决策（鉴权模型、契约源、命名、免费层）已冻结且不依赖后续代码状态。Stage 5、6、8、9、10
 > 暂留本文件，各自启动时再抽取并做差距审计。
 
 #### 阶段间排期与并行（2026-07-27）
@@ -62,8 +63,9 @@ Stage 7 的独立设计文档（文件名不带阶段编号，后续顺延不需
 | Stage 5 不可信输入组 → Stage 9 事件触发上线   | 攻击者开一个 Issue 即可投喂无人值守 agent      |
 | Stage 8 统一 interaction → Stage 9 评论提及   | 否则 VCS 侧会长出第二套提及机制                |
 | Stage 6 Plan/Entitlement → Stage 7 自助免费层 | 免费层需要配额与开通能力落地                   |
+| Stage 10 FOCUS 命名决策 → Stage 7 usage/cost 契约冻结 | 对外契约冻结后再改列名与语义是 breaking change |
 
-**关键路径（面向 GA）**：Stage 5 → Stage 6 → GA。Stage 7/8/9 是产品扩展，
+**关键路径（面向 GA）**：Stage 5 → Stage 6 → GA。Stage 7/8/9/10 是产品扩展，
 除上表门禁外不阻塞 GA。
 
 **建议尽早启动、不必等待前序阶段的工作**：
@@ -74,10 +76,13 @@ Stage 7 的独立设计文档（文件名不带阶段编号，后续顺延不需
   本地与云端分叉越深；该组不依赖 Stage 8。
 - Stage 7 的 M1–M2（API 产品化与 TypeScript SDK）——只需要 Stage 2 级别的 API 稳定性。
 - Stage 6 的合规认证路径——准备周期以季度计，必须尽早启动而不是 GA 前补。
+- Stage 10 的 FOCUS 列名对齐决策——纯契约形状决策，改动极小，但必须赶在 Stage 7 usage/cost
+  契约冻结之前完成，晚了就是对外 breaking change（见上表硬门禁）。
 
 **排期与优先级的区别**：Stage 编号表达依赖与主题归属，不表达优先级。若资源有限，优先级排序是
 Stage 5（安全与可靠性下限）> Stage 9 自动化回归（止损产品分叉）> Stage 6（可正式售卖）>
-Stage 7 > Stage 8 > Stage 9 其余。
+Stage 7 > Stage 8 > Stage 9 其余 > Stage 10 其余（成本结构优化，价值随真实用量增长；唯 FOCUS
+命名决策例外，须提前）。
 
 ### Stage 3：Provider Runtime 与远程 Worker 产品化
 
@@ -1525,10 +1530,20 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
       除显式 App push 外的 checkout 均不持久化凭据。
       2026-08-02 对当前 `origin` fork `hxp0618/synara` 的只读远端核查显示：repository secret 名称、变量、
       Environment 和 `release.yml` run 均为空，`main` 返回 `Branch not protected`；本地 Stage 6 分支还领先远端
-      15 个 commit 且工作树未收口。因此远端当前不能生成受保护签名候选，详见
+      15 个 commit 且工作树未收口。因此远端当时不能生成受保护签名候选，详见
       `docs/reports/stage-6-github-release-environment-readiness-20260802.md`。该状态必须在真实 candidate 前通过明确
       release repository、clean source、branch protection、protected Environment、分离 reviewer 与签名/公证配置
       关闭，不能以本地工程门禁替代。
+      2026-08-04 结构性控制已按下述工具关闭：operator 确认 `hxp0618/synara` 为发布仓库；`main` 分支保护经
+      `stage6:branch-protection` 应用并回读（5 个无条件 CI required check、enforce-admins、last-push approval、
+      strict checks、线性历史、禁 force-push/删除）；`stage6-enterprise-ga` Environment 经
+      `stage6:environment:baseline` 达到 `environment-baseline-ready-not-release-approved`（`hxp0618` + `ameliaWiza2`
+      双分离 reviewer、prevent self-review、protected-branch-only、管理员 bypass 已在 UI 关闭并回读）；
+      `SYNARA_FINALIZE_RELEASE=1` 已设置。期间修复了两处工具缺陷：个人仓库发送组织专属
+      `bypass_pull_request_allowances` 导致 422，以及被 GitHub 静默削减 reviewer 的漂移 Environment 无法进入
+      准确的 fail-closed 拒绝路径。readiness 六项控制全部为 `true`，但 16 个签名/公证/Release App secret 与
+      per-candidate Environment 值仍缺失，评估保持 `github-release-inputs-incomplete`，详见
+      `docs/reports/stage-6-github-release-environment-readiness-20260804.md`。
       `stage6:github:readiness` 已把这次人工核查固化为只读机器投影：从本地 `release.yml` 提取固定 secret/variable
       名称，Secret 永远只读名称；唯一读取的值是非敏感 repository variable `SYNARA_FINALIZE_RELEASE`，且必须精确
       为 `1`，错误只报告变量名、不回显值。Windows 未签名例外按 candidate version 命中，readiness 在未知候选版本
@@ -1686,7 +1701,8 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
 SDK 采用自建 codegen 管线，TypeScript 首发、Python 紧随；品牌定名 **Polaris**
 （npm `@polaris-agents/sdk`、PyPI `polaris-agents`）；不做独立 execution 事件流；免费层为强制
 BYOK + 平台计算配额。GA 有一条硬门槛：Stage 5 的沙箱隔离加固必须先完成——公开 SDK 意味着任意
-第三方提交任意代码。
+第三方提交任意代码。另一条来自 Stage 10 的硬门禁：usage/cost 相关端点的契约冻结前，必须先完成
+FOCUS 列名对齐决策（见文首硬门禁表与 Stage 10），否则冻结后再改是对外 breaking change。
 
 ### Stage 8：组织内协作与 Agent/人统一提及
 
@@ -1734,6 +1750,7 @@ IM 天然做不到的"对话与执行同处一个权威状态机"。
   类型，不产生两套并行机制。
 - 触达复用组织既有 IM 与邮件，不自建通讯基础设施；组织的 IM 使用习惯不因本阶段改变。
 - 提及是受控、可审计、可撤销的访问授予，绝不成为权限旁路。
+- Session 任一时刻只有一个驱动者；跨人协作以 interaction 为单位完成，不引入多人并发驱动。
 
 #### TODO
 
@@ -1743,7 +1760,34 @@ IM 天然做不到的"对话与执行同处一个权威状态机"。
       Event Stream、可 resolve/过期，并复用既有 interaction 的 pending 快照与 reconcile 语义。
 - [ ] 冻结"提及即访问授予"的安全语义：被提及人按**其自身角色**应用既有 redaction 投影（不继承
       提及者的可见性）、写入 Audit、可撤销、可设过期；提及不得越过 Organization 边界。
-- [ ] 实现 Session 转交（handoff）、协作者列表与显式共享，复用 Organization 角色而非新建权限体系。
+- [ ] 【已决策 2026-08-04：单驱动者】冻结会话驱动权模型：Session 增加权威字段 `driverUserId`
+      （初始为创建者），任一时刻只有 driver 能发起 Turn；在该 Session 内发起 人 → agent 委派
+      等价于发起 Turn，同样归 driver 独占，否则协作者可经 `@agent(task)` 绕过驱动权。interaction
+      的 resolve 权按其**响应者指向**判定而非按 driver 判定：Approval / Structured User Input
+      默认指向 driver，driver 可经提及把具体问题定向给同事，被指向者即可 resolve——一次性
+      receipt 记录 resolver 身份，"谁批准了这次危险操作"始终有唯一答案。其他协作者是响应者：
+      按自身角色的 redacted 读投影，可写锚定评论、发起锚定的 人 → 人 interaction、resolve 指向
+      自己的 interaction。协作的单位是 interaction 而非并发键入，**不做多人共驾**：Provider
+      Runtime 是单流状态机，真实的并行诉求由 fork 满足。
+- [ ] 实现 Session 转交（handoff）、协作者列表与显式共享，复用 Organization 角色而非新建权限
+      体系。handoff 是控制面权威、版本化、写 Audit 的显式动作（沿用既有 authoritative session
+      lifecycle actions 的模式）：正常路径需接收方 accept；管理路径允许具备相应 Organization
+      角色的成员强制接管（覆盖驱动者离职/掉线）。驱动权变更即递增 driver generation 并进入
+      Session Event Stream（客户端经 `snapshotSequence` 对账），携带旧 driver generation 的
+      Turn 提交与 interaction resolve 一律 fail closed；该 fencing 是对既有 Generation fencing
+      语义的同构加法，不改动 Stage 3/4 已冻结的 wire 语义。并发 resolve 复用 `Idempotency-Key`
+      与一次性 receipt 的单胜者语义。handoff 时仍 pending 且指向旧 driver 的 interaction 随
+      驱动权重新指向新 driver（携带新 generation 进入其待响应队列，不留下永远无法 resolve 的
+      悬空项）；显式定向给第三人的 interaction 不受影响。新 driver 的可见性与审批能力按其自身
+      角色生效，不继承旧 driver——与"提及即访问授予"同一条不放大原则。
+- [ ] 非 driver 的 UI 呈现为显式的"由 X 驱动"状态，composer 降级为评论/回答模式并提供"请求
+      接管"入口（走 handoff 流程）；不做 Google Docs 式多人光标与输入中状态，避免制造"共驾被
+      支持"的错误预期。
+- [ ] 提供并行协作的正式出口：fork Session（继承上下文快照，独立 workspace/worktree，执行面
+      天然隔离），结论经锚定评论/提及回流原 Session；不在同一 Session 内提供任何形式的并发驱动。
+      fork 不得成为绕过 redaction 的通道：fork 者只能带走按其自身角色可见的内容（快照先过其
+      redaction 投影再落入新 Session），fork 写 Audit，并需负向测试证明受限角色 fork 不出被
+      脱敏的事件。
 - [ ] 实现对具体 Event / Artifact / diff 位置的定位评论，使讨论锚定在证据上而非游离的聊天流。
 - [ ] 将锚定规则实现为强制约束而非惯例：所有协作内容必须携带 Session / Execution / Artifact /
       diff 锚点，不提供任何创建无锚点会话的入口；缺锚点的写入在 API 层直接拒绝。这是"补充"不
@@ -1756,8 +1800,9 @@ IM 天然做不到的"对话与执行同处一个权威状态机"。
 - [ ] 将协作内容纳入既有 Audit 与 Retention 机制，明确保留期、导出与 Legal Hold 边界（成为沟通
       通道即继承合规义务，不能游离在 Stage 6 的数据治理之外）。
 - [ ] 将非目标写入契约：通用频道、与 Session 无关的 DM、presence、输入中状态、移动端应用、
-      语音/视频，以及**与组织 IM 的双向消息镜像**。这些一律不做——溢出只允许平台 → IM 单向，
-      IM 中的普通对话不回流，避免退化为第二个 IM。
+      语音/视频、**多人并发驱动同一 Session（共驾/多人光标）**，以及**与组织 IM 的双向消息
+      镜像**。这些一律不做——溢出只允许平台 → IM 单向，IM 中的普通对话不回流，避免退化为
+      第二个 IM。
 - [ ] 【已决策 2026-07-27：统一】实现单一 Request/Response interaction 类型，覆盖全部四个方向：
       人 → agent（既有 `@alias(task)` 委派）、人 → 人（新增）、agent → 人（**既有 Approval /
       Structured User Input 即是此方向**）、agent → agent（子任务委派）。发起者与响应者各自可为
@@ -1789,6 +1834,10 @@ IM 天然做不到的"对话与执行同处一个权威状态机"。
 - [ ] 四个提及方向（人↔agent 全组合）共用同一 interaction 类型与同一持久化事实，既有 Approval /
       Structured User Input 的冻结语义无回归；agent 无法解析需要人类授权的请求，且被提及 agent
       的权限不超过发起者，均有负向测试证明。
+- [ ] 任一时刻 Session 只有一个 driver：被 fence 的旧 driver 提交 Turn / resolve 被拒绝、双人
+      并发 resolve 同一 interaction 恰好一个成功、非 driver 无法发起 Turn 或 resolve 非指向自己
+      的 interaction（尝试记审计），均有负向测试证明；handoff 全程可审计，且新 driver 权限严格
+      按其自身角色、无继承无放大。
 - [ ] 组织既有 IM 能收到可点击、可执行的通知；至少 approve / reject / 短回答可在 IM 内完成并
       正确回写 Session。
 - [ ] 平台没有引入独立通用聊天面（无频道、无 presence、无移动端、无双向镜像），非目标在契约中
@@ -1881,6 +1930,96 @@ GitHub/GitLab App 参与开发流"——没有安装式授权、没有入站事�
 - [ ] 未映射到已知成员的外部 VCS 身份无法触发任何 Execution，且尝试被记入审计。
 - [ ] 存在效果侧指标（至少采纳率），可回答"换模型/换 prompt 后质量是否变化"。
 - [ ] 新用户可在不阅读文档的情况下完成仓库连接并跑通第一次 Turn。
+
+### Stage 10：计算供给弹性与成本可编程化
+
+状态：TODO。立项日期 2026-08-04，来源是一次外部对标（Cloudflare Agents Week 2026-08 系列
+发布，含 `@cloudflare/computer` 与 Billable Usage API）而非内部缺陷核查。对标结论不改变
+Stage 5-9 的优先级与 GA 关键路径，只把路线图已隐含依赖、但从未显式立项的两个能力收口成
+阶段：会话生命周期与计算生命周期解耦，以及成本的程序可消费化。
+
+立项依据：
+
+- Stage 8 的 pending interaction（会话停在"等同事回答/等审批"上数小时）与 Stage 9 的定时/
+  事件自动化（大量短执行）在放大同一个成本结构问题：会话存活时长不能等于计算持有时长。
+  **差距审计（2026-08-04）**：机制层已在 Stage 4 落地并验收——`waiting-for-approval`
+  suspend、`suspendAfterIdleSeconds` 的 Checkpoint/Suspend/Resume、lease-free `suspended`、
+  Warm Pool 与冷启动 P50/P95/P99 指标、空闲区间计为 platform cost 均已存在。因此本阶段
+  **不新建挂起机制**，真实缺口有三：挂起触发面未覆盖 Stage 8 新增的 pending interaction
+  类型；"空闲不持有计算"缺产品级验收姿态（没有指标回答"多少空闲会话仍在持有计算"、哪些
+  Target 应默认开启挂起）；周边轻量工作没有低成本执行路径。
+- Stage 6 的目标原话是"用户能自己解释'这次花了多少、为什么'"，其用户侧 per-Session/Turn
+  成本可见性已完成——但载体是管理面板与 CSV，缺程序可消费的 API 形状，而消费者应包括
+  无人值守的 agent 本身（Stage 9）。行业成本数据形状已在 FinOps FOCUS 规范上收敛
+  （AWS/Azure/GCP 与主流成本工具均已支持），列名与语义要趁 Stage 7 契约冻结前定，之后
+  再改就是对外 breaking change。
+
+**边界（不可动摇）**：本阶段借的是"计算按需供给 + 空闲挂起"的经济学，不是技术选型——
+不自建 isolate/microVM 技术栈，不引入第二套 Worker Protocol，不因成本优化降低任何 Stage 5
+冻结的隔离、审批与 egress 边界。
+
+跨阶段归属（本阶段不重复实现，只做扩展与验收）：
+
+- Checkpoint/Suspend/Resume、Warm Pool、冷启动指标与空闲成本归属机制归 **Stage 4**（已验收）；
+  本阶段只扩展触发面并补产品级验收，禁止重建。
+- 用户侧 per-Session/Turn 成本可见性与 billing 权威归 **Stage 6**（已完成）；本阶段只做导出
+  形状（FOCUS）与程序化端点，数字必须同源。
+- API 鉴权、三级 allowlist、防暴露守卫与 Service Account scope 归 **Stage 7**；本阶段不新增
+  鉴权机制。
+- 运行时层级的隔离等级声明规则归 Roadmap-wide rules 与 **Stage 5**；轻量执行路径只是该规则
+  的一次新实例，不豁免。
+
+#### 目标
+
+- 会话生命周期与计算生命周期解耦：计算按 Turn 租借，空闲即挂起/释放，恢复对用户透明。
+- 成本与用量是程序可消费的一等 API：形状对齐 FOCUS，agent 可自查配额与当期花费，数字与
+  Stage 6 billing 权威同源。
+- 对外 API 以"无人值守 agent 能否只靠响应内容自我纠错"为可用性检验标准。
+
+#### TODO — Turn-scoped 计算租借与空闲挂起
+
+- [ ] 将挂起触发面扩展到 Stage 8 的统一 interaction：Session 进入任何 pending interaction
+      （审批、同事提问、agent 间委派）超过阈值即走 Stage 4 既有的 Checkpoint/Suspend/Resume
+      链路，与既有 `waiting-for-approval`、`suspendAfterIdleSeconds` 同一状态机，不新建；
+      恢复必须复用已冻结的 session 恢复、Generation fencing 与 approval 一次性 receipt
+      语义，无回归。
+- [ ] 把"空闲不持有计算"从能力升级为验收姿态：建立"空闲会话计算持有率"指标；明确各
+      Execution Target 的默认挂起策略与开启条件——p95 恢复延迟预算不达标的 Target 不得
+      默认开启；恢复对用户透明，UI 不得出现"会话丢失"或需要手工重连的状态。
+- [ ] 为周边工作定义轻量执行路径（git 元数据操作、artifact/diff 投影、Stage 9 入站 webhook
+      的 pre/post 处理），不为其消耗完整 provider 沙箱。按 roadmap-wide rule 显式声明该层级
+      的隔离等级；执行层选择只是调度与成本提示，**绝不构成安全边界的降级通道**——不可信
+      输入（Stage 5 定义）不得被调度到弱隔离层，需负向测试覆盖。
+- [ ] 为本阶段新增的每条挂起/租借路径与护栏给出实测性能预算：默认关闭路径零开销、开启路径
+      的吞吐与尾延迟开销有实测数字、校验失败一律 fail closed（中止而非降级放行）。
+
+#### TODO — 成本可编程化
+
+- [ ] 将 usage/cost 导出的列名与语义对齐 FOCUS 规范（`ServiceName`、`ChargePeriodStart/End`、
+      `ConsumedQuantity`/`ConsumedUnit`、`ContractedCost`、`BillingCurrency` 等），数据复用
+      Stage 6 billing 权威，不建第二套统计旁路；暂未覆盖的 FOCUS 必填列显式登记差距，不硬造
+      数据。该命名决策必须在 Stage 7 usage/cost 契约冻结前完成（硬门禁见文首）。
+- [ ] 在 Polaris API 提供 agent 可自查的配额余量与当期成本端点，归因粒度到 Session/
+      Execution；走 Stage 7 的三级 allowlist 与防暴露守卫、Service Account scope，不新增
+      鉴权机制。
+- [ ] 将"无人值守 agent 只靠 API 响应即可自我纠错"纳入 Stage 7 错误契约的验收：错误响应
+      包含机器可读原因码、重试语义与配额余量。判定方式：一次 agent 不读文档跑通 SDK 典型
+      流程、并在故障注入（限流/配额耗尽/无效参数）下自行退避恢复的演练。
+
+#### 完成条件
+
+- [ ] 一个停在 pending interaction 的 Session 超过阈值后不再持有 provider runtime 与沙箱
+      计算资源；用户下一次交互透明恢复，p95 恢复延迟在预算内。判定以真实挂起/恢复演练、
+      资源计量与"空闲会话计算持有率"指标为准，且 Generation fencing、approval receipt 与
+      session 对账在挂起恢复路径上有回归测试。
+- [ ] 轻量执行路径（如落地）具备显式隔离等级声明，且有负向测试证明不可信输入无法被调度到
+      弱隔离层。
+- [ ] usage/cost API 列名与 FOCUS 对齐并有契约一致性测试；API 数字与 Stage 6 billing 权威
+      同源，无旁路统计。
+- [ ] agent 能通过 Polaris 自查配额与当期成本，并在配额受限时依据机器可读错误自行退避，有
+      演练证据。
+- [ ] 成本优化未降低任何安全边界：Stage 5 的隔离等级、审批与 egress 语义在本阶段结束后全部
+      无回归。
 
 ### Roadmap-wide rules
 
