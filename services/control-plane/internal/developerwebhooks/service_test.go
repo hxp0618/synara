@@ -58,6 +58,10 @@ func TestWebhookProjectionSignsThinPayloadAndPublishes(t *testing.T) {
 	if !strings.HasPrefix(issued.Secret, SecretPrefix) {
 		t.Fatalf("issued secret = %q", issued.Secret)
 	}
+	endpoints, err := fixture.service.List(context.Background(), fixture.principal, fixture.tenantID)
+	if err != nil || len(endpoints) != 1 || endpoints[0].ID != issued.Endpoint.ID {
+		t.Fatalf("endpoints=%#v err=%v", endpoints, err)
+	}
 	event := fixture.projectEvent(t, "execution.failed", map[string]any{
 		"prompt": "must never leave the Control Plane", "credential": "also secret",
 	})

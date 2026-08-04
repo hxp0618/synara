@@ -20,15 +20,16 @@ properties protect the evidence input boundary but do not authenticate Git clean
 ## Current compatibility decisions
 
 - Control Plane exposes API major `v1`. Web, Platform Admin, Desktop, server, contracts, `@synara/control-plane-client`, and
-  `@synara/enterprise-ui` at `0.6.3` are a same-release unit because there is not yet an independently versioned
+  `@synara/enterprise-ui` at `0.6.5` are a same-release unit because there is not yet an independently versioned
   browser compatibility handshake.
 - Managed Worker registration is exact Worker Protocol `2`. Worker Protocol v1 is not registration-compatible.
 - Control Plane can read persisted Runtime Event v1 and v2. Managed Workers and Provider Host v2 emit Runtime Event v2.
 - Managed Provider Host emits Protocol `2.2`; Control Plane accepts major `2` with minor `>= 1`. Major mismatch and older
   minor are non-schedulable. The Worker manifest's provider/runtime compatibility checks remain the per-image authority.
 - Worker Manifest storage schema is `3` and is independent from Workspace layout v3.
-- The current Control Plane Migration tail is `000163_stage6_candidate_compatibility_matrix_evidence.sql` with its exact
-  SHA-256 frozen in the machine matrix. Migration 163 makes Candidate v5 the only active release authority, binds the
+- The current Control Plane Migration tail is `000167_stage7_execution_target_provisioning.sql` with its exact
+  SHA-256 frozen in the machine matrix. Migrations 165-167 add the Stage 7 developer-platform authorities while retaining
+  the same forward-only application rollback boundary. Migration 163 makes Candidate v5 the only active release authority, binds the
   source-current compatibility matrix projection at PostgreSQL and SQLite boundaries, and retains terminal v2-v4 bytes
   as audit history. Migration 162 upgrades current Operations evidence to v2 and retains v1 history without authority.
   Earlier migrations remain immutable. Migrations are forward-only expand/contract; application rollback is allowed only

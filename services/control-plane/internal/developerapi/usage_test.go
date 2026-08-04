@@ -12,8 +12,34 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
+
+func TestUsageServiceSummaryRejectsCrossTenantContextBeforeStorage(t *testing.T) {
+	db := newUsageTestDB(t)
+	service := NewUsageService(db)
+	activeTenantID := uuid.New()
+	requestedTenantID := uuid.New()
+	_, err := service.Summarize(
+		context.Background(),
+		identity.Principal{UserID: uuid.New(), ActiveTenantID: &activeTenantID},
+		requestedTenantID,
+		uuid.New(),
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("usage summary accepted a Tenant outside the Principal active context")
+	}
+	var rows int64
+	if err := db.Model(&persistence.ServiceAccountAPIUsageWindow{}).Count(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("cross-Tenant summary touched usage storage: rows=%d", rows)
+	}
+}
 
 func TestUsageServiceAdmissionIsAtomicAcrossConcurrentRequests(t *testing.T) {
 	db := newUsageTestDB(t)

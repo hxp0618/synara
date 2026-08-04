@@ -172,12 +172,27 @@ func TestProjectOperationsRejectCrossTenantNestedIDSubstitution(t *testing.T) {
 		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
 	)
 	assertProjectProblemCode(t, err, "organization_not_found")
+	_, err = fixture.service.ListPage(
+		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID, ProjectListQuery{},
+	)
+	assertProjectProblemCode(t, err, "organization_not_found")
 	_, err = fixture.service.Create(
 		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
 		CreateProjectInput{Name: "Cross-Tenant Create"},
 		"project-cross-tenant-create", "127.0.0.1",
 	)
 	assertProjectProblemCode(t, err, "organization_not_found")
+	_, _, err = fixture.service.UpdateWithIdempotency(
+		fixture.ctx, otherPrincipal, otherTenant.ID, project.ID,
+		UpdateProjectInput{Name: &updatedName}, "project-cross-tenant-update-idempotent",
+		"project-cross-tenant-update-idempotent", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "project_not_found")
+	_, _, err = fixture.service.ArchiveWithIdempotency(
+		fixture.ctx, otherPrincipal, otherTenant.ID, project.ID,
+		"project-cross-tenant-archive-idempotent", "project-cross-tenant-archive-idempotent", "127.0.0.1",
+	)
+	assertProjectProblemCode(t, err, "project_not_found")
 	_, _, err = fixture.service.CreateWithIdempotency(
 		fixture.ctx, otherPrincipal, otherTenant.ID, fixture.organizationID,
 		CreateProjectInput{Name: "Cross-Tenant Idempotent Create"},

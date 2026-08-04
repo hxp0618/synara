@@ -384,14 +384,27 @@
       "id": "project-nested-id",
       "family": "Project",
       "boundary": "nested-id-substitution",
-      "operations": ["get", "list", "create", "idempotent create", "update", "archive"],
+      "operations": [
+        "get",
+        "list",
+        "paginate",
+        "create",
+        "idempotent create",
+        "update",
+        "idempotent update",
+        "archive",
+        "idempotent archive"
+      ],
       "entrypoints": [
         "Service.Get",
         "Service.List",
+        "Service.ListPage",
         "Service.Create",
         "Service.CreateWithIdempotency",
         "Service.Update",
-        "Service.Archive"
+        "Service.UpdateWithIdempotency",
+        "Service.Archive",
+        "Service.ArchiveWithIdempotency"
       ],
       "package": "./internal/projects",
       "testFile": "services/control-plane/internal/projects/git_credentials_test.go",
@@ -413,6 +426,7 @@
       "operations": [
         "get",
         "list",
+        "paginate",
         "create",
         "idempotent create",
         "create Turn",
@@ -431,6 +445,7 @@
       "entrypoints": [
         "Service.Get",
         "Service.ListByProject",
+        "Service.ListByProjectPage",
         "Service.Create",
         "Service.CreateWithIdempotency",
         "Service.CreateTurn",
@@ -462,8 +477,10 @@
         "interrupt",
         "steer",
         "list interactions",
+        "paginate interactions",
         "list runtime isolation decisions",
         "list pending interactions",
+        "paginate pending interactions",
         "resolve approval",
         "resolve user input",
         "compact",
@@ -482,8 +499,10 @@
         "Service.RequestInterrupt",
         "Service.RequestSteer",
         "Service.ListInteractions",
+        "Service.ListInteractionsPage",
         "Service.ListRuntimeIsolationDecisions",
         "Service.ListPendingInteractions",
+        "Service.ListPendingInteractionsPage",
         "Service.ResolveApproval",
         "Service.ResolveUserInput",
         "Service.RequestCompact",
@@ -503,12 +522,23 @@
       "id": "artifact-content",
       "family": "Artifact metadata and content grant",
       "boundary": "tenant-object-and-content-token",
-      "operations": ["create", "complete", "get", "list", "download", "delete"],
+      "operations": [
+        "create",
+        "idempotent create",
+        "complete",
+        "get",
+        "list",
+        "paginate",
+        "download",
+        "delete"
+      ],
       "entrypoints": [
         "Service.Create",
+        "Service.CreateWithIdempotency",
         "Service.Complete",
         "Service.Get",
         "Service.List",
+        "Service.ListPage",
         "Service.Download",
         "Service.Delete"
       ],
@@ -906,6 +936,9 @@
       "boundary": "pre-policy-and-storage-active-tenant-context",
       "operations": [
         "create",
+        "idempotent create",
+        "create SSH provisioning operation",
+        "get SSH provisioning operation",
         "update Provider policy",
         "update process containment",
         "update runtime isolation policy",
@@ -913,6 +946,9 @@
       ],
       "entrypoints": [
         "Service.Create",
+        "Service.CreateWithIdempotency",
+        "Service.CreateProvisioningOperation",
+        "Service.GetProvisioningOperation",
         "Service.UpdateProviderPolicy",
         "Service.UpdateProcessContainmentPolicy",
         "Service.UpdateRuntimeIsolationPolicy",
@@ -1806,6 +1842,40 @@
       "package": "./internal/observability",
       "testFile": "services/control-plane/internal/observability/metrics_test.go",
       "testName": "TestMetricLabelsRejectIdentifiersAndSecretsBeforeRendering"
+    },
+    {
+      "id": "developer-api-usage-active-context",
+      "family": "Developer API usage projection",
+      "boundary": "pre-storage-active-tenant-context",
+      "operations": ["summarize Service Account API usage"],
+      "package": "./internal/developerapi",
+      "testFile": "services/control-plane/internal/developerapi/usage_test.go",
+      "testName": "TestUsageServiceSummaryRejectsCrossTenantContextBeforeStorage"
+    },
+    {
+      "id": "developer-webhook-read-and-delivery-boundary",
+      "family": "Developer Webhook endpoint and delivery projection",
+      "boundary": "active-tenant-endpoint-and-delivery-binding",
+      "operations": ["create", "list", "list deliveries", "authorize exact delivery replay"],
+      "entrypoints": [
+        "Service.Create",
+        "Service.List",
+        "Service.ListDeliveries",
+        "Service.AuthorizeDeliveryReplay"
+      ],
+      "package": "./internal/developerwebhooks",
+      "testFile": "services/control-plane/internal/developerwebhooks/service_test.go",
+      "testName": "TestWebhookProjectionSignsThinPayloadAndPublishes"
+    },
+    {
+      "id": "developer-webhook-secret-and-lifecycle-boundary",
+      "family": "Developer Webhook endpoint lifecycle",
+      "boundary": "active-tenant-secret-rotation-and-terminal-revocation",
+      "operations": ["rotate secret", "disable", "revoke"],
+      "entrypoints": ["Service.RotateSecret", "Service.SetEnabled", "Service.Revoke"],
+      "package": "./internal/developerwebhooks",
+      "testFile": "services/control-plane/internal/developerwebhooks/service_test.go",
+      "testName": "TestWebhookEndpointValidationRejectsSSRFAndSecretLifecycle"
     }
   ]
 }

@@ -16,8 +16,8 @@ COMMIT = "a" * 40
 LOCKFILE_SHA256 = "b" * 64
 ENVIRONMENT_ID = "production-like/stage6-rc1"
 MIGRATION = {
-    "name": "000163_stage6_candidate_compatibility_matrix_evidence.sql",
-    "sha256": "sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd",
+    "name": "000167_stage7_execution_target_provisioning.sql",
+    "sha256": "sha256:0a18a1d02755f27967f62cc3cd0d72ba907559f88993b822ceed8dac182c9fd1",
 }
 ARTIFACTS = {
     "controlPlaneImage": "sha256:" + "1" * 64,
@@ -179,13 +179,13 @@ class ValidateCandidateEvidenceBundleTest(unittest.TestCase):
             },
             "migrations": {
                 "tail": {
-                    "path": "services/control-plane/migrations/000163_stage6_candidate_compatibility_matrix_evidence.sql",
+                    "path": "services/control-plane/migrations/000167_stage7_execution_target_provisioning.sql",
                     "sha256": MIGRATION["sha256"].removeprefix("sha256:"),
                 },
                 "count": 1,
                 "files": [
                     {
-                        "path": "services/control-plane/migrations/000163_stage6_candidate_compatibility_matrix_evidence.sql",
+                        "path": "services/control-plane/migrations/000167_stage7_execution_target_provisioning.sql",
                         "sha256": MIGRATION["sha256"].removeprefix("sha256:"),
                     }
                 ],

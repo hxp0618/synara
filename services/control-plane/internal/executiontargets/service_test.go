@@ -37,6 +37,18 @@ func TestExecutionTargetMutationsRejectInactiveTenantBeforePolicyOrStorage(t *te
 
 	_, err = service.Create(ctx, principal, requestedTenantID, CreateInput{})
 	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, _, err = service.CreateWithIdempotency(
+		ctx, principal, requestedTenantID, CreateInput{},
+		"execution-target-inactive-create", "execution-target-inactive-create", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, _, err = service.CreateProvisioningOperation(
+		ctx, principal, requestedTenantID, uuid.New(), "install",
+		"execution-target-inactive-provision", "execution-target-inactive-provision", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, err = service.GetProvisioningOperation(ctx, principal, requestedTenantID, uuid.New(), uuid.New())
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
 	_, err = service.UpdateProviderPolicy(ctx, principal, requestedTenantID, uuid.New(), nil)
 	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
 	_, err = service.UpdateProcessContainmentPolicy(ctx, principal, requestedTenantID, uuid.New(), nil)
