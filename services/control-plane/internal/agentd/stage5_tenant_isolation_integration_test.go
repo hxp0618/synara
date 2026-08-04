@@ -535,7 +535,6 @@ func (c *stage5AgentdProviderIsolationControlPlane) completeExecution(
 		c.writeProblem(writer, http.StatusConflict, "stage5_evidence_invalid", evidenceErr.Error())
 		return
 	}
-	result := c.resultLocked()
 	if index == 0 {
 		if evidence.Stage != "seeded" || evidence.SeededPathCount != 6 {
 			c.recordErrorLocked(fmt.Sprintf("Tenant A seed evidence is invalid: %#v", evidence))
@@ -557,7 +556,7 @@ func (c *stage5AgentdProviderIsolationControlPlane) completeExecution(
 	}
 	c.writeJSON(writer, http.StatusOK, map[string]any{"completed": true})
 	if index == 1 {
-		result = c.resultLocked()
+		result := c.resultLocked()
 		select {
 		case c.results <- result:
 		default:

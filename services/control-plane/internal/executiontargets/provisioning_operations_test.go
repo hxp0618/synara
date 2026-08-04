@@ -120,7 +120,9 @@ func TestProvisioningOperationDurableIdempotencyAndClaimTakeover(t *testing.T) {
 	if err != nil || failed.State != "failed" || failed.Error == nil || failed.Error.Code != "provisioning_failed" || strings.Contains(failed.Error.Message, "private-key") {
 		t.Fatalf("safe failed projection = %#v err=%v", failed, err)
 	}
-	if StableProvisioningWorkerInstanceUID(failed.ID) != StableProvisioningWorkerInstanceUID(failed.ID) {
+	firstWorkerUID := StableProvisioningWorkerInstanceUID(failed.ID)
+	secondWorkerUID := StableProvisioningWorkerInstanceUID(failed.ID)
+	if firstWorkerUID != secondWorkerUID {
 		t.Fatal("stable provisioning Worker identity changed for the same operation")
 	}
 
