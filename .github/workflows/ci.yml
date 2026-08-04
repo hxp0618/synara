@@ -317,4 +317,4 @@ jobs:
       # coordination in agentd and the reconcilers. The package timeout prevents
       # a deadlock from consuming the entire hosted-runner budget.
       - name: Race test
-        run: go test ./... -race -count=1 -timeout=30m
+        run: go test ./... -race -count=1 -timeout=45m

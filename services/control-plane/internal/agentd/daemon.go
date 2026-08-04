@@ -272,6 +272,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 						return fmt.Errorf("claim Workspace cleanup: %w", cleanupErr)
 					}
 					if d.draining.Load() || runContext.Err() != nil {
+						if fatalErr := workerFatalError(runContext); fatalErr != nil {
+							return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+						}
 						if d.draining.Load() {
 							<-drainMarked
 						}

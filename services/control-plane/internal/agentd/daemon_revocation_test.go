@@ -88,7 +88,10 @@ func TestDaemonStopsAfterWorkerIdentityRevokedDuringHeartbeat(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	).Run(ctx)
 	if !isWorkerRevocationError(err) {
-		t.Fatalf("Daemon.Run() error = %T %v, want Worker revocation", err, err)
+		t.Fatalf(
+			"Daemon.Run() error = %T %v, want Worker revocation (heartbeats=%d claims=%d)",
+			err, err, heartbeatCalls.Load(), claimCalls.Load(),
+		)
 	}
 	if got := heartbeatCalls.Load(); got != 1 {
 		t.Fatalf("revoked Worker made %d Heartbeat requests, want 1", got)
