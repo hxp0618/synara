@@ -78,7 +78,10 @@ func TestDaemonStopsAfterWorkerIdentityRevokedDuringHeartbeat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The race detector can delay the first heartbeat substantially on a loaded
+	// hosted runner. Keep the safety deadline well outside the heartbeat path so
+	// parent cancellation cannot win over the terminal revocation response.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	err := NewDaemon(
 		revocationDaemonConfig(t, server.URL, targetID, time.Millisecond),
@@ -120,7 +123,7 @@ func TestDaemonStopsAfterKubernetesPodDeletionFencedDuringHeartbeat(t *testing.T
 	}))
 	defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	err := NewDaemon(
 		revocationDaemonConfig(t, server.URL, targetID, time.Millisecond),

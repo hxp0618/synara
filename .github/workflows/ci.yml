@@ -263,7 +263,7 @@ jobs:
       # also exercises SDK subprocess conformance, so the job budget must leave
       # room for the static-analysis and vulnerability gates that follow it.
       - name: Race test
-        run: go test ./... -race -count=1
+        run: go test ./... -race -count=1 -timeout=30m
 
       # Correctness checks only. SA covers misuse and deprecated APIs — a
       # crypto/dsa import and two tar.TypeRegA comparisons had already accreted
