@@ -28,18 +28,18 @@ export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
   planModeUnavailableReason?: string | null;
   supportsFastMode: boolean;
   fastModeEnabled: boolean;
-  onAddPhotos: (files: File[]) => void;
+  onAddAttachments: (files: File[]) => void;
   onToggleFastMode: () => void;
   onSetPlanMode: (enabled: boolean) => void;
 }) {
   const inputId = useId();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Reset the hidden input so selecting the same image twice still emits a change event.
+  // Reset the hidden input so selecting the same file twice still emits a change event.
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) {
-      props.onAddPhotos(files);
+      props.onAddAttachments(files);
     }
     event.target.value = "";
   };
@@ -49,9 +49,8 @@ export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
       <input
         id={inputId}
         ref={fileInputRef}
-        data-testid="composer-photo-input"
+        data-testid="composer-file-input"
         type="file"
-        accept="image/*"
         multiple
         className="sr-only"
         onChange={handleFileInputChange}
@@ -67,7 +66,7 @@ export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
             />
           }
         >
-          <PlusIcon aria-hidden="true" className="size-4" />
+          <PlusIcon aria-hidden="true" className="size-4 text-white" />
         </MenuTrigger>
         <ComposerPickerMenuPopup align="start">
           <MenuItem
@@ -76,7 +75,7 @@ export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
             }}
           >
             <PaperclipIcon className="size-4 shrink-0" />
-            Add image
+            Add files
           </MenuItem>
 
           <MenuSeparator />

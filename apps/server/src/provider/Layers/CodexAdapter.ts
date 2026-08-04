@@ -2219,6 +2219,22 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       }).pipe(Effect.map((result) => result satisfies ServerVoiceTranscriptionResult));
 
     const commandOutputOffsets = new Map<string, number>();
+    const prewarmVoice: NonNullable<CodexAdapterShape["prewarmVoice"]> = (input) =>
+      Effect.tryPromise({
+        try: () =>
+          manager.prewarmVoice({
+            cwd: input.cwd,
+            ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+          }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "voice/prewarm",
+            detail: toMessage(cause, "voice/prewarm failed"),
+            cause,
+          }),
+      });
+
     yield* Effect.acquireRelease(
       Effect.gen(function* () {
         const writeNativeEvent = (event: ProviderEvent) =>
@@ -2334,6 +2350,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       listPlugins,
       readPlugin,
       listModels,
+      prewarmVoice,
       transcribeVoice,
       streamEvents: Stream.fromQueue(runtimeEventQueue),
     } satisfies CodexAdapterShape;

@@ -20,7 +20,7 @@ properties protect the evidence input boundary but do not authenticate Git clean
 ## Current compatibility decisions
 
 - Control Plane exposes API major `v1`. Web, Platform Admin, Desktop, server, contracts, `@synara/control-plane-client`, and
-  `@synara/enterprise-ui` at `0.6.5` are a same-release unit because there is not yet an independently versioned
+  `@synara/enterprise-ui` at `0.6.6` are a same-release unit because there is not yet an independently versioned
   browser compatibility handshake.
 - Managed Worker registration is exact Worker Protocol `2`. Worker Protocol v1 is not registration-compatible.
 - Control Plane can read persisted Runtime Event v1 and v2. Managed Workers and Provider Host v2 emit Runtime Event v2.

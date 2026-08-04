@@ -119,7 +119,23 @@ describe("SidebarActivityView", () => {
   });
 
   it("shows only authoritative lifecycle actions and never exposes local pin/delete controls", async () => {
-    const session = makeThread(90);
+    // Keep this action-focused row in the expanded Today bucket. A fixed date
+    // eventually falls into the collapsed Earlier bucket and turns the test
+    // into a calendar-boundary failure instead of an authority regression.
+    const completedAt = new Date().toISOString();
+    const session = makeThread(90, {
+      createdAt: completedAt,
+      updatedAt: completedAt,
+      lastVisitedAt: completedAt,
+      latestTurn: {
+        turnId: "activity-turn-authoritative",
+        state: "completed",
+        requestedAt: completedAt,
+        startedAt: completedAt,
+        completedAt,
+        assistantMessageId: null,
+      } as SidebarThreadSummary["latestTurn"],
+    });
     const onControlPlaneSettled = vi.fn();
     const onControlPlaneArchive = vi.fn();
     const onLocalPin = vi.fn();

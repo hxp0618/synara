@@ -144,6 +144,8 @@ import type {
   ServerUpdateSettingsResult,
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
+  ServerVoicePrewarmInput,
+  ServerVoicePrewarmResult,
   ServerVoiceTranscriptionInput,
   ServerVoiceTranscriptionResult,
 } from "./server";
@@ -268,6 +270,12 @@ export interface BrowserTabState {
   id: string;
   url: string;
   title: string;
+  /**
+   * Agent-owned tabs use a main-process WebContentsView so the exact page can
+   * stay alive while its chat route is not mounted. Older snapshots omit this
+   * field and are treated as renderer-owned by the web app.
+   */
+  runtimeSurface?: "native" | "renderer";
   status: "live" | "suspended";
   isLoading: boolean;
   canGoBack: boolean;
@@ -723,6 +731,7 @@ export interface NativeApi {
     generateAutomationIntent: (
       input: ServerGenerateAutomationIntentInput,
     ) => Promise<ServerGenerateAutomationIntentResult>;
+    prewarmVoice?: (input: ServerVoicePrewarmInput) => Promise<ServerVoicePrewarmResult>;
     transcribeVoice: (
       input: ServerVoiceTranscriptionInput,
     ) => Promise<ServerVoiceTranscriptionResult>;
