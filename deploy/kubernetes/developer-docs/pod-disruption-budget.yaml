@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: polaris-developer-docs
+  labels:
+    app.kubernetes.io/name: polaris-developer-docs
+    app.kubernetes.io/part-of: synara-developer-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: polaris-developer-docs

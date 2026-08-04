@@ -36,6 +36,9 @@ to satisfy an external deployment, Registry, real Provider or GA requirement.
   suppression, sequence-gap denial and execution filtering are tested.
 - **Achieved:** CI-fix, PR-review and batch-migration examples typecheck against the workspace SDK.
 - **Achieved:** Developer Docs and the filtered API Reference build from the same OpenAPI source.
+- **Achieved for deployment source:** the immutable non-root/read-only Developer Docs image, runtime probes and
+  non-publishing Kubernetes base passed local acceptance and are repeated in CI; see
+  [`stage-7-developer-docs-container-acceptance-20260805.md`](stage-7-developer-docs-container-acceptance-20260805.md).
 - **Partially evidenced externally:** the exact static artifact rendered on an authorized remote host, but the public
   high port was blocked and no shared firewall/ingress was changed; see
   [`stage-7-developer-docs-remote-host-acceptance-20260804.md`](stage-7-developer-docs-remote-host-acceptance-20260804.md).

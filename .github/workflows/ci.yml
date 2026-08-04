@@ -71,6 +71,42 @@ jobs:
       - name: Verify Stage 7 developer contract, SDK, docs, and examples
         run: bun run stage7:developer:check
 
+      - name: Build and smoke-test Developer Docs deployment image
+        run: |
+          set -euo pipefail
+          image="polaris-developer-docs:${GITHUB_SHA}"
+          container="polaris-developer-docs-ci"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker build \
+            --target developer-docs-runtime \
+            --build-arg PUBLIC_POLARIS_CONSOLE_URL=https://console.example.invalid \
+            --build-arg POLARIS_DEVELOPER_DOCS_REVISION="$GITHUB_SHA" \
+            --tag "$image" \
+            .
+          docker run --detach \
+            --name "$container" \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --publish 127.0.0.1:18080:8080 \
+            "$image"
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/ready >ready.json; then
+              break
+            fi
+            sleep 1
+          done
+          grep -F "\"revision\":\"${GITHUB_SHA}\"" ready.json
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/getting-started/
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/api-reference/
+          test "$(docker inspect --format '{{.Config.User}}' "$container")" = node
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true
+
       - name: Test
         run: bun run test
 
