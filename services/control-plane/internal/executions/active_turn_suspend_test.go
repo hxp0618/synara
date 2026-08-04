@@ -553,7 +553,18 @@ func setupDurableActiveTurnSuspend(t *testing.T, label string) activeTurnSuspend
 		t.Fatal(err)
 	}
 
-	current = current.Add(1801 * time.Second)
+	// SQLite trigger time advances while the race detector executes this heavy
+	// fixture. Derive the idle boundary from the persisted authority instead of
+	// assuming setup completed within one second of the initial test clock.
+	var session persistence.AgentSession
+	if err := db.Select("meaningful_activity_at", "suspend_after_idle_seconds").
+		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+		Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	current = session.MeaningfulActivityAt.Add(
+		time.Duration(session.SuspendAfterIdleSeconds+1) * time.Second,
+	)
 	if err := db.Model(&persistence.WorkerLease{}).
 		Where("tenant_id = ? AND execution_id = ?", execution.TenantID, execution.ExecutionID).
 		Updates(map[string]any{"heartbeat_at": current, "expires_at": current.Add(service.leaseTTL)}).Error; err != nil {

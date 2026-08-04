@@ -257,14 +257,6 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # -race is the only check covering the goroutine, atomic and shared-cache
-      # coordination in agentd and the reconcilers. It runs across the whole
-      # module; hosted runners can take substantially longer now that the suite
-      # also exercises SDK subprocess conformance, so the job budget must leave
-      # room for the static-analysis and vulnerability gates that follow it.
-      - name: Race test
-        run: go test ./... -race -count=1 -timeout=30m
-
       # Correctness checks only. SA covers misuse and deprecated APIs — a
       # crypto/dsa import and two tar.TypeRegA comparisons had already accreted
       # here — and S1/QF1 cover provably redundant code. ST* is excluded on
@@ -286,3 +278,40 @@ jobs:
       - name: Vulnerability scan
         run: |
           go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  control-plane-race:
+    name: Go Control Plane Race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: services/control-plane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The race suite also launches both official SDKs against an httptest
+      # Control Plane, so it needs the same subprocess runtimes as the regular
+      # Go job. Keeping it separate lets static analysis and govulncheck run in
+      # parallel instead of waiting behind a roughly 40-minute race run.
+      - name: Setup Bun for SDK conformance
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Python for SDK conformance
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      # -race is the only check covering the goroutine, atomic and shared-cache
+      # coordination in agentd and the reconcilers. The package timeout prevents
+      # a deadlock from consuming the entire hosted-runner budget.
+      - name: Race test
+        run: go test ./... -race -count=1 -timeout=30m
