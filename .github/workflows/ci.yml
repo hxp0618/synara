@@ -205,7 +205,7 @@ jobs:
   control-plane:
     name: Go Control Plane
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: services/control-plane
@@ -258,9 +258,10 @@ jobs:
         run: go test ./... -count=1
 
       # -race is the only check covering the goroutine, atomic and shared-cache
-      # coordination in agentd and the reconcilers. Measured at 3m11s for the
-      # whole module versus 2m55s for just those packages, so it runs everywhere
-      # rather than leaving the other 50 packages unguarded to save 16 seconds.
+      # coordination in agentd and the reconcilers. It runs across the whole
+      # module; hosted runners can take substantially longer now that the suite
+      # also exercises SDK subprocess conformance, so the job budget must leave
+      # room for the static-analysis and vulnerability gates that follow it.
       - name: Race test
         run: go test ./... -race -count=1
 
