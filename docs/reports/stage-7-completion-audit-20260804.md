@@ -47,8 +47,9 @@ to satisfy an external deployment, Registry, real Provider or GA requirement.
 
 - **Achieved:** `polaris-agents` Python 3.11+ package shares the generated operation inventory and real Control
   Plane conformance behavior with TypeScript.
-- **Achieved locally:** wheel/sdist build and archive verifier pass. `twine check` is wired into protected CI, but the
-  earlier local attempt could not download `nh3`; only the protected release environment can satisfy that exact row.
+- **Achieved locally:** wheel/sdist build, archive verifier and `twine check` pass for the exact recorded archives;
+  see [`stage-7-sdk-release-artifact-local-acceptance-20260805.md`](stage-7-sdk-release-artifact-local-acceptance-20260805.md).
+  Protected OIDC attestation and Registry publication remain external release evidence.
 - **Achieved:** Console API Key management exposes create/scope/rate-limit/rotate/revoke/last-used/usage without
   retaining plaintext after the one-time display.
 - **Achieved locally:** Webhook projection sends a thin signed payload to a real local HTTP receiver, retries
