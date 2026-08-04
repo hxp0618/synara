@@ -17,6 +17,19 @@ afterEach(async () => {
 });
 
 describe("Polaris SDK release staging", () => {
+  it("fails closed when a requested OIDC publication is not ready", () => {
+    const workflow = readFileSync(
+      join(import.meta.dirname, "../../.github/workflows/polaris-sdk-release.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain("publish_preflight:");
+    expect(workflow).toContain('test "$GITHUB_REF_TYPE" = "tag"');
+    expect(workflow).toContain('test "$GITHUB_REF_NAME" = "polaris-sdk-v$EXPECTED_VERSION"');
+    expect(workflow).toContain('test "$NPM_READY" = "1"');
+    expect(workflow).toContain('test "$PYPI_READY" = "1"');
+    expect(workflow.match(/needs: \[build, publish_preflight\]/g)).toHaveLength(2);
+  });
+
   it("maps npm beta versions to PEP 440 and rejects mismatches", () => {
     expect(() => assertMatchingBetaVersions("0.1.0-beta.1", "0.1.0b1")).not.toThrow();
     expect(() => assertMatchingBetaVersions("0.1.0", "0.1.0")).toThrow(/semver beta/);

@@ -1676,8 +1676,10 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
 
 ### Stage 7：对外 SDK 与开发者平台
 
-状态：IN PROGRESS（2026-08-03 启动）。设计已冻结（2026-07-26），完整内容见独立设计文档
+状态：IN PROGRESS（2026-08-03 启动；2026-08-04 source public beta 与受控运行时出口完成，
+仓库外激活和 GA 依赖待办）。设计已冻结（2026-07-26），完整内容见独立设计文档
 [`docs/plans/external-sdk-developer-platform.md`](docs/plans/external-sdk-developer-platform.md)，
+逐项证据见 [`docs/reports/stage-7-completion-audit-20260804.md`](docs/reports/stage-7-completion-audit-20260804.md)，
 本节不重复其 TODO 与完成条件。
 
 摘要：把只服务第一方（Web 经 Node 代理、Worker、SCIM）的 `/v1` 开放成外部开发者可编程的产品。

@@ -19,15 +19,23 @@ uuid_key() {
 
 urlencode() { jq -rn --arg value "$1" '$value | @uri'; }
 
-create_session_body="$(jq -cn --arg title "Polaris curl quickstart" --arg provider "codex" \
-  '{title:$title,provider:$provider,visibility:"project"}')"
+create_session_body="$(jq -cn \
+  --arg title "Polaris curl quickstart" \
+  --arg provider "${POLARIS_PROVIDER:-codex}" \
+  --arg executionTargetId "${POLARIS_EXECUTION_TARGET_ID:-}" \
+  --arg providerCredentialId "${POLARIS_PROVIDER_CREDENTIAL_ID:-}" \
+  '{title:$title,provider:$provider,visibility:"project"}
+   + (if $executionTargetId == "" then {} else {executionTargetId:$executionTargetId} end)
+   + (if $providerCredentialId == "" then {} else {providerCredentialId:$providerCredentialId} end)')"
 session_response="$(curl --fail-with-body --silent --show-error \
   -X POST "${base_url}/v1/projects/$(urlencode "$POLARIS_PROJECT_ID")/sessions" \
   -H "$authorization" -H 'Content-Type: application/json' \
   -H "Idempotency-Key: curl-session-$(uuid_key)" --data-binary "$create_session_body")"
 session_id="$(jq -er '.id' <<<"$session_response")"
 
-turn_body="$(jq -cn '{inputText:"Request one harmless command that needs approval, then finish.",runtimeMode:"full-access",interactionMode:"default"}')"
+quickstart_prompt="${POLARIS_QUICKSTART_PROMPT:-Request one harmless command that needs approval, then finish.}"
+turn_body="$(jq -cn --arg inputText "$quickstart_prompt" \
+  '{inputText:$inputText,runtimeMode:"full-access",interactionMode:"default"}')"
 curl --fail-with-body --silent --show-error \
   -X POST "${base_url}/v1/sessions/$(urlencode "$session_id")/turns" \
   -H "$authorization" -H 'Content-Type: application/json' \
@@ -46,7 +54,7 @@ approval_event=''
 while (( SECONDS < deadline )); do
   page="$(curl --fail-with-body --silent --show-error \
     "${base_url}/v1/sessions/$(urlencode "$session_id")/events?afterSequence=0&limit=200" -H "$authorization")"
-  approval_event="$(jq -cer '[.items[] | select(
+  approval_event="$(jq -cr '[.items[] | select(
     .eventType == "approval.requested" or
     (.eventType == "request.opened" and (.payload.requestType | type) == "string" and (.payload.requestType | endswith("_approval")))
   )][-1] // empty' <<<"$page")"
@@ -64,3 +72,27 @@ curl --fail-with-body --silent --show-error \
   -H "Idempotency-Key: curl-approval-$(uuid_key)" --data-binary "$decision_body" >/dev/null
 
 printf 'Resolved approval %s for Execution %s.\n' "$request_id" "$execution_id"
+
+deadline=$((SECONDS + 120))
+terminal_event=''
+while (( SECONDS < deadline )); do
+  page="$(curl --fail-with-body --silent --show-error \
+    "${base_url}/v1/sessions/$(urlencode "$session_id")/events?afterSequence=0&limit=200" -H "$authorization")"
+  terminal_event="$(jq -cr --arg executionId "$execution_id" '[.items[] | select(
+    .executionId == $executionId and (
+      .eventType == "execution.completed" or
+      .eventType == "execution.failed" or
+      .eventType == "execution.cancelled" or
+      .eventType == "execution.interrupted"
+    )
+  )][-1] // empty' <<<"$page")"
+  [[ -n "$terminal_event" ]] && break
+  sleep 1
+done
+[[ -n "$terminal_event" ]] || { printf 'Execution did not reach a terminal Event within 120 seconds.\n' >&2; exit 1; }
+terminal_type="$(jq -er '.eventType' <<<"$terminal_event")"
+[[ "$terminal_type" == "execution.completed" ]] || {
+  printf 'Execution ended with %s instead of execution.completed.\n' "$terminal_type" >&2
+  exit 1
+}
+printf 'Execution %s completed. Quickstart passed.\n' "$execution_id"

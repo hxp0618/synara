@@ -5,8 +5,9 @@ This Astro site is the server-side Developer API entry point. Its guide pages ar
 `docs/api/openapi.yaml`.
 
 Only operations marked `x-synara-contract-status: codegen-ready` are included in the public reference.
-The complete OpenAPI source also contains `route-only` operations and the internal route-surface inventory
-used by Control Plane conformance tests, so serving that source directly would overstate the public contract.
+The complete OpenAPI source also contains the internal route-surface inventory used by Control Plane
+conformance tests, so serving that source directly would expose an internal classification artifact. The
+current public-beta source has no `route-only` operations, but the filter remains fail-closed for future work.
 
 ```sh
 bun run --cwd apps/developer-docs dev

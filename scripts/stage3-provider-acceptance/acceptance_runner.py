@@ -9997,11 +9997,20 @@ class AcceptanceSuite:
                 self._create_resources,
                 requires=("runtime.worker-discovery",),
             )
+            fixture_requirement = "resources.credential-project-session"
+            if self.options.ssh_developer_api_provisioning:
+                self._case(
+                    "developer.curl-quickstart",
+                    "Issue a Service Account API Key and complete the curl quickstart within five minutes",
+                    self._developer_api_curl_quickstart,
+                    requires=("resources.credential-project-session",),
+                )
+                fixture_requirement = "developer.curl-quickstart"
             self._case(
                 "fixture.text-tool-usage-artifact",
                 "Run text, tool, usage, Artifact, and Credential fixture flow",
                 self._text_tool_usage_artifact,
-                requires=("resources.credential-project-session",),
+                requires=(fixture_requirement,),
             )
             self._case(
                 "fixture.approval-resolution",
@@ -10963,6 +10972,115 @@ class AcceptanceSuite:
                 "providerCredentialId": session.get("providerCredentialId"),
                 "lastEventSequence": session.get("lastEventSequence"),
             },
+        }
+
+    def _developer_api_curl_quickstart(self) -> Mapping[str, Any]:
+        tenant_id = self._required("tenant_id")
+        project_id = self._required("project_id")
+        target_id = self._required("target_id")
+        credential_id = self._required("credential_id")
+        started = time.monotonic()
+        issued = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/service-accounts",
+                {
+                    "name": f"stage7-curl-quickstart-{uuid.uuid4().hex[:12]}",
+                    "description": "Ephemeral Stage 7 curl quickstart acceptance principal",
+                    "role": "owner",
+                    "scopes": ["api.access"],
+                },
+                expected=(201,),
+            ),
+            "curl quickstart Service Account",
+        )
+        account = json_object(issued.get("account"), "curl quickstart Service Account.account")
+        token = issued.get("token")
+        if not isinstance(token, str) or not token.startswith("syna_sa_"):
+            raise AcceptanceError(
+                "runner.curl_quickstart_token_invalid",
+                "The curl quickstart Service Account did not return a valid one-time token.",
+            )
+        self.redactor.add(token, "[REDACTED_CURL_QUICKSTART_API_KEY]")
+        repo_root = getattr(self.driver, "repo_root", None)
+        if not isinstance(repo_root, pathlib.Path):
+            raise AcceptanceError(
+                "runner.curl_quickstart_repository_unavailable",
+                "The curl quickstart could not resolve the acceptance repository root.",
+            )
+        script = repo_root / "examples" / "polaris" / "curl" / "quickstart.sh"
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "POLARIS_BASE_URL": self.api.base_url,
+            "POLARIS_API_KEY": token,
+            "POLARIS_PROJECT_ID": project_id,
+            "POLARIS_EXECUTION_TARGET_ID": target_id,
+            "POLARIS_PROVIDER_CREDENTIAL_ID": credential_id,
+            "POLARIS_PROVIDER": self.options.provider,
+            "POLARIS_QUICKSTART_PROMPT": "[approval]",
+        }
+        try:
+            completed = subprocess.run(
+                [str(script)],
+                cwd=repo_root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.deadline.request_timeout(maximum=300.0),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.curl_quickstart_failed",
+                f"The curl quickstart could not complete: {self.redactor.text(str(error))}",
+            ) from None
+        duration_ms = int((time.monotonic() - started) * 1000)
+        stdout = self.redactor.text(completed.stdout).strip()
+        stderr = self.redactor.text(completed.stderr).strip()
+        stdout_bytes = len(stdout.encode("utf-8"))
+        stdout_sha256 = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.curl_quickstart_failed",
+                "The curl quickstart exited unsuccessfully.",
+                {
+                    "exitCode": completed.returncode,
+                    "durationMs": duration_ms,
+                    "stdoutBytes": stdout_bytes,
+                    "stdoutSha256": stdout_sha256,
+                    "stderrExcerpt": stderr[-1000:],
+                },
+            )
+        if "Quickstart passed." not in stdout:
+            raise AcceptanceError(
+                "runner.curl_quickstart_completion_missing",
+                "The curl quickstart did not report a completed Execution.",
+                {
+                    "durationMs": duration_ms,
+                    "stdoutBytes": stdout_bytes,
+                    "stdoutSha256": stdout_sha256,
+                },
+            )
+        if duration_ms >= 300_000:
+            raise AcceptanceError(
+                "runner.curl_quickstart_sla_exceeded",
+                "The curl quickstart exceeded the five-minute acceptance line.",
+                {"durationMs": duration_ms, "maximumDurationMs": 300_000},
+            )
+        token = ""
+        return {
+            "serviceAccountId": account.get("id"),
+            "role": account.get("role"),
+            "scopes": account.get("scopes"),
+            "durationMs": duration_ms,
+            "maximumDurationMs": 300_000,
+            "completedExecution": True,
+            "tokenPersisted": False,
+            "stdoutBytes": stdout_bytes,
+            "stdoutSha256": stdout_sha256,
+            "requestContentPersisted": False,
         }
 
     def _create_fixture_credential(self, provider: str, title: str) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-# Polaris TypeScript examples
+# Polaris developer examples
 
 These server-side examples exercise the public `@polaris-agents/sdk` surface. They intentionally do not place
 API Keys in browser code and do not call internal Worker or Provider Host protocols.
@@ -10,6 +10,20 @@ export POLARIS_API_KEY="syna_sa_..."
 export POLARIS_BASE_URL="https://control.example.com"
 export POLARIS_PROJECT_ID="..."
 ```
+
+The curl quickstart can bind an explicit BYO Target and organization-scoped Provider Credential. This is
+recommended for deterministic server automation; omitting them asks the Control Plane to resolve the Project's
+configured defaults.
+
+```sh
+export POLARIS_EXECUTION_TARGET_ID="..."      # optional
+export POLARIS_PROVIDER_CREDENTIAL_ID="..."  # optional
+examples/polaris/curl/quickstart.sh
+```
+
+It creates a Session, starts a Turn, follows SSE, resolves the first Approval and waits for that Execution to
+complete. `POLARIS_QUICKSTART_PROMPT` exists for controlled acceptance fixtures; production callers normally
+use the default prompt or their own application input.
 
 Then run one workflow from the repository root:
 

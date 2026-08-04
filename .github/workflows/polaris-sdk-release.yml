@@ -100,10 +100,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  publish_preflight:
+    name: Fail closed before requested publication
+    if: ${{ inputs.publish == true }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require exact tag and both trusted publishers
+        env:
+          EXPECTED_VERSION: ${{ needs.build.outputs.npm_version }}
+          NPM_READY: ${{ vars.POLARIS_NPM_TRUSTED_PUBLISHING_READY }}
+          PYPI_READY: ${{ vars.POLARIS_PYPI_TRUSTED_PUBLISHING_READY }}
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          test "$GITHUB_REF_NAME" = "polaris-sdk-v$EXPECTED_VERSION"
+          test "$NPM_READY" = "1"
+          test "$PYPI_READY" = "1"
+
   publish_npm:
     name: Publish TypeScript SDK through npm OIDC
-    if: ${{ inputs.publish == true && github.ref_type == 'tag' && startsWith(github.ref_name, 'polaris-sdk-v') && vars.POLARIS_NPM_TRUSTED_PUBLISHING_READY == '1' }}
-    needs: build
+    if: ${{ inputs.publish == true }}
+    needs: [build, publish_preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: polaris-npm
@@ -136,8 +156,8 @@ jobs:
 
   publish_pypi:
     name: Publish Python SDK through PyPI OIDC
-    if: ${{ inputs.publish == true && github.ref_type == 'tag' && startsWith(github.ref_name, 'polaris-sdk-v') && vars.POLARIS_PYPI_TRUSTED_PUBLISHING_READY == '1' }}
-    needs: build
+    if: ${{ inputs.publish == true }}
+    needs: [build, publish_preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: polaris-pypi
