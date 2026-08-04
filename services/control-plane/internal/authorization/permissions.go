@@ -22,6 +22,7 @@ const (
 	SessionCreate          Permission = "session.create"
 	SessionRead            Permission = "session.read"
 	SessionShare           Permission = "session.share"
+	SessionSettle          Permission = "session.settle"
 	SessionArchive         Permission = "session.archive"
 	SessionDelete          Permission = "session.delete"
 	ExecutionCreate        Permission = "execution.create"
@@ -60,7 +61,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		TenantRead, TenantUpdate, TenantDelete, TenantMembersRead, TenantMembersInvite,
 		TenantMembersUpdate, TenantMembersRemove, OrganizationRead, OrganizationUpdate,
 		OrganizationMembers, ProjectCreate, ProjectRead, ProjectUpdate, ProjectDelete,
-		SessionCreate, SessionRead, SessionShare, SessionArchive, SessionDelete,
+		SessionCreate, SessionRead, SessionShare, SessionSettle, SessionArchive, SessionDelete,
 		ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete,
 		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, CostManage,
@@ -73,7 +74,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		TenantRead, TenantUpdate, TenantMembersRead, TenantMembersInvite, TenantMembersUpdate,
 		TenantMembersRemove, OrganizationRead, OrganizationUpdate, OrganizationMembers,
 		ProjectCreate, ProjectRead, ProjectUpdate, ProjectDelete, SessionCreate, SessionRead,
-		SessionShare, SessionArchive, SessionDelete, ExecutionCreate, ExecutionCancel,
+		SessionShare, SessionSettle, SessionArchive, SessionDelete, ExecutionCreate, ExecutionCancel,
 		ExecutionApprove, ExecutionReadLogs, WorkerRead, WorkerManage, AuditRead,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse, QuotaRead, QuotaManage,
 		RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
@@ -103,26 +104,26 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 var organizationRolePermissions = map[string]map[Permission]struct{}{
 	"owner": permissionSet(
 		OrganizationRead, OrganizationUpdate, OrganizationMembers, ProjectCreate, ProjectRead,
-		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionArchive,
+		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionSettle, SessionArchive,
 		SessionDelete, ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
 		SchedulingPolicyRead, SchedulingPolicyManage,
 	),
 	"admin": permissionSet(
 		OrganizationRead, OrganizationUpdate, OrganizationMembers, ProjectCreate, ProjectRead,
-		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionArchive,
+		ProjectUpdate, ProjectDelete, SessionCreate, SessionRead, SessionShare, SessionSettle, SessionArchive,
 		SessionDelete, ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
 		SchedulingPolicyRead, SchedulingPolicyManage,
 	),
 	"agent_operator": permissionSet(
-		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionShare, SessionArchive,
+		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionShare, SessionSettle, SessionArchive,
 		ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse,
 		SchedulingPolicyRead,
 	),
 	"member": permissionSet(
-		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionArchive,
+		OrganizationRead, ProjectRead, SessionCreate, SessionRead, SessionSettle, SessionArchive,
 		ExecutionCreate, ExecutionCancel, ExecutionReadLogs, ArtifactRead, ArtifactWrite, CredentialsUse,
 		SchedulingPolicyRead,
 	),

@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../appSettings";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { showConfirmDialogFallback } from "../confirmDialogFallback";
+import { useControlPlane } from "../controlPlaneContext";
 import {
   getFallbackThreadIdAfterDelete,
   derivePinnedThreadIdsForSidebar,
@@ -112,6 +113,12 @@ export function useSidebarThreadActions(input: {
     sidebarThreadSummaryById,
     threadsHydrated,
   } = input;
+  const controlPlane = useControlPlane();
+  const {
+    archiveSession: archiveControlPlaneSession,
+    isAuthoritative: isControlPlaneAuthoritative,
+    setSessionSettled: setControlPlaneSessionSettled,
+  } = controlPlane;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
@@ -172,18 +179,27 @@ export function useSidebarThreadActions(input: {
       return next;
     });
   }, []);
-  const dispatchThreadPinnedState = useCallback(async (threadId: ThreadId, isPinned: boolean) => {
-    const api = readNativeApi();
-    if (!api) return;
-    await api.orchestration.dispatchCommand({
-      type: "thread.meta.update",
-      commandId: newCommandId(),
-      threadId,
-      isPinned,
-    });
-  }, []);
+  const dispatchThreadPinnedState = useCallback(
+    async (threadId: ThreadId, isPinned: boolean) => {
+      if (isControlPlaneAuthoritative) {
+        throw new Error("Pinning Control Plane Sessions is not supported.");
+      }
+      const api = readNativeApi();
+      if (!api) return;
+      await api.orchestration.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: newCommandId(),
+        threadId,
+        isPinned,
+      });
+    },
+    [isControlPlaneAuthoritative],
+  );
   const setThreadPinned = useCallback(
     async (threadId: ThreadId, isPinned: boolean) => {
+      if (isControlPlaneAuthoritative) {
+        throw new Error("Pinning Control Plane Sessions is not supported.");
+      }
       const api = readNativeApi();
       if (!api) return;
       const requestVersion =
@@ -221,6 +237,7 @@ export function useSidebarThreadActions(input: {
     },
     [
       clearOptimisticThreadPinned,
+      isControlPlaneAuthoritative,
       dispatchThreadPinnedState,
       pinThreadLocally,
       setOptimisticThreadPinned,
@@ -256,8 +273,6 @@ export function useSidebarThreadActions(input: {
 
   const setThreadSettled = useCallback(
     async (threadId: ThreadId, isSettled: boolean) => {
-      const api = readNativeApi();
-      if (!api) throw new Error("Unable to connect to the app server.");
       const requestVersion =
         (latestSettledMutationVersionByThreadIdRef.current.get(threadId) ?? 0) + 1;
       latestSettledMutationVersionByThreadIdRef.current.set(threadId, requestVersion);
@@ -283,19 +298,28 @@ export function useSidebarThreadActions(input: {
         return next;
       });
       try {
-        const commandSequence = await setThreadSettledFromClient(
-          api.orchestration,
-          threadId,
-          isSettled,
-        );
-        if (isLatestRequest()) {
-          setOptimisticSettledMutationByThreadId((current) => {
-            const mutation = current.get(threadId);
-            if (!mutation) return current;
-            const next = new Map(current);
-            next.set(threadId, recordOptimisticSettledMutationSequence(mutation, commandSequence));
-            return next;
-          });
+        if (isControlPlaneAuthoritative) {
+          await setControlPlaneSessionSettled(threadId, isSettled, randomUUID());
+        } else {
+          const api = readNativeApi();
+          if (!api) throw new Error("Unable to connect to the app server.");
+          const commandSequence = await setThreadSettledFromClient(
+            api.orchestration,
+            threadId,
+            isSettled,
+          );
+          if (isLatestRequest()) {
+            setOptimisticSettledMutationByThreadId((current) => {
+              const mutation = current.get(threadId);
+              if (!mutation) return current;
+              const next = new Map(current);
+              next.set(
+                threadId,
+                recordOptimisticSettledMutationSequence(mutation, commandSequence),
+              );
+              return next;
+            });
+          }
         }
       } catch (error) {
         // A newer toggle owns the override now; dropping it here would revert to
@@ -313,7 +337,7 @@ export function useSidebarThreadActions(input: {
       }, SETTLE_OVERRIDE_MAX_LIFETIME_MS);
       settleOverrideExpiryTimeoutsRef.current.set(threadId, expiry);
     },
-    [clearOptimisticThreadSettled],
+    [clearOptimisticThreadSettled, isControlPlaneAuthoritative, setControlPlaneSessionSettled],
   );
 
   const setThreadSettledWithToast = useCallback(
@@ -420,9 +444,10 @@ export function useSidebarThreadActions(input: {
   }, [sidebarThreads, optimisticPinnedStateByThreadId]);
 
   useEffect(() => {
+    if (isControlPlaneAuthoritative) return;
     if (!threadsHydrated) return;
     prunePinnedThreads(sidebarThreads.map((thread) => thread.id));
-  }, [sidebarThreads, threadsHydrated, prunePinnedThreads]);
+  }, [isControlPlaneAuthoritative, sidebarThreads, threadsHydrated, prunePinnedThreads]);
 
   useEffect(() => {
     if (!threadsHydrated || persistedPinnedThreadIds.length === 0) return;
@@ -446,7 +471,13 @@ export function useSidebarThreadActions(input: {
           legacyPinMigrationThreadIdsRef.current.delete(threadId);
         });
     }
-  }, [dispatchThreadPinnedState, sidebarThreads, threadsHydrated, persistedPinnedThreadIds]);
+  }, [
+    isControlPlaneAuthoritative,
+    dispatchThreadPinnedState,
+    sidebarThreads,
+    threadsHydrated,
+    persistedPinnedThreadIds,
+  ]);
 
   const deleteThread = useCallback(
     async (
@@ -457,6 +488,9 @@ export function useSidebarThreadActions(input: {
         worktreeCleanupMode?: "prompt" | "skip";
       } = {},
     ): Promise<void> => {
+      if (isControlPlaneAuthoritative) {
+        throw new Error("Deleting Control Plane Sessions is not supported.");
+      }
       await deleteActiveThreadFromClient({
         threadId,
         ...(opts.deletedThreadIds !== undefined ? { deletedThreadIds: opts.deletedThreadIds } : {}),
@@ -538,6 +572,7 @@ export function useSidebarThreadActions(input: {
       routeThreadId,
       sidebarThreads,
       unpinThread,
+      isControlPlaneAuthoritative,
     ],
   );
 
@@ -563,8 +598,6 @@ export function useSidebarThreadActions(input: {
 
   const archiveThread = useCallback(
     async (threadId: ThreadId): Promise<boolean> => {
-      const api = readNativeApi();
-      if (!api) return false;
       const thread = getThreadFromState(useStore.getState(), threadId);
       if (!thread) return false;
       const pendingThreadIds = archivePendingThreadIdsRef.current;
@@ -572,7 +605,13 @@ export function useSidebarThreadActions(input: {
 
       pendingThreadIds.add(threadId);
       const runArchive = async (): Promise<boolean> => {
-        await archiveThreadFromClient(api.orchestration, threadId);
+        if (isControlPlaneAuthoritative) {
+          await archiveControlPlaneSession(threadId, randomUUID());
+        } else {
+          const api = readNativeApi();
+          if (!api) throw new Error("Unable to connect to the app server.");
+          await archiveThreadFromClient(api.orchestration, threadId);
+        }
         if (routeThreadId === threadId) {
           const fallbackThreadId = getFallbackThreadIdAfterDelete({
             threads: sidebarThreads,
@@ -596,7 +635,15 @@ export function useSidebarThreadActions(input: {
         pendingThreadIds.delete(threadId);
       });
     },
-    [appSettings.sidebarThreadSortOrder, handleNewChat, routeThreadId, sidebarThreads, navigate],
+    [
+      appSettings.sidebarThreadSortOrder,
+      archiveControlPlaneSession,
+      isControlPlaneAuthoritative,
+      handleNewChat,
+      routeThreadId,
+      sidebarThreads,
+      navigate,
+    ],
   );
 
   const restoreArchivedThreadFromToast = useCallback(
@@ -672,7 +719,9 @@ export function useSidebarThreadActions(input: {
       try {
         const returnToThreadOnUndo = routeThreadId === threadId;
         const archived = await archiveThread(threadId);
-        if (archived) showArchiveUndoToast(threadId, { returnToThreadOnUndo });
+        if (archived && !isControlPlaneAuthoritative) {
+          showArchiveUndoToast(threadId, { returnToThreadOnUndo });
+        }
       } catch (error) {
         toastManager.add({
           type: "error",
@@ -681,7 +730,7 @@ export function useSidebarThreadActions(input: {
         });
       }
     },
-    [archiveThread, routeThreadId, showArchiveUndoToast],
+    [archiveThread, isControlPlaneAuthoritative, routeThreadId, showArchiveUndoToast],
   );
 
   const confirmAndArchiveThread = useCallback(
@@ -767,6 +816,9 @@ export function useSidebarThreadActions(input: {
 
   const deleteProjectThreads = useCallback(
     async (projectId: ProjectId, options?: DeleteProjectThreadsOptions) => {
+      if (isControlPlaneAuthoritative) {
+        throw new Error("Deleting Control Plane Sessions is not supported.");
+      }
       const api = readNativeApi();
       const project = projectById.get(projectId);
       if (!api || !project) return null;
@@ -855,7 +907,7 @@ export function useSidebarThreadActions(input: {
         projectName: project.name,
       };
     },
-    [deleteThread, projectById, sidebarThreads, removeFromSelection],
+    [isControlPlaneAuthoritative, deleteThread, projectById, sidebarThreads, removeFromSelection],
   );
 
   return {

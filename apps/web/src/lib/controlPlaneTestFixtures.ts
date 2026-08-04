@@ -55,6 +55,7 @@ export function createTestAgentSession(
     resourceLifecyclePolicy: testResourceLifecycleEffective,
     createdAt: timestamp,
     updatedAt: timestamp,
+    settledAt: null,
     archivedAt: null,
     ...overrides,
   };

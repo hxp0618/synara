@@ -37,7 +37,12 @@ type Session struct {
 	ResourceLifecyclePolicy    lifecyclepolicy.Effective `json:"resourceLifecyclePolicy"`
 	CreatedAt                  time.Time                 `json:"createdAt"`
 	UpdatedAt                  time.Time                 `json:"updatedAt"`
+	SettledAt                  *time.Time                `json:"settledAt"`
 	ArchivedAt                 *time.Time                `json:"archivedAt"`
+}
+
+type SetSessionSettledInput struct {
+	Settled bool `json:"settled"`
 }
 
 type Turn struct {

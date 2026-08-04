@@ -549,6 +549,7 @@ func New(
 	mux.Handle("POST /v1/sessions/{sessionID}/fork", server.requireAuth(http.HandlerFunc(server.forkSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/suspend", server.requireAuth(http.HandlerFunc(server.suspendSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
+	mux.Handle("PUT /v1/sessions/{sessionID}/settled", server.requireAuth(http.HandlerFunc(server.setSessionSettled)))
 	mux.Handle("POST /v1/sessions/{sessionID}/archive", server.requireAuth(http.HandlerFunc(server.archiveSession)))
 	mux.Handle("POST /v1/executions/{executionID}/cancel", server.requireAuth(http.HandlerFunc(server.cancelExecution)))
 	mux.Handle("POST /v1/executions/{executionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurnExecution)))
@@ -1273,6 +1274,28 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 	}
 	item, replayed, err := s.sessions.ArchiveWithIdempotency(
 		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) setSessionSettled(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	var input sessions.SetSessionSettledInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, replayed, err := s.sessions.SetSettledWithIdempotency(
+		r.Context(), mustPrincipal(r), sessionID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
 	)
 	if err != nil {
 		s.writeError(w, r, err)

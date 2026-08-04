@@ -1299,6 +1299,12 @@ export default function Sidebar() {
   );
   const projects = useStore((store) => store.projects);
   const controlPlane = useControlPlane();
+  const allowThreadPinAction = !controlPlane.isAuthoritative;
+  const allowThreadDeleteAction = !controlPlane.isAuthoritative;
+  const allowThreadArchiveAction =
+    !controlPlane.isAuthoritative || controlPlane.capabilities.canArchiveSession;
+  const allowThreadSettledAction =
+    !controlPlane.isAuthoritative || controlPlane.capabilities.canSettleSession;
   const spaces = useStore((store) => store.spaces);
   // Selection state only; the handlers and sync effects live in useSpacesController.
   const storedActiveSpaceId = useSpacesUiStore((store) => store.activeSpaceId);
@@ -2938,7 +2944,9 @@ export default function Sidebar() {
       const clicked = await api.contextMenu.show(
         [
           { id: "rename", label: "Rename thread" },
-          { id: "toggle-pin", label: pinActionLabel("thread", isPinned) },
+          ...(allowThreadPinAction
+            ? [{ id: "toggle-pin", label: pinActionLabel("thread", isPinned) }]
+            : []),
           ...(threadStatus?.dismissible
             ? [{ id: "clear-notification", label: "Clear notification" }]
             : []),
@@ -2953,15 +2961,19 @@ export default function Sidebar() {
           // Subagent threads are archived and restored through their parent
           // (thread.archive cascades); archiving one alone would strand it with
           // no sidebar or Archived-panel row to restore it from.
-          ...(thread.parentThreadId
+          ...(!allowThreadArchiveAction || thread.parentThreadId
             ? []
             : [{ id: "archive", label: "Archive", separatorBefore: true }]),
-          {
-            id: "delete",
-            label: "Delete",
-            destructive: true,
-            ...(thread.parentThreadId ? { separatorBefore: true } : {}),
-          },
+          ...(allowThreadDeleteAction
+            ? [
+                {
+                  id: "delete",
+                  label: "Delete",
+                  destructive: true,
+                  ...(thread.parentThreadId ? { separatorBefore: true } : {}),
+                },
+              ]
+            : []),
         ],
         position,
       );
@@ -2970,7 +2982,7 @@ export default function Sidebar() {
         openRenameThreadDialog(threadId);
         return;
       }
-      if (clicked === "toggle-pin") {
+      if (clicked === "toggle-pin" && allowThreadPinAction) {
         toggleThreadPinned(threadId);
         return;
       }
@@ -3096,16 +3108,19 @@ export default function Sidebar() {
         await options?.onExtraAction?.("return-to-single-chat");
         return;
       }
-      if (clicked === "archive") {
+      if (clicked === "archive" && allowThreadArchiveAction) {
         await confirmAndArchiveThread(threadId);
         return;
       }
-      if (clicked !== "delete") return;
+      if (clicked !== "delete" || !allowThreadDeleteAction) return;
       await confirmAndDeleteThread(threadId);
     },
     [
       confirmAndArchiveThread,
       confirmAndDeleteThread,
+      allowThreadArchiveAction,
+      allowThreadDeleteAction,
+      allowThreadPinAction,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       clearDismissedThreadStatus,
@@ -3133,8 +3148,10 @@ export default function Sidebar() {
       const clicked = await api.contextMenu.show(
         [
           { id: "mark-unread", label: `Mark unread (${count})` },
-          { id: "archive", label: `Archive (${count})` },
-          { id: "delete", label: `Delete (${count})`, destructive: true },
+          ...(allowThreadArchiveAction ? [{ id: "archive", label: `Archive (${count})` }] : []),
+          ...(allowThreadDeleteAction
+            ? [{ id: "delete", label: `Delete (${count})`, destructive: true }]
+            : []),
         ],
         position,
       );
@@ -3148,7 +3165,7 @@ export default function Sidebar() {
         return;
       }
 
-      if (clicked === "archive") {
+      if (clicked === "archive" && allowThreadArchiveAction) {
         // Subagent threads follow their parent's archive cascade. Archiving one
         // directly would strand it, and archiving it after its parent in this
         // loop would fail the not-archived invariant.
@@ -3176,7 +3193,7 @@ export default function Sidebar() {
         return;
       }
 
-      if (clicked !== "delete") return;
+      if (clicked !== "delete" || !allowThreadDeleteAction) return;
 
       if (appSettings.confirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
@@ -3210,6 +3227,8 @@ export default function Sidebar() {
     [
       appSettings.confirmThreadArchive,
       appSettings.confirmThreadDelete,
+      allowThreadArchiveAction,
+      allowThreadDeleteAction,
       archiveThread,
       clearSelection,
       clearDismissedThreadStatus,
@@ -4145,6 +4164,7 @@ export default function Sidebar() {
       compact?: boolean;
     },
   ) {
+    if (!allowThreadArchiveAction) return null;
     return (
       <ThreadArchiveActionButton
         threadId={threadId}
@@ -4163,7 +4183,7 @@ export default function Sidebar() {
     compact?: boolean;
   }) {
     const compact = input.compact === true;
-    const includePinToggle = input.includePinToggle !== false;
+    const includePinToggle = input.includePinToggle !== false && allowThreadPinAction;
 
     return (
       <SidebarRowHoverActions threadId={input.threadId}>
@@ -5935,6 +5955,9 @@ export default function Sidebar() {
                     onSetThreadSettled={setThreadSettledWithToast}
                     onToggleThreadPinned={toggleThreadPinned}
                     onArchiveThread={(threadId) => void archiveThreadWithUndo(threadId)}
+                    allowSettledAction={allowThreadSettledAction}
+                    allowPinAction={allowThreadPinAction}
+                    allowArchiveAction={allowThreadArchiveAction}
                     onMarkThreadRead={markThreadVisited}
                     prByThreadId={prByThreadId}
                     onVisibleThreadIdsChange={handleActivityVisibleThreadIdsChange}

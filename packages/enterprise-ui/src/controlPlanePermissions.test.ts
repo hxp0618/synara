@@ -52,6 +52,8 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(capabilities.canCreateProject).toBe(true);
     expect(capabilities.canUpdateProject).toBe(true);
     expect(capabilities.canCreateSession).toBe(true);
+    expect(capabilities.canSettleSession).toBe(true);
+    expect(capabilities.canArchiveSession).toBe(true);
     expect(capabilities.canCreateTurn).toBe(true);
     expect(capabilities.canSteerExecution).toBe(true);
     expect(capabilities.canInterruptExecution).toBe(true);
@@ -151,6 +153,8 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(viewer.canReadProjects).toBe(true);
     expect(viewer.canUpdateProject).toBe(false);
     expect(viewer.canCreateSession).toBe(false);
+    expect(viewer.canSettleSession).toBe(false);
+    expect(viewer.canArchiveSession).toBe(false);
     expect(viewer.canCreateTurn).toBe(false);
     expect(viewer.canSteerExecution).toBe(false);
     expect(viewer.canInterruptExecution).toBe(false);
@@ -164,6 +168,8 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(suspendedTenant.canReadProjects).toBe(true);
     expect(suspendedTenant.canUpdateProject).toBe(false);
     expect(suspendedTenant.canCreateTurn).toBe(false);
+    expect(suspendedTenant.canSettleSession).toBe(false);
+    expect(suspendedTenant.canArchiveSession).toBe(false);
     expect(suspendedTenant.canSteerExecution).toBe(false);
     expect(suspendedTenant.canInterruptExecution).toBe(false);
     expect(

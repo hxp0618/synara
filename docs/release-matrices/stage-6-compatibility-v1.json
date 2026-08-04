@@ -6,14 +6,14 @@
       "sourceCommitRequired": true
     },
     "packages": {
-      "admin": "0.6.3",
-      "controlPlaneClient": "0.6.3",
-      "contracts": "0.6.3",
-      "desktop": "0.6.3",
-      "enterpriseUi": "0.6.3",
+      "admin": "0.6.5",
+      "controlPlaneClient": "0.6.5",
+      "contracts": "0.6.5",
+      "desktop": "0.6.5",
+      "enterpriseUi": "0.6.5",
       "providerHost": "0.2.0",
-      "server": "0.6.3",
-      "web": "0.6.3"
+      "server": "0.6.5",
+      "web": "0.6.5"
     },
     "providerHostProtocol": {
       "acceptedMajor": 2,
@@ -36,8 +36,8 @@
   "database": {
     "rollbackPolicy": "application-only-after-previous-build-target-schema-proof",
     "targetTail": {
-      "name": "000163_stage6_candidate_compatibility_matrix_evidence.sql",
-      "sha256": "sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd"
+      "name": "000164_session_settlement.sql",
+      "sha256": "sha256:9094065b2ee3881d0a4c83f1b68430d7deec522cc46b557eeec97582f3407b38"
     },
     "upgradePolicy": "forward-only-expand-contract"
   },

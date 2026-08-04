@@ -99,6 +99,9 @@ const harness = vi.hoisted(() => ({
   removeDeletedThreadFromClientState: vi.fn(),
   resolveSplitViewPaneIdForThread: vi.fn(),
   resolveSplitViewFocusedThreadId: vi.fn(),
+  controlPlaneAuthoritative: false,
+  controlPlaneSetSessionSettled: vi.fn(),
+  controlPlaneArchiveSession: vi.fn(),
   splitViewsById: {} as Record<string, unknown>,
   shellSnapshotSequence: 0,
 }));
@@ -155,6 +158,13 @@ vi.mock("../nativeApi", () => ({
   readNativeApi: () => ({
     orchestration: { dispatchCommand: harness.dispatchCommand },
     dialogs: { confirm: harness.confirm },
+  }),
+}));
+vi.mock("../controlPlaneContext", () => ({
+  useControlPlane: () => ({
+    isAuthoritative: harness.controlPlaneAuthoritative,
+    setSessionSettled: harness.controlPlaneSetSessionSettled,
+    archiveSession: harness.controlPlaneArchiveSession,
   }),
 }));
 vi.mock("../lib/threadArchive", () => ({
@@ -261,6 +271,7 @@ beforeEach(() => {
   harness.pinnedThreadIds = [];
   harness.shellSnapshotSequence = 0;
   harness.alreadyUnarchived = false;
+  harness.controlPlaneAuthoritative = false;
   harness.splitViewsById = {};
   for (const mock of [
     harness.pinThread,
@@ -283,6 +294,8 @@ beforeEach(() => {
     harness.handleNewChat,
     harness.resolveSplitViewPaneIdForThread,
     harness.resolveSplitViewFocusedThreadId,
+    harness.controlPlaneSetSessionSettled,
+    harness.controlPlaneArchiveSession,
   ]) {
     mock.mockReset();
   }
@@ -294,6 +307,8 @@ beforeEach(() => {
   });
   harness.dispatchCommand.mockResolvedValue({ sequence: 1 });
   harness.archiveThread.mockResolvedValue(undefined);
+  harness.controlPlaneSetSessionSettled.mockResolvedValue({ id: THREAD_ID });
+  harness.controlPlaneArchiveSession.mockResolvedValue({ id: THREAD_ID });
   harness.unarchiveThread.mockResolvedValue(undefined);
   harness.confirm.mockResolvedValue(true);
   harness.handleNewChat.mockResolvedValue({ ok: true });
@@ -318,6 +333,35 @@ beforeEach(() => {
 });
 
 describe("useSidebarThreadActions", () => {
+  it("routes authoritative settle/archive to the Control Plane and rejects local pin/delete", async () => {
+    harness.controlPlaneAuthoritative = true;
+    const controller = render();
+
+    controller.setThreadSettledWithToast(THREAD_ID, true);
+    await vi.waitFor(() => expect(harness.controlPlaneSetSessionSettled).toHaveBeenCalled());
+    await expect(controller.archiveThread(THREAD_ID)).resolves.toBe(true);
+    controller.toggleThreadPinned(THREAD_ID);
+    await vi.waitFor(() =>
+      expect(harness.toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Unable to pin thread" }),
+      ),
+    );
+    await expect(controller.deleteThread(THREAD_ID)).rejects.toThrow(
+      "Deleting Control Plane Sessions is not supported.",
+    );
+
+    expect(harness.controlPlaneSetSessionSettled).toHaveBeenCalledWith(
+      THREAD_ID,
+      true,
+      expect.any(String),
+    );
+    expect(harness.controlPlaneArchiveSession).toHaveBeenCalledWith(THREAD_ID, expect.any(String));
+    expect(harness.archiveThread).not.toHaveBeenCalled();
+    expect(harness.dispatchCommand).not.toHaveBeenCalled();
+    expect(harness.activeThreadDelete).not.toHaveBeenCalled();
+    expect(harness.pinThread).not.toHaveBeenCalled();
+  });
+
   it("pins optimistically and dispatches thread metadata", async () => {
     let controller = render();
 

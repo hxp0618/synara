@@ -329,7 +329,7 @@ func toSession(model persistence.AgentSession) Session {
 			WorkspaceRetentionDays:         model.WorkspaceRetentionDays, WarmPoolMode: model.WarmPoolMode,
 		},
 		CreatedAt: model.CreatedAt,
-		UpdatedAt: model.UpdatedAt, ArchivedAt: model.ArchivedAt,
+		UpdatedAt: model.UpdatedAt, SettledAt: model.SettledAt, ArchivedAt: model.ArchivedAt,
 	}
 }
 
@@ -1122,6 +1122,129 @@ func (s *Service) Archive(
 ) (Session, error) {
 	item, _, err := s.ArchiveWithIdempotency(ctx, principal, sessionID, "", requestID, ipAddress)
 	return item, err
+}
+
+func (s *Service) SetSettledWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	input SetSessionSettledInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Session, bool, error) {
+	tenantID, err := ActiveTenant(principal)
+	if err != nil {
+		return Session{}, false, err
+	}
+	current, _, err := s.authorizedModel(
+		ctx,
+		principal,
+		tenantID,
+		sessionID,
+		authorization.SessionSettle,
+	)
+	if err != nil {
+		return Session{}, false, err
+	}
+	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
+		return Session{}, false, problem.New(404, "session_not_found", "Session not found.")
+	}
+	operation := "session.unsettle"
+	eventType := "session.unsettled"
+	if input.Settled {
+		operation = "session.settle"
+		eventType = "session.settled"
+	}
+	var settledEvent persistence.SessionEvent
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID:      tenantID,
+		ActorID:       principal.UserID,
+		Key:           idempotencyKey,
+		Operation:     operation,
+		SuccessStatus: 200,
+		Request:       map[string]any{"sessionId": sessionID, "settled": input.Settled},
+	}, func(tx *gorm.DB) (Session, error) {
+		var locked persistence.AgentSession
+		lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ?", tenantID, sessionID).
+			Take(&locked).Error
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return Session{}, problem.New(404, "session_not_found", "Session not found.")
+		}
+		if lookupErr != nil {
+			return Session{}, problem.Wrap(500, "session_lock_failed", "Failed to lock the session.", lookupErr)
+		}
+		if locked.ArchivedAt != nil || locked.Status == "archived" {
+			return Session{}, problem.New(409, "session_archived", "Archived Sessions cannot be marked done.")
+		}
+		currentlySettled := locked.SettledAt != nil
+		if currentlySettled == input.Settled {
+			return toSession(locked), nil
+		}
+
+		now := time.Now().UTC()
+		var settledAt *time.Time
+		if input.Settled {
+			settledAt = &now
+		}
+		if err := tx.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", tenantID, sessionID).
+			Update("settled_at", settledAt).Error; err != nil {
+			return Session{}, problem.Wrap(500, "session_settle_failed", "Failed to update the Session done state.", err)
+		}
+		locked.SettledAt = settledAt
+		payload := map[string]any{"settled": input.Settled}
+		if settledAt != nil {
+			payload["settledAt"] = *settledAt
+		}
+		settledEvent, err = appendEvent(ctx, tx, &locked, eventInput{
+			EventType: eventType,
+			ActorType: "user",
+			ActorID:   &principal.UserID,
+			Payload:   payload,
+		})
+		if err != nil {
+			return Session{}, err
+		}
+		outboxPayload := map[string]any{
+			"tenantId":       tenantID,
+			"organizationId": locked.OrganizationID,
+			"projectId":      locked.ProjectID,
+			"sessionId":      sessionID,
+			"settled":        input.Settled,
+		}
+		if settledAt != nil {
+			outboxPayload["settledAt"] = *settledAt
+		}
+		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+			TenantID:   &tenantID,
+			Topic:      eventType,
+			MessageKey: sessionID.String(),
+			Payload:    outboxPayload,
+		}); err != nil {
+			return Session{}, problem.Wrap(500, "session_settle_outbox_failed", "The Session done event could not be queued.", err)
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID:       tenantID,
+			ActorType:      "user",
+			ActorID:        &principal.UserID,
+			Action:         eventType,
+			ResourceType:   "agent_session",
+			ResourceID:     &sessionID,
+			OrganizationID: &locked.OrganizationID,
+			RequestID:      requestID,
+			IPAddress:      ipAddress,
+		}); err != nil {
+			return Session{}, err
+		}
+		return toSession(locked), nil
+	})
+	if err != nil {
+		return Session{}, false, err
+	}
+	if !result.Replayed && settledEvent.EventID != uuid.Nil {
+		s.events.publish(toEvent(settledEvent))
+	}
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) ArchiveWithIdempotency(

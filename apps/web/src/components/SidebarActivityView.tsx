@@ -95,6 +95,9 @@ function ActivityThreadRow({
   onSetSettled,
   onTogglePinned,
   onArchive,
+  allowSettledAction,
+  allowPinAction,
+  allowArchiveAction,
   renderHoverCard,
 }: {
   thread: SidebarThreadSummary;
@@ -108,6 +111,9 @@ function ActivityThreadRow({
   onSetSettled: (settled: boolean) => void;
   onTogglePinned: () => void;
   onArchive: () => void;
+  allowSettledAction: boolean;
+  allowPinAction: boolean;
+  allowArchiveAction: boolean;
   renderHoverCard: (anchorId: string) => ReactNode;
 }) {
   const provider = thread.session?.provider ?? thread.modelSelection.provider;
@@ -148,8 +154,9 @@ function ActivityThreadRow({
           <span
             className={cn(
               "flex min-w-0 items-center gap-1.5 overflow-hidden pr-5 transition-[padding] duration-150 ease-out",
-              // Yield the title row to the hover action cluster (pin + archive + done).
-              "group-hover/activity-row:pr-[4.25rem] group-focus-within/activity-row:pr-[4.25rem]",
+              // Yield the title row to the authoritative action cluster.
+              (allowPinAction || allowArchiveAction || allowSettledAction) &&
+                "group-hover/activity-row:pr-[4.25rem] group-focus-within/activity-row:pr-[4.25rem]",
             )}
           >
             <ProviderIcon
@@ -198,34 +205,42 @@ function ActivityThreadRow({
             <SidebarStatusTrailingGlyph status={trailingStatus} />
           </span>
         ) : null}
-        <span className="absolute top-1 right-1 inline-flex items-center gap-1 opacity-0 transition-opacity group-hover/activity-row:opacity-100 group-focus-within/activity-row:opacity-100">
-          <ThreadPinToggleButton
-            pinned={isPinned}
-            presentation="inline"
-            toneClassName={actionToneClassName}
-            onToggle={(event) => {
-              stopRowActivation(event);
-              onTogglePinned();
-            }}
-          />
-          <ThreadArchiveActionButton
-            threadId={thread.id}
-            toneClassName={actionToneClassName}
-            onArchive={onArchive}
-          />
-          <SidebarIconButton
-            icon={isSettled ? Undo2Icon : CircleCheckIcon}
-            label={isSettled ? "Undo" : "Done"}
-            title={isSettled ? "Undo" : "Done"}
-            iconClassName={SIDEBAR_TRAILING_ICON_CLASS}
-            className={cn("hover:text-foreground/89", actionToneClassName)}
-            onMouseDown={stopRowActivation}
-            onClick={(event) => {
-              stopRowActivation(event);
-              onSetSettled(!isSettled);
-            }}
-          />
-        </span>
+        {allowPinAction || allowArchiveAction || allowSettledAction ? (
+          <span className="absolute top-1 right-1 inline-flex items-center gap-1 opacity-0 transition-opacity group-hover/activity-row:opacity-100 group-focus-within/activity-row:opacity-100">
+            {allowPinAction ? (
+              <ThreadPinToggleButton
+                pinned={isPinned}
+                presentation="inline"
+                toneClassName={actionToneClassName}
+                onToggle={(event) => {
+                  stopRowActivation(event);
+                  onTogglePinned();
+                }}
+              />
+            ) : null}
+            {allowArchiveAction ? (
+              <ThreadArchiveActionButton
+                threadId={thread.id}
+                toneClassName={actionToneClassName}
+                onArchive={onArchive}
+              />
+            ) : null}
+            {allowSettledAction ? (
+              <SidebarIconButton
+                icon={isSettled ? Undo2Icon : CircleCheckIcon}
+                label={isSettled ? "Undo" : "Done"}
+                title={isSettled ? "Undo" : "Done"}
+                iconClassName={SIDEBAR_TRAILING_ICON_CLASS}
+                className={cn("hover:text-foreground/89", actionToneClassName)}
+                onMouseDown={stopRowActivation}
+                onClick={(event) => {
+                  stopRowActivation(event);
+                  onSetSettled(!isSettled);
+                }}
+              />
+            ) : null}
+          </span>
+        ) : null}
       </TooltipTrigger>
       {renderHoverCard(hoverAnchorId)}
     </Tooltip>
@@ -464,6 +479,9 @@ export function SidebarActivityView({
   onSetThreadSettled,
   onToggleThreadPinned,
   onArchiveThread,
+  allowSettledAction = true,
+  allowPinAction = true,
+  allowArchiveAction = true,
   onMarkThreadRead,
   renderThreadHoverCard,
   prByThreadId,
@@ -484,6 +502,9 @@ export function SidebarActivityView({
   onSetThreadSettled: (threadId: ThreadId, settled: boolean) => void;
   onToggleThreadPinned: (threadId: ThreadId) => void;
   onArchiveThread: (threadId: ThreadId) => void;
+  allowSettledAction?: boolean;
+  allowPinAction?: boolean;
+  allowArchiveAction?: boolean;
   /** Records a completion as seen (the classic sidebar's markThreadVisited). */
   onMarkThreadRead: (threadId: ThreadId, completedAt?: string) => void;
   /** Same rich hover card the classic thread rows show at the sidebar edge. */
@@ -634,6 +655,9 @@ export function SidebarActivityView({
       }}
       onTogglePinned={() => onToggleThreadPinned(thread.id)}
       onArchive={() => onArchiveThread(thread.id)}
+      allowSettledAction={allowSettledAction}
+      allowPinAction={allowPinAction}
+      allowArchiveAction={allowArchiveAction}
       renderHoverCard={(anchorId) => renderThreadHoverCard(thread, anchorId)}
     />
   );

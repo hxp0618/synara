@@ -74,6 +74,11 @@ function renderActivity(input: {
   prByThreadId?: ReadonlyMap<ThreadId, OrchestrationThreadPullRequest | null>;
   onVisibleThreadIdsChange?: (threadIds: readonly ThreadId[]) => void;
   onSetThreadSettled?: (threadId: ThreadId, settled: boolean) => void;
+  onToggleThreadPinned?: (threadId: ThreadId) => void;
+  onArchiveThread?: (threadId: ThreadId) => void;
+  allowSettledAction?: boolean;
+  allowPinAction?: boolean;
+  allowArchiveAction?: boolean;
   onMarkThreadRead?: (threadId: ThreadId, completedAt?: string) => void;
   resolveThreadStatus?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
 }) {
@@ -91,8 +96,15 @@ function renderActivity(input: {
       resolveThreadStatus={input.resolveThreadStatus ?? (() => null)}
       onOpenThread={() => {}}
       onSetThreadSettled={input.onSetThreadSettled ?? (() => {})}
-      onToggleThreadPinned={() => {}}
-      onArchiveThread={() => {}}
+      onToggleThreadPinned={input.onToggleThreadPinned ?? (() => {})}
+      onArchiveThread={input.onArchiveThread ?? (() => {})}
+      {...(input.allowSettledAction === undefined
+        ? {}
+        : { allowSettledAction: input.allowSettledAction })}
+      {...(input.allowPinAction === undefined ? {} : { allowPinAction: input.allowPinAction })}
+      {...(input.allowArchiveAction === undefined
+        ? {}
+        : { allowArchiveAction: input.allowArchiveAction })}
       onMarkThreadRead={input.onMarkThreadRead ?? (() => {})}
       renderThreadHoverCard={() => null}
       onCreateChat={() => {}}
@@ -104,6 +116,38 @@ function renderActivity(input: {
 describe("SidebarActivityView", () => {
   afterEach(() => {
     document.body.innerHTML = "";
+  });
+
+  it("shows only authoritative lifecycle actions and never exposes local pin/delete controls", async () => {
+    const session = makeThread(90);
+    const onControlPlaneSettled = vi.fn();
+    const onControlPlaneArchive = vi.fn();
+    const onLocalPin = vi.fn();
+    const mounted = await render(
+      renderActivity({
+        threads: [session],
+        allowSettledAction: true,
+        allowArchiveAction: true,
+        allowPinAction: false,
+        onSetThreadSettled: onControlPlaneSettled,
+        onArchiveThread: onControlPlaneArchive,
+        onToggleThreadPinned: onLocalPin,
+      }),
+    );
+
+    const row = page.getByTestId(`activity-thread-${session.id}`).element();
+    row.focus();
+    expect(row.parentElement?.querySelector('button[aria-label="Pin thread"]')).toBeNull();
+    expect(row.parentElement?.querySelector('button[aria-label="Unpin thread"]')).toBeNull();
+    expect(document.querySelector('button[aria-label="Delete"]')).toBeNull();
+
+    await page.getByRole("button", { name: "Done" }).click();
+    await page.getByTestId(`thread-archive-${session.id}`).click();
+
+    expect(onControlPlaneSettled).toHaveBeenCalledWith(session.id, true);
+    expect(onControlPlaneArchive).toHaveBeenCalledWith(session.id);
+    expect(onLocalPin).not.toHaveBeenCalled();
+    await mounted.unmount();
   });
 
   it("pages project groups, reports only mounted rows, and prefers live PR state", async () => {

@@ -253,6 +253,72 @@ func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
 	}
 }
 
+func TestSessionSettlementIsAuthorizedIdempotentAndDurable(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	ctx := context.Background()
+
+	settled, replayed, err := fixture.service.SetSettledWithIdempotency(
+		ctx,
+		fixture.principal,
+		fixture.sessionID,
+		SetSessionSettledInput{Settled: true},
+		"settle-key",
+		"settle-first",
+		"127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed || settled.SettledAt == nil {
+		t.Fatalf("unexpected first settle result: %#v replayed=%t", settled, replayed)
+	}
+	replayedSettled, replayed, err := fixture.service.SetSettledWithIdempotency(
+		ctx,
+		fixture.principal,
+		fixture.sessionID,
+		SetSessionSettledInput{Settled: true},
+		"settle-key",
+		"settle-replay",
+		"127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed || replayedSettled.SettledAt == nil ||
+		!replayedSettled.SettledAt.Equal(*settled.SettledAt) {
+		t.Fatalf("Session settle replay mismatch: first=%#v second=%#v replayed=%t", settled, replayedSettled, replayed)
+	}
+
+	unsettled, replayed, err := fixture.service.SetSettledWithIdempotency(
+		ctx,
+		fixture.principal,
+		fixture.sessionID,
+		SetSessionSettledInput{Settled: false},
+		"unsettle-key",
+		"unsettle-first",
+		"127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed || unsettled.SettledAt != nil {
+		t.Fatalf("unexpected unsettle result: %#v replayed=%t", unsettled, replayed)
+	}
+
+	assertCount(t, fixture, &persistence.SessionEvent{},
+		"session_id = ? AND event_type = ?", 1, fixture.sessionID, "session.settled")
+	assertCount(t, fixture, &persistence.SessionEvent{},
+		"session_id = ? AND event_type = ?", 1, fixture.sessionID, "session.unsettled")
+	assertCount(t, fixture, &persistence.OutboxMessage{},
+		"tenant_id = ? AND topic = ?", 1, fixture.tenantID, "session.settled")
+	assertCount(t, fixture, &persistence.OutboxMessage{},
+		"tenant_id = ? AND topic = ?", 1, fixture.tenantID, "session.unsettled")
+	assertCount(t, fixture, &persistence.AuditLog{},
+		"tenant_id = ? AND resource_id = ? AND action = ?", 1, fixture.tenantID, fixture.sessionID, "session.settled")
+	assertCount(t, fixture, &persistence.AuditLog{},
+		"tenant_id = ? AND resource_id = ? AND action = ?", 1, fixture.tenantID, fixture.sessionID, "session.unsettled")
+}
+
 func TestSessionCreateAutoSelectUsesTransactionSelectionWithoutChangingIdempotencyHash(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()

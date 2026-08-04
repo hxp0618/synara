@@ -363,6 +363,10 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "Session suspended";
     case "session.resumed":
       return "Session resumed";
+    case "session.settled":
+      return "Session marked done";
+    case "session.unsettled":
+      return "Session marked active";
     case "session.archived":
       return "Session archived";
     case "session.model.changed": {
@@ -686,6 +690,16 @@ export function applyControlPlaneSessionEvent(
       orchestrationStatus = "ready";
       error = null;
       break;
+    case "session.settled":
+      session = {
+        ...session,
+        settledAt: payloadString(event, "settledAt") ?? event.occurredAt,
+        updatedAt: event.occurredAt,
+      };
+      break;
+    case "session.unsettled":
+      session = { ...session, settledAt: null, updatedAt: event.occurredAt };
+      break;
     case "session.archived":
       session = {
         ...session,
@@ -805,6 +819,7 @@ export function projectControlPlaneThreads(
       error: projection.error,
       createdAt: sourceSession.createdAt,
       archivedAt: sourceSession.archivedAt,
+      settledAt: sourceSession.settledAt,
       updatedAt: sourceSession.updatedAt,
       branch: null,
       worktreePath: null,

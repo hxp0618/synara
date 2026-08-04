@@ -2022,6 +2022,7 @@ export type ControlPlaneAgentSession = {
   resourceLifecyclePolicy: ControlPlaneResourceLifecycleEffective;
   createdAt: string;
   updatedAt: string;
+  settledAt: string | null;
   archivedAt: string | null;
 };
 
@@ -3844,6 +3845,27 @@ export const controlPlaneClient = {
     ),
   getAgentSession: (sessionId: string) =>
     controlPlaneRequest<ControlPlaneAgentSession>(`/v1/sessions/${encodeURIComponent(sessionId)}`),
+  setSessionSettled: (
+    sessionId: string,
+    settled: boolean,
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneAgentSession>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/settled`,
+      {
+        method: "PUT",
+        ...idempotencyRequestHeaders(options),
+        body: { settled },
+      },
+    ),
+  archiveSession: (sessionId: string, options?: ControlPlaneIdempotencyOptions) =>
+    controlPlaneRequest<ControlPlaneAgentSession>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/archive`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+      },
+    ),
   switchSessionModel: (
     sessionId: string,
     input: {

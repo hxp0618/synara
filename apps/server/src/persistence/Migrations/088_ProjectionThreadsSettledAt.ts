@@ -1,4 +1,4 @@
-// FILE: 089_ProjectionThreadsSettledAt.ts
+// FILE: 088_ProjectionThreadsSettledAt.ts
 /**
  * Adds a durable settled_at marker for the Activity View task lifecycle:
  * settled threads stay visible but drop to the dimmed "Settled" section.

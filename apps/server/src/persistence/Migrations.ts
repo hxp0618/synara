@@ -103,8 +103,8 @@ import Migration0084 from "./Migrations/084_AutomationNotificationPolicy.ts";
 import Migration0085 from "./Migrations/085_AutomationSettings.ts";
 import Migration0086 from "./Migrations/086_NormalizeStudioThreadWorkspaces.ts";
 import Migration0087 from "./Migrations/087_DropUnusedOrchestrationEventIndexes.ts";
-import Migration0088 from "./Migrations/088_ExternalMcpSecuritySignals.ts";
-import Migration0089 from "./Migrations/089_ProjectionThreadsSettledAt.ts";
+import Migration0088 from "./Migrations/088_ProjectionThreadsSettledAt.ts";
+import Migration0089 from "./Migrations/089_ExternalMcpSecuritySignals.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -207,8 +207,8 @@ export const migrationEntries = [
   [85, "AutomationSettings", Migration0085],
   [86, "NormalizeStudioThreadWorkspaces", Migration0086],
   [87, "DropUnusedOrchestrationEventIndexes", Migration0087],
-  [88, "ExternalMcpSecuritySignals", Migration0088],
-  [89, "ProjectionThreadsSettledAt", Migration0089],
+  [88, "ProjectionThreadsSettledAt", Migration0088],
+  [89, "ExternalMcpSecuritySignals", Migration0089],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -293,6 +293,16 @@ export const MIGRATION_LINEAGE_ALIASES: readonly MigrationLineageAlias[] = [
     historicalName: "ProjectPullRequestPins",
     currentId: 69,
     historicalSlotRequiresRerun: false,
+  },
+  {
+    // Private SaaS builds briefly recorded ExternalMcpSecuritySignals at 88
+    // before v0.6.5 shipped ProjectionThreadsSettledAt in that slot. Remove
+    // the private tracker row so the released migration runs at 88; the
+    // external MCP migration then runs idempotently at its canonical slot 89.
+    historicalId: 88,
+    historicalName: "ExternalMcpSecuritySignals",
+    currentId: 89,
+    historicalSlotRequiresRerun: true,
   },
 ];
 

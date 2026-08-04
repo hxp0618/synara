@@ -14,6 +14,7 @@ import DurableProviderCommandDeliveryMigration from "./Migrations/064_DurablePro
 import ProjectionThreadsGatewayProvenanceMigration from "./Migrations/071_ProjectionThreadsGatewayProvenance.ts";
 import ProjectPullRequestPinsMigration from "./Migrations/069_ProjectPullRequestPins.ts";
 import SpacesMigration from "./Migrations/079_Spaces.ts";
+import ExternalMcpSecuritySignalsMigration from "./Migrations/089_ExternalMcpSecuritySignals.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
@@ -289,8 +290,8 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [85, "AutomationSettings"],
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
-        [88, "ExternalMcpSecuritySignals"],
-        [89, "ProjectionThreadsSettledAt"],
+        [88, "ProjectionThreadsSettledAt"],
+        [89, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -329,8 +330,8 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         { migration_id: 85, name: "AutomationSettings" },
         { migration_id: 86, name: "NormalizeStudioThreadWorkspaces" },
         { migration_id: 87, name: "DropUnusedOrchestrationEventIndexes" },
-        { migration_id: 88, name: "ExternalMcpSecuritySignals" },
-        { migration_id: 89, name: "ProjectionThreadsSettledAt" },
+        { migration_id: 88, name: "ProjectionThreadsSettledAt" },
+        { migration_id: 89, name: "ExternalMcpSecuritySignals" },
       ]);
       const preserved = yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM orchestration_consumer_state
@@ -410,8 +411,8 @@ agentGatewayRetentionLegacyLayer(
           [85, "AutomationSettings"],
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
-          [88, "ExternalMcpSecuritySignals"],
-          [89, "ProjectionThreadsSettledAt"],
+          [88, "ProjectionThreadsSettledAt"],
+          [89, "ExternalMcpSecuritySignals"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -494,8 +495,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [85, "AutomationSettings"],
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
-        [88, "ExternalMcpSecuritySignals"],
-        [89, "ProjectionThreadsSettledAt"],
+        [88, "ProjectionThreadsSettledAt"],
+        [89, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -520,8 +521,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [85, "AutomationSettings"],
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
-          [88, "ExternalMcpSecuritySignals"],
-          [89, "ProjectionThreadsSettledAt"],
+          [88, "ProjectionThreadsSettledAt"],
+          [89, "ExternalMcpSecuritySignals"],
         ],
       );
 
@@ -599,8 +600,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [85, "AutomationSettings"],
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
-        [88, "ExternalMcpSecuritySignals"],
-        [89, "ProjectionThreadsSettledAt"],
+        [88, "ProjectionThreadsSettledAt"],
+        [89, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -621,8 +622,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [85, "AutomationSettings"],
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
-          [88, "ExternalMcpSecuritySignals"],
-          [89, "ProjectionThreadsSettledAt"],
+          [88, "ProjectionThreadsSettledAt"],
+          [89, "ExternalMcpSecuritySignals"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`
@@ -826,6 +827,15 @@ describe("migration lineage aliases", () => {
     ]);
   });
 
+  it("replays released migration 88 after a private SaaS build claimed its slot", () => {
+    const recorded = canonicalTrackerThrough(87);
+    recorded.set(88, "ExternalMcpSecuritySignals");
+
+    assert.deepStrictEqual(planMigrationLineageAliasRepairs(recorded), [
+      { kind: "remove", migrationId: 88 },
+    ]);
+  });
+
   it("declines when the tracker also diverges outside the alias", () => {
     const recorded = canonicalTrackerThrough(53);
     recorded.set(54, "ProjectPullRequestPins");
@@ -845,6 +855,44 @@ describe("migration lineage aliases", () => {
     for (let id = 17; id <= 60; id++) foreign.set(id, `ForeignMigration${id}`);
     assert.deepStrictEqual(planMigrationLineageAliasRepairs(foreign), []);
   });
+});
+
+const privateSaaS88Layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+
+privateSaaS88Layer("private SaaS migration 88 database", (it) => {
+  it.effect("runs released projection migration 88 then retains external MCP migration at 89", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 87 });
+      yield* ExternalMcpSecuritySignalsMigration;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (88, 'ExternalMcpSecuritySignals')
+      `;
+
+      const executed = yield* runMigrations();
+      assert.deepStrictEqual(
+        executed.map(([id]) => id),
+        [88, 89],
+      );
+      assert.deepStrictEqual(
+        (yield* trackerRows(sql)).slice(-2).map((row) => [row.migration_id, row.name]),
+        [
+          [88, "ProjectionThreadsSettledAt"],
+          [89, "ExternalMcpSecuritySignals"],
+        ],
+      );
+      const projectionColumns = yield* projectionThreadsColumnNames(sql);
+      assert.include(projectionColumns, "settled_at");
+      const externalColumns = yield* sql<{ readonly name: string }>`
+        SELECT name FROM pragma_table_info('external_mcp_audit_log')
+      `;
+      assert.include(
+        externalColumns.map(({ name }) => name),
+        "content_trust",
+      );
+    }),
+  );
 });
 
 const releasedV055Layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));

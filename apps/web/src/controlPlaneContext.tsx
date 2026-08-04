@@ -143,6 +143,12 @@ export type ControlPlaneContextValue = {
     projectId: string,
     input: CreateControlPlaneSessionInput,
   ) => Promise<ControlPlaneAgentSession>;
+  setSessionSettled: (
+    sessionId: string,
+    settled: boolean,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneAgentSession>;
+  archiveSession: (sessionId: string, idempotencyKey?: string) => Promise<ControlPlaneAgentSession>;
   switchSessionModel: (
     sessionId: string,
     model: string,
@@ -698,6 +704,37 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     },
     [activeOrganizationId, activeTenantId, projectionRuntime, projectIdsKey, queryClient],
   );
+  const setSessionSettled = useCallback(
+    async (sessionId: string, settled: boolean, idempotencyKey?: string) => {
+      if (!isAuthoritative || !capabilities.canSettleSession) {
+        throw new Error("The active Tenant or Organization cannot update this Session done state.");
+      }
+      const nextSession = await controlPlaneClient.setSessionSettled(
+        sessionId,
+        settled,
+        idempotencyOptions(settled ? "session-settle" : "session-unsettle", idempotencyKey),
+      );
+      syncReturnedSession(nextSession);
+      void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+      return nextSession;
+    },
+    [capabilities.canSettleSession, isAuthoritative, projectionRuntime, syncReturnedSession],
+  );
+  const archiveSession = useCallback(
+    async (sessionId: string, idempotencyKey?: string) => {
+      if (!isAuthoritative || !capabilities.canArchiveSession) {
+        throw new Error("The active Tenant or Organization cannot archive this Session.");
+      }
+      const nextSession = await controlPlaneClient.archiveSession(
+        sessionId,
+        idempotencyOptions("session-archive", idempotencyKey),
+      );
+      syncReturnedSession(nextSession);
+      void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+      return nextSession;
+    },
+    [capabilities.canArchiveSession, isAuthoritative, projectionRuntime, syncReturnedSession],
+  );
   const refreshAdvancedSessionAuthority = useCallback(
     async (...sessionIds: ReadonlyArray<string>) => {
       const uniqueSessionIds = [...new Set(sessionIds.filter(Boolean))];
@@ -1168,6 +1205,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       setActiveOrganization,
       createProject,
       createSession,
+      setSessionSettled,
+      archiveSession,
       switchSessionModel,
       createTurn,
       compactSession,
@@ -1188,6 +1227,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       capabilities,
       createProject,
       createSession,
+      setSessionSettled,
+      archiveSession,
       switchSessionModel,
       createTurn,
       compactSession,

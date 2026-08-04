@@ -109,6 +109,7 @@ const session: ControlPlaneAgentSession = {
   },
   createdAt: "2026-07-24T08:00:00Z",
   updatedAt: "2026-07-24T08:45:00Z",
+  settledAt: null,
   archivedAt: null,
 };
 

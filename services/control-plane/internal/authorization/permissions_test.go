@@ -21,8 +21,14 @@ func TestOrganizationPermissionsSeparateOperatorsAndViewers(t *testing.T) {
 	if !OrganizationAllows("agent_operator", ExecutionApprove) {
 		t.Fatal("agent operator must be able to approve executions")
 	}
+	if !OrganizationAllows("member", SessionSettle) || !OrganizationAllows("member", SessionArchive) {
+		t.Fatal("organization members must be able to settle and archive their Sessions")
+	}
 	if OrganizationAllows("viewer", SessionCreate) {
 		t.Fatal("viewer must remain read-only")
+	}
+	if OrganizationAllows("viewer", SessionSettle) || OrganizationAllows("viewer", SessionArchive) {
+		t.Fatal("viewers must not mutate Session lifecycle state")
 	}
 }
 

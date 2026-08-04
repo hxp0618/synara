@@ -78,6 +78,7 @@ type AgentSession struct {
 	WarmPoolMode                          string     `gorm:"column:warm_pool_mode;default:disabled"`
 	CreatedAt                             time.Time  `gorm:"column:created_at"`
 	UpdatedAt                             time.Time  `gorm:"column:updated_at"`
+	SettledAt                             *time.Time `gorm:"column:settled_at"`
 	ArchivedAt                            *time.Time `gorm:"column:archived_at"`
 }
 

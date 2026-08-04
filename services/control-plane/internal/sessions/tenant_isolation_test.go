@@ -65,6 +65,11 @@ func TestSessionOperationsRejectCrossTenantNestedIDSubstitution(t *testing.T) {
 		"session-cross-tenant-archive-idempotent", "session-cross-tenant-archive-idempotent", "127.0.0.1",
 	)
 	assertSessionProblemCode(t, err, "session_not_found")
+	_, _, err = fixture.service.SetSettledWithIdempotency(
+		ctx, otherPrincipal, fixture.sessionID, SetSessionSettledInput{Settled: true},
+		"session-cross-tenant-settle", "session-cross-tenant-settle", "127.0.0.1",
+	)
+	assertSessionProblemCode(t, err, "session_not_found")
 	_, _, err = fixture.service.Suspend(
 		ctx, otherPrincipal, fixture.sessionID,
 		"session-cross-tenant-suspend", "session-cross-tenant-suspend", "127.0.0.1",

@@ -652,6 +652,26 @@ describe("Control Plane Session projection", () => {
     expect(thread.forkSourceThreadId).toBe("source-session");
   });
 
+  it("projects authoritative Session settled and unsettled events onto Activity state", () => {
+    const settled = applyControlPlaneSessionEvent(
+      createControlPlaneSessionProjection(session),
+      event(1, "session.settled", { settled: true, settledAt: "2026-07-12T00:00:01Z" }),
+    ).projection;
+    expect(settled.session.settledAt).toBe("2026-07-12T00:00:01Z");
+    expect(
+      projectControlPlaneThreads([session], new Map([[session.id, settled]]))[0]?.settledAt,
+    ).toBe("2026-07-12T00:00:01Z");
+
+    const unsettled = applyControlPlaneSessionEvent(
+      settled,
+      event(2, "session.unsettled", { settled: false }),
+    ).projection;
+    expect(unsettled.session.settledAt).toBeNull();
+    expect(
+      projectControlPlaneThreads([session], new Map([[session.id, unsettled]]))[0]?.settledAt,
+    ).toBeNull();
+  });
+
   it("projects top-level thread model and timestamps from the projection Session authority", () => {
     const projection = {
       ...createControlPlaneSessionProjection(session),

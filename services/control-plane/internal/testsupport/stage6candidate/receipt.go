@@ -45,8 +45,8 @@ func Receipt(candidateID, environmentID string) ([]byte, string, error) {
 	}
 	_, internalCostDigest, err := stage6internalcost.Receipt(
 		candidateID, environmentID,
-		"000163_stage6_candidate_compatibility_matrix_evidence.sql",
-		"sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd",
+		"000164_session_settlement.sql",
+		"sha256:9094065b2ee3881d0a4c83f1b68430d7deec522cc46b557eeec97582f3407b38",
 	)
 	if err != nil {
 		return nil, "", err
@@ -94,7 +94,7 @@ func Receipt(candidateID, environmentID string) ([]byte, string, error) {
 					"macos-x64": "sha256:" + strings.Repeat("8", 64), "windows-x64": "sha256:" + strings.Repeat("9", 64),
 				},
 			},
-			"migrationTail": map[string]any{"name": "000163_stage6_candidate_compatibility_matrix_evidence.sql", "sha256": "sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd"},
+			"migrationTail": map[string]any{"name": "000164_session_settlement.sql", "sha256": "sha256:9094065b2ee3881d0a4c83f1b68430d7deec522cc46b557eeec97582f3407b38"},
 			"origins":       map[string]any{"controlPlaneBaseUrl": "https://control.example.test/v1", "webBaseUrl": "https://app.example.test", "adminBaseUrl": "https://admin.example.test"},
 			"regions":       []string{"region-one"},
 		},
@@ -107,7 +107,7 @@ func Receipt(candidateID, environmentID string) ([]byte, string, error) {
 			"schemaVersion": "synara.release-compatibility-matrix.v1", "matrixVersion": 1,
 			"assessment": "source-compatible-not-release-approved", "sourceFileCount": 172,
 			"sourceByteCount": 1048576,
-			"migrationTail":   map[string]any{"name": "000163_stage6_candidate_compatibility_matrix_evidence.sql", "sha256": "sha256:8b22dab46148c8da90df03833606bf1a8968b9d99570f3e96b0ba5ad23ac68bd"},
+			"migrationTail":   map[string]any{"name": "000164_session_settlement.sql", "sha256": "sha256:9094065b2ee3881d0a4c83f1b68430d7deec522cc46b557eeec97582f3407b38"},
 		},
 		"releaseEvidence": map[string]any{
 			"path": "release-evidence.json", "sha256": digest("release-evidence"),

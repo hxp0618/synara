@@ -838,6 +838,43 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-model-switch-1");
   });
 
+  it("routes Session settle and archive mutations with independent idempotency keys", async () => {
+    const fetchMock = vi.fn<RequiredInitFetch>(
+      async () =>
+        new Response(JSON.stringify({ id: "session-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.setSessionSettled("session/one", true, {
+      idempotencyKey: "settle-key",
+    });
+    await controlPlaneClient.archiveSession("session/one", {
+      idempotencyKey: "archive-key",
+    });
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      "/v1/sessions/session%2Fone/settled",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({ settled: true }),
+      }),
+    ]);
+    expect(new Headers(fetchMock.mock.calls[0]![1].headers).get("Idempotency-Key")).toBe(
+      "settle-key",
+    );
+    expect(fetchMock.mock.calls[1]).toEqual([
+      "/v1/sessions/session%2Fone/archive",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    ]);
+    expect(new Headers(fetchMock.mock.calls[1]![1].headers).get("Idempotency-Key")).toBe(
+      "archive-key",
+    );
+  });
+
   it("sends expectedModel null explicitly when the Session has no current model", async () => {
     const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
