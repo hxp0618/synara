@@ -477,7 +477,9 @@ func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSe
 		"cn-beijing",
 		"cluster-b",
 	)
-	now := time.Now().UTC().Add(-10 * time.Second)
+	// SQLite persists these authority timestamps at microsecond precision. Keep
+	// the frozen expectation at the same precision on nanosecond Linux clocks.
+	now := time.Now().UTC().Add(-10 * time.Second).Truncate(time.Microsecond)
 	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
 

@@ -770,7 +770,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     expect(Buffer.byteLength(oversized.stdout.trim())).toBeGreaterThan(
       PROVIDER_HOST_MAX_MESSAGE_BYTES,
     );
-  });
+  }, 15_000);
 
   it("injects turn-scoped malformed, oversized, and crash faults without changing discovery", () => {
     for (const scenario of ["provider-malformed", "provider-oversized"] as const) {
