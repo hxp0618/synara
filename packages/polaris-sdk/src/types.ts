@@ -34,7 +34,8 @@ export type SteerActiveTurnInput = components["schemas"]["SteerActiveTurnRequest
 export type CompactSessionInput = components["schemas"]["CompactSessionRequest"];
 export type ReviewTarget = components["schemas"]["ReviewTarget"];
 export type StartSessionReviewInput = components["schemas"]["StartSessionReviewRequest"];
-export type DeveloperQueuedSessionOperation = components["schemas"]["DeveloperQueuedSessionOperation"];
+export type DeveloperQueuedSessionOperation =
+  components["schemas"]["DeveloperQueuedSessionOperation"];
 export type RollbackSessionInput = components["schemas"]["RollbackSessionRequest"];
 export type RollbackSessionResult = components["schemas"]["RollbackSessionResult"];
 export type ForkSessionInput = components["schemas"]["ForkSessionRequest"];

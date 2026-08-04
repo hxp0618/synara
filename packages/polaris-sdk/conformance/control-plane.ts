@@ -52,7 +52,9 @@ const archiveCandidate = await targetPolaris.projects.create(
   { idempotencyKey: `conformance-project-archive-create-${crypto.randomUUID()}` },
 );
 const projectArchiveKey = `conformance-project-archive-${crypto.randomUUID()}`;
-await targetPolaris.projects.archive(archiveCandidate.data.id, { idempotencyKey: projectArchiveKey });
+await targetPolaris.projects.archive(archiveCandidate.data.id, {
+  idempotencyKey: projectArchiveKey,
+});
 const archivedReplay = await targetPolaris.projects.archive(archiveCandidate.data.id, {
   idempotencyKey: projectArchiveKey,
 });
@@ -60,9 +62,14 @@ assert(archivedReplay.idempotencyReplayed, "Project archive replay was not ident
 const projectCapabilities = await targetPolaris.projects.capabilities(project.data.id, {
   executionTargetId,
 });
-assert(projectCapabilities.data.executionTargetId === executionTargetId, "Project capability target drifted.");
+assert(
+  projectCapabilities.data.executionTargetId === executionTargetId,
+  "Project capability target drifted.",
+);
 assert(projectCapabilities.data.basis === "target", "Project capability basis was not target.");
-console.error("[polaris-conformance] created, replayed, listed, read, updated, and archived Projects");
+console.error(
+  "[polaris-conformance] created, replayed, listed, read, updated, and archived Projects",
+);
 const createKey = `conformance-create-${crypto.randomUUID()}`;
 const createInput = {
   projectId: project.data.id,
@@ -78,8 +85,14 @@ assert(session.response.requestId !== null, "Session response omitted X-Request-
 assert(session.response.rateLimit.limit !== null, "Session response omitted RateLimit-Limit.");
 assert(!session.response.idempotencyReplayed, "Initial Session create was unexpectedly replayed.");
 const sessionCapabilities = await session.capabilities();
-assert(sessionCapabilities.data.executionTargetId === executionTargetId, "Session capability target drifted.");
-assert(sessionCapabilities.data.basis === "target", "Fresh Session capability basis was not target.");
+assert(
+  sessionCapabilities.data.executionTargetId === executionTargetId,
+  "Session capability target drifted.",
+);
+assert(
+  sessionCapabilities.data.basis === "target",
+  "Fresh Session capability basis was not target.",
+);
 const sessionUsage = await session.usage();
 assert(sessionUsage.data.sessionId === session.id, "Session Usage returned another Session.");
 assert(Array.isArray(sessionUsage.data.items), "Session Usage items were not an array.");
@@ -103,7 +116,10 @@ const switchedModelReplay = await archiveSession.switchModel(
   { model: "conformance-model", expectedModel: "conformance-model" },
   { idempotencyKey: switchModelKey },
 );
-assert(switchedModel.data.model === "conformance-model", "Session model compare-and-switch drifted.");
+assert(
+  switchedModel.data.model === "conformance-model",
+  "Session model compare-and-switch drifted.",
+);
 assert(switchedModelReplay.idempotencyReplayed, "Session model-switch replay was not identified.");
 const suspendKey = `conformance-session-suspend-${crypto.randomUUID()}`;
 const suspendedSession = await archiveSession.suspend({ idempotencyKey: suspendKey });
@@ -129,7 +145,11 @@ const cancelSession = await polaris.sessions.create(
   { idempotencyKey: `conformance-cancel-session-create-${crypto.randomUUID()}` },
 );
 const cancelTurn = await cancelSession.sendTurn(
-  { inputText: "Cancel this queued execution.", runtimeMode: "full-access", interactionMode: "default" },
+  {
+    inputText: "Cancel this queued execution.",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  },
   { idempotencyKey: `conformance-cancel-turn-create-${crypto.randomUUID()}` },
 );
 const cancelEvents = await cancelSession.listEvents({ afterSequence: 0, limit: 50 });
@@ -144,7 +164,13 @@ const cancelledExecutionReplay = await polaris.executions.cancel(cancellableEven
 });
 assert(cancelledExecution.data.status === "cancelled", "Execution cancel did not reach cancelled.");
 assert(cancelledExecutionReplay.idempotencyReplayed, "Execution cancel replay was not identified.");
-for (const forbidden of ["workerId", "workerManifestId", "providerRuntimeBindingId", "remoteWorkspaceId", "generation"]) {
+for (const forbidden of [
+  "workerId",
+  "workerManifestId",
+  "providerRuntimeBindingId",
+  "remoteWorkspaceId",
+  "generation",
+]) {
   assert(!(forbidden in cancelledExecution.data), `Execution projection leaked ${forbidden}.`);
 }
 const rollbackBoundary = await cancelSession.listEvents({ afterSequence: 0, limit: 50 });
@@ -161,11 +187,19 @@ assert(rollback.data.removedTurnCount === 1, "Session rollback did not remove th
 assert(rollbackReplay.idempotencyReplayed, "Session rollback replay was not identified.");
 const forkKey = `conformance-session-fork-${crypto.randomUUID()}`;
 const forked = await cancelSession.fork(
-  { expectedLastEventSequence: rollback.data.eventSequence, title: "SDK conformance fork", visibility: "organization" },
+  {
+    expectedLastEventSequence: rollback.data.eventSequence,
+    title: "SDK conformance fork",
+    visibility: "organization",
+  },
   { idempotencyKey: forkKey },
 );
 const forkedReplay = await cancelSession.fork(
-  { expectedLastEventSequence: rollback.data.eventSequence, title: "SDK conformance fork", visibility: "organization" },
+  {
+    expectedLastEventSequence: rollback.data.eventSequence,
+    title: "SDK conformance fork",
+    visibility: "organization",
+  },
   { idempotencyKey: forkKey },
 );
 assert(forked.data.session.id !== cancelSession.id, "Session fork reused the source ID.");
@@ -180,15 +214,28 @@ const interruptSession = await polaris.sessions.create(
   { idempotencyKey: `conformance-interrupt-session-create-${crypto.randomUUID()}` },
 );
 await interruptSession.sendTurn(
-  { inputText: "Interrupt this queued execution.", runtimeMode: "full-access", interactionMode: "default" },
+  {
+    inputText: "Interrupt this queued execution.",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  },
   { idempotencyKey: `conformance-interrupt-turn-create-${crypto.randomUUID()}` },
 );
 const interruptKey = `conformance-turn-interrupt-${crypto.randomUUID()}`;
 const interruptCommand = await interruptSession.interrupt({ idempotencyKey: interruptKey });
 const interruptCommandReplay = await interruptSession.interrupt({ idempotencyKey: interruptKey });
-assert(interruptCommand.data.commandType === "InterruptTurn", "Interrupt returned another command type.");
+assert(
+  interruptCommand.data.commandType === "InterruptTurn",
+  "Interrupt returned another command type.",
+);
 assert(interruptCommandReplay.idempotencyReplayed, "Interrupt replay was not identified.");
-for (const forbidden of ["payload", "deliveryWorkerId", "deliveryGeneration", "deliveryAttempts", "deliveryError"]) {
+for (const forbidden of [
+  "payload",
+  "deliveryWorkerId",
+  "deliveryGeneration",
+  "deliveryAttempts",
+  "deliveryError",
+]) {
   assert(!(forbidden in interruptCommand.data), `Control command projection leaked ${forbidden}.`);
 }
 

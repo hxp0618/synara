@@ -51,7 +51,7 @@ func TestDeveloperExecutionAndControlCommandProjectionsExcludeRuntimeAuthority(t
 		ControlCommand: executions.ControlCommand{
 			ID: uuid.New(), ExecutionID: uuid.New(), SessionID: uuid.New(), TurnID: uuid.New(),
 			Provider: "codex", CommandType: "StartReview", Status: "pending", RequestedAt: now,
-			Payload: map[string]any{"target": map[string]any{"type": "baseBranch", "branch": "sensitive"}},
+			Payload:          map[string]any{"target": map[string]any{"type": "baseBranch", "branch": "sensitive"}},
 			DeliveryWorkerID: &workerID, DeliveryGeneration: int64PointerHTTPAPI(7),
 		},
 	})

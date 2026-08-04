@@ -56,6 +56,14 @@ const approvedVisualAssetDigests = new Map<string, string>([
   ],
 ]);
 
+// Legally required license/origin attribution is not first-party product identity. Approve only the
+// exact reviewed line bytes at their canonical paths; changing a word or copying the attribution into
+// another file becomes a violation again.
+const approvedAttributionLineDigests = new Map<string, ReadonlySet<string>>([
+  ["LICENSE", new Set(["8555679b962ae99635687f48fc5c02647e32554df6ccf00cadbf2f4589859399"])],
+  ["README.md", new Set(["727d3ddd93ba5dfb7fd25a59120be75eeac0df46bc0273415a214f1a6fcd3325"])],
+]);
+
 export interface BrandIdentityFile {
   readonly path: string;
   readonly contents: string;
@@ -86,6 +94,8 @@ export function findBrandIdentityViolations(
     }
     for (const [index, line] of file.contents.split(/\r?\n/).entries()) {
       if (!containsForbiddenIdentity(line)) continue;
+      const lineDigest = createHash("sha256").update(line).digest("hex");
+      if (approvedAttributionLineDigests.get(file.path)?.has(lineDigest)) continue;
       violations.push({ path: file.path, line: index + 1, text: line.trim() });
     }
   }

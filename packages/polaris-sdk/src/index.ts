@@ -513,7 +513,9 @@ export class SessionHandle {
     });
   }
 
-  capabilities(options: { signal?: AbortSignal } = {}): Promise<SDKResponse<ProviderCapabilityProjection>> {
+  capabilities(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SDKResponse<ProviderCapabilityProjection>> {
     return this.transport.json<ProviderCapabilityProjection>({
       method: "GET",
       path: `/v1/sessions/${encodeURIComponent(this.id)}/provider-capabilities`,

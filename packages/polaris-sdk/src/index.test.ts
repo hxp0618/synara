@@ -191,32 +191,65 @@ describe("Polaris", () => {
       .mockResolvedValueOnce(jsonResponse({ items: [session], nextCursor: "next-page" }, 200))
       .mockResolvedValueOnce(jsonResponse(session, 200))
       .mockResolvedValueOnce(
-        jsonResponse({ executionTargetId: "target-1", targetKind: "ssh", basis: "target", items: [] }, 200),
+        jsonResponse(
+          { executionTargetId: "target-1", targetKind: "ssh", basis: "target", items: [] },
+          200,
+        ),
       )
-      .mockResolvedValueOnce(jsonResponse({ tenantId: "tenant-1", sessionId: "session-1", items: [] }, 200))
+      .mockResolvedValueOnce(
+        jsonResponse({ tenantId: "tenant-1", sessionId: "session-1", items: [] }, 200),
+      )
       .mockResolvedValueOnce(jsonResponse({ ...session, model: "model-next" }, 200))
       .mockResolvedValueOnce(jsonResponse({ ...session, status: "suspended" }, 200))
       .mockResolvedValueOnce(jsonResponse({ ...session, status: "active" }, 200))
       .mockResolvedValueOnce(
-        jsonResponse({
-          id: "execution-1", sessionId: "session-1", turnId: "turn-1", attempt: 1,
-          status: "recovering", executionTargetId: "target-1", targetKind: "ssh", provider: "codex",
-          queuedAt: "2026-08-04T00:00:00Z", startedAt: null, finishedAt: null, failureCode: null,
-        }, 202),
+        jsonResponse(
+          {
+            id: "execution-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            attempt: 1,
+            status: "recovering",
+            executionTargetId: "target-1",
+            targetKind: "ssh",
+            provider: "codex",
+            queuedAt: "2026-08-04T00:00:00Z",
+            startedAt: null,
+            finishedAt: null,
+            failureCode: null,
+          },
+          202,
+        ),
       )
       .mockResolvedValueOnce(
-        jsonResponse({
-          id: "command-1", executionId: "execution-1", sessionId: "session-1", turnId: "turn-1",
-          provider: "codex", commandType: "SteerTurn", status: "pending",
-          requestedAt: "2026-08-04T00:00:00Z",
-        }, 202),
+        jsonResponse(
+          {
+            id: "command-1",
+            executionId: "execution-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            provider: "codex",
+            commandType: "SteerTurn",
+            status: "pending",
+            requestedAt: "2026-08-04T00:00:00Z",
+          },
+          202,
+        ),
       )
       .mockResolvedValueOnce(
-        jsonResponse({
-          id: "command-2", executionId: "execution-1", sessionId: "session-1", turnId: "turn-1",
-          provider: "codex", commandType: "InterruptTurn", status: "pending",
-          requestedAt: "2026-08-04T00:00:00Z",
-        }, 202),
+        jsonResponse(
+          {
+            id: "command-2",
+            executionId: "execution-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            provider: "codex",
+            commandType: "InterruptTurn",
+            status: "pending",
+            requestedAt: "2026-08-04T00:00:00Z",
+          },
+          202,
+        ),
       )
       .mockResolvedValueOnce(jsonResponse({ ...session, status: "archived" }, 200));
     const polaris = new Polaris({
@@ -312,7 +345,10 @@ describe("Polaris", () => {
       .mockResolvedValueOnce(jsonResponse({ ...project, name: "Updated Project" }, 200))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(
-        jsonResponse({ executionTargetId: "target/one", targetKind: "ssh", basis: "target", items: [] }, 200),
+        jsonResponse(
+          { executionTargetId: "target/one", targetKind: "ssh", basis: "target", items: [] },
+          200,
+        ),
       );
     const polaris = new Polaris({
       apiKey: "syna_sa_test-token",
@@ -548,12 +584,20 @@ describe("Polaris", () => {
   it("encodes sequence-guarded compact, review, rollback, and fork operations", async () => {
     const session = sessionFixture();
     const command = {
-      id: "command-1", executionId: "execution-1", sessionId: session.id, turnId: "turn-1",
-      provider: "codex", commandType: "CompactSession", status: "pending",
+      id: "command-1",
+      executionId: "execution-1",
+      sessionId: session.id,
+      turnId: "turn-1",
+      provider: "codex",
+      commandType: "CompactSession",
+      status: "pending",
       requestedAt: "2026-08-04T00:00:00Z",
     };
     const operation = {
-      type: "compact", turn: { id: "turn-1" }, executionId: "execution-1", controlCommand: command,
+      type: "compact",
+      turn: { id: "turn-1" },
+      executionId: "execution-1",
+      controlCommand: command,
     };
     const fetchMock = vi
       .fn<SDKFetch>()
@@ -562,10 +606,21 @@ describe("Polaris", () => {
       .mockResolvedValueOnce(jsonResponse({ ...operation, type: "review" }, 202))
       .mockResolvedValueOnce(jsonResponse({ sessionId: session.id, removedTurnCount: 1 }, 200))
       .mockResolvedValueOnce(
-        jsonResponse({ session: { ...session, id: "session-fork" }, sourceSessionId: session.id, sourceEventSequence: 7, supportMode: "emulated" }, 201),
+        jsonResponse(
+          {
+            session: { ...session, id: "session-fork" },
+            sourceSessionId: session.id,
+            sourceEventSequence: 7,
+            supportMode: "emulated",
+          },
+          201,
+        ),
       );
     const polaris = new Polaris({
-      apiKey: "syna_sa_test-token", baseUrl: "https://control.example.test", fetch: fetchMock, maxRetries: 0,
+      apiKey: "syna_sa_test-token",
+      baseUrl: "https://control.example.test",
+      fetch: fetchMock,
+      maxRetries: 0,
     });
     const handle = await polaris.sessions.get(session.id);
 
@@ -589,9 +644,11 @@ describe("Polaris", () => {
       "https://control.example.test/v1/sessions/session-1/rollback",
       "https://control.example.test/v1/sessions/session-1/fork",
     ]);
-    expect(fetchMock.mock.calls.slice(1).map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([
-      "compact-key", "review-key", "rollback-key", "fork-key",
-    ]);
+    expect(
+      fetchMock.mock.calls
+        .slice(1)
+        .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key")),
+    ).toEqual(["compact-key", "review-key", "rollback-key", "fork-key"]);
   });
 
   it("cancels an Execution through the sanitized developer projection", async () => {
@@ -612,7 +669,9 @@ describe("Polaris", () => {
     const fetchMock = vi
       .fn<SDKFetch>()
       .mockResolvedValueOnce(jsonResponse(execution, 200))
-      .mockResolvedValueOnce(jsonResponse({ ...execution, status: "recovering", finishedAt: null }, 202));
+      .mockResolvedValueOnce(
+        jsonResponse({ ...execution, status: "recovering", finishedAt: null }, 202),
+      );
     const polaris = new Polaris({
       apiKey: "syna_sa_test-token",
       baseUrl: "https://control.example.test",

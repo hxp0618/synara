@@ -1615,7 +1615,8 @@ components:
       properties:
         expectedLastEventSequence: { type: integer, format: int64, minimum: 0 }
         target: { $ref: "#/components/schemas/ReviewTarget" }
-        runtimeMode: { type: string, enum: [approval-required, full-access], default: approval-required }
+        runtimeMode:
+          { type: string, enum: [approval-required, full-access], default: approval-required }
     DeveloperQueuedSessionOperation:
       type: object
       additionalProperties: false
@@ -1635,7 +1636,19 @@ components:
     RollbackSessionResult:
       type: object
       additionalProperties: false
-      required: [sessionId, eventId, eventSequence, fromSessionId, fromTurnId, fromSequence, removedTurnCount, supportMode, workspaceDisposition, externalSideEffectsReverted]
+      required:
+        [
+          sessionId,
+          eventId,
+          eventSequence,
+          fromSessionId,
+          fromTurnId,
+          fromSequence,
+          removedTurnCount,
+          supportMode,
+          workspaceDisposition,
+          externalSideEffectsReverted,
+        ]
       properties:
         sessionId: { $ref: "#/components/schemas/UUID" }
         eventId: { $ref: "#/components/schemas/UUID" }
@@ -1716,7 +1729,13 @@ components:
           additionalProperties: { type: integer, format: int64 }
         costCoverage:
           type: string
-          enum: [provider-unavailable, provider-only, provider-and-allocated-platform, provider-unavailable-with-allocated-platform]
+          enum:
+            [
+              provider-unavailable,
+              provider-only,
+              provider-and-allocated-platform,
+              provider-unavailable-with-allocated-platform,
+            ]
         final: { type: boolean }
         updatedAt: { type: string, format: date-time }
     PlatformCharge:
@@ -1914,7 +1933,8 @@ components:
           oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
         kind:
           type: string
-          enum: [attachment, generated_file, terminal_log, diff, workspace_snapshot, checkpoint, memory]
+          enum:
+            [attachment, generated_file, terminal_log, diff, workspace_snapshot, checkpoint, memory]
         status: { type: string, enum: [pending, ready, deleting, deleted, failed] }
         originalName: { type: [string, "null"] }
         contentType: { type: [string, "null"] }
@@ -2144,7 +2164,8 @@ components:
     PendingInteraction:
       type: object
       additionalProperties: false
-      required: [id, executionId, turnId, provider, requestId, kind, payload, requestedAt, expiresAt]
+      required:
+        [id, executionId, turnId, provider, requestId, kind, payload, requestedAt, expiresAt]
       properties:
         id: { $ref: "#/components/schemas/UUID" }
         executionId: { $ref: "#/components/schemas/UUID" }

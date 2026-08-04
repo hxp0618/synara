@@ -27,7 +27,7 @@ describe("brand identity guard", () => {
     ).toEqual([]);
   });
 
-  it("rejects retired identity in legal notices", () => {
+  it("allows only the exact canonical legal attribution line", () => {
     const notice = `Copyright (c) 2026 ${characters(84, 51)} ${characters(
       84,
       111,
@@ -35,9 +35,12 @@ describe("brand identity guard", () => {
       108,
       115,
     )} Inc.`;
-    expect(findBrandIdentityViolations([{ path: "LICENSE", contents: notice }])).toHaveLength(1);
+    expect(findBrandIdentityViolations([{ path: "LICENSE", contents: notice }])).toEqual([]);
     expect(
       findBrandIdentityViolations([{ path: "docs/license-copy.md", contents: notice }]),
+    ).toHaveLength(1);
+    expect(
+      findBrandIdentityViolations([{ path: "LICENSE", contents: `${notice} product` }]),
     ).toHaveLength(1);
   });
 
