@@ -2,8 +2,11 @@ package executions
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -53,6 +56,46 @@ func (s *Service) ListInteractions(
 	return items, nil
 }
 
+func (s *Service) ListInteractionsPage(
+	ctx context.Context,
+	principal identity.Principal,
+	executionID uuid.UUID,
+	input InteractionListQuery,
+) (InteractionPage, error) {
+	tenantID, _, err := s.authorizeInteraction(ctx, principal, executionID)
+	if err != nil {
+		return InteractionPage{}, err
+	}
+	limit, cursor, err := normalizeInteractionListQuery(input, tenantID, executionID, "execution")
+	if err != nil {
+		return InteractionPage{}, err
+	}
+	query := s.db.WithContext(ctx).Where("tenant_id = ? AND execution_id = ?", tenantID, executionID)
+	if cursor != nil {
+		query = query.Where("requested_at > ? OR (requested_at = ? AND id > ?)", cursor.RequestedAt, cursor.RequestedAt, cursor.ID)
+	}
+	models := make([]persistence.ExecutionInteraction, 0, limit+1)
+	if err := query.Order("requested_at, id").Limit(limit + 1).Find(&models).Error; err != nil {
+		return InteractionPage{}, problem.Wrap(500, "interactions_load_failed", "Execution interactions could not be loaded.", err)
+	}
+	hasMore := len(models) > limit
+	if hasMore {
+		models = models[:limit]
+	}
+	page := InteractionPage{Items: make([]Interaction, 0, len(models))}
+	for _, model := range models {
+		page.Items = append(page.Items, toInteraction(model))
+	}
+	if hasMore {
+		last := models[len(models)-1]
+		encoded := encodeInteractionListCursor(interactionListCursor{
+			Version: 1, TenantID: tenantID, ResourceID: executionID, Scope: "execution", RequestedAt: last.RequestedAt, ID: last.ID,
+		})
+		page.NextCursor = &encoded
+	}
+	return page, nil
+}
+
 func (s *Service) ListPendingInteractions(
 	ctx context.Context,
 	principal identity.Principal,
@@ -78,6 +121,106 @@ func (s *Service) ListPendingInteractions(
 		items = append(items, toPendingInteraction(model))
 	}
 	return PendingInteractionSnapshot{Items: items, SnapshotSequence: session.LastEventSequence}, nil
+}
+
+func (s *Service) ListPendingInteractionsPage(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	input InteractionListQuery,
+) (PendingInteractionPage, error) {
+	tenantID, session, err := s.authorizeSessionInteraction(ctx, principal, sessionID)
+	if err != nil {
+		return PendingInteractionPage{}, err
+	}
+	limit, cursor, err := normalizeInteractionListQuery(input, tenantID, sessionID, "session")
+	if err != nil {
+		return PendingInteractionPage{}, err
+	}
+	query := s.db.WithContext(ctx).Where(
+		"tenant_id = ? AND session_id = ? AND status = 'pending' AND expires_at > ?",
+		tenantID, sessionID, s.now(),
+	)
+	if cursor != nil {
+		query = query.Where("requested_at > ? OR (requested_at = ? AND id > ?)", cursor.RequestedAt, cursor.RequestedAt, cursor.ID)
+	}
+	models := make([]persistence.ExecutionInteraction, 0, limit+1)
+	if err := query.Order("requested_at, id").Limit(limit + 1).Find(&models).Error; err != nil {
+		return PendingInteractionPage{}, problem.Wrap(500, "interactions_load_failed", "Pending Session interactions could not be loaded.", err)
+	}
+	hasMore := len(models) > limit
+	if hasMore {
+		models = models[:limit]
+	}
+	page := PendingInteractionPage{Items: make([]PendingInteraction, 0, len(models)), SnapshotSequence: session.LastEventSequence}
+	for _, model := range models {
+		page.Items = append(page.Items, toPendingInteraction(model))
+	}
+	if hasMore {
+		last := models[len(models)-1]
+		encoded := encodeInteractionListCursor(interactionListCursor{
+			Version: 1, TenantID: tenantID, ResourceID: sessionID, Scope: "session", RequestedAt: last.RequestedAt, ID: last.ID,
+		})
+		page.NextCursor = &encoded
+	}
+	return page, nil
+}
+
+type interactionListCursor struct {
+	Version     int       `json:"v"`
+	TenantID    uuid.UUID `json:"tenantId"`
+	ResourceID  uuid.UUID `json:"resourceId"`
+	Scope       string    `json:"scope"`
+	RequestedAt time.Time `json:"requestedAt"`
+	ID          uuid.UUID `json:"id"`
+}
+
+func normalizeInteractionListQuery(
+	input InteractionListQuery,
+	tenantID, resourceID uuid.UUID,
+	scope string,
+) (int, *interactionListCursor, error) {
+	limit := input.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 200 {
+		return 0, nil, problem.New(400, "invalid_interaction_limit", "Interaction list limit must be between 1 and 200.")
+	}
+	if strings.TrimSpace(input.Cursor) == "" {
+		return limit, nil, nil
+	}
+	cursor, err := decodeInteractionListCursor(input.Cursor)
+	if err != nil || cursor.TenantID != tenantID || cursor.ResourceID != resourceID || cursor.Scope != scope {
+		return 0, nil, problem.New(400, "invalid_interaction_cursor", "Interaction list cursor is invalid for this resource.")
+	}
+	return limit, &cursor, nil
+}
+
+func encodeInteractionListCursor(cursor interactionListCursor) string {
+	encoded, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeInteractionListCursor(value string) (interactionListCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return interactionListCursor{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	decoder.DisallowUnknownFields()
+	var cursor interactionListCursor
+	if err := decoder.Decode(&cursor); err != nil {
+		return interactionListCursor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return interactionListCursor{}, errors.New("invalid trailing cursor data")
+	}
+	if cursor.Version != 1 || cursor.TenantID == uuid.Nil || cursor.ResourceID == uuid.Nil ||
+		(cursor.Scope != "execution" && cursor.Scope != "session") || cursor.RequestedAt.IsZero() || cursor.ID == uuid.Nil {
+		return interactionListCursor{}, errors.New("invalid cursor fields")
+	}
+	return cursor, nil
 }
 
 func (s *Service) ExpirePendingInteractions(

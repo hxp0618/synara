@@ -812,6 +812,16 @@ type Interaction struct {
 	DeliveryError       *string        `json:"deliveryError,omitempty"`
 }
 
+type InteractionListQuery struct {
+	Limit  int
+	Cursor string
+}
+
+type InteractionPage struct {
+	Items      []Interaction `json:"items"`
+	NextCursor *string       `json:"nextCursor"`
+}
+
 type PendingInteraction struct {
 	ID          uuid.UUID      `json:"id"`
 	ExecutionID uuid.UUID      `json:"executionId"`
@@ -826,6 +836,12 @@ type PendingInteraction struct {
 
 type PendingInteractionSnapshot struct {
 	Items            []PendingInteraction `json:"items"`
+	SnapshotSequence int64                `json:"snapshotSequence"`
+}
+
+type PendingInteractionPage struct {
+	Items            []PendingInteraction `json:"items"`
+	NextCursor       *string              `json:"nextCursor"`
 	SnapshotSequence int64                `json:"snapshotSequence"`
 }
 

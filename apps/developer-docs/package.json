@@ -1,0 +1,22 @@
+{
+  "name": "@synara/developer-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "bun ../../scripts/generate-stage7-public-openapi.ts ../../docs/api/openapi.yaml .generated/openapi.yaml && astro build && bunx @redocly/cli@2.43.3 build-docs .generated/openapi.yaml --config ../../docs/api/redocly.yaml --output dist/api-reference/index.html",
+    "preview": "astro preview",
+    "test": "vitest run",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "astro": "^6.4.6"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.7",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "yaml": "^2.8.3"
+  }
+}

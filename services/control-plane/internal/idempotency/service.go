@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"gorm.io/gorm/clause"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -39,6 +41,9 @@ func Execute[T any](
 	scope Scope,
 	operation func(*gorm.DB) (T, error),
 ) (Result[T], error) {
+	if machine, ok := authorization.MachinePrincipalFromContext(ctx); ok {
+		scope.ActorID = machine.ActorID
+	}
 	var zero T
 	scope.Key = strings.TrimSpace(scope.Key)
 	if scope.Key == "" {

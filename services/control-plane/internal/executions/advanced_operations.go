@@ -150,10 +150,11 @@ func (s *Service) requestPrimaryOperation(
 	); err != nil {
 		return OperationResult[QueuedSessionOperation]{}, err
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session." + request.Type, SuccessStatus: 202,
 		Request: map[string]any{
 			"sessionId": sessionID, "expectedLastEventSequence": request.ExpectedLastEventSequence,
@@ -327,7 +328,7 @@ func (s *Service) requestPrimaryOperation(
 			return QueuedSessionOperation{}, problem.Wrap(409, "control_command_conflict", "The primary Control command conflicts with another operation.", err)
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, sessionID, sessions.InternalEventInput{
-			EventType: "turn.created", ActorType: "user", ActorID: &principal.UserID, ExecutionID: &execution.ID,
+			EventType: "turn.created", ActorType: actorType, ActorID: &actorID, ExecutionID: &execution.ID,
 			Payload: scheduled.MergeSchedulingEvidencePayload(map[string]any{
 				"turnId": turn.ID, "executionId": execution.ID, "status": "queued",
 				"turnKind": request.TurnKind, "controlCommandId": command.ID,
@@ -358,7 +359,7 @@ func (s *Service) requestPrimaryOperation(
 			return QueuedSessionOperation{}, problem.Wrap(500, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "session." + request.Type + "_requested", ResourceType: "agent_session", ResourceID: &session.ID,
 			OrganizationID: &session.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"turnId": turn.ID, "executionId": execution.ID, "controlCommandId": command.ID},

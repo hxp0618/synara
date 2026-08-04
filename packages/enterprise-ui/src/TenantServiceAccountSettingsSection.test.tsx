@@ -23,6 +23,9 @@ describe("TenantServiceAccountSettingsSection", () => {
           name: "SCIM provisioner",
           description: "Directory sync",
           scopes: ["scim.read", "scim.write"],
+          role: "member",
+          rateLimitPerMinute: 600,
+          lastUsedAt: null,
           status: "active",
           revokedAt: null,
           createdAt: "2026-07-30T00:00:00Z",
@@ -39,7 +42,10 @@ describe("TenantServiceAccountSettingsSection", () => {
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain("Service Accounts and SCIM");
+    expect(markup).toContain("Service Accounts and API Keys");
+    expect(markup).toContain("api.access");
+    expect(markup).toContain("Requests per minute");
+    expect(markup).toContain("last used never");
     expect(markup).toContain("Create Service Account");
     expect(markup).toContain("SCIM provisioner");
     expect(markup).toContain("Rotate token");

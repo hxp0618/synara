@@ -67,6 +67,57 @@ func TestReviewOperationPersistsAtomicallyAndReplays(t *testing.T) {
 	fixture.assertPrimaryOperationCounts(t, 1, 1, 1, 1, 1)
 }
 
+func TestReviewOperationAttributesServiceAccountAndPersistsMachineReceipt(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+		Update("visibility", "organization").Error; err != nil {
+		t.Fatal(err)
+	}
+	serviceAccountID := uuid.New()
+	principal := fixture.principal
+	principal.ServiceAccountID = &serviceAccountID
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	input := StartReviewInput{
+		ExpectedLastEventSequence: &expected,
+		Target:                    ReviewTarget{Type: "uncommittedChanges"},
+	}
+	first, err := fixture.service.RequestReview(
+		context.Background(), principal, fixture.sessionID, input,
+		"review-service-account", "review-service-account-request", "127.0.0.1",
+	)
+	if err != nil || first.Replayed || first.Value.Type != "review" {
+		t.Fatalf("Service Account Review = %#v, %v", first, err)
+	}
+	replay, err := fixture.service.RequestReview(
+		context.Background(), principal, fixture.sessionID, input,
+		"review-service-account", "review-service-account-replay", "127.0.0.1",
+	)
+	if err != nil || !replay.Replayed || replay.Value.ExecutionID != first.Value.ExecutionID {
+		t.Fatalf("Service Account Review replay = %#v, %v", replay, err)
+	}
+	var auditLog persistence.AuditLog
+	if err := fixture.db.Where(
+		"tenant_id = ? AND action = ? AND resource_id = ?", fixture.tenantID,
+		"session.review_requested", fixture.sessionID,
+	).Take(&auditLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditLog.ActorType != "service_account" || auditLog.ActorID == nil || *auditLog.ActorID != serviceAccountID {
+		t.Fatalf("Service Account Review Audit attribution = %#v", auditLog)
+	}
+	var receipt persistence.APIIdempotencyKey
+	if err := fixture.db.Where(
+		"tenant_id = ? AND actor_id = ? AND operation = ?", fixture.tenantID,
+		serviceAccountID, "session.review",
+	).Take(&receipt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if receipt.CompletedAt == nil {
+		t.Fatalf("Service Account Review receipt = %#v", receipt)
+	}
+}
+
 func TestPrimaryOperationsEnforcePrivateSessionAndSequenceCAS(t *testing.T) {
 	t.Run("private session", func(t *testing.T) {
 		fixture := newAdvancedOperationFixture(t, nil)

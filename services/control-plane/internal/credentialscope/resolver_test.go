@@ -66,6 +66,32 @@ func TestResolveUsesScopePriorityAndRejectsSameLevelAmbiguity(t *testing.T) {
 	}
 }
 
+func TestResolveMachineSessionNeverInheritsCreatorUserCredential(t *testing.T) {
+	fixture := newResolverFixture(t, "enterprise", "enterprise")
+	model := "gpt-5.6"
+	userCredential := fixture.credential(ScopeUser, &fixture.userID, nil, true)
+	organizationCredential := fixture.credential(ScopeOrganization, nil, &fixture.organizationID, true)
+	if err := fixture.db.Create(&userCredential).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Create(&organizationCredential).Error; err != nil {
+		t.Fatal(err)
+	}
+	request := fixture.request(&model, nil)
+	request.ExcludeUserScope = true
+	selection, err := Resolve(context.Background(), fixture.db, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection == nil || selection.Credential.ID != organizationCredential.ID {
+		t.Fatalf("machine selection = %#v, want Organization Credential", selection)
+	}
+
+	request.ExplicitCredentialID = &userCredential.ID
+	_, err = Resolve(context.Background(), fixture.db, request)
+	assertScopeProblem(t, err, "credential_not_found")
+}
+
 func TestResolveRequiresOptInAndAppliesTenantSelectors(t *testing.T) {
 	fixture := newResolverFixture(t, "enterprise", "enterprise")
 	model := "gpt-5.6"

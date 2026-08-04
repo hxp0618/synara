@@ -2,7 +2,10 @@ package projects
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -137,9 +140,13 @@ func (s *Service) CreateWithIdempotency(
 	if err != nil {
 		return Project{}, false, err
 	}
+	if identity.IsServiceAccount(principal) && visibility == "private" {
+		return Project{}, false, problem.New(400, "service_account_private_project_unsupported", "Service Accounts cannot create private Projects.")
+	}
 
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "project.create", SuccessStatus: 201,
 		Request: map[string]any{
 			"tenantId": tenantID, "organizationId": organizationID, "name": name,
@@ -156,7 +163,7 @@ func (s *Service) CreateWithIdempotency(
 			return Project{}, problem.Wrap(409, "project_create_rejected", "Project creation was rejected by a tenant isolation constraint.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "project.created", ResourceType: "project", ResourceID: &model.ID,
 			OrganizationID: &organizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"visibility": visibility},
@@ -189,7 +196,9 @@ func (s *Service) List(
 	}
 	query := s.db.WithContext(ctx).Model(&persistence.Project{}).Select(projectSelectColumns).
 		Where("tenant_id = ? AND organization_id = ? AND archived_at IS NULL", tenantID, organizationID)
-	if !authorization.TenantAllows(access.TenantRole, authorization.ProjectRead) {
+	if identity.IsServiceAccount(principal) {
+		query = query.Where("visibility <> ?", "private")
+	} else if !authorization.TenantAllows(access.TenantRole, authorization.ProjectRead) {
 		query = query.Where("visibility <> ? OR created_by = ?", "private", principal.UserID)
 	}
 	models := make([]persistence.Project, 0)
@@ -197,6 +206,101 @@ func (s *Service) List(
 		return nil, problem.Wrap(500, "projects_load_failed", "Failed to load projects.", err)
 	}
 	return s.projectsWithGitFetchBindings(ctx, models)
+}
+
+func (s *Service) ListPage(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, organizationID uuid.UUID,
+	input ProjectListQuery,
+) (ProjectPage, error) {
+	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
+		return ProjectPage{}, err
+	}
+	access, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, organizationID, authorization.ProjectRead)
+	if err != nil {
+		return ProjectPage{}, err
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 200 {
+		return ProjectPage{}, problem.New(400, "invalid_project_limit", "Project list limit must be between 1 and 200.")
+	}
+	var cursor *projectListCursor
+	if strings.TrimSpace(input.Cursor) != "" {
+		decoded, decodeErr := decodeProjectListCursor(input.Cursor)
+		if decodeErr != nil || decoded.TenantID != tenantID || decoded.OrganizationID != organizationID {
+			return ProjectPage{}, problem.New(400, "invalid_project_cursor", "Project list cursor is invalid for this Organization.")
+		}
+		cursor = &decoded
+	}
+	query := s.db.WithContext(ctx).Model(&persistence.Project{}).Select(projectSelectColumns).
+		Where("tenant_id = ? AND organization_id = ? AND archived_at IS NULL", tenantID, organizationID)
+	if identity.IsServiceAccount(principal) {
+		query = query.Where("visibility <> ?", "private")
+	} else if !authorization.TenantAllows(access.TenantRole, authorization.ProjectRead) {
+		query = query.Where("visibility <> ? OR created_by = ?", "private", principal.UserID)
+	}
+	if cursor != nil {
+		query = query.Where("LOWER(name) > ? OR (LOWER(name) = ? AND id > ?)", cursor.Name, cursor.Name, cursor.ID)
+	}
+	models := make([]persistence.Project, 0, limit+1)
+	if err := query.Order("LOWER(name), id").Limit(limit + 1).Find(&models).Error; err != nil {
+		return ProjectPage{}, problem.Wrap(500, "projects_load_failed", "Failed to load projects.", err)
+	}
+	hasMore := len(models) > limit
+	if hasMore {
+		models = models[:limit]
+	}
+	items, err := s.projectsWithGitFetchBindings(ctx, models)
+	if err != nil {
+		return ProjectPage{}, err
+	}
+	page := ProjectPage{Items: items}
+	if hasMore {
+		last := models[len(models)-1]
+		encoded := encodeProjectListCursor(projectListCursor{
+			Version: 1, TenantID: tenantID, OrganizationID: organizationID, Name: strings.ToLower(last.Name), ID: last.ID,
+		})
+		page.NextCursor = &encoded
+	}
+	return page, nil
+}
+
+type projectListCursor struct {
+	Version        int       `json:"v"`
+	TenantID       uuid.UUID `json:"tenantId"`
+	OrganizationID uuid.UUID `json:"organizationId"`
+	Name           string    `json:"name"`
+	ID             uuid.UUID `json:"id"`
+}
+
+func encodeProjectListCursor(cursor projectListCursor) string {
+	encoded, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeProjectListCursor(value string) (projectListCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return projectListCursor{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	decoder.DisallowUnknownFields()
+	var cursor projectListCursor
+	if err := decoder.Decode(&cursor); err != nil {
+		return projectListCursor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return projectListCursor{}, errors.New("invalid trailing cursor data")
+	}
+	if cursor.Version != 1 || cursor.TenantID == uuid.Nil || cursor.OrganizationID == uuid.Nil ||
+		cursor.Name == "" || cursor.ID == uuid.Nil {
+		return projectListCursor{}, errors.New("invalid cursor fields")
+	}
+	return cursor, nil
 }
 
 func (s *Service) Get(
@@ -219,10 +323,29 @@ func (s *Service) loadAuthorizedProjectModel(
 	principal identity.Principal,
 	tenantID, projectID uuid.UUID,
 ) (persistence.Project, error) {
+	return s.loadAuthorizedProjectModelWithArchiveState(ctx, principal, tenantID, projectID, false)
+}
+
+func (s *Service) loadAuthorizedProjectModelIncludingArchived(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, projectID uuid.UUID,
+) (persistence.Project, error) {
+	return s.loadAuthorizedProjectModelWithArchiveState(ctx, principal, tenantID, projectID, true)
+}
+
+func (s *Service) loadAuthorizedProjectModelWithArchiveState(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, projectID uuid.UUID,
+	includeArchived bool,
+) (persistence.Project, error) {
 	var model persistence.Project
-	err := s.db.WithContext(ctx).Select(projectSelectColumns).
-		Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, projectID).
-		Take(&model).Error
+	query := s.db.WithContext(ctx).Select(projectSelectColumns).Where("tenant_id = ? AND id = ?", tenantID, projectID)
+	if !includeArchived {
+		query = query.Where("archived_at IS NULL")
+	}
+	err := query.Take(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.Project{}, problem.New(404, "project_not_found", "Project not found.")
 	}
@@ -232,6 +355,9 @@ func (s *Service) loadAuthorizedProjectModel(
 	access, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, model.OrganizationID, authorization.ProjectRead)
 	if err != nil {
 		return persistence.Project{}, err
+	}
+	if identity.IsServiceAccount(principal) && model.Visibility == "private" {
+		return persistence.Project{}, problem.New(404, "project_not_found", "Project not found.")
 	}
 	if model.Visibility == "private" && model.CreatedBy != principal.UserID && !authorization.TenantAllows(access.TenantRole, authorization.ProjectRead) {
 		return persistence.Project{}, problem.New(404, "project_not_found", "Project not found.")
@@ -246,23 +372,36 @@ func (s *Service) Update(
 	input UpdateProjectInput,
 	requestID, ipAddress string,
 ) (Project, error) {
+	item, _, err := s.UpdateWithIdempotency(
+		ctx, principal, tenantID, projectID, input, "", requestID, ipAddress,
+	)
+	return item, err
+}
+
+func (s *Service) UpdateWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, projectID uuid.UUID,
+	input UpdateProjectInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Project, bool, error) {
 	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	currentModel, err := s.loadAuthorizedProjectModel(ctx, principal, tenantID, projectID)
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	current := toProject(currentModel, nil)
 	if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, current.OrganizationID, authorization.ProjectUpdate); err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	if input.GitCredentialID.Set {
-		return Project{}, credentialBindingAPIRequired()
+		return Project{}, false, credentialBindingAPIRequired()
 	}
 	if input.RepositoryURL == nil {
 		if _, err := s.projectModelWithGitFetchBinding(ctx, currentModel); err != nil {
-			return Project{}, err
+			return Project{}, false, err
 		}
 	}
 	updates := map[string]any{}
@@ -270,14 +409,14 @@ func (s *Service) Update(
 	if input.Name != nil {
 		name, err := validation.Name(*input.Name, "invalid_project_name", "Project name", 200)
 		if err != nil {
-			return Project{}, err
+			return Project{}, false, err
 		}
 		updates["name"] = name
 	}
 	if input.RepositoryURL != nil {
 		normalizedRepositoryURL, err := normalizeRepositoryURL(input.RepositoryURL)
 		if err != nil {
-			return Project{}, err
+			return Project{}, false, err
 		}
 		repositoryURL = normalizedRepositoryURL
 		updates["repository_url"] = normalizedRepositoryURL
@@ -285,53 +424,67 @@ func (s *Service) Update(
 	if input.DefaultBranch != nil {
 		branch, err := normalizeBranch(*input.DefaultBranch)
 		if err != nil {
-			return Project{}, err
+			return Project{}, false, err
 		}
 		updates["default_branch"] = branch
 	}
 	if input.Visibility != nil {
 		visibility, err := normalizeVisibility(*input.Visibility, "")
 		if err != nil {
-			return Project{}, err
+			return Project{}, false, err
+		}
+		if identity.IsServiceAccount(principal) && visibility == "private" {
+			return Project{}, false, problem.New(400, "service_account_private_project_unsupported", "Service Accounts cannot make Projects private.")
 		}
 		updates["visibility"] = visibility
 	}
 	if len(updates) == 0 {
-		return Project{}, problem.New(400, "empty_update", "Provide at least one project field to update.")
+		return Project{}, false, problem.New(400, "empty_update", "Provide at least one project field to update.")
 	}
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
+		Operation: "project.update", SuccessStatus: 200,
+		Request: map[string]any{"projectId": projectID, "input": input},
+	}, func(tx *gorm.DB) (Project, error) {
 		var locked persistence.Project
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Select(projectSelectColumns).
 			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, projectID).
 			Take(&locked).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-			return problem.New(404, "project_not_found", "Project not found.")
+			return Project{}, problem.New(404, "project_not_found", "Project not found.")
 		} else if err != nil {
-			return problem.Wrap(500, "project_load_failed", "Failed to lock the Project for update.", err)
+			return Project{}, problem.Wrap(500, "project_load_failed", "Failed to lock the Project for update.", err)
 		}
 		if input.RepositoryURL != nil {
 			if err := s.ensureRepositoryMatchesActiveGitBindings(ctx, tx, tenantID, projectID, repositoryURL); err != nil {
-				return err
+				return Project{}, err
 			}
 		}
 		result := tx.Model(&persistence.Project{}).
 			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, projectID).
 			Updates(updates)
 		if result.Error != nil {
-			return problem.Wrap(409, "project_update_rejected", "Project update was rejected.", result.Error)
+			return Project{}, problem.Wrap(409, "project_update_rejected", "Project update was rejected.", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			return problem.New(404, "project_not_found", "Project not found.")
+			return Project{}, problem.New(404, "project_not_found", "Project not found.")
 		}
-		return audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "project.updated", ResourceType: "project", ResourceID: &projectID,
 			OrganizationID: &current.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-		})
+		}); err != nil {
+			return Project{}, err
+		}
+		if err := tx.Select(projectSelectColumns).Where("tenant_id = ? AND id = ?", tenantID, projectID).Take(&locked).Error; err != nil {
+			return Project{}, problem.Wrap(500, "project_load_failed", "Failed to load the updated Project.", err)
+		}
+		return s.projectModelWithGitFetchBindingDB(ctx, tx, locked)
 	})
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
-	return s.Get(ctx, principal, tenantID, projectID)
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) projectWithGitFetchBinding(ctx context.Context, project Project) (Project, error) {
@@ -347,7 +500,19 @@ func (s *Service) projectWithGitFetchBinding(ctx context.Context, project Projec
 }
 
 func (s *Service) projectModelWithGitFetchBinding(ctx context.Context, model persistence.Project) (Project, error) {
-	return s.projectWithGitFetchBinding(ctx, toProject(model, nil))
+	return s.projectModelWithGitFetchBindingDB(ctx, s.db, model)
+}
+
+func (s *Service) projectModelWithGitFetchBindingDB(ctx context.Context, db *gorm.DB, model persistence.Project) (Project, error) {
+	project := toProject(model, nil)
+	bindings, err := s.loadActiveGitFetchBindings(ctx, db, project.TenantID, []uuid.UUID{project.ID})
+	if err != nil {
+		return Project{}, err
+	}
+	if err := applyGitFetchBinding(&project, bindings[project.ID]); err != nil {
+		return Project{}, err
+	}
+	return project, nil
 }
 
 func (s *Service) projectsWithGitFetchBindings(ctx context.Context, models []persistence.Project) ([]Project, error) {
@@ -451,40 +616,78 @@ func (s *Service) Archive(
 	tenantID, projectID uuid.UUID,
 	requestID, ipAddress string,
 ) error {
+	_, _, err := s.ArchiveWithIdempotency(
+		ctx, principal, tenantID, projectID, "", requestID, ipAddress,
+	)
+	return err
+}
+
+func (s *Service) ArchiveWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, projectID uuid.UUID,
+	idempotencyKey, requestID, ipAddress string,
+) (Project, bool, error) {
 	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
-		return err
+		return Project{}, false, err
 	}
-	current, err := s.Get(ctx, principal, tenantID, projectID)
+	currentModel, err := s.loadAuthorizedProjectModelIncludingArchived(ctx, principal, tenantID, projectID)
 	if err != nil {
-		return err
+		return Project{}, false, err
 	}
+	current := toProject(currentModel, nil)
 	if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, current.OrganizationID, authorization.ProjectDelete); err != nil {
-		return err
+		return Project{}, false, err
 	}
-	return persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
+		Operation: "project.archive", SuccessStatus: 204,
+		Request: map[string]any{"projectId": projectID},
+	}, func(tx *gorm.DB) (Project, error) {
+		var locked persistence.Project
+		lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Select(projectSelectColumns).
+			Where("tenant_id = ? AND id = ?", tenantID, projectID).Take(&locked).Error
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return Project{}, problem.New(404, "project_not_found", "Project not found.")
+		}
+		if lookupErr != nil {
+			return Project{}, problem.Wrap(500, "project_load_failed", "Failed to lock the Project for archive.", lookupErr)
+		}
+		if locked.ArchivedAt != nil {
+			return toProject(locked, nil), nil
+		}
 		var activeSessions int64
 		if err := tx.Model(&persistence.AgentSession{}).
 			Where("tenant_id = ? AND project_id = ? AND archived_at IS NULL", tenantID, projectID).
 			Count(&activeSessions).Error; err != nil {
-			return problem.Wrap(500, "project_archive_failed", "Failed to inspect project sessions.", err)
+			return Project{}, problem.Wrap(500, "project_archive_failed", "Failed to inspect project sessions.", err)
 		}
 		if activeSessions > 0 {
-			return problem.New(409, "project_has_active_sessions", "Archive active project sessions before archiving the project.")
+			return Project{}, problem.New(409, "project_has_active_sessions", "Archive active project sessions before archiving the project.")
 		}
 		now := time.Now().UTC()
 		result := tx.Model(&persistence.Project{}).
 			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, projectID).
 			Update("archived_at", now)
 		if result.Error != nil {
-			return problem.Wrap(500, "project_archive_failed", "Failed to archive the project.", result.Error)
+			return Project{}, problem.Wrap(500, "project_archive_failed", "Failed to archive the project.", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			return problem.New(404, "project_not_found", "Project not found.")
+			return Project{}, problem.New(404, "project_not_found", "Project not found.")
 		}
-		return audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "project.archived", ResourceType: "project", ResourceID: &projectID,
 			OrganizationID: &current.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-		})
+		}); err != nil {
+			return Project{}, err
+		}
+		locked.ArchivedAt = &now
+		return toProject(locked, nil), nil
 	})
+	if err != nil {
+		return Project{}, false, err
+	}
+	return result.Value, result.Replayed, nil
 }

@@ -2,7 +2,10 @@ package sessions
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -52,6 +55,16 @@ type LifecyclePolicyResolver interface {
 	) (lifecyclepolicy.Effective, error)
 }
 
+type EventProjector interface {
+	ProjectSessionEvent(context.Context, *gorm.DB, persistence.SessionEvent) error
+}
+
+func WithEventProjector(projector EventProjector) ServiceOption {
+	return func(service *Service) {
+		service.eventProjector = projector
+	}
+}
+
 func WithLifecyclePolicyResolver(resolver LifecyclePolicyResolver) ServiceOption {
 	return func(service *Service) {
 		service.lifecyclePolicies = resolver
@@ -67,6 +80,7 @@ type Service struct {
 	events                             *eventBroker
 	providerCapabilityHeartbeatTimeout time.Duration
 	lifecyclePolicies                  LifecyclePolicyResolver
+	eventProjector                     EventProjector
 	now                                func() time.Time
 	// Package-private deterministic seam for selection-to-commit race tests.
 	// Production services leave this nil.
@@ -474,9 +488,15 @@ func (s *Service) CreateWithIdempotency(
 	if err != nil {
 		return Session{}, false, err
 	}
+	if identity.IsServiceAccount(principal) && strings.TrimSpace(input.Visibility) == "" {
+		input.Visibility = "project"
+	}
 	visibility, err := normalizeSessionVisibility(input.Visibility)
 	if err != nil {
 		return Session{}, false, err
+	}
+	if identity.IsServiceAccount(principal) && visibility == "private" {
+		return Session{}, false, problem.New(400, "service_account_private_session_unsupported", "Service Accounts cannot create private Sessions.")
 	}
 	provider, err := normalizeProvider(input.Provider)
 	if err != nil {
@@ -603,6 +623,7 @@ func (s *Service) CreateWithIdempotency(
 			tenantID,
 			project.OrganizationID,
 			principal.UserID,
+			identity.IsServiceAccount(principal),
 			provider,
 			modelName,
 			requestedCredentialID,
@@ -650,7 +671,7 @@ func (s *Service) CreateWithIdempotency(
 			selectedRegion = globalSelection.Member.Region
 			selectedClusterID = globalSelection.Member.ClusterID
 		}
-		createdEvent, err = appendEvent(ctx, tx, &model, eventInput{
+		createdEvent, err = s.appendEvent(ctx, tx, &model, eventInput{
 			EventType: "session.created", ActorType: "user", ActorID: &principal.UserID,
 			Payload: map[string]any{
 				"title": title, "provider": provider, "visibility": visibility,
@@ -730,13 +751,15 @@ func (s *Service) resolveProviderCredentialSelection(
 	ctx context.Context,
 	db *gorm.DB,
 	tenantID, organizationID, sessionOwnerUserID uuid.UUID,
+	excludeUserScope bool,
 	provider string,
 	model *string,
 	requestedCredentialID *uuid.UUID,
 ) (*uuid.UUID, error) {
 	selection, err := credentialscope.Resolve(ctx, db, credentialscope.Request{
 		TenantID: tenantID, OrganizationID: organizationID, SessionOwnerUserID: sessionOwnerUserID,
-		Provider: provider, Model: model, ExplicitCredentialID: requestedCredentialID, Now: s.now(),
+		ExcludeUserScope: excludeUserScope, Provider: provider, Model: model,
+		ExplicitCredentialID: requestedCredentialID, Now: s.now(),
 	})
 	if err != nil {
 		return nil, err
@@ -761,32 +784,108 @@ func (s *Service) ListByProject(
 	principal identity.Principal,
 	projectID uuid.UUID,
 ) ([]Session, error) {
+	page, err := s.ListByProjectPage(ctx, principal, projectID, SessionListQuery{Limit: 200})
+	return page.Items, err
+}
+
+func (s *Service) ListByProjectPage(
+	ctx context.Context,
+	principal identity.Principal,
+	projectID uuid.UUID,
+	input SessionListQuery,
+) (SessionPage, error) {
 	tenantID, err := ActiveTenant(principal)
 	if err != nil {
-		return nil, err
+		return SessionPage{}, err
 	}
 	project, err := s.projects.Get(ctx, principal, tenantID, projectID)
 	if err != nil {
-		return nil, err
+		return SessionPage{}, err
 	}
 	access, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, project.OrganizationID, authorization.SessionRead)
 	if err != nil {
-		return nil, err
+		return SessionPage{}, err
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 200 {
+		return SessionPage{}, problem.New(400, "invalid_session_limit", "Session list limit must be between 1 and 200.")
+	}
+	var cursor *sessionListCursor
+	if strings.TrimSpace(input.Cursor) != "" {
+		decoded, decodeErr := decodeSessionListCursor(input.Cursor)
+		if decodeErr != nil || decoded.TenantID != tenantID || decoded.ProjectID != projectID {
+			return SessionPage{}, problem.New(400, "invalid_session_cursor", "Session list cursor is invalid for this Project.")
+		}
+		cursor = &decoded
 	}
 	query := s.db.WithContext(ctx).Model(&persistence.AgentSession{}).
 		Where("tenant_id = ? AND project_id = ? AND archived_at IS NULL", tenantID, projectID)
-	if !authorization.TenantAllows(access.TenantRole, authorization.SessionRead) {
+	if identity.IsServiceAccount(principal) {
+		query = query.Where("visibility <> ?", "private")
+	} else if !authorization.TenantAllows(access.TenantRole, authorization.SessionRead) {
 		query = query.Where("visibility <> ? OR created_by = ?", "private", principal.UserID)
 	}
+	if cursor != nil {
+		query = query.Where("updated_at < ? OR (updated_at = ? AND id < ?)", cursor.UpdatedAt, cursor.UpdatedAt, cursor.ID)
+	}
 	models := make([]persistence.AgentSession, 0)
-	if err := query.Order("updated_at DESC, id").Find(&models).Error; err != nil {
-		return nil, problem.Wrap(500, "sessions_load_failed", "Failed to load sessions.", err)
+	if err := query.Order("updated_at DESC, id DESC").Limit(limit + 1).Find(&models).Error; err != nil {
+		return SessionPage{}, problem.Wrap(500, "sessions_load_failed", "Failed to load sessions.", err)
+	}
+	hasMore := len(models) > limit
+	if hasMore {
+		models = models[:limit]
 	}
 	items := make([]Session, 0, len(models))
 	for _, model := range models {
 		items = append(items, toSession(model))
 	}
-	return items, nil
+	page := SessionPage{Items: items}
+	if hasMore {
+		last := models[len(models)-1]
+		encoded := encodeSessionListCursor(sessionListCursor{
+			Version: 1, TenantID: tenantID, ProjectID: projectID, UpdatedAt: last.UpdatedAt, ID: last.ID,
+		})
+		page.NextCursor = &encoded
+	}
+	return page, nil
+}
+
+type sessionListCursor struct {
+	Version   int       `json:"v"`
+	TenantID  uuid.UUID `json:"tenantId"`
+	ProjectID uuid.UUID `json:"projectId"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	ID        uuid.UUID `json:"id"`
+}
+
+func encodeSessionListCursor(cursor sessionListCursor) string {
+	encoded, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeSessionListCursor(value string) (sessionListCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return sessionListCursor{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	decoder.DisallowUnknownFields()
+	var cursor sessionListCursor
+	if err := decoder.Decode(&cursor); err != nil {
+		return sessionListCursor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return sessionListCursor{}, errors.New("invalid trailing cursor data")
+	}
+	if cursor.Version != 1 || cursor.TenantID == uuid.Nil || cursor.ProjectID == uuid.Nil ||
+		cursor.UpdatedAt.IsZero() || cursor.ID == uuid.Nil {
+		return sessionListCursor{}, errors.New("invalid cursor fields")
+	}
+	return cursor, nil
 }
 
 func (s *Service) Get(
@@ -1044,7 +1143,7 @@ func (s *Service) CreateTurnWithIdempotency(
 		if sourceProposedPlan != nil {
 			turnCreatedPayload["sourceProposedPlan"] = sourceProposedPlan
 		}
-		createdEvent, err = appendEvent(ctx, tx, &locked, eventInput{
+		createdEvent, err = s.appendEvent(ctx, tx, &locked, eventInput{
 			EventType: "turn.created", ActorType: "user", ActorID: &principal.UserID,
 			ExecutionID: &execution.ID,
 			Payload:     turnCreatedPayload,
@@ -1141,9 +1240,10 @@ func (s *Service) ArchiveWithIdempotency(
 	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
 		return Session{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 	var archivedEvent persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session.archive", SuccessStatus: 200,
 		Request: map[string]any{"sessionId": sessionID},
 	}, func(tx *gorm.DB) (Session, error) {
@@ -1179,8 +1279,8 @@ func (s *Service) ArchiveWithIdempotency(
 		); err != nil {
 			return Session{}, err
 		}
-		archivedEvent, err = appendEvent(ctx, tx, &locked, eventInput{
-			EventType: "session.archived", ActorType: "user", ActorID: &principal.UserID,
+		archivedEvent, err = s.appendEvent(ctx, tx, &locked, eventInput{
+			EventType: "session.archived", ActorType: actorType, ActorID: &actorID,
 			Payload: map[string]any{"archivedAt": now},
 		})
 		if err != nil {
@@ -1196,7 +1296,7 @@ func (s *Service) ArchiveWithIdempotency(
 			return Session{}, problem.Wrap(500, "session_archive_outbox_failed", "The archived Session event could not be queued.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "session.archived", ResourceType: "agent_session", ResourceID: &sessionID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 		}); err != nil {
@@ -1314,6 +1414,9 @@ func (s *Service) authorizedModel(
 	if err != nil {
 		return persistence.AgentSession{}, authorization.OrganizationAccess{}, err
 	}
+	if identity.IsServiceAccount(principal) && model.Visibility == "private" {
+		return persistence.AgentSession{}, authorization.OrganizationAccess{}, problem.New(404, "session_not_found", "Session not found.")
+	}
 	return model, access, nil
 }
 
@@ -1374,7 +1477,7 @@ func (s *Service) AppendInternalEvent(
 	if input.OccurredAt != nil {
 		occurredAt = input.OccurredAt.UTC()
 	}
-	return appendEvent(ctx, tx, &session, eventInput{
+	return s.appendEvent(ctx, tx, &session, eventInput{
 		EventID: eventID, EventVersion: eventVersion, EventType: input.EventType,
 		ActorType: input.ActorType, ActorID: input.ActorID, MeaningfulActivity: input.MeaningfulActivity,
 		ExecutionID: input.ExecutionID,
@@ -1407,6 +1510,10 @@ func appendEvent(
 	session *persistence.AgentSession,
 	input eventInput,
 ) (persistence.SessionEvent, error) {
+	if machine, ok := authorization.MachinePrincipalFromContext(ctx); ok && input.ActorType == "user" {
+		input.ActorType = "service_account"
+		input.ActorID = &machine.ActorID
+	}
 	nextSequence := session.LastEventSequence + 1
 	eventID := input.EventID
 	if eventID == uuid.Nil {
@@ -1439,7 +1546,7 @@ func appendEvent(
 	// User actions are semantic by definition. Worker events renew activity only
 	// when the trusted runtime-ingestion path marks them explicitly; lifecycle,
 	// checkpoint, Workspace, and recovery bookkeeping must never slide activity.
-	if input.ActorType == "user" || input.MeaningfulActivity {
+	if input.ActorType == "user" || input.ActorType == "service_account" || input.MeaningfulActivity {
 		if session.MeaningfulActivityAt.After(observedAt) {
 			observedAt = session.MeaningfulActivityAt
 		}
@@ -1476,6 +1583,24 @@ func appendEvent(
 		return persistence.SessionEvent{}, problem.New(409, "session_event_sequence_conflict", "Session event sequence changed concurrently.")
 	}
 	session.LastEventSequence = nextSequence
+	return event, nil
+}
+
+func (s *Service) appendEvent(
+	ctx context.Context,
+	tx *gorm.DB,
+	session *persistence.AgentSession,
+	input eventInput,
+) (persistence.SessionEvent, error) {
+	event, err := appendEvent(ctx, tx, session, input)
+	if err != nil || s.eventProjector == nil {
+		return event, err
+	}
+	if err := s.eventProjector.ProjectSessionEvent(ctx, tx, event); err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(
+			500, "session_event_projection_failed", "Session Event delivery projections could not be persisted.", err,
+		)
+	}
 	return event, nil
 }
 

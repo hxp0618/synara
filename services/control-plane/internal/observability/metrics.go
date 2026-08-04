@@ -501,6 +501,9 @@ type providerResumeRuntimeFallbackMetricKey struct {
 
 func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffer) error {
 	now := time.Now().UTC()
+	if err := r.writeExecutionTargetProvisioningMetrics(ctx, output, now); err != nil {
+		return err
+	}
 	executions, err := groupedCounts(ctx, r.db, "agent_executions", "status", "target_kind")
 	if err != nil {
 		return fmt.Errorf("collect execution metrics: %w", err)
@@ -768,6 +771,48 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	}
 	writeHelp(output, "synara_metrics_collection_success", "Whether authoritative database metrics were collected successfully.", "gauge")
 	output.WriteString("synara_metrics_collection_success 1\n")
+	return nil
+}
+
+func (r *Registry) writeExecutionTargetProvisioningMetrics(ctx context.Context, output *bytes.Buffer, now time.Time) error {
+	if !r.db.Migrator().HasTable("execution_target_provisioning_operations") {
+		writeHelp(output, "synara_execution_target_provisioning_operations", "Durable Execution Target provisioning operations by bounded action and state.", "gauge")
+		writeHelp(output, "synara_execution_target_provisioning_oldest_accepted_age_seconds", "Age of the oldest accepted Execution Target provisioning operation.", "gauge")
+		fmt.Fprintln(output, "synara_execution_target_provisioning_oldest_accepted_age_seconds 0")
+		writeHelp(output, "synara_execution_target_provisioning_claim_takeovers_total", "Durable Execution Target provisioning claims taken over after their first attempt.", "counter")
+		fmt.Fprintln(output, "synara_execution_target_provisioning_claim_takeovers_total 0")
+		return nil
+	}
+	rows, err := pairedCountsWhere(ctx, r.db, "execution_target_provisioning_operations", "action", "state", "")
+	if err != nil {
+		return fmt.Errorf("collect Execution Target provisioning operation metrics: %w", err)
+	}
+	writePairedGauge(
+		output,
+		"synara_execution_target_provisioning_operations",
+		"Durable Execution Target provisioning operations by bounded action and state.",
+		"action", "state", rows,
+	)
+	var oldest persistence.ExecutionTargetProvisioningOperation
+	oldestFound := true
+	if err := r.db.WithContext(ctx).Select("id", "created_at").Where("state = ?", "accepted").Order("created_at, id").Take(&oldest).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		oldestFound = false
+	} else if err != nil {
+		return fmt.Errorf("collect oldest accepted Execution Target provisioning operation: %w", err)
+	}
+	oldestAge := 0.0
+	if oldestFound && now.After(oldest.CreatedAt) {
+		oldestAge = now.Sub(oldest.CreatedAt).Seconds()
+	}
+	writeHelp(output, "synara_execution_target_provisioning_oldest_accepted_age_seconds", "Age of the oldest accepted Execution Target provisioning operation.", "gauge")
+	fmt.Fprintf(output, "synara_execution_target_provisioning_oldest_accepted_age_seconds %s\n", formatFloat(oldestAge))
+	var takeovers int64
+	if err := r.db.WithContext(ctx).Table("execution_target_provisioning_operations").
+		Select("COALESCE(SUM(CASE WHEN attempt_generation > 1 THEN attempt_generation - 1 ELSE 0 END), 0)").Scan(&takeovers).Error; err != nil {
+		return fmt.Errorf("collect Execution Target provisioning claim takeovers: %w", err)
+	}
+	writeHelp(output, "synara_execution_target_provisioning_claim_takeovers_total", "Durable Execution Target provisioning claims taken over after their first attempt.", "counter")
+	fmt.Fprintf(output, "synara_execution_target_provisioning_claim_takeovers_total %d\n", takeovers)
 	return nil
 }
 

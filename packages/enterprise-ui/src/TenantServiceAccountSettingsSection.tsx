@@ -6,6 +6,7 @@ import { controlPlaneClient, type ControlPlaneServiceAccount } from "@synara/con
 import { useEnterpriseUiHost } from "./EnterpriseUiHost";
 
 const SCOPES = [
+  ["api.access", "Call public-beta Polaris resource APIs"],
   ["scim.read", "Read SCIM users and groups"],
   ["scim.write", "Provision SCIM users and groups"],
   ["identity.read", "Read identity configuration"],
@@ -14,6 +15,17 @@ const SCOPES = [
 
 export function serviceAccountQueryKey(tenantId: string) {
   return ["control-plane", "tenants", tenantId, "service-accounts"] as const;
+}
+
+export function serviceAccountUsageQueryKey(tenantId: string, serviceAccountId: string) {
+  return [
+    "control-plane",
+    "tenants",
+    tenantId,
+    "service-accounts",
+    serviceAccountId,
+    "usage",
+  ] as const;
 }
 
 export function TenantServiceAccountSettingsSection(props: {
@@ -30,10 +42,10 @@ export function TenantServiceAccountSettingsSection(props: {
   });
   const [issuedToken, setIssuedToken] = useState("");
   return (
-    <SettingsSection title="Service Accounts and SCIM">
+    <SettingsSection title="Service Accounts and API Keys">
       <SettingsRow
-        title="Directory provisioning credentials"
-        description="Service Accounts are Tenant-scoped machine identities. Tokens are shown once, stored only as SHA-256 hashes, and can be rotated or revoked without impersonating a User."
+        title="Machine credentials"
+        description="Service Accounts are fixed-role machine identities for the Polaris API, SCIM, and identity automation. Tokens are shown once, stored only as SHA-256 hashes, and can be rotated or revoked without impersonating a User."
       >
         {props.canManage ? (
           <ServiceAccountForm
@@ -76,7 +88,7 @@ export function TenantServiceAccountSettingsSection(props: {
       {accounts.data?.items.length === 0 ? (
         <SettingsListRow
           title="No Service Accounts"
-          description="Create one with SCIM scopes before connecting a directory provider."
+          description="Create an API Key or add SCIM scopes before connecting a directory provider."
         />
       ) : null}
       <InlineError error={accounts.error} />
@@ -88,13 +100,22 @@ function ServiceAccountForm(props: {
   tenantId: string;
   onCreated: (account: ControlPlaneServiceAccount, token: string) => void;
 }) {
-  const { Button, FormField, InlineError, Input, formGridClassName } = useEnterpriseUiHost();
+  const { Button, FormField, InlineError, Input, formGridClassName, nativeSelectClassName } =
+    useEnterpriseUiHost();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [scopes, setScopes] = useState<ReadonlyArray<string>>(["scim.read", "scim.write"]);
+  const [role, setRole] = useState<ControlPlaneServiceAccount["role"]>("member");
+  const [rateLimitPerMinute, setRateLimitPerMinute] = useState(600);
   const create = useMutation({
     mutationFn: () =>
-      controlPlaneClient.createServiceAccount(props.tenantId, { name, description, scopes }),
+      controlPlaneClient.createServiceAccount(props.tenantId, {
+        name,
+        description,
+        role,
+        scopes,
+        rateLimitPerMinute,
+      }),
     onSuccess: (issued) => {
       props.onCreated(issued.account, issued.token);
       setName("");
@@ -125,6 +146,32 @@ function ServiceAccountForm(props: {
           onChange={(event) => setDescription(event.target.value)}
         />
       </FormField>
+      <FormField label="Fixed Tenant role">
+        <select
+          data-testid="service-account-role"
+          className={nativeSelectClassName}
+          value={role}
+          onChange={(event) => setRole(event.target.value as ControlPlaneServiceAccount["role"])}
+        >
+          <option value="member">Member</option>
+          <option value="auditor">Auditor</option>
+          <option value="cost_admin">Cost admin</option>
+          <option value="security_admin">Security admin</option>
+          <option value="admin">Admin</option>
+          <option value="owner">Owner</option>
+        </select>
+      </FormField>
+      <FormField label="Requests per minute">
+        <Input
+          data-testid="service-account-rate-limit"
+          type="number"
+          min={1}
+          max={60000}
+          required
+          value={rateLimitPerMinute}
+          onChange={(event) => setRateLimitPerMinute(event.target.valueAsNumber)}
+        />
+      </FormField>
       <div className="space-y-2 sm:col-span-2">
         {SCOPES.map(([scope, label]) => (
           <label key={scope} className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -148,7 +195,13 @@ function ServiceAccountForm(props: {
       <div className="sm:col-span-2">
         <Button
           data-testid="service-account-submit"
-          disabled={create.isPending || scopes.length === 0}
+          disabled={
+            create.isPending ||
+            scopes.length === 0 ||
+            !Number.isSafeInteger(rateLimitPerMinute) ||
+            rateLimitPerMinute < 1 ||
+            rateLimitPerMinute > 60000
+          }
           size="sm"
           type="submit"
         >
@@ -168,6 +221,13 @@ function ServiceAccountRow(props: {
 }) {
   const { Button, SettingsListRow, StatusPill } = useEnterpriseUiHost();
   const queryClient = useQueryClient();
+  const usage = useQuery({
+    queryKey: serviceAccountUsageQueryKey(props.tenantId, props.account.id),
+    queryFn: () => controlPlaneClient.getServiceAccountAPIUsage(props.tenantId, props.account.id),
+    enabled: props.account.status === "active",
+    retry: false,
+  });
+  const aggregateUsage = usage.data?.items.find((item) => item.routePattern === "*");
   const rotate = useMutation({
     mutationFn: () =>
       controlPlaneClient.rotateServiceAccountToken(props.tenantId, props.account.id),
@@ -190,7 +250,7 @@ function ServiceAccountRow(props: {
   return (
     <SettingsListRow
       title={props.account.name}
-      description={`${props.account.description || "No description"} · ${props.account.scopes.join(", ")}`}
+      description={`${props.account.description || "No description"} · ${props.account.role} · ${props.account.rateLimitPerMinute}/min · ${props.account.scopes.join(", ")} · last used ${props.account.lastUsedAt ? new Date(props.account.lastUsedAt).toLocaleString() : "never"}${aggregateUsage ? ` · 24h ${aggregateUsage.requestCount} admitted / ${aggregateUsage.rateLimitedCount} limited` : ""}`}
       actions={
         <span className="flex items-center gap-2">
           <StatusPill value={props.account.status} />

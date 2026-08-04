@@ -71,10 +71,11 @@ func (s *Service) ResumeActiveTurn(
 	); err != nil {
 		return OperationResult[Execution]{}, err
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "execution.active-turn.resume", SuccessStatus: 202,
 		Request: map[string]any{"executionId": executionID},
 	}, func(tx *gorm.DB) (Execution, error) {
@@ -122,14 +123,14 @@ func (s *Service) ResumeActiveTurn(
 			return toExecution(execution), nil
 		}
 		appended, err = s.resumeSuspendedExecutionLocked(
-			ctx, tx, &execution, "user", &principal.UserID, nil,
+			ctx, tx, &execution, actorType, &actorID, nil,
 			"active_idle_explicit_resume", "active-idle-explicit-resume", now,
 		)
 		if err != nil {
 			return Execution{}, err
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "execution.active_turn_resumed", ResourceType: "agent_execution", ResourceID: &execution.ID,
 			OrganizationID: &session.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"sessionId": execution.SessionID, "turnId": execution.TurnID, "suspendAttemptId": attempt.ID},

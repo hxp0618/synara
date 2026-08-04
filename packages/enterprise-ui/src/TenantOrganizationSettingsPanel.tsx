@@ -21,6 +21,7 @@ import {
   TenantCredentialSettingsSection,
 } from "./TenantCredentialSettingsSection";
 import { TenantDataResidencySettingsSection } from "./TenantDataResidencySettingsSection";
+import { TenantDeveloperWebhookSettingsSection } from "./TenantDeveloperWebhookSettingsSection";
 import { TenantDeletionRecoverySettingsSection } from "./TenantDeletionRecoverySettingsSection";
 import { TenantIdentitySettingsSection } from "./TenantIdentitySettingsSection";
 import { TenantLegalHoldsSettingsSection } from "./TenantLegalHoldsSettingsSection";
@@ -526,6 +527,14 @@ function AuthenticatedTenantPanel(props: { destination: EnterpriseSettingsSectio
       {isSupport && canReadOutbox ? (
         <TenantOutboxSettingsSection
           key={`outbox-${activeTenant.id}`}
+          canManage={canManageOutbox}
+          tenantId={activeTenant.id}
+        />
+      ) : null}
+
+      {isSupport && canReadOutbox ? (
+        <TenantDeveloperWebhookSettingsSection
+          key={`developer-webhooks-${activeTenant.id}`}
           canManage={canManageOutbox}
           tenantId={activeTenant.id}
         />

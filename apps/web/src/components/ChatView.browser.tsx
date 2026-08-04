@@ -1366,6 +1366,7 @@ function installAuthoritativeControlPlaneFixture(options?: {
     vi.spyOn(controlPlaneClient, "listProjects").mockResolvedValue(projects),
     vi.spyOn(controlPlaneClient, "listProjectSessions").mockImplementation(async () => ({
       items: [...sessions],
+      nextCursor: null,
     })),
     vi.spyOn(controlPlaneClient, "getAgentSession").mockImplementation(async (sessionId) => {
       const session = sessions.find((candidate) => candidate.id === sessionId);

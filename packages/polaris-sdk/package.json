@@ -1,0 +1,60 @@
+{
+  "name": "@polaris-agents/sdk",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "description": "Official TypeScript SDK for the Polaris Developer API",
+  "homepage": "https://github.com/hxp0618/synara/tree/main/packages/polaris-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/hxp0618/synara/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hxp0618/synara.git",
+    "directory": "packages/polaris-sdk"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "generate": "openapi-typescript ../../docs/api/openapi.yaml --default-non-nullable false -o src/generated/openapi.ts",
+    "generate:check": "openapi-typescript ../../docs/api/openapi.yaml --default-non-nullable false -o src/generated/openapi.ts --check",
+    "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "openapi-typescript": "7.13.0",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "polaris": {
+    "minimumControlPlaneVersion": "0.1.0-beta.1"
+  }
+}

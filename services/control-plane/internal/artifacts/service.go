@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +41,7 @@ var allowedKinds = map[string]struct{}{
 var (
 	checkpointArtifactNamespace = uuid.MustParse("2a54ef28-e6e7-5b78-91e6-d268e84da111")
 	workerArtifactNamespace     = uuid.MustParse("7836bb83-81d3-5a45-bff1-420789e2024f")
+	developerArtifactNamespace  = uuid.MustParse("92378b29-c1a9-53a3-a9f1-6f1c4f974d46")
 	errWorkerArtifactCreateRace = errors.New("worker artifact create raced")
 )
 
@@ -115,6 +118,115 @@ func (s *Service) Create(
 	grant, err := s.uploadGrant(ctx, model, plainToken)
 	s.observe("create", 0, err)
 	return grant, err
+}
+
+func (s *Service) CreateWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	input CreateInput,
+	idempotencyKey, requestID, ipAddress string,
+) (UploadGrant, bool, error) {
+	session, err := s.authorizeSession(ctx, principal, sessionID, authorization.ArtifactWrite, true)
+	if err != nil {
+		return UploadGrant{}, false, err
+	}
+	normalized, err := s.normalizeCreate(input)
+	if err != nil {
+		return UploadGrant{}, false, err
+	}
+	if normalized.Kind == "checkpoint" || normalized.Kind == "memory" {
+		return UploadGrant{}, false, problem.New(400, "artifact_kind_internal", "Checkpoint and Memory Artifacts are reserved for internal recovery workflows.")
+	}
+	if normalized.ExecutionID != nil {
+		if err := s.requireExecution(ctx, session.TenantID, session.ID, *normalized.ExecutionID); err != nil {
+			return UploadGrant{}, false, err
+		}
+	}
+	key, err := normalizeWorkerArtifactIdempotencyKey(&idempotencyKey)
+	if err != nil || key == nil {
+		return UploadGrant{}, false, problem.New(400, "invalid_idempotency_key", "Idempotency-Key is required and must be a non-empty value of at most 200 characters.")
+	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
+	artifactID := developerArtifactID(session.TenantID, actorID, *key)
+	for attempt := 0; attempt < 2; attempt++ {
+		var model persistence.Artifact
+		var plainToken string
+		replayed := false
+		err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+			loadErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+				Where("tenant_id = ? AND id = ?", session.TenantID, artifactID).Take(&model).Error
+			if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+				model, plainToken, err = s.pendingModelWithID(session, normalized, actorType, actorID, artifactID, nil)
+				if err != nil {
+					return err
+				}
+				if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
+					if errors.Is(err, gorm.ErrDuplicatedKey) {
+						return errWorkerArtifactCreateRace
+					}
+					return problem.Wrap(409, "artifact_create_rejected", "Artifact creation was rejected by an isolation constraint.", err)
+				}
+				return audit.Record(ctx, tx, audit.Entry{
+					TenantID: model.TenantID, ActorType: actorType, ActorID: &actorID,
+					Action: "artifact.created", ResourceType: "artifact", ResourceID: &model.ID,
+					OrganizationID: &model.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
+					Metadata: map[string]any{"sessionId": model.SessionID, "kind": model.Kind},
+				})
+			}
+			if loadErr != nil {
+				return problem.Wrap(500, "artifact_load_failed", "Failed to inspect the idempotent Artifact.", loadErr)
+			}
+			replayed = true
+			if !developerArtifactMatchesCreate(model, session, actorType, actorID, normalized) {
+				return problem.New(409, "idempotency_conflict", "Idempotency-Key was already used for different Artifact metadata.")
+			}
+			switch model.Status {
+			case "pending":
+				model, plainToken, err = s.refreshPendingArtifactGrant(ctx, tx, model)
+				return err
+			case "ready":
+				return nil
+			default:
+				return problem.New(409, "artifact_idempotency_unavailable", "The idempotent Artifact is no longer available.")
+			}
+		})
+		if errors.Is(err, errWorkerArtifactCreateRace) {
+			continue
+		}
+		if err != nil {
+			return UploadGrant{}, false, err
+		}
+		if model.Status == "ready" {
+			return UploadGrant{Artifact: toArtifact(model), UploadRequired: false}, replayed, nil
+		}
+		grant, grantErr := s.uploadGrant(ctx, model, plainToken)
+		s.observe("create", 0, grantErr)
+		return grant, replayed, grantErr
+	}
+	return UploadGrant{}, false, problem.New(409, "artifact_idempotency_race", "The idempotent Artifact is still being committed; retry with the same key.")
+}
+
+func developerArtifactID(tenantID, actorID uuid.UUID, idempotencyKey string) uuid.UUID {
+	return uuid.NewSHA1(developerArtifactNamespace, []byte(tenantID.String()+"\x00"+actorID.String()+"\x00"+idempotencyKey))
+}
+
+func developerArtifactMatchesCreate(
+	model persistence.Artifact,
+	session persistence.AgentSession,
+	actorType string,
+	actorID uuid.UUID,
+	input CreateInput,
+) bool {
+	return model.TenantID == session.TenantID && model.OrganizationID == session.OrganizationID &&
+		model.ProjectID == session.ProjectID && model.SessionID == session.ID &&
+		model.CreatedByType == actorType && model.CreatedByID == actorID && model.Kind == input.Kind &&
+		sameOptionalUUID(model.ExecutionID, input.ExecutionID) &&
+		sameOptionalString(model.OriginalName, input.OriginalName) && sameOptionalTime(model.ExpiresAt, input.ExpiresAt)
+}
+
+func sameOptionalUUID(left, right *uuid.UUID) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
 }
 
 func (s *Service) CreateForWorker(
@@ -781,6 +893,92 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, sessio
 	return items, nil
 }
 
+func (s *Service) ListPage(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	input ArtifactListQuery,
+) (ArtifactPage, error) {
+	session, err := s.authorizeSession(ctx, principal, sessionID, authorization.ArtifactRead, false)
+	if err != nil {
+		return ArtifactPage{}, err
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 200 {
+		return ArtifactPage{}, problem.New(400, "invalid_artifact_limit", "Artifact list limit must be between 1 and 200.")
+	}
+	var cursor *artifactListCursor
+	if strings.TrimSpace(input.Cursor) != "" {
+		decoded, decodeErr := decodeArtifactListCursor(input.Cursor)
+		if decodeErr != nil || decoded.TenantID != session.TenantID || decoded.SessionID != session.ID {
+			return ArtifactPage{}, problem.New(400, "invalid_artifact_cursor", "Artifact list cursor is invalid for this Session.")
+		}
+		cursor = &decoded
+	}
+	query := s.db.WithContext(ctx).Where(
+		"tenant_id = ? AND session_id = ? AND deleted_at IS NULL", session.TenantID, session.ID,
+	)
+	if cursor != nil {
+		query = query.Where("created_at < ? OR (created_at = ? AND id < ?)", cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
+	}
+	models := make([]persistence.Artifact, 0, limit+1)
+	if err := query.Order("created_at DESC, id DESC").Limit(limit + 1).Find(&models).Error; err != nil {
+		return ArtifactPage{}, problem.Wrap(500, "artifacts_load_failed", "Failed to load artifacts.", err)
+	}
+	hasMore := len(models) > limit
+	if hasMore {
+		models = models[:limit]
+	}
+	page := ArtifactPage{Items: make([]Artifact, 0, len(models))}
+	for _, model := range models {
+		page.Items = append(page.Items, toArtifact(model))
+	}
+	if hasMore {
+		last := models[len(models)-1]
+		encoded := encodeArtifactListCursor(artifactListCursor{
+			Version: 1, TenantID: session.TenantID, SessionID: session.ID, CreatedAt: last.CreatedAt, ID: last.ID,
+		})
+		page.NextCursor = &encoded
+	}
+	return page, nil
+}
+
+type artifactListCursor struct {
+	Version   int       `json:"v"`
+	TenantID  uuid.UUID `json:"tenantId"`
+	SessionID uuid.UUID `json:"sessionId"`
+	CreatedAt time.Time `json:"createdAt"`
+	ID        uuid.UUID `json:"id"`
+}
+
+func encodeArtifactListCursor(cursor artifactListCursor) string {
+	encoded, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeArtifactListCursor(value string) (artifactListCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return artifactListCursor{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	decoder.DisallowUnknownFields()
+	var cursor artifactListCursor
+	if err := decoder.Decode(&cursor); err != nil {
+		return artifactListCursor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return artifactListCursor{}, errors.New("invalid trailing cursor data")
+	}
+	if cursor.Version != 1 || cursor.TenantID == uuid.Nil || cursor.SessionID == uuid.Nil || cursor.CreatedAt.IsZero() || cursor.ID == uuid.Nil {
+		return artifactListCursor{}, errors.New("invalid cursor fields")
+	}
+	return cursor, nil
+}
+
 func (s *Service) Get(ctx context.Context, principal identity.Principal, artifactID uuid.UUID) (Artifact, error) {
 	model, err := s.authorizedArtifact(ctx, principal, artifactID, authorization.ArtifactRead)
 	if err != nil {
@@ -956,9 +1154,9 @@ func (s *Service) Delete(
 	if model.Status == "deleted" {
 		return nil
 	}
-	actorID := principal.UserID
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 	_, err = s.deleteModel(ctx, model, artifactDeleteActor{
-		ActorType: "user", ActorID: &actorID, RequestID: requestID, IPAddress: ipAddress,
+		ActorType: actorType, ActorID: &actorID, RequestID: requestID, IPAddress: ipAddress,
 	})
 	var size int64
 	if model.SizeBytes != nil {

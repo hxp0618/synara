@@ -1,0 +1,13 @@
+extends:
+  - recommended
+
+rules:
+  # Route-only operations intentionally do not yet carry publication prose or
+  # enumerated 4xx responses. Structural validation still applies to the whole
+  # document, while codegen-ready completeness is enforced by the Go gate.
+  operation-summary: off
+  operation-4xx-response: off
+  info-license: off
+  # SessionEvent is referenced by the SSE-specific extension consumed by the
+  # handwritten domain layer, which generic OpenAPI linters cannot follow.
+  no-unused-components: off

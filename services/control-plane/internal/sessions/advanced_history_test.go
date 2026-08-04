@@ -74,6 +74,67 @@ func TestRollbackReportsConversationOnlyDispositionAndReplaysIdempotently(t *tes
 	}
 }
 
+func TestRollbackAndForkAttributeServiceAccountAndPersistMachineReceipts(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	ctx := context.Background()
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+		Update("visibility", "organization").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, _ = appendCompletedMessageTurn(t, fixture, fixture.sessionID, "first")
+	secondTurnID, expected := appendCompletedMessageTurn(t, fixture, fixture.sessionID, "second")
+	serviceAccountID := uuid.New()
+	principal := fixture.principal
+	principal.ServiceAccountID = &serviceAccountID
+
+	rollback, replayed, err := fixture.service.Rollback(
+		ctx, principal, fixture.sessionID,
+		RollbackSessionInput{ExpectedLastEventSequence: &expected, FromTurnID: secondTurnID},
+		"rollback-service-account", "rollback-service-account-request", "127.0.0.1",
+	)
+	if err != nil || replayed || rollback.RemovedTurnCount != 1 {
+		t.Fatalf("Service Account Rollback = %#v replayed=%t err=%v", rollback, replayed, err)
+	}
+	forkExpected := rollback.EventSequence
+	forked, replayed, err := fixture.service.Fork(
+		ctx, principal, fixture.sessionID,
+		ForkSessionInput{ExpectedLastEventSequence: &forkExpected, Title: "Machine fork", Visibility: "organization"},
+		"fork-service-account", "fork-service-account-request", "127.0.0.1",
+	)
+	if err != nil || replayed || forked.Session.ID == uuid.Nil {
+		t.Fatalf("Service Account Fork = %#v replayed=%t err=%v", forked, replayed, err)
+	}
+
+	for _, operation := range []struct {
+		name       string
+		action     string
+		resourceID uuid.UUID
+	}{
+		{name: "session.rollback", action: "session.history_rolled_back", resourceID: fixture.sessionID},
+		{name: "session.fork", action: "session.forked", resourceID: forked.Session.ID},
+	} {
+		var receipt persistence.APIIdempotencyKey
+		if err := fixture.db.Where(
+			"tenant_id = ? AND actor_id = ? AND operation = ?", fixture.tenantID, serviceAccountID, operation.name,
+		).Take(&receipt).Error; err != nil {
+			t.Fatal(err)
+		}
+		if receipt.CompletedAt == nil {
+			t.Fatalf("Service Account %s receipt = %#v", operation.name, receipt)
+		}
+		var auditLog persistence.AuditLog
+		if err := fixture.db.Where(
+			"tenant_id = ? AND action = ? AND resource_id = ?", fixture.tenantID, operation.action, operation.resourceID,
+		).Take(&auditLog).Error; err != nil {
+			t.Fatal(err)
+		}
+		if auditLog.ActorType != "service_account" || auditLog.ActorID == nil || *auditLog.ActorID != serviceAccountID {
+			t.Fatalf("Service Account %s Audit attribution = %#v", operation.name, auditLog)
+		}
+	}
+}
+
 func TestForkOfForkKeepsLogicalPrefixWithoutCopyingEvents(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()

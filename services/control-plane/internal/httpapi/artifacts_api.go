@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
@@ -19,6 +21,18 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 	var input artifacts.CreateInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		grant, replayed, err := s.artifacts.CreateWithIdempotency(
+			r.Context(), mustPrincipal(r), sessionID, input, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+		)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		setIdempotencyReplayHeader(w, replayed)
+		writeJSON(w, http.StatusCreated, grant)
 		return
 	}
 	grant, err := s.artifacts.Create(r.Context(), mustPrincipal(r), sessionID, input, requestID(r), clientIP(r))
@@ -32,6 +46,22 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	sessionID, ok := s.pathUUID(w, r, "sessionID")
 	if !ok {
+		return
+	}
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		limit, err := queryInt(r, "limit", 50)
+		if err != nil || limit < 1 || limit > 200 {
+			s.writeError(w, r, problem.New(400, "invalid_artifact_limit", "Artifact list limit must be between 1 and 200."))
+			return
+		}
+		page, err := s.artifacts.ListPage(r.Context(), mustPrincipal(r), sessionID, artifacts.ArtifactListQuery{
+			Limit: limit, Cursor: r.URL.Query().Get("cursor"),
+		})
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
 		return
 	}
 	items, err := s.artifacts.List(r.Context(), mustPrincipal(r), sessionID)

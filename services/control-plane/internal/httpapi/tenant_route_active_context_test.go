@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-var tenantRouteRegistrationPattern = regexp.MustCompile(`(?m)^\s*mux\.(?:Handle|HandleFunc)\("([A-Z]+) ([^"]*\/v1\/tenants\/\{tenantID\}[^"]*)",`)
+var tenantRouteRegistrationPattern = regexp.MustCompile(`(?m)^\s*routes\.(?:Internal|PublicBeta|PublicGA)(?:Func)?\("([A-Z]+) ([^"]*\/v1\/tenants\/\{tenantID\}[^"]*)",`)
 var routeParameterPattern = regexp.MustCompile(`\{[^}]+\}`)
 
 type explicitTenantRoute struct {

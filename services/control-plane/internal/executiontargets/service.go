@@ -15,6 +15,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
@@ -131,48 +132,62 @@ func (s *Service) Get(ctx context.Context, principal identity.Principal, tenantI
 }
 
 func (s *Service) Create(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, input CreateInput) (Target, error) {
+	item, _, err := s.CreateWithIdempotency(ctx, principal, tenantID, input, "", "", "")
+	return item, err
+}
+
+func (s *Service) CreateWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID uuid.UUID,
+	input CreateInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Target, bool, error) {
 	if err := identity.RequireActiveTenant(principal, tenantID); err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	kind, err := platform.ParseExecutionTargetKind(input.Kind)
 	if err != nil {
-		return Target{}, problem.New(400, "invalid_execution_target_kind", err.Error()+".")
+		return Target{}, false, problem.New(400, "invalid_execution_target_kind", err.Error()+".")
 	}
 	if platform.IsRemoteTarget(kind) && (!s.platform.LeaseEnabled || !s.platform.FencingEnabled) {
-		return Target{}, problem.New(409, "remote_target_protocol_unsupported", "Remote execution targets require lease and fencing support.")
+		return Target{}, false, problem.New(409, "remote_target_protocol_unsupported", "Remote execution targets require lease and fencing support.")
+	}
+	if identity.IsServiceAccount(principal) && kind == platform.TargetLocal {
+		return Target{}, false, problem.New(400, "service_account_local_execution_target_unsupported", "Service Accounts cannot create local Execution Targets.")
 	}
 	name, err := validation.Name(input.Name, "invalid_execution_target_name", "Execution target name", 160)
 	if err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	if s.platform.Profile == platform.ProfilePersonal && input.OrganizationID == nil {
-		return Target{}, problem.New(400, "personal_execution_target_organization_required", "Personal execution targets must belong to the Personal organization.")
+		return Target{}, false, problem.New(400, "personal_execution_target_organization_required", "Personal execution targets must belong to the Personal organization.")
 	}
 	if input.OrganizationID != nil {
 		if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, *input.OrganizationID, authorization.OrganizationRead); err != nil {
-			return Target{}, err
+			return Target{}, false, err
 		}
 	}
 	input.Configuration = defaultRuntimeIsolationForNewTarget(kind, s.platform.Profile, input.Configuration)
 	if kind == platform.TargetKubernetes || kind == platform.TargetDocker {
 		rawPolicy, ok := input.Configuration["runtimeIsolation"].(map[string]any)
 		if !ok {
-			return Target{}, invalidRuntimeIsolationConfiguration("runtimeIsolation must be a JSON object.")
+			return Target{}, false, invalidRuntimeIsolationConfiguration("runtimeIsolation must be a JSON object.")
 		}
 		normalizedPolicy, err := normalizeRuntimeIsolationPolicyUpdate(
 			string(kind), input.Configuration, rawPolicy,
 		)
 		if err != nil {
-			return Target{}, err
+			return Target{}, false, err
 		}
 		input.Configuration["runtimeIsolation"] = normalizedPolicy
 	}
 	configuration, err := encryptConfiguration(s.cipher, input.Configuration)
 	if err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	capabilities := input.Capabilities
 	if capabilities == nil {
@@ -180,24 +195,48 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	}
 	capabilities, err = normalizeExecutionTargetCapabilities(capabilities)
 	if err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	if err := validatePublicCapabilities(capabilities); err != nil {
-		return Target{}, err
+		return Target{}, false, err
 	}
 	status := "active"
 	if kind == platform.TargetSSH {
 		status = "offline"
 	}
-	model := persistence.ExecutionTarget{
-		ID: uuid.New(), TenantID: &tenantID, OrganizationID: input.OrganizationID,
-		Kind: string(kind), Name: name, Status: status, ConfigurationEncrypted: configuration,
-		ConfigurationKeyID: runtimeSecretKeyID(s.cipher, configuration), Capabilities: capabilities,
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		Operation: "execution_target.create", SuccessStatus: 201,
+		Request: map[string]any{
+			"tenantId": tenantID, "organizationId": input.OrganizationID, "kind": kind,
+			"name": name, "configuration": input.Configuration, "capabilities": capabilities,
+		},
+	}, func(tx *gorm.DB) (Target, error) {
+		actorID := identity.ActorID(principal)
+		model := persistence.ExecutionTarget{
+			ID: uuid.New(), TenantID: &tenantID, OrganizationID: input.OrganizationID,
+			Kind: string(kind), Name: name, Status: status, ConfigurationEncrypted: configuration,
+			ConfigurationKeyID: runtimeSecretKeyID(s.cipher, configuration), Capabilities: capabilities,
+		}
+		if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
+			return Target{}, problem.Wrap(409, "execution_target_create_rejected", "Execution target creation was rejected.", err)
+		}
+		if requestID != "" {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: identity.ActorType(principal), ActorID: &actorID,
+				Action: "execution_target.created", ResourceType: "execution_target", ResourceID: &model.ID,
+				OrganizationID: input.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
+				Metadata: map[string]any{"kind": kind, "name": name},
+			}); err != nil {
+				return Target{}, err
+			}
+		}
+		return s.projectTarget(model), nil
+	})
+	if err != nil {
+		return Target{}, false, err
 	}
-	if err := s.db.WithContext(ctx).Create(&model).Error; err != nil {
-		return Target{}, problem.Wrap(409, "execution_target_create_rejected", "Execution target creation was rejected.", err)
-	}
-	return s.projectTarget(model), nil
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) UpdateProviderPolicy(

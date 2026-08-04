@@ -145,6 +145,16 @@ type EventPage struct {
 	LastSequence int64   `json:"lastSequence"`
 }
 
+type SessionListQuery struct {
+	Limit  int
+	Cursor string
+}
+
+type SessionPage struct {
+	Items      []Session `json:"items"`
+	NextCursor *string   `json:"nextCursor"`
+}
+
 type EventAccess struct {
 	CanReadInteractionDetails bool
 }

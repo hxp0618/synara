@@ -23,6 +23,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
+	"github.com/synara-ai/synara/services/control-plane/internal/developerwebhooks"
 	"github.com/synara-ai/synara/services/control-plane/internal/enterpriseidentity"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
@@ -158,11 +159,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	outboxTopicPublishers := map[string]outbox.Publisher{outbox.InternalIncidentUpdateTopic: incidentPublisher}
 	outboxDispatcher, err := outbox.NewDispatcher(
 		outboxService,
 		outbox.TopicPublisher{
 			Default: outbox.DatabasePublisher{},
-			Topics:  map[string]outbox.Publisher{outbox.InternalIncidentUpdateTopic: incidentPublisher},
+			Topics:  outboxTopicPublishers,
 		},
 		cfg.OutboxPollInterval, metrics, logger,
 	)
@@ -200,6 +202,12 @@ func main() {
 		os.Exit(1)
 	}
 	credentialService := credentials.NewService(db, credentialCipher)
+	developerWebhookService, err := developerwebhooks.NewService(db, credentialCipher, developerwebhooks.Options{})
+	if err != nil {
+		logger.Error("failed to configure developer Webhooks", "error", err)
+		os.Exit(1)
+	}
+	outboxTopicPublishers[developerwebhooks.OutboxTopic] = developerWebhookService
 	resolveImagePull := func(
 		ctx context.Context,
 		tenantID, targetID uuid.UUID,
@@ -248,6 +256,21 @@ func main() {
 		logger.Error("failed to initialize reconciler leadership", "error", err)
 		os.Exit(1)
 	}
+	sshProvisioningExecutor, err := executiontargets.NewSSHProvisioningOperationExecutor(executionTargetService, sshProvisioner)
+	if err != nil {
+		logger.Error("failed to configure SSH provisioning executor", "error", err)
+		os.Exit(1)
+	}
+	sshProvisioningReconciler, err := executiontargets.NewProvisioningReconciler(
+		executionTargetService,
+		sshProvisioningExecutor,
+		reconcilerLeadershipConfig.HolderID+":ssh-provisioning",
+		maxDuration(2*time.Minute, cfg.SSHProvisionTimeout+30*time.Second),
+	)
+	if err != nil {
+		logger.Error("failed to configure SSH provisioning reconciler", "error", err)
+		os.Exit(1)
+	}
 	lifecyclePolicyService, err := lifecyclepolicy.NewService(db, cfg.ResourceLifecycle)
 	if err != nil {
 		logger.Error("failed to configure Resource Lifecycle Policy", "error", err)
@@ -257,6 +280,7 @@ func main() {
 		db, projectService, executionTargetService,
 		sessions.WithProviderCapabilityHeartbeatTimeout(cfg.WorkerHeartbeatTimeout),
 		sessions.WithLifecyclePolicyResolver(lifecyclePolicyService),
+		sessions.WithEventProjector(developerWebhookService),
 	)
 	memoryService := memories.NewService(db)
 	executionService := executions.NewService(
@@ -389,7 +413,8 @@ func main() {
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
 		credentialService, retentionService, metrics, outboxService, enterpriseIdentityService,
-		serviceAccountService, scimService, schemaChecker, logger, httpapi.WithBilling(billingService),
+		serviceAccountService, scimService, schemaChecker, logger,
+		httpapi.WithBilling(billingService), httpapi.WithDeveloperWebhooks(developerWebhookService),
 	)
 	if err != nil {
 		logger.Error("failed to configure HTTP API", "error", err)
@@ -418,6 +443,18 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("failed to configure kubernetes reconciler leadership runner", "error", err)
+		os.Exit(1)
+	}
+	sshProvisioningLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:ssh-execution-target-provisioning",
+		CycleInterval:     2 * time.Second,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure SSH provisioning leadership runner", "error", err)
 		os.Exit(1)
 	}
 	targetFailoverLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
@@ -570,6 +607,14 @@ func main() {
 		kubernetesLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
 			return observeLeadershipBackground(metrics, "kubernetes", func() error {
 				return kubernetesReconciler.ReconcileOnce(run.Context)
+			})
+		})
+	})
+	startBackground(func() {
+		sshProvisioningLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "ssh-provisioning", func() error {
+				_, err := sshProvisioningReconciler.ReconcileOnce(run.Context)
+				return err
 			})
 		})
 	})

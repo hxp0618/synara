@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
@@ -24,6 +25,10 @@ type Entry struct {
 }
 
 func Record(ctx context.Context, tx *gorm.DB, entry Entry) error {
+	if machine, ok := authorization.MachinePrincipalFromContext(ctx); ok && entry.ActorType == "user" {
+		entry.ActorType = "service_account"
+		entry.ActorID = &machine.ActorID
+	}
 	metadata := entry.Metadata
 	if metadata == nil {
 		metadata = map[string]any{}

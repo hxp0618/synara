@@ -379,7 +379,7 @@ func (s *Service) FailoverExecution(
 			eventPayload["destinationDrAuthority"] = authority
 			outboxPayload["destinationDrAuthority"] = authority
 		}
-		appended, err = appendEvent(ctx, tx, &session, eventInput{
+		appended, err = s.appendEvent(ctx, tx, &session, eventInput{
 			EventType: "execution.failover-committed", ActorType: "system", ExecutionID: &destination.ID,
 			Payload: eventPayload,
 		})

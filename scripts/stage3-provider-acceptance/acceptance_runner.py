@@ -1252,6 +1252,7 @@ class RunnerOptions:
     real_provider_base_url_env: str | None
     real_provider_model: str | None
     kubectl_bin: str = "kubectl"
+    ssh_developer_api_provisioning: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2313,10 +2314,18 @@ class LocalRetentionHarness:
 
 
 class APIClient:
-    def __init__(self, base_url: str, deadline: Deadline, redactor: SecretRedactor) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        deadline: Deadline,
+        redactor: SecretRedactor,
+        *,
+        bearer_token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.deadline = deadline
         self.redactor = redactor
+        self.bearer_token = bearer_token
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
 
@@ -2328,17 +2337,20 @@ class APIClient:
         expected: Iterable[int] = (200,),
         *,
         maximum_timeout: float = 10.0,
+        idempotency_key: str | None = None,
     ) -> Any:
         data = None
         headers = {
             "Accept": "application/json",
             "X-Request-ID": f"stage3-acceptance-{uuid.uuid4()}",
         }
+        if self.bearer_token is not None:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
         if payload is not None:
             data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
-            headers["Idempotency-Key"] = str(uuid.uuid4())
+            headers["Idempotency-Key"] = idempotency_key or str(uuid.uuid4())
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with self.opener.open(
@@ -5263,33 +5275,126 @@ class SSHDriver(ManagedWorkerDriver):
                 )
             self._assert_remote_target_absent(negative_id)
 
-            target = self._create_ssh_target(
-                tenant_id,
-                organization_id,
-                self.target_name,
-                self.host_key,
-                provider,
-            )
+            developer_evidence: Mapping[str, Any] | None = None
+            developer_api: APIClient | None = None
+            if self.options.ssh_developer_api_provisioning:
+                developer_api, principal_evidence = self._developer_api_client(tenant_id)
+                target = self._create_ssh_target(
+                    tenant_id,
+                    organization_id,
+                    self.target_name,
+                    self.host_key,
+                    provider,
+                    api=developer_api,
+                )
+                developer_evidence = {
+                    "surface": "public-beta developer API",
+                    "authentication": principal_evidence,
+                    "targetCreatedByServiceAccount": True,
+                }
+            else:
+                target = self._create_ssh_target(
+                    tenant_id,
+                    organization_id,
+                    self.target_name,
+                    self.host_key,
+                    provider,
+                )
             target_id = self._target_id(target, "SSH execution target")
             self.target_id = target_id
             self._assert_remote_target_absent(target_id)
-            installed = json_object(
-                self.api.request(
-                    "POST",
-                    f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/install",
-                    maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
-                ),
-                "SSH install result",
-            )
+            if developer_api is not None:
+                provisioning_path = (
+                    f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/provisioning-operations"
+                )
+                idempotency_key = f"stage7-live-ssh-{uuid.uuid4()}"
+                operation = json_object(
+                    developer_api.request(
+                        "POST",
+                        provisioning_path,
+                        {"action": "install"},
+                        expected=(202,),
+                        idempotency_key=idempotency_key,
+                    ),
+                    "durable SSH provisioning operation",
+                )
+                replay = json_object(
+                    developer_api.request(
+                        "POST",
+                        provisioning_path,
+                        {"action": "install"},
+                        expected=(202,),
+                        idempotency_key=idempotency_key,
+                    ),
+                    "replayed durable SSH provisioning operation",
+                )
+                operation_id = operation.get("id")
+                if not isinstance(operation_id, str) or replay.get("id") != operation_id:
+                    raise AcceptanceError(
+                        "runner.developer_api_provisioning_replay_mismatch",
+                        "The durable SSH provisioning operation did not replay the stable idempotency key.",
+                    )
+
+                def completed_operation() -> dict[str, Any] | None:
+                    current = json_object(
+                        developer_api.request(
+                            "GET",
+                            f"{provisioning_path}/{operation_id}",
+                            maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
+                        ),
+                        "durable SSH provisioning operation status",
+                    )
+                    if current.get("state") == "failed":
+                        error = current.get("error")
+                        raise AcceptanceError(
+                            "runner.developer_api_provisioning_failed",
+                            "The durable SSH provisioning operation failed.",
+                            {"operationId": operation_id, "error": self.redactor.value(error)},
+                        )
+                    return current if current.get("state") == "succeeded" else None
+
+                completed = developer_api.wait_until(
+                    "durable Stage 7 SSH provisioning operation",
+                    completed_operation,
+                    timeout_seconds=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
+                )
+                installed = json_object(completed.get("result"), "durable SSH provisioning result")
+                developer_evidence = {
+                    **(developer_evidence or {}),
+                    "provisioningOperationId": operation_id,
+                    "idempotencyReplay": True,
+                    "terminalState": completed.get("state"),
+                    "attempt": completed.get("attempt"),
+                    "secretConfigurationProjected": False,
+                    "internalServiceNameProjected": False,
+                }
+            else:
+                installed = json_object(
+                    self.api.request(
+                        "POST",
+                        f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/install",
+                        maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
+                    ),
+                    "SSH install result",
+                )
             expected_service = f"synara-agentd-{target_id}.service"
-            if (
+            developer_contract_invalid = developer_api is not None and (
+                installed.get("targetId") != target_id
+                or installed.get("action") != "install"
+                or installed.get("status") != "active"
+                or "serviceName" in installed
+                or not isinstance(installed.get("binarySha256"), str)
+                or len(str(installed.get("binarySha256"))) != 64
+            )
+            legacy_contract_invalid = developer_api is None and (
                 installed.get("targetId") != target_id
                 or installed.get("operation") != "install"
                 or installed.get("status") != "active"
                 or installed.get("serviceName") != expected_service
                 or not isinstance(installed.get("binarySha256"), str)
                 or len(str(installed.get("binarySha256"))) != 64
-            ):
+            )
+            if developer_contract_invalid or legacy_contract_invalid:
                 raise AcceptanceError(
                     "runner.ssh_install_contract_mismatch",
                     "SSH Target installation returned an invalid result.",
@@ -5330,6 +5435,7 @@ class SSHDriver(ManagedWorkerDriver):
                     "controlPlaneTransport": self._worker_proxy_relay_evidence(),
                     "controlPlaneCredentialLifecycle": self.credential_lifecycle,
                     "workerAllocation": self.lifecycle.worker_allocation,
+                    **({"developerApi": developer_evidence} if developer_evidence is not None else {}),
                 },
             }
         finally:
@@ -5582,7 +5688,7 @@ class SSHDriver(ManagedWorkerDriver):
             collect("remove owned external SSH runtime", self._remove_external_runtime)
         collect("stop Worker proxy relay", self._stop_worker_proxy_relay)
         collect("stop Control Plane", self.stop)
-        if self.machine_created and self.owns_machine and not self.options.keep:
+        if self.machine_create_attempted and self.owns_machine and not self.options.keep:
             completed = collect(
                 "delete disposable OrbStack machine",
                 lambda: self._orbctl_completed(
@@ -6258,7 +6364,7 @@ class SSHDriver(ManagedWorkerDriver):
                 self.machine_name,
             ],
             log_path=self.logs_dir / "ssh-orbstack-create.log",
-            maximum_timeout=max(180.0, self.deadline.remaining()),
+            maximum_timeout=180.0,
         )
         self.machine_created = True
         stage = "/tmp/synara-stage3-acceptance"
@@ -6735,9 +6841,12 @@ class SSHDriver(ManagedWorkerDriver):
         name: str,
         host_key: str,
         provider: str,
+        *,
+        api: APIClient | None = None,
     ) -> dict[str, Any]:
+        client = api or self.api
         return json_object(
-            self.api.request(
+            client.request(
                 "POST",
                 f"/v1/tenants/{tenant_id}/execution-targets",
                 {
@@ -6782,6 +6891,44 @@ class SSHDriver(ManagedWorkerDriver):
             ),
             name,
         )
+
+    def _developer_api_client(
+        self,
+        tenant_id: str,
+    ) -> tuple[APIClient, Mapping[str, Any]]:
+        issued = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/service-accounts",
+                {
+                    "name": f"stage7-live-ssh-{uuid.uuid4().hex[:12]}",
+                    "description": "Ephemeral Stage 7 live SSH developer API acceptance principal",
+                    "role": "owner",
+                    "scopes": ["api.access"],
+                },
+                expected=(201,),
+            ),
+            "temporary Stage 7 Service Account",
+        )
+        account = json_object(issued.get("account"), "temporary Stage 7 Service Account.account")
+        token = issued.get("token")
+        if not isinstance(token, str) or not token.startswith("syna_sa_"):
+            raise AcceptanceError(
+                "runner.developer_api_token_invalid",
+                "The temporary Stage 7 Service Account did not return a valid one-time token.",
+            )
+        self.redactor.add(token, "[REDACTED_STAGE7_SERVICE_ACCOUNT_TOKEN]")
+        return APIClient(
+            self.base_url,
+            self.deadline,
+            self.redactor,
+            bearer_token=token,
+        ), {
+            "serviceAccountId": account.get("id"),
+            "role": account.get("role"),
+            "scopes": account.get("scopes"),
+            "tokenPersisted": False,
+        }
 
     @staticmethod
     def _target_id(target: Mapping[str, Any], label: str) -> str:
@@ -14842,12 +14989,12 @@ class AcceptanceSuite:
         output = json_object(terminal_payload.get("output"), "execution.completed payload.output")
         credential_evidence = json_object(output.get("credentialEvidence"), "credential evidence")
         if credential_evidence != {
-            "credentialPayloadKeys": ["apiKey"],
+            "credentialPayloadKeys": ["apiKey", "baseUrl"],
             "credentialVerified": True,
         }:
             raise AcceptanceError(
                 "runner.fixture_credential_evidence_invalid",
-                "The fixture did not return the expected key-only Credential evidence.",
+                "The fixture did not return the expected bounded Credential evidence.",
                 {"credentialEvidence": credential_evidence},
             )
         worker_id, generation = self._event_worker_identity(terminal)
@@ -17767,7 +17914,7 @@ class AcceptanceSuite:
             "load credential evidence",
         )
         expected_credential_evidence = {
-            "credentialPayloadKeys": ["apiKey"],
+            "credentialPayloadKeys": ["apiKey", "baseUrl"],
             "credentialVerified": True,
         }
         terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
@@ -19501,7 +19648,7 @@ class AcceptanceSuite:
         after = 0
         while True:
             page = json_object(
-                self.api.request("GET", f"/v1/sessions/{session_id}/events?afterSequence={after}&limit=500"),
+                self.api.request("GET", f"/v1/sessions/{session_id}/events?afterSequence={after}&limit=200"),
                 "session events",
             )
             items = page.get("items")
@@ -20250,6 +20397,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--ssh-machine-arch", choices=("arm64", "amd64"), default="arm64")
     parser.add_argument("--ssh-machine-image", default="ubuntu:24.04")
     parser.add_argument("--ssh-node-version", default="24.13.1")
+    parser.add_argument(
+        "--ssh-developer-api-provisioning",
+        action="store_true",
+        help=(
+            "Create the positive SSH Target and drive its durable provisioning operation through "
+            "a temporary Service Account on the public-beta developer API"
+        ),
+    )
     parser.add_argument("--ssh-external-host", help="Explicit non-disposable SSH host")
     parser.add_argument("--ssh-external-port", type=int, default=22)
     parser.add_argument("--ssh-external-user", help="SSH login user for --ssh-external-host")
@@ -20686,6 +20841,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--ssh-machine-image must be a non-empty OrbStack distro reference")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", parsed.ssh_node_version.strip()):
         parser.error("--ssh-node-version must be a three-component numeric version")
+    if parsed.ssh_developer_api_provisioning and parsed.target != "ssh":
+        parser.error("--ssh-developer-api-provisioning requires --target ssh")
     external_option_used = bool(
         parsed.ssh_external_host
         or parsed.ssh_external_user
@@ -21092,6 +21249,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         real_provider_base_url_env=real_provider_base_url_env,
         real_provider_model=real_provider_model,
         kubectl_bin=parsed.kubectl_bin.strip(),
+        ssh_developer_api_provisioning=parsed.ssh_developer_api_provisioning,
     )
 
 

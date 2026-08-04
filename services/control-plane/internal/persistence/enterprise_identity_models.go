@@ -77,17 +77,19 @@ type IdentityLoginAttempt struct {
 func (IdentityLoginAttempt) TableName() string { return "identity_login_attempts" }
 
 type ServiceAccount struct {
-	ID             uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID       uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	OrganizationID *uuid.UUID `gorm:"column:organization_id;type:uuid"`
-	Name           string     `gorm:"column:name"`
-	Description    string     `gorm:"column:description"`
-	Status         string     `gorm:"column:status"`
-	Scopes         []string   `gorm:"column:scopes;serializer:json"`
-	CreatedBy      uuid.UUID  `gorm:"column:created_by;type:uuid"`
-	CreatedAt      time.Time  `gorm:"column:created_at"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at"`
-	RevokedAt      *time.Time `gorm:"column:revoked_at"`
+	ID                 uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID           uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	OrganizationID     *uuid.UUID `gorm:"column:organization_id;type:uuid"`
+	Name               string     `gorm:"column:name"`
+	Description        string     `gorm:"column:description"`
+	Status             string     `gorm:"column:status"`
+	Role               string     `gorm:"column:role"`
+	Scopes             []string   `gorm:"column:scopes;serializer:json"`
+	RateLimitPerMinute int        `gorm:"column:rate_limit_per_minute"`
+	CreatedBy          uuid.UUID  `gorm:"column:created_by;type:uuid"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
+	RevokedAt          *time.Time `gorm:"column:revoked_at"`
 }
 
 func (ServiceAccount) TableName() string { return "service_accounts" }
@@ -104,6 +106,27 @@ type ServiceAccountToken struct {
 }
 
 func (ServiceAccountToken) TableName() string { return "service_account_tokens" }
+
+type ServiceAccountAPIUsageWindow struct {
+	TenantID         uuid.UUID  `gorm:"column:tenant_id;type:uuid;primaryKey"`
+	ServiceAccountID uuid.UUID  `gorm:"column:service_account_id;type:uuid;primaryKey"`
+	WindowStartedAt  time.Time  `gorm:"column:window_started_at;primaryKey"`
+	RoutePattern     string     `gorm:"column:route_pattern;primaryKey"`
+	OrganizationID   *uuid.UUID `gorm:"column:organization_id;type:uuid"`
+	AdmittedCount    int64      `gorm:"column:admitted_count"`
+	RateLimitedCount int64      `gorm:"column:rate_limited_count"`
+	RequestCount     int64      `gorm:"column:request_count"`
+	SuccessCount     int64      `gorm:"column:success_count"`
+	ClientErrorCount int64      `gorm:"column:client_error_count"`
+	ServerErrorCount int64      `gorm:"column:server_error_count"`
+	TotalDurationMS  int64      `gorm:"column:total_duration_ms"`
+	CreatedAt        time.Time  `gorm:"column:created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at"`
+}
+
+func (ServiceAccountAPIUsageWindow) TableName() string {
+	return "service_account_api_usage_windows"
+}
 
 type IdentityGroup struct {
 	ID          uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`

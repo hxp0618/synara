@@ -273,21 +273,22 @@ type WorkerRequestReceipt struct {
 func (WorkerRequestReceipt) TableName() string { return "worker_request_receipts" }
 
 type ExecutionTarget struct {
-	ID                     uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID               *uuid.UUID     `gorm:"column:tenant_id;type:uuid"`
-	OrganizationID         *uuid.UUID     `gorm:"column:organization_id;type:uuid"`
-	Kind                   string         `gorm:"column:kind"`
-	Name                   string         `gorm:"column:name"`
-	Status                 string         `gorm:"column:status"`
-	ConfigurationEncrypted []byte         `gorm:"column:configuration_encrypted"`
-	ConfigurationKeyID     *string        `gorm:"column:configuration_key_id"`
-	Capabilities           map[string]any `gorm:"column:capabilities;serializer:json"`
-	SSHOperationGeneration int64          `gorm:"column:ssh_operation_generation;not null;default:0"`
-	SSHOperationKind       *string        `gorm:"column:ssh_operation_kind"`
-	SSHOperationStartedAt  *time.Time     `gorm:"column:ssh_operation_started_at"`
-	SSHExpectedInstanceUID *uuid.UUID     `gorm:"column:ssh_expected_instance_uid;type:uuid"`
-	CreatedAt              time.Time      `gorm:"column:created_at"`
-	UpdatedAt              time.Time      `gorm:"column:updated_at"`
+	ID                         uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                   *uuid.UUID     `gorm:"column:tenant_id;type:uuid"`
+	OrganizationID             *uuid.UUID     `gorm:"column:organization_id;type:uuid"`
+	Kind                       string         `gorm:"column:kind"`
+	Name                       string         `gorm:"column:name"`
+	Status                     string         `gorm:"column:status"`
+	ConfigurationEncrypted     []byte         `gorm:"column:configuration_encrypted"`
+	ConfigurationKeyID         *string        `gorm:"column:configuration_key_id"`
+	Capabilities               map[string]any `gorm:"column:capabilities;serializer:json"`
+	SSHOperationGeneration     int64          `gorm:"column:ssh_operation_generation;not null;default:0"`
+	SSHOperationKind           *string        `gorm:"column:ssh_operation_kind"`
+	SSHOperationStartedAt      *time.Time     `gorm:"column:ssh_operation_started_at"`
+	SSHExpectedInstanceUID     *uuid.UUID     `gorm:"column:ssh_expected_instance_uid;type:uuid"`
+	SSHProvisioningOperationID *uuid.UUID     `gorm:"column:ssh_provisioning_operation_id;type:uuid"`
+	CreatedAt                  time.Time      `gorm:"column:created_at"`
+	UpdatedAt                  time.Time      `gorm:"column:updated_at"`
 }
 
 func (ExecutionTarget) TableName() string { return "execution_targets" }

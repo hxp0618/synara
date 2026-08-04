@@ -36,6 +36,11 @@ export {
   TenantServiceAccountSettingsSection,
   serviceAccountQueryKey,
 } from "./TenantServiceAccountSettingsSection";
+export {
+  TenantDeveloperWebhookSettingsSection,
+  developerWebhookDeliveryQueryKey,
+  developerWebhookQueryKey,
+} from "./TenantDeveloperWebhookSettingsSection";
 export { TenantAuditSettingsSection, auditLogQueryKey } from "./TenantAuditSettingsSection";
 export {
   TenantSupportAccessSettingsSection,

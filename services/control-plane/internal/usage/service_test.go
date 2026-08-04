@@ -286,6 +286,14 @@ func assertInternalCostCenterProjection(
 		item.CostCoverage != "provider-and-allocated-platform" {
 		t.Fatalf("unexpected Session Usage explanation: %#v", item)
 	}
+	serviceAccountID := uuid.New()
+	_, err = NewService(db).GetSessionUsage(ctx, identity.Principal{
+		UserID: domain.UserID, ActiveTenantID: &domain.TenantID, ServiceAccountID: &serviceAccountID,
+	}, sessionID)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "session_not_found" {
+		t.Fatalf("Service Account private Session Usage error = %v", err)
+	}
 	if err := db.Model(&persistence.TenantSubscription{}).
 		Where("tenant_id = ?", domain.TenantID).
 		Updates(map[string]any{

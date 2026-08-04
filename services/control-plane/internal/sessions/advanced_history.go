@@ -45,12 +45,13 @@ func (s *Service) Rollback(
 	if err != nil {
 		return RollbackSessionResult{}, false, err
 	}
-	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
+	if current.Visibility == "private" && (identity.IsServiceAccount(principal) || current.CreatedBy != principal.UserID) {
 		return RollbackSessionResult{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session.rollback", SuccessStatus: 200,
 		Request: map[string]any{
 			"sessionId": sessionID, "expectedLastEventSequence": expected, "fromTurnId": input.FromTurnID,
@@ -102,8 +103,8 @@ func (s *Service) Rollback(
 		if err := clearProviderCursorForHistoryMutation(ctx, tx, &session, s.now()); err != nil {
 			return RollbackSessionResult{}, err
 		}
-		appended, err = appendEvent(ctx, tx, &session, eventInput{
-			EventType: "session.history.rolled-back", ActorType: "user", ActorID: &principal.UserID,
+		appended, err = s.appendEvent(ctx, tx, &session, eventInput{
+			EventType: "session.history.rolled-back", ActorType: actorType, ActorID: &actorID,
 			Payload: map[string]any{
 				"fromSessionId": fromSessionID, "fromTurnId": input.FromTurnID,
 				"fromSequence": fromSequence, "removedTurnCount": len(removedTurns),
@@ -127,7 +128,7 @@ func (s *Service) Rollback(
 			return RollbackSessionResult{}, problem.Wrap(500, "session_rollback_outbox_failed", "The Session rollback event could not be queued.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "session.history_rolled_back", ResourceType: "agent_session", ResourceID: &session.ID,
 			OrganizationID: &session.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
@@ -177,7 +178,7 @@ func (s *Service) Fork(
 	if err != nil {
 		return ForkSessionResult{}, false, err
 	}
-	if source.Visibility == "private" && source.CreatedBy != principal.UserID {
+	if source.Visibility == "private" && (identity.IsServiceAccount(principal) || source.CreatedBy != principal.UserID) {
 		return ForkSessionResult{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
 	if _, err := s.authorizer.RequireOrganization(
@@ -209,9 +210,13 @@ func (s *Service) Fork(
 	if err != nil {
 		return ForkSessionResult{}, false, err
 	}
+	if identity.IsServiceAccount(principal) && visibility == "private" {
+		return ForkSessionResult{}, false, problem.New(400, "service_account_private_session_unsupported", "Service Accounts cannot fork private Sessions.")
+	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session.fork", SuccessStatus: 201,
 		Request: map[string]any{
 			"sourceSessionId": sourceSessionID, "expectedLastEventSequence": expected,
@@ -251,6 +256,7 @@ func (s *Service) Fork(
 			tenantID,
 			locked.OrganizationID,
 			principal.UserID,
+			identity.IsServiceAccount(principal),
 			locked.Provider,
 			locked.Model,
 			requestedCredentialID,
@@ -304,8 +310,8 @@ func (s *Service) Fork(
 		if err := tx.WithContext(ctx).Create(&created).Error; err != nil {
 			return ForkSessionResult{}, problem.Wrap(409, "session_fork_rejected", "The Fork Session could not be created.", err)
 		}
-		appended, err = appendEvent(ctx, tx, &created, eventInput{
-			EventType: "session.forked", ActorType: "user", ActorID: &principal.UserID,
+		appended, err = s.appendEvent(ctx, tx, &created, eventInput{
+			EventType: "session.forked", ActorType: actorType, ActorID: &actorID,
 			Payload: map[string]any{
 				"sourceSessionId": sourceSessionID, "sourceEventSequence": forkSequence,
 				"sourceTurnId": sourceTurnID, "supportMode": "emulated",
@@ -326,7 +332,7 @@ func (s *Service) Fork(
 			return ForkSessionResult{}, problem.Wrap(500, "session_fork_outbox_failed", "The Session Fork event could not be queued.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "session.forked", ResourceType: "agent_session", ResourceID: &created.ID,
 			OrganizationID: &created.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{

@@ -46,10 +46,11 @@ func (s *Service) Cancel(
 	); err != nil {
 		return OperationResult[Execution]{}, err
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "execution.cancel", SuccessStatus: 200,
 		Request: map[string]any{"executionId": executionID},
 	}, func(tx *gorm.DB) (Execution, error) {
@@ -85,13 +86,13 @@ func (s *Service) Cancel(
 			lockedLease = &lease
 		}
 		appended, err = s.cancelExecutionLocked(
-			ctx, tx, &execution, lockedLease, "user", &principal.UserID, now, "user-requested",
+			ctx, tx, &execution, lockedLease, actorType, &actorID, now, "user-requested",
 		)
 		if err != nil {
 			return Execution{}, err
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "execution.cancelled", ResourceType: "agent_execution", ResourceID: &execution.ID,
 			OrganizationID: &session.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"sessionId": execution.SessionID, "turnId": execution.TurnID},
@@ -161,7 +162,7 @@ func (s *Service) cancelExecutionLocked(
 			authorityKind := workerClaimReleaseAuthorityControlPlane
 			if actorType == "worker" {
 				authorityKind = workerClaimReleaseAuthorityWorker
-			} else if actorType == "user" {
+			} else if actorType == "user" || actorType == "service_account" {
 				authorityKind = workerClaimReleaseAuthorityUser
 			}
 			authorityID := ""

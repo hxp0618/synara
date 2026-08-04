@@ -48,6 +48,9 @@ func TestServiceAccountTokenIsOneTimeHashedAndRotatable(t *testing.T) {
 	if issued.Token == "" || issued.Account.Status != "active" {
 		t.Fatalf("unexpected issued account: %#v", issued)
 	}
+	if issued.Account.RateLimitPerMinute != DefaultRateLimitPerMinute {
+		t.Fatalf("default rate limit = %d", issued.Account.RateLimitPerMinute)
+	}
 	var stored persistence.ServiceAccountToken
 	if err := db.Where("service_account_id = ?", issued.Account.ID).Take(&stored).Error; err != nil {
 		t.Fatal(err)
@@ -59,6 +62,13 @@ func TestServiceAccountTokenIsOneTimeHashedAndRotatable(t *testing.T) {
 	if err != nil || !authenticated.Allows("scim.write") || authenticated.TenantID != tenantID {
 		t.Fatalf("service account authentication failed: %#v %v", authenticated, err)
 	}
+	accounts, err := service.List(context.Background(), principal, tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].LastUsedAt == nil {
+		t.Fatalf("Service Account last-used projection = %#v", accounts)
+	}
 	rotated, err := service.RotateToken(context.Background(), principal, tenantID, issued.Account.ID, nil, "service-account-rotate", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +78,76 @@ func TestServiceAccountTokenIsOneTimeHashedAndRotatable(t *testing.T) {
 	}
 	if _, err := service.Authenticate(context.Background(), rotated.Token); err != nil {
 		t.Fatalf("rotated token is invalid: %v", err)
+	}
+}
+
+func TestServiceAccountRateLimitIsValidatedAndAuthenticated(t *testing.T) {
+	db, principal, tenantID := setupServiceAccountTest(t)
+	service := NewService(db)
+	limit := 42
+	issued, err := service.Create(context.Background(), principal, tenantID, CreateInput{
+		Name: "Developer API", Scopes: []string{"api.access"}, RateLimitPerMinute: &limit,
+	}, "service-account-rate-limit", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := service.Authenticate(context.Background(), issued.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Account.RateLimitPerMinute != limit || authenticated.RateLimitPerMinute != limit {
+		t.Fatalf("rate limits account=%d principal=%d", issued.Account.RateLimitPerMinute, authenticated.RateLimitPerMinute)
+	}
+
+	invalid := 0
+	_, err = service.Create(context.Background(), principal, tenantID, CreateInput{
+		Name: "Invalid Developer API", Scopes: []string{"api.access"}, RateLimitPerMinute: &invalid,
+	}, "service-account-invalid-rate-limit", "127.0.0.1")
+	if problemCode(err) != "invalid_service_account_rate_limit" {
+		t.Fatalf("invalid rate limit error = %v", err)
+	}
+}
+
+func TestServiceAccountResourceRoleMatchesTenantOrOrganizationScope(t *testing.T) {
+	db, principal, tenantID := setupServiceAccountTest(t)
+	service := NewService(db)
+	now := time.Now().UTC()
+	organizationID := uuid.New()
+	if err := db.Create(&persistence.Organization{
+		ID: organizationID, TenantID: tenantID, Slug: "developer-api", Name: "Developer API",
+		Kind: "business", Status: "active", Settings: map[string]any{}, CreatedBy: principal.UserID,
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	issued, err := service.Create(context.Background(), principal, tenantID, CreateInput{
+		OrganizationID: &organizationID, Name: "Polaris automation", Role: "agent_operator",
+		Scopes: []string{"api.access"},
+	}, "service-account-api-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := service.Authenticate(context.Background(), issued.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.Role != "agent_operator" || authenticated.CreatedBy != principal.UserID || !authenticated.Allows("api.access") {
+		t.Fatalf("authenticated resource Principal = %#v", authenticated)
+	}
+
+	_, err = service.Create(context.Background(), principal, tenantID, CreateInput{
+		OrganizationID: &organizationID, Name: "Invalid tenant role", Role: "security_admin",
+		Scopes: []string{"api.access"},
+	}, "service-account-invalid-org-role", "127.0.0.1")
+	if problemCode(err) != "invalid_service_account_role" {
+		t.Fatalf("Organization Service Account tenant role error = %v", err)
+	}
+	_, err = service.Create(context.Background(), principal, tenantID, CreateInput{
+		Name: "Invalid organization role", Role: "agent_operator", Scopes: []string{"api.access"},
+	}, "service-account-invalid-tenant-role", "127.0.0.1")
+	if problemCode(err) != "invalid_service_account_role" {
+		t.Fatalf("Tenant Service Account organization role error = %v", err)
 	}
 }
 

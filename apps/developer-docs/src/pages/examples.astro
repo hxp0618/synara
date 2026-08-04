@@ -1,0 +1,19 @@
+---
+import DocsLayout from "../layouts/DocsLayout.astro";
+import type { DocPage } from "../content";
+
+const page: DocPage = {
+  slug: "examples",
+  navLabel: "Examples",
+  title: "Production workflow examples",
+  description: "Complete TypeScript, Python, and curl integrations cover common automation and contract-validation patterns.",
+  sections: [
+    { id: "ci-fix-bot", title: "CI failure repair bot", body: ["Starts a Session for a failed CI job, asks the agent to diagnose and repair the repository, and streams durable progress into the job log."], code: "bun run examples:ci-fix" },
+    { id: "pr-review-bot", title: "Pull request review bot", body: ["Creates a constrained review Session from pull request context and prints review findings without granting automatic approval."], code: "bun run examples:pr-review" },
+    { id: "batch-migration", title: "Batch migration", body: ["Runs one idempotent Session per repository, checkpoints event sequences, and records partial failures for safe restart."], code: "bun run examples:batch-migration -- repositories.json" },
+    { id: "curl-quickstart", title: "curl end-to-end quickstart", body: ["Uses only curl and jq to create a Session, send a Turn, follow SSE, locate a v1/v2 approval Event, and resolve it with a stable API Key. Supply an already deployed Control Plane, Service Account key, and Project ID."], code: "examples/polaris/curl/quickstart.sh" },
+  ],
+};
+---
+
+<DocsLayout page={page} />

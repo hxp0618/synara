@@ -45,6 +45,25 @@ type Principal struct {
 	DesktopDeviceID      *uuid.UUID `json:"desktopDeviceId,omitempty"`
 	Email                string     `json:"email"`
 	DisplayName          string     `json:"displayName"`
+	ServiceAccountID     *uuid.UUID `json:"-"`
+}
+
+func ActorID(principal Principal) uuid.UUID {
+	if principal.ServiceAccountID != nil {
+		return *principal.ServiceAccountID
+	}
+	return principal.UserID
+}
+
+func ActorType(principal Principal) string {
+	if principal.ServiceAccountID != nil {
+		return "service_account"
+	}
+	return "user"
+}
+
+func IsServiceAccount(principal Principal) bool {
+	return principal.ServiceAccountID != nil
 }
 
 type TenantAccess struct {

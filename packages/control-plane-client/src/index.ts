@@ -1875,7 +1875,18 @@ export type ControlPlaneServiceAccount = {
   name: string;
   description: string;
   status: "active" | "revoked";
+  role:
+    | "owner"
+    | "admin"
+    | "security_admin"
+    | "cost_admin"
+    | "auditor"
+    | "agent_operator"
+    | "member"
+    | "viewer";
   scopes: ReadonlyArray<string>;
+  rateLimitPerMinute: number;
+  lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
   revokedAt: string | null;
@@ -1884,6 +1895,75 @@ export type ControlPlaneServiceAccount = {
 export type ControlPlaneIssuedServiceAccount = {
   account: ControlPlaneServiceAccount;
   token: string;
+};
+
+export type ControlPlaneServiceAccountUsageSummary = {
+  routePattern: string;
+  admittedCount: number;
+  rateLimitedCount: number;
+  requestCount: number;
+  successCount: number;
+  clientErrorCount: number;
+  serverErrorCount: number;
+  totalDurationMs: number;
+};
+
+export type ControlPlaneServiceAccountUsageReport = {
+  tenantId: string;
+  serviceAccountId: string;
+  organizationId: string | null;
+  from: string;
+  to: string;
+  items: ReadonlyArray<ControlPlaneServiceAccountUsageSummary>;
+};
+
+export type ControlPlaneDeveloperWebhookEventType =
+  | "turn.completed"
+  | "request.opened"
+  | "approval.requested"
+  | "execution.completed"
+  | "execution.failed"
+  | "execution.cancelled"
+  | "execution.interrupted"
+  | "execution.suspended";
+
+export type ControlPlaneDeveloperWebhook = {
+  id: string;
+  tenantId: string;
+  name: string;
+  url: string;
+  status: "active" | "disabled" | "revoked";
+  eventTypes: ReadonlyArray<ControlPlaneDeveloperWebhookEventType>;
+  secretVersion: number;
+  lastDeliveredAt: string | null;
+  lastFailedAt: string | null;
+  lastFailureSummary: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt: string | null;
+};
+
+export type ControlPlaneIssuedDeveloperWebhook = {
+  endpoint: ControlPlaneDeveloperWebhook;
+  secret: string;
+};
+
+export type ControlPlaneDeveloperWebhookDelivery = {
+  id: string;
+  endpointId: string;
+  sessionEventId: string;
+  eventType: ControlPlaneDeveloperWebhookEventType;
+  sessionId: string;
+  executionId: string | null;
+  sequence: number;
+  status: "pending" | "retrying" | "published" | "dead-letter";
+  attempts: number;
+  availableAt: string;
+  createdAt: string;
+  publishedAt: string | null;
+  deadLetteredAt: string | null;
+  lastError: string | null;
 };
 
 export type ControlPlaneCredentialPurpose = "provider" | "git" | "registry" | "package";
@@ -3627,7 +3707,9 @@ export const controlPlaneClient = {
       organizationId?: string;
       name: string;
       description: string;
+      role?: ControlPlaneServiceAccount["role"];
       scopes: ReadonlyArray<string>;
+      rateLimitPerMinute?: number;
       expiresAt?: string;
     },
   ) =>
@@ -3635,6 +3717,19 @@ export const controlPlaneClient = {
       `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts`,
       { method: "POST", body: input },
     ),
+  getServiceAccountAPIUsage: (
+    tenantId: string,
+    serviceAccountId: string,
+    range: { from?: string; to?: string } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (range.from) query.set("from", range.from);
+    if (range.to) query.set("to", range.to);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return controlPlaneRequest<ControlPlaneServiceAccountUsageReport>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts/${encodeURIComponent(serviceAccountId)}/usage${suffix}`,
+    );
+  },
   rotateServiceAccountToken: (tenantId: string, serviceAccountId: string) =>
     controlPlaneRequest<{ token: string; expiresAt: string | null }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts/${encodeURIComponent(serviceAccountId)}/rotate-token`,
@@ -3643,6 +3738,46 @@ export const controlPlaneClient = {
   revokeServiceAccount: (tenantId: string, serviceAccountId: string) =>
     controlPlaneRequest<void>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts/${encodeURIComponent(serviceAccountId)}/revoke`,
+      { method: "POST" },
+    ),
+  listDeveloperWebhooks: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneDeveloperWebhook> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks`,
+    ),
+  createDeveloperWebhook: (
+    tenantId: string,
+    input: {
+      name: string;
+      url: string;
+      eventTypes: ReadonlyArray<ControlPlaneDeveloperWebhookEventType>;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneIssuedDeveloperWebhook>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks`,
+      { method: "POST", body: input },
+    ),
+  rotateDeveloperWebhookSecret: (tenantId: string, webhookId: string) =>
+    controlPlaneRequest<ControlPlaneIssuedDeveloperWebhook>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+      { method: "POST" },
+    ),
+  setDeveloperWebhookEnabled: (tenantId: string, webhookId: string, enabled: boolean) =>
+    controlPlaneRequest<ControlPlaneDeveloperWebhook>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks/${encodeURIComponent(webhookId)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
+    ),
+  revokeDeveloperWebhook: (tenantId: string, webhookId: string) =>
+    controlPlaneRequest<ControlPlaneDeveloperWebhook>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks/${encodeURIComponent(webhookId)}/revoke`,
+      { method: "POST" },
+    ),
+  listDeveloperWebhookDeliveries: (tenantId: string, webhookId: string, limit = 50) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneDeveloperWebhookDelivery> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks/${encodeURIComponent(webhookId)}/deliveries?limit=${encodeURIComponent(String(limit))}`,
+    ),
+  replayDeveloperWebhookDelivery: (tenantId: string, webhookId: string, deliveryId: string) =>
+    controlPlaneRequest<unknown>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/developer-webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/replay`,
       { method: "POST" },
     ),
   listCredentials: (tenantId: string) =>
@@ -3759,10 +3894,22 @@ export const controlPlaneClient = {
       `/v1/tenants/${encodeURIComponent(tenantId)}/organizations`,
       { method: "POST", body: { ...input, settings: {} } },
     ),
-  listProjects: (tenantId: string, organizationId: string) =>
-    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneProject> }>(
-      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations/${encodeURIComponent(organizationId)}/projects`,
-    ),
+  listProjects: (
+    tenantId: string,
+    organizationId: string,
+    page?: { limit?: number; cursor?: string },
+  ) => {
+    const query = new URLSearchParams();
+    if (page?.limit !== undefined) query.set("limit", String(page.limit));
+    if (page?.cursor) query.set("cursor", page.cursor);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return controlPlaneRequest<{
+      items: ReadonlyArray<ControlPlaneProject>;
+      nextCursor?: string;
+    }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations/${encodeURIComponent(organizationId)}/projects${suffix}`,
+    );
+  },
   createProject: (
     tenantId: string,
     organizationId: string,
@@ -3795,10 +3942,17 @@ export const controlPlaneClient = {
       method: "PATCH",
       body: input,
     }),
-  listProjectSessions: (projectId: string) =>
-    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
-      `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
-    ),
+  listProjectSessions: (projectId: string, page?: { limit?: number; cursor?: string }) => {
+    const query = new URLSearchParams();
+    if (page?.limit !== undefined) query.set("limit", String(page.limit));
+    if (page?.cursor) query.set("cursor", page.cursor);
+    const encodedQuery = query.toString();
+    const suffix = encodedQuery ? `?${encodedQuery}` : "";
+    return controlPlaneRequest<{
+      items: ReadonlyArray<ControlPlaneAgentSession>;
+      nextCursor: string | null;
+    }>(`/v1/projects/${encodeURIComponent(projectId)}/sessions${suffix}`);
+  },
   getProjectResourceLifecyclePolicy: (projectId: string) =>
     controlPlaneRequest<ControlPlaneResourceLifecyclePolicy>(
       `/v1/projects/${encodeURIComponent(projectId)}/resource-lifecycle-policy`,
@@ -4147,10 +4301,10 @@ export const controlPlaneClient = {
     controlPlaneRequest<ControlPlaneSessionUsage>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/usage`,
     ),
-  listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {
+  listSessionEvents: (sessionId: string, afterSequence = 0, limit = 50) => {
     const query = new URLSearchParams({
       afterSequence: String(normalizeSessionEventSequence(afterSequence)),
-      limit: String(Math.max(1, Math.min(500, limit))),
+      limit: String(Math.max(1, Math.min(200, limit))),
     });
     return controlPlaneRequest<ControlPlaneSessionEventPage>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/events?${query.toString()}`,

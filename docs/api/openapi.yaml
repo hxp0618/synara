@@ -1,0 +1,3138 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Polaris Developer API
+  version: 0.1.0-beta.1
+  description: >-
+    Public developer contract for the Synara control plane. Operations marked
+    route-only participate in exposure conformance but are not yet eligible for SDK generation.
+servers:
+  - url: /
+paths:
+  /v1/artifacts/{artifactID}:
+    delete:
+      operationId: deleteArtifact
+      summary: Idempotently delete an Artifact and revoke its grants
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: artifactID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "204":
+          description: Artifact deleted, or already deleted by the same authorized caller
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: getArtifact
+      summary: Get Artifact metadata
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: artifactID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Artifact metadata without payload bytes or grant credentials
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/artifacts/{artifactID}/complete:
+    post:
+      operationId: completeArtifact
+      summary: Confirm an uploaded Artifact by size, digest, and media type
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: artifactID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompleteArtifactRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Ready Artifact; an identical confirmation is intrinsically replay-safe
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/artifacts/{artifactID}/download:
+    post:
+      operationId: downloadArtifact
+      summary: Issue a short-lived Artifact download grant
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: artifactID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Short-lived download grant; payload bytes remain outside the JSON API
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactDownloadGrant" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/executions/{executionID}/approvals/{requestID}/resolve:
+    post:
+      operationId: resolveExecutionApproval
+      summary: Resolve a pending execution approval
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: executionID
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: requestID
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveApprovalRequest"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Approval resolution accepted or idempotently replayed
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/executions/{executionID}/cancel:
+    post:
+      operationId: cancelExecution
+      summary: Cancel an active or queued Execution
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: executionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Cancelled Execution or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperExecution" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/executions/{executionID}/interactions:
+    get:
+      operationId: listExecutionInteractions
+      summary: List an Execution's Interaction history
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: executionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Bounded Interaction history page without Worker delivery internals
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InteractionPage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/executions/{executionID}/resume:
+    post:
+      operationId: resumeActiveTurnExecution
+      summary: Resume an idle-suspended active Turn by Execution ID
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: executionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Recovering Execution or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperExecution" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/executions/{executionID}/user-input/{requestID}/resolve:
+    post:
+      operationId: resolveExecutionUserInput
+      summary: Resolve a structured user-input Interaction
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: executionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: requestID
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolveUserInputRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Structured user input resolved or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Interaction" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{projectID}:
+    delete:
+      operationId: archiveProject
+      summary: Archive a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "204":
+          description: Project archived or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: getProject
+      summary: Get a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Project
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: updateProject
+      summary: Update a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProjectRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Updated Project or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{projectID}/provider-capabilities:
+    get:
+      operationId: projectProviderCapabilities
+      summary: Read the sanitized Provider capability matrix for a Project target
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: executionTargetId
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Sanitized target-based Provider capability matrix
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderCapabilityProjection" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{projectID}/sessions:
+    get:
+      operationId: listProjectSessions
+      summary: List Sessions in a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Bounded Session page ordered by most recent update
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionPage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createSession
+      summary: Create a Session in a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: projectID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Session created or idempotently replayed
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}:
+    get:
+      operationId: getAgentSession
+      summary: Get a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Session
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/archive:
+    post:
+      operationId: archiveSession
+      summary: Archive a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Archived Session or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/artifacts:
+    get:
+      operationId: listArtifacts
+      summary: List Artifact metadata for a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Bounded Artifact metadata page ordered newest first
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactPage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createArtifact
+      summary: Create pending Artifact metadata and a short-lived upload grant
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateArtifactRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Pending Artifact with a fresh short-lived grant, or ready metadata on replay
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactUploadGrant" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/compact:
+    post:
+      operationId: compactSession
+      summary: Queue a native-cursor Session compaction
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompactSessionRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Compaction operation queued or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperQueuedSessionOperation" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/events:
+    get:
+      operationId: listSessionEvents
+      summary: List durable Session Events after a sequence
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: afterSequence
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Ordered durable Session Event page
+          headers:
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEventPage"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/events/stream:
+    get:
+      operationId: streamSessionEvents
+      summary: Stream resumable Session Events
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-sse-event-schema: "#/components/schemas/SessionEvent"
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: afterSequence
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Used as the resume cursor when afterSequence is absent.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Resumable Session Event stream
+          headers:
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                sessionEvent:
+                  value: |-
+                    id: 42
+                    event: session-event
+                    data: {"eventId":"f3d95da2-af9f-4c38-98df-55a743be910d","eventVersion":1,"tenantId":"9074a58b-fad0-41ea-bc73-773867d98d72","organizationId":"fcdb7dd0-ab4c-454a-8ba2-b99ef5e87ab7","projectId":"74e7ab78-ecc1-4a54-a605-7582303058e8","sessionId":"3bf04193-a157-4829-811d-054be6802b23","executionId":null,"workerId":null,"generation":null,"sequence":42,"eventType":"session.created","actorType":"service_account","actorId":"2bfa3f0c-e8de-484f-a12f-4b9f393f8d8e","payload":{},"occurredAt":"2026-08-03T12:00:00Z"}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/fork:
+    post:
+      operationId: forkSession
+      summary: Fork an idle Session at an exact Event sequence
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForkSessionRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Forked Session or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForkSessionResult" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/interactions:
+    get:
+      operationId: listPendingSessionInteractions
+      summary: List pending Session Interactions at a durable Event watermark
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Bounded pending Interaction page and Session Event watermark
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingInteractionPage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/model-switch:
+    post:
+      operationId: switchSessionModel
+      summary: Compare-and-switch a Session model
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SwitchSessionModelRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Updated Session or idempotently replayed compare-and-switch result
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/provider-capabilities:
+    get:
+      operationId: sessionProviderCapabilities
+      summary: Read the sanitized Provider capability matrix for a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Sanitized execution-based Provider capability matrix
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderCapabilityProjection" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/resume:
+    post:
+      operationId: resumeSession
+      summary: Resume a suspended Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Active Session or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/reviews:
+    post:
+      operationId: startSessionReview
+      summary: Queue a code review at an exact Event sequence
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartSessionReviewRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Review operation queued or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperQueuedSessionOperation" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/rollback:
+    post:
+      operationId: rollbackSession
+      summary: Roll back idle Session history from a Turn boundary
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackSessionRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Rollback result or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackSessionResult" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/suspend:
+    post:
+      operationId: suspendSession
+      summary: Suspend an active Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Suspended Session or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/turns:
+    post:
+      operationId: createTurn
+      summary: Create a Turn in a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTurnRequest"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Turn created or idempotently replayed
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/turns/active/interrupt:
+    post:
+      operationId: interruptActiveTurn
+      summary: Interrupt the active Turn in a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Interrupt command accepted or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperControlCommand" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/turns/active/resume:
+    post:
+      operationId: resumeActiveTurn
+      summary: Resume the idle-suspended active Turn in a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      x-synara-request-body: none
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Recovering Execution or idempotently replayed response
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperExecution" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/turns/active/steer:
+    post:
+      operationId: steerActiveTurn
+      summary: Send additional input to the active Turn
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SteerActiveTurnRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Steer command accepted or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeveloperControlCommand" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/sessions/{sessionID}/usage:
+    get:
+      operationId: getSessionUsage
+      summary: Read token, network, duration, and cost Usage for a Session
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Session Usage grouped by Execution generation
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionUsage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/tenants/{tenantID}/organizations/{organizationID}/projects:
+    get:
+      operationId: listProjects
+      summary: List Projects in an Organization
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: organizationID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1 }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Bounded Project page ordered case-insensitively by name and stable ID
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProjectPage" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createProject
+      summary: Create a Project
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: organizationID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProjectRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Project created or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/tenants/{tenantID}/execution-targets:
+    post:
+      operationId: createExecutionTarget
+      summary: Register a Tenant-owned Execution Target
+      description: Requires a Tenant-scoped API Key whose fixed role grants Worker management.
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateExecutionTargetRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "201":
+          description: Execution Target registered or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionTarget" }
+        default: { $ref: "#/components/responses/ErrorResponse" }
+  /v1/tenants/{tenantID}/execution-targets/{executionTargetID}:
+    get:
+      operationId: getExecutionTarget
+      summary: Read a safe Execution Target projection
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: executionTargetID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Safe Execution Target projection without encrypted configuration
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionTarget" }
+        default: { $ref: "#/components/responses/ErrorResponse" }
+  /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations:
+    post:
+      operationId: createExecutionTargetProvisioningOperation
+      summary: Start durable SSH Execution Target provisioning
+      description: Returns a durable asynchronous operation. Registration alone does not mean compute is ready.
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: executionTargetID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { $ref: "#/components/schemas/CreateExecutionTargetProvisioningOperationRequest" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "202":
+          description: Durable provisioning operation accepted or idempotently replayed
+          headers:
+            Idempotency-Replayed: { $ref: "#/components/headers/IdempotencyReplayed" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionTargetProvisioningOperation" }
+        default: { $ref: "#/components/responses/ErrorResponse" }
+  /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations/{provisioningOperationID}:
+    get:
+      operationId: getExecutionTargetProvisioningOperation
+      summary: Read a safe provisioning operation projection
+      x-synara-exposure: public-beta
+      x-synara-contract-status: codegen-ready
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: executionTargetID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: provisioningOperationID
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UUID" }
+      security:
+        - ServiceAccountBearer: []
+      responses:
+        "200":
+          description: Safe provisioning operation without SSH configuration or remote output
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionTargetProvisioningOperation" }
+        default: { $ref: "#/components/responses/ErrorResponse" }
+components:
+  securitySchemes:
+    ServiceAccountBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: syna_sa_...
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Caller-generated opaque key used to replay this mutation safely.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  headers:
+    IdempotencyReplayed:
+      description: True when the stored response for the Idempotency-Key was replayed.
+      schema:
+        type: boolean
+    RateLimitLimit:
+      description: Per-key request limit for the current UTC minute window.
+      schema:
+        type: integer
+        minimum: 1
+    RateLimitRemaining:
+      description: Remaining admitted requests for the key in the current window.
+      schema:
+        type: integer
+        minimum: 0
+    RateLimitReset:
+      description: Whole seconds until the current UTC minute window resets.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    ErrorResponse:
+      description: Stable Polaris API error envelope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+    ResourceLifecycleOverrides:
+      type: object
+      additionalProperties: false
+      properties:
+        waitingKeepAliveSeconds: { type: [integer, "null"], minimum: 0 }
+        suspendAfterIdleSeconds: { type: [integer, "null"], minimum: 0 }
+        absoluteSessionLifetimeSeconds: { type: [integer, "null"], minimum: 0 }
+        workspaceRetentionDays: { type: [integer, "null"], minimum: 0 }
+        warmPoolMode: { type: [string, "null"] }
+    EffectiveResourceLifecyclePolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - waitingKeepAliveSeconds
+        - suspendAfterIdleSeconds
+        - absoluteSessionLifetimeSeconds
+        - workspaceRetentionDays
+        - warmPoolMode
+      properties:
+        waitingKeepAliveSeconds: { type: integer, minimum: 0 }
+        suspendAfterIdleSeconds: { type: integer, minimum: 0 }
+        absoluteSessionLifetimeSeconds: { type: [integer, "null"], minimum: 0 }
+        workspaceRetentionDays: { type: integer, minimum: 0 }
+        warmPoolMode: { type: string }
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [title, provider]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        visibility:
+          type: string
+          enum: [project, organization]
+          default: project
+        provider: { type: string, minLength: 1 }
+        model: { type: [string, "null"] }
+        providerCredentialId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+          description: Machine principals may reference only non-user credential scopes they are authorized to use.
+        executionTargetId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        executionTargetGroupId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        preferredExecutionRegion: { type: [string, "null"] }
+        resourceLifecyclePolicy:
+          oneOf:
+            - $ref: "#/components/schemas/ResourceLifecycleOverrides"
+            - type: "null"
+    Session:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenantId
+        - organizationId
+        - projectId
+        - createdBy
+        - title
+        - status
+        - visibility
+        - provider
+        - model
+        - providerCredentialId
+        - executionTargetId
+        - requestedExecutionTargetId
+        - lastEventSequence
+        - resourceState
+        - meaningfulActivityAt
+        - resourceLifecyclePolicy
+        - createdAt
+        - updatedAt
+        - archivedAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        organizationId: { $ref: "#/components/schemas/UUID" }
+        projectId: { $ref: "#/components/schemas/UUID" }
+        createdBy: { $ref: "#/components/schemas/UUID" }
+        title: { type: string }
+        status: { type: string }
+        visibility: { type: string, enum: [project, organization] }
+        provider: { type: string }
+        model: { type: [string, "null"] }
+        providerCredentialId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        executionTargetId: { $ref: "#/components/schemas/UUID" }
+        requestedExecutionTargetId: { $ref: "#/components/schemas/UUID" }
+        executionTargetGroupId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        routingPolicyVersion: { type: [integer, "null"], format: int64 }
+        preferredExecutionRegion: { type: [string, "null"] }
+        forkSourceSessionId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        forkSourceTurnId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        forkSourceEventSequence: { type: [integer, "null"], format: int64 }
+        forkStrategy: { type: [string, "null"] }
+        lastEventSequence: { type: integer, format: int64, minimum: 0 }
+        resourceState: { type: string }
+        meaningfulActivityAt: { type: string, format: date-time }
+        resourceIdleSince: { type: [string, "null"], format: date-time }
+        absoluteExpiresAt: { type: [string, "null"], format: date-time }
+        resourceLifecyclePolicy: { $ref: "#/components/schemas/EffectiveResourceLifecyclePolicy" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        archivedAt: { type: [string, "null"], format: date-time }
+    SessionPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+        nextCursor: { type: [string, "null"] }
+    ProviderCapabilityProjection:
+      type: object
+      additionalProperties: false
+      required: [executionTargetId, targetKind, basis, items]
+      properties:
+        executionTargetId: { $ref: "#/components/schemas/UUID" }
+        targetKind: { type: string, minLength: 1 }
+        basis: { type: string, enum: [target, execution] }
+        executionId: { type: [string, "null"], format: uuid }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderCapabilityItem" }
+    ProviderCapabilityItem:
+      type: object
+      additionalProperties: false
+      required: [provider, capabilityId, status, reasonCode]
+      properties:
+        provider: { type: string, minLength: 1 }
+        capabilityId: { type: string, minLength: 1 }
+        status: { type: string, enum: [supported, unsupported, unobserved] }
+        reasonCode: { type: string, minLength: 1 }
+        supportMode: { type: string, enum: [native, emulated] }
+    SwitchSessionModelRequest:
+      type: object
+      additionalProperties: false
+      required: [model, expectedModel]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 200 }
+        expectedModel: { type: [string, "null"], maxLength: 200 }
+    SessionUsage:
+      type: object
+      additionalProperties: false
+      required: [tenantId, sessionId, items]
+      properties:
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ExecutionUsage" }
+    DeveloperExecution:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - sessionId
+        - turnId
+        - attempt
+        - status
+        - executionTargetId
+        - targetKind
+        - provider
+        - queuedAt
+        - startedAt
+        - finishedAt
+        - failureCode
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        turnId: { $ref: "#/components/schemas/UUID" }
+        attempt: { type: integer, minimum: 1 }
+        status: { type: string }
+        executionTargetId: { $ref: "#/components/schemas/UUID" }
+        targetKind: { type: string }
+        provider: { type: [string, "null"] }
+        queuedAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        failureCode: { type: [string, "null"] }
+    DeveloperControlCommand:
+      type: object
+      additionalProperties: false
+      required: [id, executionId, sessionId, turnId, provider, commandType, status, requestedAt]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        executionId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        turnId: { $ref: "#/components/schemas/UUID" }
+        provider: { type: string }
+        commandType: { type: string }
+        status: { type: string }
+        requestedAt: { type: string, format: date-time }
+    SteerActiveTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [inputText]
+      properties:
+        inputText: { type: string, minLength: 1, maxLength: 1000000 }
+    CompactSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedLastEventSequence]
+      properties:
+        expectedLastEventSequence: { type: integer, format: int64, minimum: 0 }
+    ReviewTarget:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: { type: string, enum: [uncommittedChanges, baseBranch] }
+        branch: { type: string, minLength: 1, maxLength: 255 }
+    StartSessionReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedLastEventSequence, target]
+      properties:
+        expectedLastEventSequence: { type: integer, format: int64, minimum: 0 }
+        target: { $ref: "#/components/schemas/ReviewTarget" }
+        runtimeMode: { type: string, enum: [approval-required, full-access], default: approval-required }
+    DeveloperQueuedSessionOperation:
+      type: object
+      additionalProperties: false
+      required: [type, turn, executionId, controlCommand]
+      properties:
+        type: { type: string, enum: [compact, review] }
+        turn: { $ref: "#/components/schemas/Turn" }
+        executionId: { $ref: "#/components/schemas/UUID" }
+        controlCommand: { $ref: "#/components/schemas/DeveloperControlCommand" }
+    RollbackSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedLastEventSequence, fromTurnId]
+      properties:
+        expectedLastEventSequence: { type: integer, format: int64, minimum: 0 }
+        fromTurnId: { $ref: "#/components/schemas/UUID" }
+    RollbackSessionResult:
+      type: object
+      additionalProperties: false
+      required: [sessionId, eventId, eventSequence, fromSessionId, fromTurnId, fromSequence, removedTurnCount, supportMode, workspaceDisposition, externalSideEffectsReverted]
+      properties:
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        eventId: { $ref: "#/components/schemas/UUID" }
+        eventSequence: { type: integer, format: int64, minimum: 1 }
+        fromSessionId: { $ref: "#/components/schemas/UUID" }
+        fromTurnId: { $ref: "#/components/schemas/UUID" }
+        fromSequence: { type: integer, format: int64, minimum: 1 }
+        removedTurnCount: { type: integer, minimum: 0 }
+        supportMode: { type: string, enum: [emulated] }
+        workspaceDisposition: { type: string }
+        externalSideEffectsReverted: { type: boolean }
+    ForkSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedLastEventSequence]
+      properties:
+        expectedLastEventSequence: { type: integer, format: int64, minimum: 0 }
+        title: { type: string, minLength: 1, maxLength: 300 }
+        visibility: { type: string, enum: [project, organization] }
+        providerCredentialId: { $ref: "#/components/schemas/UUID" }
+        executionTargetId: { $ref: "#/components/schemas/UUID" }
+    ForkSessionResult:
+      type: object
+      additionalProperties: false
+      required: [session, sourceSessionId, sourceEventSequence, supportMode]
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        sourceSessionId: { $ref: "#/components/schemas/UUID" }
+        sourceEventSequence: { type: integer, format: int64, minimum: 0 }
+        supportMode: { type: string, enum: [emulated] }
+    ExecutionUsage:
+      type: object
+      additionalProperties: false
+      required:
+        - executionId
+        - generation
+        - turnId
+        - provider
+        - model
+        - inputTokens
+        - cachedInputTokens
+        - outputTokens
+        - reasoningTokens
+        - totalTokens
+        - networkIngressBytes
+        - networkEgressBytes
+        - durationMillis
+        - providerCostMicros
+        - providerCostReported
+        - providerCurrency
+        - platformCharges
+        - totalCostByCurrency
+        - costCoverage
+        - final
+        - updatedAt
+      properties:
+        executionId: { $ref: "#/components/schemas/UUID" }
+        generation: { type: integer, format: int64, minimum: 0 }
+        turnId: { $ref: "#/components/schemas/UUID" }
+        provider: { type: string }
+        model: { type: [string, "null"] }
+        inputTokens: { type: integer, format: int64, minimum: 0 }
+        cachedInputTokens: { type: integer, format: int64, minimum: 0 }
+        outputTokens: { type: integer, format: int64, minimum: 0 }
+        reasoningTokens: { type: integer, format: int64, minimum: 0 }
+        totalTokens: { type: integer, format: int64, minimum: 0 }
+        networkIngressBytes: { type: integer, format: int64, minimum: 0 }
+        networkEgressBytes: { type: integer, format: int64, minimum: 0 }
+        durationMillis: { type: integer, format: int64, minimum: 0 }
+        providerCostMicros: { type: integer, format: int64, minimum: 0 }
+        providerCostReported: { type: boolean }
+        providerCurrency: { type: string }
+        platformCharges:
+          type: array
+          items: { $ref: "#/components/schemas/PlatformCharge" }
+        totalCostByCurrency:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+        costCoverage:
+          type: string
+          enum: [provider-unavailable, provider-only, provider-and-allocated-platform, provider-unavailable-with-allocated-platform]
+        final: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+    PlatformCharge:
+      type: object
+      additionalProperties: false
+      required: [kind, currencyCode, amountMicros, source]
+      properties:
+        kind: { type: string }
+        currencyCode: { type: string }
+        amountMicros: { type: integer, format: int64 }
+        source: { type: string, enum: [estimated, actual] }
+    SourceProposedPlanReference:
+      type: object
+      additionalProperties: false
+      required: [threadId, planId]
+      properties:
+        threadId: { type: string, minLength: 1 }
+        planId: { type: string, minLength: 1 }
+    CreateTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [inputText, runtimeMode, interactionMode]
+      properties:
+        inputText: { type: string, minLength: 1 }
+        runtimeMode: { type: string, minLength: 1 }
+        interactionMode: { type: string, minLength: 1 }
+        sourceProposedPlan:
+          oneOf:
+            - $ref: "#/components/schemas/SourceProposedPlanReference"
+            - type: "null"
+        automationId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        queueClass: { type: string }
+        queuePriority: { type: integer }
+        quotaUnits: { type: integer, minimum: 0 }
+    Turn:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenantId
+        - sessionId
+        - createdBy
+        - status
+        - inputText
+        - turnKind
+        - runtimeMode
+        - interactionMode
+        - startedAt
+        - completedAt
+        - createdAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        createdBy: { $ref: "#/components/schemas/UUID" }
+        status: { type: string }
+        inputText: { type: string }
+        turnKind: { type: string }
+        runtimeMode: { type: string }
+        interactionMode: { type: string }
+        startedAt: { type: [string, "null"], format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+    SessionEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - eventVersion
+        - tenantId
+        - organizationId
+        - projectId
+        - sessionId
+        - executionId
+        - workerId
+        - generation
+        - sequence
+        - eventType
+        - actorType
+        - actorId
+        - payload
+        - occurredAt
+      properties:
+        eventId: { $ref: "#/components/schemas/UUID" }
+        eventVersion: { type: integer, minimum: 1 }
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        organizationId: { $ref: "#/components/schemas/UUID" }
+        projectId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        executionId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        workerId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        generation: { type: [integer, "null"], format: int64 }
+        sequence: { type: integer, format: int64, minimum: 1 }
+        eventType: { type: string }
+        actorType: { type: string, enum: [user, service_account, worker, system] }
+        actorId:
+          oneOf:
+            - $ref: "#/components/schemas/UUID"
+            - type: "null"
+        payload:
+          type: object
+          additionalProperties: true
+        occurredAt: { type: string, format: date-time }
+    SessionEventPage:
+      type: object
+      additionalProperties: false
+      required: [items, lastSequence]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionEvent"
+        lastSequence:
+          type: integer
+          format: int64
+          minimum: 0
+    ResolveApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [accept, decline] }
+    ResolveUserInputRequest:
+      type: object
+      additionalProperties: false
+      required: [answers]
+      properties:
+        answers:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: array
+                minItems: 1
+                maxItems: 100
+                items: { type: string }
+    CreateProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        repositoryUrl:
+          oneOf: [{ type: string, minLength: 1, maxLength: 2048 }, { type: "null" }]
+        defaultBranch: { type: string, default: main }
+        visibility: { type: string, enum: [organization, tenant], default: organization }
+    UpdateProjectRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        repositoryUrl: { type: string, minLength: 1, maxLength: 2048 }
+        defaultBranch: { type: string, minLength: 1, maxLength: 255 }
+        visibility: { type: string, enum: [organization, tenant] }
+    Artifact:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenantId
+        - organizationId
+        - projectId
+        - sessionId
+        - executionId
+        - kind
+        - status
+        - originalName
+        - contentType
+        - sizeBytes
+        - sha256
+        - createdByType
+        - createdById
+        - readyAt
+        - createdAt
+        - expiresAt
+        - deletedAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        organizationId: { $ref: "#/components/schemas/UUID" }
+        projectId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        executionId:
+          oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
+        kind:
+          type: string
+          enum: [attachment, generated_file, terminal_log, diff, workspace_snapshot, checkpoint, memory]
+        status: { type: string, enum: [pending, ready, deleting, deleted, failed] }
+        originalName: { type: [string, "null"] }
+        contentType: { type: [string, "null"] }
+        sizeBytes: { type: [integer, "null"], format: int64, minimum: 0 }
+        sha256:
+          oneOf: [{ type: string, pattern: "^[0-9a-f]{64}$" }, { type: "null" }]
+        createdByType: { type: string, enum: [user, service_account, worker] }
+        createdById: { $ref: "#/components/schemas/UUID" }
+        readyAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: [string, "null"], format: date-time }
+        deletedAt: { type: [string, "null"], format: date-time }
+    CreateArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [attachment, generated_file, terminal_log, diff, workspace_snapshot]
+        originalName: { type: [string, "null"], maxLength: 500 }
+        executionId:
+          oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
+        expiresAt: { type: [string, "null"], format: date-time }
+    CompleteArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [sizeBytes, sha256, contentType]
+      properties:
+        sizeBytes: { type: integer, format: int64, minimum: 0 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        contentType: { type: string, minLength: 1, maxLength: 255 }
+    ArtifactUploadGrant:
+      type: object
+      additionalProperties: false
+      required: [artifact, uploadRequired]
+      properties:
+        artifact: { $ref: "#/components/schemas/Artifact" }
+        uploadRequired: { type: boolean }
+        method: { type: string, enum: [PUT] }
+        url: { type: string, minLength: 1 }
+        headers: { type: object, additionalProperties: { type: string } }
+        expiresAt: { type: string, format: date-time }
+    ArtifactPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Artifact" }
+        nextCursor: { type: [string, "null"] }
+    ArtifactDownloadGrant:
+      type: object
+      additionalProperties: false
+      required: [artifact, url, expiresAt]
+      properties:
+        artifact: { $ref: "#/components/schemas/Artifact" }
+        url:
+          type: string
+          minLength: 1
+          description: Short-lived relative local-content URL or absolute presigned object-store URL.
+        expiresAt: { type: string, format: date-time }
+    Project:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenantId
+        - organizationId
+        - name
+        - repositoryUrl
+        - defaultBranch
+        - gitCredentialId
+        - visibility
+        - createdBy
+        - createdAt
+        - updatedAt
+        - archivedAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        tenantId: { $ref: "#/components/schemas/UUID" }
+        organizationId: { $ref: "#/components/schemas/UUID" }
+        name: { type: string }
+        repositoryUrl:
+          oneOf: [{ type: string }, { type: "null" }]
+        defaultBranch: { type: string }
+        gitCredentialId:
+          oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
+        visibility: { type: string, enum: [organization, tenant] }
+        createdBy: { $ref: "#/components/schemas/UUID" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        archivedAt: { type: [string, "null"], format: date-time }
+    ProjectPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Project" }
+        nextCursor: { type: [string, "null"] }
+    CreateExecutionTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [organizationId, kind, name, configuration, capabilities]
+      properties:
+        organizationId: { $ref: "#/components/schemas/UUID" }
+        kind: { type: string, enum: [ssh, docker, kubernetes] }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        configuration:
+          type: object
+          additionalProperties: true
+          description: Encrypted at rest and never returned by the Execution Target API.
+        capabilities:
+          type: object
+          additionalProperties: true
+          description: Non-secret public capability declaration. Secret-like keys are rejected.
+    ExecutionTarget:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - tenantId
+        - organizationId
+        - kind
+        - name
+        - status
+        - capabilities
+        - isolationProfile
+        - platformSharedEligible
+        - productBoundary
+        - createdAt
+        - updatedAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        tenantId:
+          oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
+        organizationId:
+          oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }]
+        kind: { type: string, enum: [local, ssh, docker, kubernetes] }
+        name: { type: string }
+        status: { type: string, enum: [active, disabled, offline] }
+        capabilities: { type: object, additionalProperties: true }
+        isolationProfile: { type: string }
+        platformSharedEligible: { type: boolean }
+        productBoundary: { type: string, enum: [single-tenant-trusted, multi-tenant-restricted] }
+        runtimeIsolationPolicy: { type: object, additionalProperties: true }
+        runtimeIsolationStatus: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateExecutionTargetProvisioningOperationRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: { type: string, enum: [install, upgrade, revoke] }
+    ExecutionTargetProvisioningOperation:
+      type: object
+      additionalProperties: false
+      required: [id, targetId, action, state, attempt, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        targetId: { $ref: "#/components/schemas/UUID" }
+        action: { type: string, enum: [install, upgrade, revoke] }
+        state: { type: string, enum: [accepted, running, succeeded, failed] }
+        attempt: { type: integer, format: int64, minimum: 0 }
+        result:
+          type: object
+          additionalProperties: false
+          properties:
+            targetId: { $ref: "#/components/schemas/UUID" }
+            action: { type: string, enum: [install, upgrade, revoke] }
+            status: { type: string, enum: [active, disabled] }
+            binarySha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+    Interaction:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - executionId
+        - sessionId
+        - turnId
+        - provider
+        - requestId
+        - kind
+        - status
+        - payload
+        - requestedAt
+        - expiresAt
+        - resolvedAt
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        executionId: { $ref: "#/components/schemas/UUID" }
+        sessionId: { $ref: "#/components/schemas/UUID" }
+        turnId: { $ref: "#/components/schemas/UUID" }
+        provider: { type: string }
+        requestId: { type: string }
+        kind: { type: string, enum: [approval, user-input] }
+        status: { type: string }
+        payload: { type: object, additionalProperties: true }
+        resolution: { type: object, additionalProperties: true }
+        requestedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        resolvedAt: { type: [string, "null"], format: date-time }
+    InteractionPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Interaction" }
+        nextCursor: { type: [string, "null"] }
+    PendingInteraction:
+      type: object
+      additionalProperties: false
+      required: [id, executionId, turnId, provider, requestId, kind, payload, requestedAt, expiresAt]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        executionId: { $ref: "#/components/schemas/UUID" }
+        turnId: { $ref: "#/components/schemas/UUID" }
+        provider: { type: string }
+        requestId: { type: string }
+        kind: { type: string, enum: [approval, user-input] }
+        payload: { type: object, additionalProperties: true }
+        requestedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    PendingInteractionPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, snapshotSequence]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PendingInteraction" }
+        nextCursor: { type: [string, "null"] }
+        snapshotSequence: { type: integer, format: int64, minimum: 0 }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+            details:
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: "null"
+x-synara-route-surfaces:
+  - method: GET
+    path: "/health"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/ready"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/metrics"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/profile"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/platform/routing-authority/execution-targets/{executionTargetID}/observations"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/auth/dev-login"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/auth/sso/connections"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/auth/sso/{connectionID}/start"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/auth/sso/{connectionID}/metadata"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/auth/sso/{connectionID}/callback"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/auth/sso/{connectionID}/callback"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/desktop-enrollments/redeem"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/register"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/heartbeat"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/storage-scrubs/claim"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/storage-scrubs/{scrubID}/acknowledged"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/storage-scrubs/{scrubID}/failed"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/claim"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/{cleanupID}/renew"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/{cleanupID}/started"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/{cleanupID}/acknowledged"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/{cleanupID}/failed"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/workspace-cleanups/{cleanupID}/release"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/claim"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/renew"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/start"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/ready"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/dirty"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/failed"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/checkpoints"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/ready"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/failed"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/complete"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/fail"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/release"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/resource-directives/pull"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/resource-suspend/quiesced"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/resource-suspend/checkpoint-ready"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/resource-suspend/complete"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/resource-suspend/abort"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/events"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/usage"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/interaction-resolutions/pull"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/control-updates/pull"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/control-commands/pull"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/control-commands/{controlCommandID}/delivered"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/control-commands/{controlCommandID}/acknowledged"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/artifacts"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/artifacts/{artifactID}/complete"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/artifact/download"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/memory-revisions/{revisionID}/artifact/download"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/credentials/{credentialID}/resolve"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/provider-credential-grants/{grantID}/resolve"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/workers/executions/{executionID}/credential-grants/{grantID}/resolve"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/auth/session"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/auth/logout"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/auth/active-tenant"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/desktop-sessions/rotate"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/desktop/disconnect"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/invitations/{token}/accept"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/deletion-requests"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/lifecycle-transitions"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/deletion-requests"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/restore"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/v1/tenants/{tenantID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/members"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/invitations"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/members/{userID}"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/v1/tenants/{tenantID}/members/{userID}"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/members/{userID}/revoke-sessions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/audit-logs"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/audit-logs/export"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/outbox-messages"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/outbox-messages/{messageID}/replay"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/developer-webhooks"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/rotate-secret"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/enable"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/disable"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/deliveries"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/developer-webhooks/{webhookID}/deliveries/{deliveryID}/replay"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-scheduling-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-scheduling-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/data-residency-statement"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/workers"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/workers/{workerID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/worker-manifests"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/canary"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/promote"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/rollback"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/placement-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-target-groups"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-target-groups"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members/{targetGroupMemberID}"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/location-outages"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/location-outages"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations/{provisioningOperationID}"
+    x-synara-exposure: public-beta
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/runtime-isolation-policy"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/quota"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/entitlements"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/usage"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/usage/export.json"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/support-diagnostic.json"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/support-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/support-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/support-access"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/support-access/{grantID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/support-access"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/tenants"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/tenants"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/tenants/{tenantID}/entitlements"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/platform/tenants/{tenantID}/entitlement-profile"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/tenants/{tenantID}/desktop-access"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/tenants/{tenantID}/desktop-enrollments"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/desktop-enrollments/{enrollmentID}/opened"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/desktop-enrollments/{enrollmentID}/revoke"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/desktop-devices/{deviceID}/revoke"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/support-access/requests"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/support-access/{grantID}/approve"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/support-access/{grantID}/deny"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/support-access/{grantID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/release-candidates"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/release-candidates"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/release-candidates/{candidateRecordID}/readiness"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/release-candidates/{candidateRecordID}/approvals"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/release-candidates/{candidateRecordID}/final-review"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/release-candidates/{candidateRecordID}/transitions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/incidents"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incidents"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incidents/{incidentID}/status-board"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incidents/{incidentID}/internal-updates"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incidents/{incidentID}/resolution-approval"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incidents/{incidentID}/transitions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/incident-exercises"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incident-exercises"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/incident-exercises/{incidentExerciseID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/operations-exercises"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/operations-exercises"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/operations-exercises/{operationsExerciseID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/internal-cost-reviews"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/internal-cost-reviews"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/internal-cost-reviews/{internalCostReviewID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/slo-windows"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/slo-windows"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/slo-windows/{sloWindowRecordID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/recovery-drills"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/recovery-drills"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/recovery-drills/{recoveryDrillRecordID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/penetration-engagements"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/penetration-engagements"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/penetration-engagements/{penetrationEngagementID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/capacity-runs"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/capacity-runs"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/capacity-runs/{capacityRunID}/approvals"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/compliance-programs"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs/{programID}/controls"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs/{programID}/evidence"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs/{programID}/evidence/{evidenceRecordID}/review"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs/{programID}/decisions"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/compliance-programs/{programID}/transitions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/provider-commercial-authorizations"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/provider-commercial-authorizations"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/provider-commercial-authorizations/{authorizationID}/approvals"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/provider-commercial-authorizations/{authorizationID}/transitions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/platform/governance-authorities"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/governance-authorities"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/platform/governance-authorities/{grantID}/revoke"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/quota"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/cost-accounting/tariffs"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/tariffs"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/allocations:sweep"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/imports/{provider}/{externalImportID}"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/cost-accounting/imports/{importID}/reconcile"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/cost-accounting/report"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/cost-accounting/export.csv"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/cost-accounting/projects/{projectID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/retention-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/retention-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/legal-holds"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/legal-holds"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/legal-holds/{holdID}/release"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/privacy-requests"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/privacy-requests"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/transitions"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/export"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/erasure"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/data-export"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/resource-lifecycle-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/resource-lifecycle-policy"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/memory-revisions"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/credentials"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/credentials"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/credentials/{credentialID}/rotate"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/credentials/{credentialID}/revoke"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/credentials/{credentialID}/auto-select"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/provider-credential-scope-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/provider-credential-scope-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/credential-bindings"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/credential-bindings"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/credential-bindings/{bindingID}/disable"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/identity-connections"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/identity-connections"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/identity-connections/{connectionID}/disable"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/identity-domains"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/identity-domains"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/identity-domains/{domainID}/verify"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/identity-domains/{domainID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/identity-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/identity-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/service-accounts"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/service-accounts"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/usage"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/rotate-token"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/revoke"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/ServiceProviderConfig"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/ResourceTypes"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/Schemas"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/Users"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/scim/v2/Users"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/Users/{userID}"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/scim/v2/Users/{userID}"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/scim/v2/Users/{userID}"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/scim/v2/Users/{userID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/Groups"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/scim/v2/Groups"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/scim/v2/Groups/{groupID}"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/scim/v2/Groups/{groupID}"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/scim/v2/Groups/{groupID}"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/scim/v2/Groups/{groupID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/organizations"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/organizations"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/members"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/members"
+    x-synara-exposure: internal
+  - method: PATCH
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}"
+    x-synara-exposure: internal
+  - method: DELETE
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/projects"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/tenants/{tenantID}/organizations/{organizationID}/projects"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/projects/{projectID}"
+    x-synara-exposure: public-beta
+  - method: PATCH
+    path: "/v1/projects/{projectID}"
+    x-synara-exposure: public-beta
+  - method: DELETE
+    path: "/v1/projects/{projectID}"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/projects/{projectID}/resource-lifecycle-policy"
+    x-synara-exposure: internal
+  - method: PUT
+    path: "/v1/projects/{projectID}/resource-lifecycle-policy"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/projects/{projectID}/provider-capabilities"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/projects/{projectID}/sessions"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/projects/{projectID}/sessions"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/usage"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/model-switch"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/provider-capabilities"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/events"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/events/stream"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/interactions"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/memory-references"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/sessions/{sessionID}/turns"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/turns/active/steer"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/turns/active/interrupt"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/turns/active/resume"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/compact"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/reviews"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/rollback"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/fork"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/suspend"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/resume"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/archive"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/executions/{executionID}/cancel"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/executions/{executionID}/resume"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/executions/{executionID}/interactions"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/executions/{executionID}/runtime-isolation"
+    x-synara-exposure: internal
+  - method: POST
+    path: "/v1/executions/{executionID}/approvals/{requestID}/resolve"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/executions/{executionID}/user-input/{requestID}/resolve"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/sessions/{sessionID}/artifacts"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/sessions/{sessionID}/artifacts"
+    x-synara-exposure: public-beta
+  - method: GET
+    path: "/v1/artifacts/{artifactID}"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/artifacts/{artifactID}/complete"
+    x-synara-exposure: public-beta
+  - method: POST
+    path: "/v1/artifacts/{artifactID}/download"
+    x-synara-exposure: public-beta
+  - method: DELETE
+    path: "/v1/artifacts/{artifactID}"
+    x-synara-exposure: public-beta
+  - method: PUT
+    path: "/v1/artifact-content/{artifactID}"
+    x-synara-exposure: internal
+  - method: GET
+    path: "/v1/artifact-content/{artifactID}"
+    x-synara-exposure: internal

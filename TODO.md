@@ -29,7 +29,7 @@
 | Stage 4 | 分布式执行平台和 K8s 多集群生产化                        | COMPLETE            | Stage 2、Stage 3 |
 | Stage 5 | Provider 沙箱与运行时隔离加固                            | IN PROGRESS         | Stage 3、Stage 4 |
 | Stage 6 | 企业 Self-hosted GA、运营、安全与成本治理                | TODO                | Stage 2-5        |
-| Stage 7 | 对外 SDK 与开发者平台                                    | TODO                | Stage 2、5、6    |
+| Stage 7 | 对外 SDK 与开发者平台                                    | IN PROGRESS         | Stage 2、5、6    |
 | Stage 8 | 组织内协作与 Agent/人统一提及                            | TODO                | Stage 6、Stage 7 |
 | Stage 9 | 开发者工作流集成与自动化                                 | TODO                | Stage 4、5、8    |
 
@@ -1676,7 +1676,7 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
 
 ### Stage 7：对外 SDK 与开发者平台
 
-状态：TODO。设计已冻结（2026-07-26），完整内容见独立设计文档
+状态：IN PROGRESS（2026-08-03 启动）。设计已冻结（2026-07-26），完整内容见独立设计文档
 [`docs/plans/external-sdk-developer-platform.md`](docs/plans/external-sdk-developer-platform.md)，
 本节不重复其 TODO 与完成条件。
 
