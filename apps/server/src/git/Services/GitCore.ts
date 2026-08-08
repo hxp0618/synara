@@ -39,6 +39,7 @@ export interface ExecuteGitInput {
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
+  readonly outputMode?: "error" | "truncate";
   readonly progress?: ExecuteGitProgress;
 }
 
@@ -53,6 +54,12 @@ export interface GitStatusDetails extends Omit<GitStatusResult, "pr"> {
   hasOriginRemote: boolean;
   isDefaultBranch: boolean;
   upstreamRef: string | null;
+}
+
+export interface GitBranchContext {
+  readonly isRepo: boolean;
+  readonly branch: string | null;
+  readonly upstreamRef: string | null;
 }
 
 export interface GitPreparedCommitContext {
@@ -202,6 +209,9 @@ export interface GitCoreShape {
    * Read detailed working tree / branch status for a repository.
    */
   readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
+
+  /** Read only branch identity, without diff stats or remote refresh work. */
+  readonly readBranchContext: (cwd: string) => Effect.Effect<GitBranchContext, GitCommandError>;
 
   /**
    * Read a unified patch for the current working tree, including untracked files.

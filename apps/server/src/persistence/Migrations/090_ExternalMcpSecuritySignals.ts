@@ -1,4 +1,4 @@
-// FILE: 089_ExternalMcpSecuritySignals.ts
+// FILE: 090_ExternalMcpSecuritySignals.ts
 // Purpose: Persists bounded, plaintext-free prompt-injection provenance on external MCP audit rows.
 
 import * as Effect from "effect/Effect";

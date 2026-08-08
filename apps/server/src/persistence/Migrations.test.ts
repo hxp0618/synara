@@ -14,7 +14,7 @@ import DurableProviderCommandDeliveryMigration from "./Migrations/064_DurablePro
 import ProjectionThreadsGatewayProvenanceMigration from "./Migrations/071_ProjectionThreadsGatewayProvenance.ts";
 import ProjectPullRequestPinsMigration from "./Migrations/069_ProjectPullRequestPins.ts";
 import SpacesMigration from "./Migrations/079_Spaces.ts";
-import ExternalMcpSecuritySignalsMigration from "./Migrations/089_ExternalMcpSecuritySignals.ts";
+import ExternalMcpSecuritySignalsMigration from "./Migrations/090_ExternalMcpSecuritySignals.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
@@ -291,11 +291,12 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
         [88, "ProjectionThreadsSettledAt"],
-        [89, "ExternalMcpSecuritySignals"],
+        [89, "RecoverRetentionHiddenThreads"],
+        [90, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
-      assert.deepStrictEqual(tracker.slice(-36), [
+      assert.deepStrictEqual(tracker.slice(-37), [
         { migration_id: 54, name: "DurableProviderCommandDelivery" },
         { migration_id: 55, name: "ManagedAttachments" },
         { migration_id: 56, name: "CommandReceiptFingerprints" },
@@ -331,7 +332,8 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         { migration_id: 86, name: "NormalizeStudioThreadWorkspaces" },
         { migration_id: 87, name: "DropUnusedOrchestrationEventIndexes" },
         { migration_id: 88, name: "ProjectionThreadsSettledAt" },
-        { migration_id: 89, name: "ExternalMcpSecuritySignals" },
+        { migration_id: 89, name: "RecoverRetentionHiddenThreads" },
+        { migration_id: 90, name: "ExternalMcpSecuritySignals" },
       ]);
       const preserved = yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM orchestration_consumer_state
@@ -412,7 +414,8 @@ agentGatewayRetentionLegacyLayer(
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
           [88, "ProjectionThreadsSettledAt"],
-          [89, "ExternalMcpSecuritySignals"],
+          [89, "RecoverRetentionHiddenThreads"],
+          [90, "ExternalMcpSecuritySignals"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -496,12 +499,13 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
         [88, "ProjectionThreadsSettledAt"],
-        [89, "ExternalMcpSecuritySignals"],
+        [89, "RecoverRetentionHiddenThreads"],
+        [90, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
       assert.deepStrictEqual(
-        tracker.slice(-20).map((row) => [row.migration_id, row.name]),
+        tracker.slice(-21).map((row) => [row.migration_id, row.name]),
         [
           [70, "AgentGatewayOperations"],
           [71, "ProjectionThreadsGatewayProvenance"],
@@ -522,7 +526,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
           [88, "ProjectionThreadsSettledAt"],
-          [89, "ExternalMcpSecuritySignals"],
+          [89, "RecoverRetentionHiddenThreads"],
+          [90, "ExternalMcpSecuritySignals"],
         ],
       );
 
@@ -601,12 +606,13 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [86, "NormalizeStudioThreadWorkspaces"],
         [87, "DropUnusedOrchestrationEventIndexes"],
         [88, "ProjectionThreadsSettledAt"],
-        [89, "ExternalMcpSecuritySignals"],
+        [89, "RecoverRetentionHiddenThreads"],
+        [90, "ExternalMcpSecuritySignals"],
       ]);
 
       const tracker = yield* trackerRows(sql);
       assert.deepStrictEqual(
-        tracker.slice(-16).map((row) => [row.migration_id, row.name]),
+        tracker.slice(-17).map((row) => [row.migration_id, row.name]),
         [
           [74, "ExternalMcpIntegrations"],
           [75, "ExternalMcpActiveCapacity"],
@@ -623,7 +629,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [86, "NormalizeStudioThreadWorkspaces"],
           [87, "DropUnusedOrchestrationEventIndexes"],
           [88, "ProjectionThreadsSettledAt"],
-          [89, "ExternalMcpSecuritySignals"],
+          [89, "RecoverRetentionHiddenThreads"],
+          [90, "ExternalMcpSecuritySignals"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`
@@ -860,7 +867,7 @@ describe("migration lineage aliases", () => {
 const privateSaaS88Layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
 privateSaaS88Layer("private SaaS migration 88 database", (it) => {
-  it.effect("runs released projection migration 88 then retains external MCP migration at 89", () =>
+  it.effect("runs released migrations 88-89 then retains external MCP migration at 90", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 87 });
@@ -873,13 +880,14 @@ privateSaaS88Layer("private SaaS migration 88 database", (it) => {
       const executed = yield* runMigrations();
       assert.deepStrictEqual(
         executed.map(([id]) => id),
-        [88, 89],
+        [88, 89, 90],
       );
       assert.deepStrictEqual(
-        (yield* trackerRows(sql)).slice(-2).map((row) => [row.migration_id, row.name]),
+        (yield* trackerRows(sql)).slice(-3).map((row) => [row.migration_id, row.name]),
         [
           [88, "ProjectionThreadsSettledAt"],
-          [89, "ExternalMcpSecuritySignals"],
+          [89, "RecoverRetentionHiddenThreads"],
+          [90, "ExternalMcpSecuritySignals"],
         ],
       );
       const projectionColumns = yield* projectionThreadsColumnNames(sql);

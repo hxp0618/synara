@@ -66,7 +66,7 @@ export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
             />
           }
         >
-          <PlusIcon aria-hidden="true" className="size-4 text-white" />
+          <PlusIcon aria-hidden="true" className="size-4 text-primary" />
         </MenuTrigger>
         <ComposerPickerMenuPopup align="start">
           <MenuItem

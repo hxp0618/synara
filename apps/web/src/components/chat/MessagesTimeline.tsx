@@ -10,7 +10,6 @@ import {
   type ThreadMarker,
   type TurnId,
 } from "@synara/contracts";
-import { resolveLatestTailUserMessageEditTarget } from "@synara/shared/conversationEdit";
 import { pluralize } from "@synara/shared/text";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import {
@@ -38,6 +37,7 @@ import {
 } from "../../session-logic";
 import {
   type TurnDiffSummary,
+  type WorktreeSetupResolutionAction,
   type WorktreeSetupSnapshot,
   type WorktreeSetupStep,
 } from "../../types";
@@ -133,6 +133,7 @@ import {
   getChatTranscriptUserMessageTextStyle,
   USER_MESSAGE_BUBBLE_RADIUS_CLASS_NAME,
   USER_MESSAGE_BUBBLE_SHELL_CHROME_CLASS_NAME,
+  userMessageBubbleBorderClassName,
 } from "./chatTypography";
 import { DisclosureChevron } from "../ui/DisclosureChevron";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
@@ -309,7 +310,22 @@ function WorktreeSetupStepGlyph({ status }: { status: WorktreeSetupStep["status"
 // Transient "Preparing worktree..." panel: a compact bordered card with a
 // git-branch header and a connected stepper. Hugs its content so it reads as a
 // status chip rather than a full-width block.
-function WorktreeSetupCard({ steps }: { steps: ReadonlyArray<WorktreeSetupStep> }) {
+function WorktreeSetupCard({
+  steps,
+  pendingAction,
+  onResolve,
+}: {
+  steps: ReadonlyArray<WorktreeSetupStep>;
+  pendingAction?: WorktreeSetupResolutionAction | null | undefined;
+  onResolve?: ((action: WorktreeSetupResolutionAction) => void) | undefined;
+}) {
+  // The send pipeline only honors a resolution at checkpoints before the turn
+  // dispatch, so hide the actions once "Starting session" is underway (or the
+  // setup already failed) rather than offering a cancel that can no longer win.
+  const canResolve =
+    onResolve !== undefined &&
+    steps.every((step) => step.status !== "error") &&
+    !steps.some((step) => step.id === "start-session" && step.status !== "pending");
   return (
     <div className="w-fit max-w-full rounded-xl border border-[color:var(--color-border-light)] bg-[var(--color-background-elevated-primary)] px-3.5 py-3 font-system-ui shadow-xs">
       <div className="flex items-center gap-2">
@@ -354,6 +370,26 @@ function WorktreeSetupCard({ steps }: { steps: ReadonlyArray<WorktreeSetupStep> 
           );
         })}
       </ol>
+      {canResolve ? (
+        <div className="mt-2.5 flex items-center gap-1.5">
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={pendingAction != null}
+            onClick={() => onResolve("work-locally")}
+          >
+            {pendingAction === "work-locally" ? "Switching to local..." : "Work locally"}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={pendingAction != null}
+            onClick={() => onResolve("cancel")}
+          >
+            {pendingAction === "cancel" ? "Cancelling..." : "Cancel"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -361,10 +397,15 @@ function WorktreeSetupCard({ steps }: { steps: ReadonlyArray<WorktreeSetupStep> 
 interface MessagesTimelineProps {
   hasMessages: boolean;
   isWorking: boolean;
+  workingLabel?: "Loading" | "Thinking" | undefined;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   /** Transient "New worktree" setup progress; rendered as an ephemeral step card at the tail. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  /** Action already chosen from the worktree setup card; disables its buttons while it applies. */
+  worktreeSetupPendingAction?: WorktreeSetupResolutionAction | null;
+  /** Resolve the in-flight worktree preparation (cancel the send or fall back to the local checkout). */
+  onResolveWorktreeSetup?: (action: WorktreeSetupResolutionAction) => void;
   followLiveOutput?: boolean;
   emptyStateContent?: ReactNode;
   listRef?: RefObject<LegendListRef | null>;
@@ -393,6 +434,8 @@ interface MessagesTimelineProps {
   tailAnchorScrollInFlightRef?: RefObject<boolean> | undefined;
   /** Provenance for a conversation created from another Synara task. */
   crossTaskOrigin?: CrossTaskOrigin | null;
+  /** Marks the transcript as a temporary chat so user bubbles render the dashed primary outline. */
+  isTemporaryThread?: boolean;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   nowIso?: string;
@@ -407,6 +450,14 @@ interface MessagesTimelineProps {
   onRevertUserMessage: (messageId: MessageId) => void;
   onUndoTurnFiles?: (turnCounts: readonly number[]) => void;
   onEditUserMessage?: (messageId: MessageId, text: string) => boolean | Promise<boolean>;
+  /**
+   * The user message the edit affordance may target, resolved by the owner from
+   * the raw thread messages (the same list the server-side edit policy
+   * validates). The timeline must not re-derive this from its own rows: they are
+   * createdAt-sorted and include optimistic/filtered entries, so a row-derived
+   * target can point at a message the server rejects.
+   */
+  editableUserMessageId?: MessageId | null;
   activeTurnId?: TurnId | null;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -439,9 +490,12 @@ interface MessagesTimelineProps {
 export const MessagesTimeline = memo(function MessagesTimeline({
   hasMessages,
   isWorking,
+  workingLabel: workingLabelProp,
   activeTurnInProgress,
   activeTurnStartedAt,
   worktreeSetup: worktreeSetupProp,
+  worktreeSetupPendingAction: worktreeSetupPendingActionProp,
+  onResolveWorktreeSetup,
   followLiveOutput: followLiveOutputProp,
   listRef,
   controllerRef,
@@ -453,6 +507,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   tailAnchorMessageId: tailAnchorMessageIdProp,
   tailAnchorScrollInFlightRef,
   crossTaskOrigin: crossTaskOriginProp,
+  isTemporaryThread: isTemporaryThreadProp,
   timelineEntries,
   turnDiffSummaryByAssistantMessageId,
   nowIso,
@@ -466,6 +521,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onRevertUserMessage,
   onUndoTurnFiles,
   onEditUserMessage,
+  editableUserMessageId,
   activeTurnId,
   isRevertingCheckpoint,
   onImageExpand,
@@ -493,11 +549,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // an `AssignmentPattern` in the parameter list makes React Compiler bail out on the
   // entire component (silently, since `panicThreshold` is unset), which would drop
   // memoization for the whole transcript. See MessagesTimeline.compiler.test.ts.
+  const workingLabel = workingLabelProp ?? "Thinking";
   const worktreeSetup = worktreeSetupProp ?? null;
+  const worktreeSetupPendingAction = worktreeSetupPendingActionProp ?? null;
   const followLiveOutput = followLiveOutputProp ?? false;
   const threadMarkers = threadMarkersProp ?? EMPTY_MESSAGE_MARKERS;
   const enteringUserMessageIds = enteringUserMessageIdsProp ?? EMPTY_MESSAGE_ID_SET;
   const tailAnchorMessageId = tailAnchorMessageIdProp ?? null;
+  const isTemporaryThread = isTemporaryThreadProp ?? false;
+  const userMessageBubbleBorderClass = userMessageBubbleBorderClassName(isTemporaryThread);
   // The timeline remounts per thread (and when the agent-activity detail view
   // closes), but the anchor lives above it and survives those remounts. An
   // anchor that is already set at mount time therefore describes a slide that
@@ -930,14 +990,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [clearTailExpansionScrollTimers, resolvedListRef]);
   useEffect(() => clearTailExpansionScrollTimers, [clearTailExpansionScrollTimers]);
   const ignoreTimelineImageLoad = useCallback(() => {}, []);
-  const latestEditableUserMessageId = useMemo(() => {
-    const messages = rows.flatMap((row) => (row.kind === "message" ? [row.message] : []));
-    const editTarget = resolveLatestTailUserMessageEditTarget({
-      messages,
-      activeTurnId,
-    });
-    return editTarget.editable ? (editTarget.messageId as MessageId) : null;
-  }, [activeTurnId, rows]);
+  const latestEditableUserMessageId = editableUserMessageId ?? null;
   const previousRowCountRef = useRef(rows.length);
   useEffect(() => {
     const previousRowCount = previousRowCountRef.current;
@@ -1353,6 +1406,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                       disabled={isSubmittingThisEdit || isRevertingCheckpoint}
                       allowEmpty={renderedBrowserAnnotations.length > 0}
                       chatTypographyStyle={userMessageTypographyStyle}
+                      borderClassName={userMessageBubbleBorderClass}
                       onCancel={cancelUserMessageEdit}
                       onSubmit={(text) =>
                         void submitUserMessageEdit(
@@ -1367,6 +1421,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                       className={cn(
                         "w-max max-w-full min-w-0 self-end bg-[var(--app-user-message-background)]",
                         USER_MESSAGE_BUBBLE_RADIUS_CLASS_NAME,
+                        userMessageBubbleBorderClass,
                         bubbleIsChipOnly
                           ? "py-0.5 px-3"
                           : USER_MESSAGE_BUBBLE_SHELL_CHROME_CLASS_NAME,
@@ -2146,14 +2201,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           className="shimmer pt-0.5 text-muted-foreground/70 font-system-ui"
           style={{ fontSize: `${appTypographyScale.chatPx}px` }}
         >
-          Thinking
+          {workingLabel}
         </div>
       )}
 
       {row.kind === "worktree-setup" && (
         <DisclosureRegion open={row.open}>
           <div className="pt-0.5 pb-1">
-            <WorktreeSetupCard steps={row.steps} />
+            <WorktreeSetupCard
+              steps={row.steps}
+              pendingAction={worktreeSetupPendingAction}
+              onResolve={onResolveWorktreeSetup}
+            />
           </div>
         </DisclosureRegion>
       )}
@@ -2767,6 +2826,7 @@ const UserMessageEditForm = memo(function UserMessageEditForm(props: {
   disabled: boolean;
   allowEmpty: boolean;
   chatTypographyStyle: CSSProperties;
+  borderClassName: string;
   onCancel: () => void;
   onSubmit: (value: string) => void;
 }) {
@@ -2815,6 +2875,7 @@ const UserMessageEditForm = memo(function UserMessageEditForm(props: {
       className={cn(
         "w-full bg-[var(--app-user-message-background)]",
         USER_MESSAGE_BUBBLE_RADIUS_CLASS_NAME,
+        props.borderClassName,
         USER_MESSAGE_BUBBLE_SHELL_CHROME_CLASS_NAME,
       )}
       onSubmit={(event) => {

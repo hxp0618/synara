@@ -22,6 +22,7 @@ import {
   ThreadId,
   TurnId,
 } from "@synara/contracts";
+import { isTemporaryWorktreeBranch } from "@synara/shared/git";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -494,6 +495,24 @@ function makeHarnessLayer(
           .toSorted((left, right) => right.sequence - left.sequence)
           .slice(0, input.limit),
       ),
+    readThreadEventsFromSequence: (
+      threadId: string,
+      sequenceExclusive: number,
+      limit = 1_000,
+      throughSequenceInclusive = Number.MAX_SAFE_INTEGER,
+      eventTypes?: ReadonlyArray<string>,
+    ) =>
+      Stream.fromIterable(
+        (options.diagnosticEvents ?? [])
+          .filter(
+            (event) =>
+              event.aggregateId === threadId &&
+              event.sequence > sequenceExclusive &&
+              event.sequence <= throughSequenceInclusive &&
+              (eventTypes === undefined || eventTypes.includes(event.type)),
+          )
+          .slice(0, limit),
+      ),
     readFromSequence: () => Stream.empty,
     readAll: () => Stream.empty,
   });
@@ -681,7 +700,7 @@ function makeHarnessLayer(
           },
         };
       }),
-    createDetachedWorktree: (input: { ref: string; path?: string }) =>
+    createDetachedWorktree: (input: { ref: string; path?: string; newBranch?: string }) =>
       Effect.gen(function* () {
         worktreeCreates.push(input);
         if (options.pauseAfterWorktreeCreate) {
@@ -692,7 +711,7 @@ function makeHarnessLayer(
           worktree: {
             path: input.path ?? "/tmp/worktrees/generated/synara",
             ref: input.ref,
-            branch: null,
+            branch: input.newBranch ?? null,
           },
         };
       }),
@@ -2048,13 +2067,15 @@ describe("AgentGateway", () => {
       });
       assert.isFalse(isToolError(response.result), toolErrorText(response.result));
       const payload = toolResultJson(response.result);
-      assert.isNull(payload.branch);
+      assert.isString(payload.branch);
+      assert.isTrue(isTemporaryWorktreeBranch(payload.branch as string));
+      assert.equal(payload.branch, harness.worktreeCreates[0]?.newBranch);
       assert.equal(payload.worktreePath, harness.worktreeCreates[0]?.path);
       assert.equal(harness.worktreeCreates[0]?.ref, "0123456789abcdef0123456789abcdef01234567");
       const create = harness.dispatched[0]!;
       if (create.type === "thread.create") {
         assert.equal(create.envMode, "worktree");
-        assert.isNull(create.branch);
+        assert.equal(create.branch, payload.branch);
         assert.equal(create.associatedWorktreeRef, "0123456789abcdef0123456789abcdef01234567");
       }
     }).pipe(Effect.provide(gatewayLayer));
@@ -2113,7 +2134,9 @@ describe("AgentGateway", () => {
       assert.deepEqual(harness.fetchedPullRequests, [425]);
       assert.deepEqual(harness.fetchedPullRequestRepositories, ["example/repo"]);
       assert.equal(harness.worktreeCreates[0]?.ref, "fedcba9876543210fedcba9876543210fedcba98");
-      assert.equal(harness.worktreeCreates[0]?.newBranch, undefined);
+      // The worktree is born on a temporary synara/* branch, but no branch is
+      // ever created for the pull request itself.
+      assert.isTrue(isTemporaryWorktreeBranch(harness.worktreeCreates[0]?.newBranch ?? ""));
     }).pipe(Effect.provide(gatewayLayer));
   });
 
@@ -2714,7 +2737,10 @@ describe("AgentGateway", () => {
       );
       assert.equal(harness.worktreeCreates.length, 1);
       assert.equal(harness.worktreeRemoves.length, 1);
-      assert.equal(harness.branchDeletes.length, 0);
+      assert.deepEqual(
+        harness.branchDeletes.map(({ branch }) => branch),
+        [harness.worktreeCreates[0]?.newBranch],
+      );
     }).pipe(Effect.provide(gatewayLayer));
   });
 
@@ -3135,7 +3161,10 @@ describe("AgentGateway", () => {
         );
         assert.equal(harness.worktreeCreates.length, 1);
         assert.equal(harness.worktreeRemoves.length, 1);
-        assert.equal(harness.branchDeletes.length, 0);
+        assert.deepEqual(
+          harness.branchDeletes.map(({ branch }) => branch),
+          [harness.worktreeCreates[0]?.newBranch],
+        );
         assert.equal(harness.dispatched.length, 0);
         assert.equal(harness.getOperationStatus("turn-parent-active"), "failed");
       }).pipe(Effect.provide(gatewayLayer));
@@ -3258,7 +3287,10 @@ describe("AgentGateway", () => {
       assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
       assert.equal(harness.worktreeCreates.length, 1);
       assert.equal(harness.worktreeRemoves.length, 1);
-      assert.equal(harness.branchDeletes.length, 0);
+      assert.deepEqual(
+        harness.branchDeletes.map(({ branch }) => branch),
+        [harness.worktreeCreates[0]?.newBranch],
+      );
       assert.equal(
         harness.dispatched.filter((command) => command.type === "thread.create").length,
         0,
@@ -3480,7 +3512,10 @@ describe("AgentGateway", () => {
       );
       assert.equal(harness.worktreeCreates.length, 2);
       assert.equal(harness.worktreeRemoves.length, 2);
-      assert.equal(harness.branchDeletes.length, 0);
+      assert.deepEqual(
+        harness.branchDeletes.map(({ branch }) => branch).toSorted(),
+        harness.worktreeCreates.map(({ newBranch }) => newBranch).toSorted(),
+      );
     }).pipe(Effect.provide(gatewayLayer));
   });
 

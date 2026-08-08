@@ -6,14 +6,14 @@
       "sourceCommitRequired": true
     },
     "packages": {
-      "admin": "0.6.6",
-      "controlPlaneClient": "0.6.6",
-      "contracts": "0.6.6",
-      "desktop": "0.6.6",
-      "enterpriseUi": "0.6.6",
+      "admin": "0.7.0",
+      "controlPlaneClient": "0.7.0",
+      "contracts": "0.7.0",
+      "desktop": "0.7.0",
+      "enterpriseUi": "0.7.0",
       "providerHost": "0.2.0",
-      "server": "0.6.6",
-      "web": "0.6.6"
+      "server": "0.7.0",
+      "web": "0.7.0"
     },
     "providerHostProtocol": {
       "acceptedMajor": 2,

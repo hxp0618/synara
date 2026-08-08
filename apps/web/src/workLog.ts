@@ -525,7 +525,8 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activity.kind === "tool.started" &&
     itemType === "command_execution" &&
     !commandAction &&
-    !commandPreview.command
+    !commandPreview.command &&
+    !toolName
   ) {
     entry.suppressStandaloneCommandStart = true;
   }

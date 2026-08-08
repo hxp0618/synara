@@ -72,6 +72,7 @@ import {
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
+import { AgentGatewayOperationRepository } from "../../agentGateway/Services/AgentGatewayOperationRepository.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
 import {
   ProviderAdapterRequestError,
@@ -114,6 +115,7 @@ import {
   listImportedForkMessages,
   listPriorTranscriptMessages,
 } from "../handoff.ts";
+import type { OrchestrationDispatchError } from "../Errors.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -304,6 +306,7 @@ const PROVIDER_COMMAND_SAFE_RETRY_DELAY = Duration.millis(50);
 const PROVIDER_COMMAND_INTERRUPT_TIMEOUT = Duration.seconds(10);
 const PROVIDER_COMMAND_STOP_TIMEOUT = Duration.seconds(15);
 const PROVIDER_COMMAND_EVENT_TIMEOUT = Duration.seconds(120);
+const GATEWAY_OPERATION_COMPLETION_WAIT_TIMEOUT = Duration.seconds(120);
 const PROVIDER_INPUT_SAFETY_MARGIN_CHARS = 1_000;
 const THREAD_MENTION_CONTEXT_SUFFIX_PREFIX_CHARS = 2;
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
@@ -369,6 +372,25 @@ function isUnknownPendingUserInputRequestError(cause: Cause.Cause<ProviderServic
   return Cause.pretty(cause).toLowerCase().includes("unknown pending user-input request");
 }
 
+function isClaudeContextWindowUserInputRejection(error: ProviderServiceError): boolean {
+  if (
+    error._tag !== "ProviderAdapterRequestError" ||
+    error.provider !== "claudeAgent" ||
+    error.method !== "item/tool/respondToUserInput"
+  ) {
+    return false;
+  }
+  const detail = error.detail.toLowerCase();
+  return (
+    detail.includes("context window") ||
+    detail.includes("context limit") ||
+    detail.includes("context length") ||
+    detail.includes("context_length_exceeded") ||
+    detail.includes("prompt is too long") ||
+    detail.includes("input_length and max_tokens")
+  );
+}
+
 function interactionFailureSettlementStatus(
   cause: Cause.Cause<ProviderServiceError>,
   isUnknownPendingRequest: boolean,
@@ -377,8 +399,9 @@ function interactionFailureSettlementStatus(
     onNone: () => "uncertain" as const,
     onSome: (error) => {
       if (
-        error._tag === "ProviderAdapterRequestError" &&
-        error.method === "permission.reply.acknowledge"
+        (error._tag === "ProviderAdapterRequestError" &&
+          error.method === "permission.reply.acknowledge") ||
+        isClaudeContextWindowUserInputRejection(error)
       ) {
         return "retryable" as const;
       }
@@ -470,8 +493,44 @@ const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore;
   const studioOutputReactor = yield* StudioOutputReactor;
   const git = yield* GitCore;
+  const gatewayOperations = yield* AgentGatewayOperationRepository;
   const textGeneration = yield* TextGeneration;
   const serverSettings = yield* ServerSettingsService;
+
+  const waitForGatewayOperationCompletion = Effect.fnUntraced(function* (operationId: string) {
+    const completed = yield* Effect.gen(function* () {
+      while (true) {
+        const operation = yield* gatewayOperations
+          .getById(operationId)
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning(
+                "provider command reactor could not read creating gateway operation; skipping worktree branch rename",
+                { operationId, error: error instanceof Error ? error.message : String(error) },
+              ).pipe(Effect.as(null)),
+            ),
+          );
+        if (operation === null) {
+          return false;
+        }
+        if (operation.status === "completed") {
+          return true;
+        }
+        if (operation.status === "failed" || operation.status === "compensating") {
+          return false;
+        }
+        yield* Effect.sleep(Duration.millis(100));
+      }
+    }).pipe(Effect.timeoutOption(GATEWAY_OPERATION_COMPLETION_WAIT_TIMEOUT));
+    if (Option.isNone(completed)) {
+      yield* Effect.logWarning(
+        "provider command reactor timed out waiting for creating gateway operation; skipping worktree branch rename",
+        { operationId },
+      );
+      return false;
+    }
+    return completed.value;
+  });
   const managedAttachments = yield* ManagedAttachmentRepository;
   const serverConfig = yield* ServerConfig;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
@@ -1877,9 +1936,24 @@ const make = Effect.gen(function* () {
     readonly cwd: string;
     readonly oldBranch: string;
     readonly targetBranch: string;
+    readonly gatewayOperationId: string | null;
   }) {
     if (input.targetBranch === input.oldBranch) {
       return;
+    }
+
+    // Gateway-created threads: the creating operation's durable ownership
+    // proof records the temporary branch name. Renaming before the operation
+    // reaches a terminal state would make live compensation and startup
+    // recovery reject the worktree as tampered ("worktree branch changed"),
+    // stranding it. Wait for durable completion rather than dropping the
+    // first-turn rename; failed, compensating, missing, or unreadable
+    // operations never authorize the mutation.
+    if (input.gatewayOperationId !== null) {
+      const completed = yield* waitForGatewayOperationCompletion(input.gatewayOperationId);
+      if (!completed) {
+        return;
+      }
     }
 
     const renamed = yield* git.withMutation(
@@ -1964,6 +2038,7 @@ const make = Effect.gen(function* () {
         cwd,
         oldBranch,
         targetBranch,
+        gatewayOperationId: thread.gatewayOperationId ?? null,
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning(
@@ -2005,6 +2080,7 @@ const make = Effect.gen(function* () {
           cwd,
           oldBranch,
           targetBranch,
+          gatewayOperationId: thread.gatewayOperationId ?? null,
         });
       }),
       Effect.catchCause((cause) =>
@@ -2728,7 +2804,7 @@ const make = Effect.gen(function* () {
       readonly detail: string;
       readonly settlementStatus: "retryable" | "uncertain";
     },
-  ) =>
+  ): Effect.Effect<void, OrchestrationDispatchError> =>
     event.commandId === null
       ? Effect.void
       : appendProviderFailureActivity({
@@ -2779,10 +2855,47 @@ const make = Effect.gen(function* () {
         pending.value.status !== "responding" ||
         pending.value.responseCommandId !== event.commandId)
     ) {
+      const pendingRow = Option.getOrUndefined(pending);
+      if (pendingRow?.status === "responding" || pendingRow?.status === "confirmed") {
+        // Another response command owns the claim (double-click dedup) or the
+        // interaction already settled; dropping the duplicate is the intended
+        // outcome and needs no user-visible settlement.
+        return null;
+      }
+      // No durable row, or a row this command can never claim (e.g. a lifecycle
+      // generation mismatch). Silence here permanently stranded the prompt: the
+      // client saw neither a resolution nor a failure, so every retry was
+      // swallowed again. Fail loudly so the stale prompt gets cleared.
+      yield* Effect.logWarning("provider.interaction.response.unclaimable", {
+        threadId: event.payload.threadId,
+        interactionKind: input.interactionKind,
+        requestId: event.payload.requestId,
+        commandId: event.commandId,
+        rowStatus: pendingRow?.status ?? "missing",
+        rowLifecycleGeneration: pendingRow?.lifecycleGeneration ?? null,
+        commandLifecycleGeneration: event.payload.lifecycleGeneration ?? null,
+      });
+      yield* appendInteractionResponseFailure(event, {
+        interactionKind: input.interactionKind,
+        detail: buildStalePendingRequestFailureDetail(
+          input.interactionKind === "approval" ? "approval" : "user-input",
+          event.payload.requestId,
+        ),
+        settlementStatus: "uncertain",
+      });
       return null;
     }
     const providerThread = yield* resolveProviderSessionThread(event.payload.threadId);
-    if (!providerThread) return null;
+    if (!providerThread) {
+      // The claim above already marked the row `responding`; bailing without a
+      // settlement would orphan it and silently swallow every future response.
+      yield* appendInteractionResponseFailure(event, {
+        interactionKind: input.interactionKind,
+        detail: "No provider session thread is bound to this thread.",
+        settlementStatus: "retryable",
+      });
+      return null;
+    }
     if (providerThread.session?.status !== "stopped") return providerThread.id;
     yield* appendInteractionResponseFailure(event, {
       interactionKind: input.interactionKind,

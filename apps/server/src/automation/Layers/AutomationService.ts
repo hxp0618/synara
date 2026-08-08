@@ -31,6 +31,7 @@ import {
   automationOwnsItsThread,
   automationRequiresTargetThread,
 } from "@synara/shared/automationMode";
+import { buildTemporaryWorktreeBranchName } from "@synara/shared/git";
 import { providerStartOptionsFromServerSettings } from "@synara/shared/serverSettings";
 import { autoRuntimeModeSelectionIssue } from "@synara/shared/runtimeMode";
 import { Cause, Effect, Layer, Option, PubSub, Queue, Stream } from "effect";
@@ -633,6 +634,7 @@ export const AutomationServiceLive = Layer.effect(
           cwd: input.project.workspaceRoot,
           path,
           force: true,
+          reclaimTemporaryBranch: true,
         })
         .pipe(
           Effect.catch((error) =>
@@ -877,16 +879,17 @@ export const AutomationServiceLive = Layer.effect(
                   ref: "HEAD",
                   path: null,
                   copyChangesFrom: project.workspaceRoot,
+                  newBranch: buildTemporaryWorktreeBranchName(),
                 })
                 .pipe(
                   Effect.mapError(toServiceError("Failed to create automation worktree.")),
                   Effect.map(
                     (result): ThreadEnvironment => ({
                       envMode: "worktree",
-                      branch: null,
+                      branch: result.worktree.branch,
                       worktreePath: result.worktree.path,
                       associatedWorktreePath: result.worktree.path,
-                      associatedWorktreeBranch: null,
+                      associatedWorktreeBranch: result.worktree.branch,
                       associatedWorktreeRef: result.worktree.ref,
                     }),
                   ),
