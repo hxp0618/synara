@@ -21,18 +21,18 @@
 > Artifact、Credential 和企业身份基础实现。下面的 TODO 表示生产化与产品收口目标；执行每个
 > Stage 前必须先做差距审计，禁止按旧计划重复实现已有模块。
 
-| Stage   | 目标                                                     | 状态                | 依赖             |
-| ------- | -------------------------------------------------------- | ------------------- | ---------------- |
-| Stage 1 | 定义 Control Plane 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
-| Stage 2 | Go Control Plane 收口与生产化                            | 仓库内完成 / 已验收 | Stage 1          |
-| Stage 3 | Provider Runtime 与远程 Worker 产品化                    | 已完成 / 已验收     | Stage 2          |
-| Stage 4 | 分布式执行平台和 K8s 多集群生产化                        | COMPLETE            | Stage 2、Stage 3 |
-| Stage 5 | Provider 沙箱与运行时隔离加固                            | IN PROGRESS         | Stage 3、Stage 4 |
-| Stage 6 | 企业 Self-hosted GA、运营、安全与成本治理                | TODO                | Stage 2-5        |
-| Stage 7 | 对外 SDK 与开发者平台                                    | TODO                | Stage 2、5、6    |
-| Stage 8 | 组织内协作与 Agent/人统一提及                            | TODO                | Stage 6、Stage 7 |
-| Stage 9 | 开发者工作流集成与自动化                                 | TODO                | Stage 4、5、8    |
-| Stage 10 | 计算供给弹性与成本可编程化                              | TODO                | Stage 4、6、7、8 |
+| Stage    | 目标                                                     | 状态                | 依赖             |
+| -------- | -------------------------------------------------------- | ------------------- | ---------------- |
+| Stage 1  | 定义 Control Plane 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
+| Stage 2  | Go Control Plane 收口与生产化                            | 仓库内完成 / 已验收 | Stage 1          |
+| Stage 3  | Provider Runtime 与远程 Worker 产品化                    | 已完成 / 已验收     | Stage 2          |
+| Stage 4  | 分布式执行平台和 K8s 多集群生产化                        | COMPLETE            | Stage 2、Stage 3 |
+| Stage 5  | Provider 沙箱与运行时隔离加固                            | IN PROGRESS         | Stage 3、Stage 4 |
+| Stage 6  | 企业 Self-hosted GA、运营、安全与成本治理                | TODO                | Stage 2-5        |
+| Stage 7  | 对外 SDK 与开发者平台                                    | IN PROGRESS         | Stage 2、5、6    |
+| Stage 8  | 组织内协作与 Agent/人统一提及                            | TODO                | Stage 6、Stage 7 |
+| Stage 9  | 开发者工作流集成与自动化                                 | TODO                | Stage 4、5、8    |
+| Stage 10 | 计算供给弹性与成本可编程化                               | TODO                | Stage 4、6、7、8 |
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
@@ -56,13 +56,13 @@ Stage 7 的独立设计文档（文件名不带阶段编号，后续顺延不需
 
 **必须串行的硬门禁**（其余一律可并行）：
 
-| 门禁                                          | 原因                                           |
-| --------------------------------------------- | ---------------------------------------------- |
-| Stage 5 沙箱修复 → Stage 6 第三方渗透验收     | 否则只是重复记录已知缺口，浪费一次外部测试预算 |
-| Stage 5 沙箱修复 → Stage 7 GA                 | 公开 SDK = 任意第三方提交任意代码              |
-| Stage 5 不可信输入组 → Stage 9 事件触发上线   | 攻击者开一个 Issue 即可投喂无人值守 agent      |
-| Stage 8 统一 interaction → Stage 9 评论提及   | 否则 VCS 侧会长出第二套提及机制                |
-| Stage 6 Plan/Entitlement → Stage 7 自助免费层 | 免费层需要配额与开通能力落地                   |
+| 门禁                                                  | 原因                                           |
+| ----------------------------------------------------- | ---------------------------------------------- |
+| Stage 5 沙箱修复 → Stage 6 第三方渗透验收             | 否则只是重复记录已知缺口，浪费一次外部测试预算 |
+| Stage 5 沙箱修复 → Stage 7 GA                         | 公开 SDK = 任意第三方提交任意代码              |
+| Stage 5 不可信输入组 → Stage 9 事件触发上线           | 攻击者开一个 Issue 即可投喂无人值守 agent      |
+| Stage 8 统一 interaction → Stage 9 评论提及           | 否则 VCS 侧会长出第二套提及机制                |
+| Stage 6 Plan/Entitlement → Stage 7 自助免费层         | 免费层需要配额与开通能力落地                   |
 | Stage 10 FOCUS 命名决策 → Stage 7 usage/cost 契约冻结 | 对外契约冻结后再改列名与语义是 breaking change |
 
 **关键路径（面向 GA）**：Stage 5 → Stage 6 → GA。Stage 7/8/9/10 是产品扩展，
@@ -1691,8 +1691,10 @@ SSO Enforcement、Plan/Entitlement/Feature Flag、离职回收闭环、分布式
 
 ### Stage 7：对外 SDK 与开发者平台
 
-状态：TODO。设计已冻结（2026-07-26），完整内容见独立设计文档
+状态：IN PROGRESS（2026-08-03 启动；2026-08-04 source public beta 与受控运行时出口完成，
+仓库外激活和 GA 依赖待办）。设计已冻结（2026-07-26），完整内容见独立设计文档
 [`docs/plans/external-sdk-developer-platform.md`](docs/plans/external-sdk-developer-platform.md)，
+逐项证据见 [`docs/reports/stage-7-completion-audit-20260804.md`](docs/reports/stage-7-completion-audit-20260804.md)，
 本节不重复其 TODO 与完成条件。
 
 摘要：把只服务第一方（Web 经 Node 代理、Worker、SCIM）的 `/v1` 开放成外部开发者可编程的产品。

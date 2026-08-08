@@ -892,7 +892,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
                 "payload": {
                     "output": {
                         "credentialEvidence": {
-                            "credentialPayloadKeys": ["apiKey"],
+                            "credentialPayloadKeys": ["apiKey", "baseUrl"],
                             "credentialVerified": True,
                         }
                     }
@@ -2914,6 +2914,47 @@ class KubernetesDriverRealProviderFaultTest(unittest.TestCase):
 
 
 class APIClientTimeoutTest(unittest.TestCase):
+    def test_request_applies_service_account_bearer_and_stable_idempotency_key(self) -> None:
+        captured: list[Any] = []
+
+        class Response:
+            status = 202
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: Any) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b"{}"
+
+        class Opener:
+            @staticmethod
+            def open(request: Any, timeout: float) -> Response:
+                captured.append((request, timeout))
+                return Response()
+
+        client = acceptance.APIClient(
+            "http://127.0.0.1:3780",
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+            bearer_token="syna_sa_test-token",
+        )
+        client.opener = Opener()  # type: ignore[assignment]
+        client.request(
+            "POST",
+            "/v1/tenants/tenant/execution-targets/target/provisioning-operations",
+            {"action": "install"},
+            expected=(202,),
+            idempotency_key="stable-operation-key",
+        )
+
+        request, _timeout = captured[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer syna_sa_test-token")
+        self.assertEqual(request.get_header("Idempotency-key"), "stable-operation-key")
+
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
 
@@ -8374,7 +8415,10 @@ class RunnerOptionsTest(unittest.TestCase):
             acceptance.parse_args(["--failure-only"])
 
     def test_ssh_options_use_owned_orbstack_defaults_and_release_timeout(self) -> None:
-        options = acceptance.parse_args(["--target", "ssh", "--ssh-machine-name", "synara-stage3-test"])
+        options = acceptance.parse_args([
+            "--target", "ssh", "--ssh-machine-name", "synara-stage3-test",
+            "--ssh-developer-api-provisioning",
+        ])
 
         self.assertEqual(options.timeout_seconds, 900.0)
         self.assertEqual(options.ssh_orbctl_bin, "orbctl")
@@ -8382,6 +8426,11 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.ssh_machine_arch, "arm64")
         self.assertEqual(options.ssh_machine_image, "ubuntu:24.04")
         self.assertEqual(options.ssh_node_version, "24.13.1")
+        self.assertTrue(options.ssh_developer_api_provisioning)
+
+    def test_ssh_developer_api_provisioning_rejects_other_targets(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--target", "docker", "--ssh-developer-api-provisioning"])
 
     def test_ssh_machine_name_rejects_non_dns_input(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

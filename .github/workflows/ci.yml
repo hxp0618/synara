@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -24,6 +25,11 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version-file: package.json
+
+      - name: Setup Python for Stage 7 SDK checks
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Cache Bun and Turbo
         uses: actions/cache@v5
@@ -61,6 +67,45 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Verify Stage 7 developer contract, SDK, docs, and examples
+        run: bun run stage7:developer:check
+
+      - name: Build and smoke-test Developer Docs deployment image
+        run: |
+          set -euo pipefail
+          image="polaris-developer-docs:${GITHUB_SHA}"
+          container="polaris-developer-docs-ci"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker build \
+            --target developer-docs-runtime \
+            --build-arg PUBLIC_POLARIS_CONSOLE_URL=https://console.example.invalid \
+            --build-arg POLARIS_DEVELOPER_DOCS_REVISION="$GITHUB_SHA" \
+            --tag "$image" \
+            .
+          docker run --detach \
+            --name "$container" \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --publish 127.0.0.1:18080:8080 \
+            "$image"
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/ready >ready.json; then
+              break
+            fi
+            sleep 1
+          done
+          grep -F "\"revision\":\"${GITHUB_SHA}\"" ready.json
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/getting-started/
+          curl --fail --silent --show-error --head http://127.0.0.1:18080/api-reference/
+          test "$(docker inspect --format '{{.Config.User}}' "$container")" = node
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true
 
       - name: Test
         run: bun run test
@@ -115,7 +160,10 @@ jobs:
           node-version-file: package.json
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        # Several workspaces patch the shared TypeScript installation during
+        # prepare. Windows can otherwise run those lifecycle scripts at the
+        # same time and leave one patcher observing another's partial update.
+        run: bun install --frozen-lockfile --concurrent-scripts 1
 
       - name: Test Windows process planning
         run: bun run --cwd packages/shared test src/windowsProcess.test.ts
@@ -196,13 +244,25 @@ jobs:
   control-plane:
     name: Go Control Plane
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: services/control-plane
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # The Go suite launches the official TypeScript and Python SDKs in
+      # separate processes against an httptest Control Plane for Stage 7 conformance.
+      - name: Setup Bun for SDK conformance
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Python for SDK conformance
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -236,13 +296,6 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # -race is the only check covering the goroutine, atomic and shared-cache
-      # coordination in agentd and the reconcilers. Measured at 3m11s for the
-      # whole module versus 2m55s for just those packages, so it runs everywhere
-      # rather than leaving the other 50 packages unguarded to save 16 seconds.
-      - name: Race test
-        run: go test ./... -race -count=1
-
       # Correctness checks only. SA covers misuse and deprecated APIs — a
       # crypto/dsa import and two tar.TypeRegA comparisons had already accreted
       # here — and S1/QF1 cover provably redundant code. ST* is excluded on
@@ -264,3 +317,40 @@ jobs:
       - name: Vulnerability scan
         run: |
           go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  control-plane-race:
+    name: Go Control Plane Race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: services/control-plane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The race suite also launches both official SDKs against an httptest
+      # Control Plane, so it needs the same subprocess runtimes as the regular
+      # Go job. Keeping it separate lets static analysis and govulncheck run in
+      # parallel instead of waiting behind a roughly 40-minute race run.
+      - name: Setup Bun for SDK conformance
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Python for SDK conformance
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      # -race is the only check covering the goroutine, atomic and shared-cache
+      # coordination in agentd and the reconcilers. The package timeout prevents
+      # a deadlock from consuming the entire hosted-runner budget.
+      - name: Race test
+        run: go test ./... -race -count=1 -timeout=45m

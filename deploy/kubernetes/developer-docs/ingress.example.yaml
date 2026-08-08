@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: polaris-developer-docs
+  namespace: synara-system
+  labels:
+    app.kubernetes.io/name: polaris-developer-docs
+    app.kubernetes.io/part-of: synara-developer-platform
+spec:
+  ingressClassName: replace-ingress-class
+  tls:
+    - hosts:
+        - docs.example.invalid
+      secretName: replace-developer-docs-tls-secret
+  rules:
+    - host: docs.example.invalid
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: polaris-developer-docs
+                port:
+                  name: http

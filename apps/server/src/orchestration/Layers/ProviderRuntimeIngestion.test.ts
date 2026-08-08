@@ -910,7 +910,10 @@ describe("ProviderRuntimeIngestion", () => {
         thread.session?.activeTurnId === null &&
         thread.latestTurn?.turnId === "turn-stop-aborted" &&
         thread.latestTurn.state === "interrupted" &&
-        thread.latestTurn.completedAt !== null,
+        thread.latestTurn.completedAt !== null &&
+        thread.messages.some(
+          (message) => message.id === "assistant:item-stop-aborted" && message.streaming === false,
+        ),
     );
     expect(interruptedThread.session).toMatchObject({
       status: "interrupted",

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: polaris-developer-docs
+  labels:
+    app.kubernetes.io/name: polaris-developer-docs
+    app.kubernetes.io/part-of: synara-developer-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: polaris-developer-docs
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

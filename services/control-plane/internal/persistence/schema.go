@@ -26,10 +26,10 @@ func AllModels() []any {
 		&ProviderCommercialAuthorization{}, &ProviderCommercialAuthorizationApproval{},
 		&Stage6GovernanceAuthorityGrant{},
 		&TenantSupportPolicy{}, &SupportAccessGrant{}, &LegalHold{}, &PrivacyRequest{}, &PrivacyRequestEvent{}, &TenantDataExport{},
-		&TenantInvitation{}, &AuditLog{}, &OutboxMessage{}, &OutboxPressureState{}, &TenantQuota{}, &ExecutionQuotaPolicy{}, &Project{}, &ProjectCostAllocation{}, &ExecutionTarget{}, &KubernetesPodDeletionFence{},
+		&TenantInvitation{}, &AuditLog{}, &OutboxMessage{}, &OutboxPressureState{}, &TenantQuota{}, &ExecutionQuotaPolicy{}, &Project{}, &ProjectCostAllocation{}, &ExecutionTarget{}, &ExecutionTargetProvisioningOperation{}, &KubernetesPodDeletionFence{},
 		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{}, &WorkerStorageScrub{}, &WorkerIdentityTombstone{},
 		&ExecutionUsageSummary{}, &TenantUsageQuotaAlert{},
-		&AgentExecution{}, &ExecutionSchedulingDecision{}, &ExecutionSchedulingCandidate{}, &ExecutionCapacityAdmission{}, &ExecutionRecoveryBundle{}, &ExecutionSuspendAttempt{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{},
+		&AgentExecution{}, &ExecutionSchedulingDecision{}, &ExecutionSchedulingCandidate{}, &ExecutionCapacityAdmission{}, &ExecutionRecoveryBundle{}, &ExecutionSuspendAttempt{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{}, &DeveloperWebhookEndpoint{}, &DeveloperWebhookDelivery{},
 		&ExecutionControlCommand{}, &Artifact{},
 		&ArtifactPayloadMigration{}, &ArtifactAccessToken{}, &ProviderCredential{}, &ProviderCredentialScopePolicy{},
 		&KMSRewrapRun{}, &KMSRewrapEntry{}, &KMSRewrapReceipt{},
@@ -60,7 +60,7 @@ func AllModels() []any {
 		&SSEConnectionLease{}, &ReconcilerLease{},
 		&TenantRetentionPolicy{}, &TenantResourceLifecyclePolicy{}, &ProjectResourceLifecyclePolicy{},
 		&IdentityConnection{}, &TenantDomain{}, &TenantIdentityPolicy{}, &IdentityLoginAttempt{},
-		&ServiceAccount{}, &ServiceAccountToken{}, &IdentityGroup{}, &IdentityGroupMember{},
+		&ServiceAccount{}, &ServiceAccountToken{}, &ServiceAccountAPIUsageWindow{}, &IdentityGroup{}, &IdentityGroupMember{},
 		&IdentityGroupMapping{},
 	}
 }

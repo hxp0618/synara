@@ -1,0 +1,232 @@
+---
+import type { DocPage } from "../content";
+import { pages } from "../content";
+
+type Props = { page: DocPage };
+const { page } = Astro.props;
+const consoleURL = import.meta.env.PUBLIC_POLARIS_CONSOLE_URL ?? "/console";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={page.description} />
+    <title>{page.title} · Polaris Developers</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <button class="menu-button" type="button" aria-label="Open documentation navigation" aria-expanded="false" aria-controls="docs-sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+      </button>
+      <a class="brand" href="/getting-started/" aria-label="Polaris Developers home">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M16 2.5 19 13l10.5 3L19 19l-3 10.5L13 19 2.5 16 13 13z" />
+          <circle cx="16" cy="16" r="2.4" />
+        </svg>
+        <span>Polaris Developers</span>
+      </a>
+      <nav class="topnav" aria-label="Primary navigation">
+        <a class="active" href="/getting-started/">Docs</a>
+        <a href="/api-reference/">API Reference</a>
+        <a href="/examples/">Examples</a>
+      </nav>
+      <a class="console-link" href={consoleURL}>Open Console <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <aside id="docs-sidebar" class="sidebar" aria-label="Documentation navigation">
+      <div class="sidebar-section">
+        <p>Getting started</p>
+        <a class:list={["sidebar-link", { active: page.slug === "getting-started" }]} href="/getting-started/">
+          <span class="nav-icon" aria-hidden="true">⌘</span>
+          Build your first agent workflow
+        </a>
+      </div>
+      <div class="sidebar-section">
+        <p>Guides</p>
+        {pages.slice(1).map((navPage) => (
+          <a class:list={["sidebar-link", { active: page.slug === navPage.slug }]} href={`/${navPage.slug}/`}>
+            <span class="nav-icon" aria-hidden="true">{navPage.slug === "streaming-events" ? "≋" : "◇"}</span>
+            {navPage.navLabel}
+          </a>
+        ))}
+      </div>
+      <div class="sidebar-section">
+        <p>Reference</p>
+        <a class="sidebar-link" href="/api-reference/"><span class="nav-icon" aria-hidden="true">▤</span> API Reference</a>
+      </div>
+      <div class="security-note">
+        <strong>Server-side only</strong>
+        <span>Keep API Keys out of browsers. The Developer API does not provide CORS.</span>
+        <a href="/authentication/">Learn more →</a>
+      </div>
+      <div class="version">API v1.0 <span>⌄</span></div>
+    </aside>
+
+    <main>
+      <article>
+        <div class="breadcrumb"><a href="/getting-started/">Getting started</a><span>›</span><span>{page.navLabel}</span></div>
+        <h1>{page.title}</h1>
+        <p class="lede">{page.description}</p>
+        {page.sections.map((section, index) => (
+          <section id={section.id}>
+            <h2>{section.title}</h2>
+            {index === 0 && page.slug === "getting-started" && (
+              <ol class="steps" aria-label="Quickstart steps">
+                <li><span>1</span><div><strong>Initialize Polaris</strong><small>Use a server-side API Key.</small></div></li>
+                <li><span>2</span><div><strong>Create a Session</strong><small>Choose the Project and provider.</small></div></li>
+                <li><span>3</span><div><strong>Send a Turn and stream</strong><small>Consume durable ordered events.</small></div></li>
+              </ol>
+            )}
+            {section.body.map((paragraph) => <p>{paragraph}</p>)}
+            {section.code && (
+              <div class="code-shell">
+                <div class="code-toolbar"><span>TypeScript</span><button class="copy-button" type="button" data-copy={section.code}>Copy</button></div>
+                <pre><code>{section.code}</code></pre>
+              </div>
+            )}
+          </section>
+        ))}
+        {page.next && (
+          <a class="next-topic" href={`/${page.next.slug}/`}>
+            <span><small>Next up</small><strong>{page.next.label}</strong><span>{page.next.description}</span></span>
+            <b>Continue →</b>
+          </a>
+        )}
+      </article>
+      <aside class="toc" aria-label="On this page">
+        <p>On this page</p>
+        {page.sections.map((section) => <a href={`#${section.id}`}>{section.title}</a>)}
+        <hr />
+        <p>Resources</p>
+        <a href="/api-reference/">API Reference ↗</a>
+        <a href="/streaming-events/">Streaming events</a>
+        <a href="/errors/">Errors</a>
+      </aside>
+    </main>
+
+    <script>
+      const menuButton = document.querySelector<HTMLButtonElement>(".menu-button");
+      const sidebar = document.querySelector<HTMLElement>(".sidebar");
+      menuButton?.addEventListener("click", () => {
+        const open = sidebar?.classList.toggle("open") ?? false;
+        menuButton.setAttribute("aria-expanded", String(open));
+      });
+      document.querySelectorAll<HTMLButtonElement>(".copy-button").forEach((button) => {
+        button.addEventListener("click", async () => {
+          await navigator.clipboard.writeText(button.dataset.copy ?? "");
+          button.textContent = "Copied";
+          setTimeout(() => { button.textContent = "Copy"; }, 1200);
+        });
+      });
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    color-scheme: light;
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #111318;
+    background: #fff;
+    --blue: #064de4;
+    --blue-soft: #eef4ff;
+    --line: #e4e7ec;
+    --muted: #5e6675;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; min-width: 320px; background: #fff; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; }
+  .topbar {
+    position: fixed; inset: 0 0 auto 0; z-index: 20; height: 64px; display: grid;
+    grid-template-columns: 260px 1fr auto; align-items: center; padding: 0 24px;
+    border-bottom: 1px solid var(--line); background: rgba(255,255,255,.97); backdrop-filter: blur(12px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; letter-spacing: -.025em; }
+  .brand-mark { width: 26px; height: 26px; fill: var(--blue); }
+  .topnav { justify-self: center; display: flex; align-items: center; gap: 42px; height: 100%; font-size: 14px; font-weight: 550; }
+  .topnav a { height: 100%; display: grid; place-items: center; border-bottom: 2px solid transparent; }
+  .topnav a:hover, .topnav a.active { color: var(--blue); border-bottom-color: var(--blue); }
+  .console-link { padding: 10px 14px; border-radius: 5px; background: var(--blue); color: #fff; font-size: 13px; font-weight: 650; box-shadow: 0 2px 8px rgba(6,77,228,.18); }
+  .menu-button { display: none; width: 36px; height: 36px; padding: 8px; border: 0; background: transparent; }
+  .menu-button svg { width: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .sidebar {
+    position: fixed; z-index: 10; top: 64px; bottom: 0; left: 0; width: 260px; padding: 30px 22px 70px;
+    border-right: 1px solid var(--line); overflow-y: auto; background: #fff;
+  }
+  .sidebar-section { margin-bottom: 27px; }
+  .sidebar-section > p, .toc > p { margin: 0 0 10px 10px; color: #353b47; font-size: 10px; font-weight: 750; letter-spacing: .105em; text-transform: uppercase; }
+  .sidebar-link { display: flex; gap: 9px; align-items: center; min-height: 38px; padding: 7px 9px; border-left: 2px solid transparent; color: #363c48; font-size: 13px; line-height: 1.35; }
+  .sidebar-link:hover { color: var(--blue); background: #f8faff; }
+  .sidebar-link.active { color: var(--blue); border-left-color: var(--blue); background: var(--blue-soft); font-weight: 650; }
+  .nav-icon { width: 17px; text-align: center; color: #697386; font-family: ui-monospace, monospace; }
+  .security-note { display: grid; gap: 10px; margin-top: 34px; padding: 16px; border: 1px solid #cbdafd; border-radius: 7px; background: #f9fbff; font-size: 12px; line-height: 1.5; }
+  .security-note strong { font-size: 12px; }
+  .security-note span { color: var(--muted); }
+  .security-note a { color: var(--blue); font-weight: 600; }
+  .version { position: fixed; bottom: 0; left: 0; width: 259px; padding: 17px 30px; border-top: 1px solid var(--line); background: #fff; color: var(--muted); font: 12px ui-monospace, monospace; }
+  main { margin: 64px 0 0 260px; min-height: calc(100vh - 64px); display: grid; grid-template-columns: minmax(0, 760px) 210px; justify-content: center; }
+  article { min-width: 0; padding: 48px 56px 90px; border-right: 1px solid var(--line); }
+  .breadcrumb { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; color: var(--muted); font-size: 12px; }
+  .breadcrumb a { color: var(--blue); font-weight: 600; }
+  h1 { max-width: 680px; margin: 0; font-size: clamp(32px, 3.2vw, 46px); line-height: 1.07; letter-spacing: -.045em; }
+  .lede { max-width: 650px; margin: 14px 0 38px; color: #48505e; font-size: 17px; line-height: 1.6; }
+  article section { scroll-margin-top: 90px; margin: 0 0 40px; }
+  h2 { margin: 0 0 14px; font-size: 21px; letter-spacing: -.025em; }
+  article section > p { max-width: 680px; color: #424a58; font-size: 15px; line-height: 1.75; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin: 20px 0 24px; padding: 0; list-style: none; }
+  .steps li { display: flex; gap: 10px; min-width: 0; }
+  .steps li > span { flex: 0 0 23px; width: 23px; height: 23px; display: grid; place-items: center; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; font-weight: 700; }
+  .steps div { display: grid; gap: 5px; }
+  .steps strong { font-size: 12px; line-height: 1.35; }
+  .steps small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+  .code-shell { overflow: hidden; margin-top: 18px; border: 1px solid #d9dde5; border-radius: 7px; background: #fbfcfe; box-shadow: 0 1px 2px rgba(17,24,39,.035); }
+  .code-toolbar { height: 38px; display: flex; justify-content: flex-end; align-items: center; gap: 13px; padding: 0 13px; border-bottom: 1px solid #e3e6ec; color: var(--muted); font-size: 11px; }
+  .copy-button { border: 0; padding: 4px 6px; background: transparent; color: var(--blue); font-size: 11px; cursor: pointer; }
+  pre { margin: 0; padding: 20px; overflow-x: auto; color: #202532; font: 12px/1.65 "SFMono-Regular", Consolas, "Liberation Mono", monospace; tab-size: 2; }
+  .next-topic { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-top: 58px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .next-topic > span { display: grid; gap: 4px; }
+  .next-topic small { color: var(--muted); font-size: 11px; }
+  .next-topic strong { font-size: 19px; }
+  .next-topic span span { color: var(--muted); font-size: 13px; }
+  .next-topic b { flex: 0 0 auto; color: var(--blue); font-size: 13px; }
+  .toc { position: sticky; top: 64px; align-self: start; height: calc(100vh - 64px); padding: 42px 28px; }
+  .toc > p { margin-left: 0; }
+  .toc a { display: block; margin: 0 0 14px; color: #4e5664; font-size: 12px; line-height: 1.4; }
+  .toc a:hover { color: var(--blue); }
+  .toc hr { margin: 28px 0; border: 0; border-top: 1px solid var(--line); }
+  @media (max-width: 1040px) {
+    .topbar { grid-template-columns: 240px 1fr auto; }
+    .topnav { gap: 22px; }
+    .sidebar { width: 240px; }
+    .version { width: 239px; }
+    main { margin-left: 240px; grid-template-columns: minmax(0, 760px); }
+    article { border-right: 0; }
+    .toc { display: none; }
+  }
+  @media (max-width: 760px) {
+    .topbar { height: 58px; grid-template-columns: auto 1fr auto; padding: 0 12px; }
+    .menu-button { display: block; }
+    .brand { font-size: 14px; justify-self: start; }
+    .brand-mark { width: 21px; height: 21px; }
+    .topnav { display: none; }
+    .console-link { padding: 8px 10px; font-size: 11px; }
+    .sidebar { top: 58px; width: min(86vw, 310px); transform: translateX(-102%); transition: transform 180ms ease-out; box-shadow: 8px 0 24px rgba(17,24,39,.08); }
+    .sidebar.open { transform: translateX(0); }
+    .version { display: none; }
+    main { margin: 58px 0 0; display: block; }
+    article { padding: 35px 22px 64px; }
+    h1 { font-size: 34px; }
+    .lede { font-size: 15px; margin-bottom: 31px; }
+    .steps { grid-template-columns: 1fr; gap: 17px; }
+    pre { font-size: 11px; }
+    .next-topic { align-items: start; flex-direction: column; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .sidebar { transition: none; }
+  }
+</style>

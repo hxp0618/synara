@@ -59,10 +59,11 @@ func (s *Service) transitionOperationalStatus(
 	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
 		return Session{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	var appended persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session." + actionName, SuccessStatus: 200,
 		Request: map[string]any{"sessionId": sessionID, "targetStatus": toStatus},
 	}, func(tx *gorm.DB) (Session, error) {
@@ -93,15 +94,15 @@ func (s *Service) transitionOperationalStatus(
 		}
 		locked.Status = toStatus
 		locked.UpdatedAt = now
-		appended, err = appendEvent(ctx, tx, &locked, eventInput{
-			EventType: eventType, ActorType: "user", ActorID: &principal.UserID,
+		appended, err = s.appendEvent(ctx, tx, &locked, eventInput{
+			EventType: eventType, ActorType: actorType, ActorID: &actorID,
 			Payload: map[string]any{"status": toStatus}, OccurredAt: now,
 		})
 		if err != nil {
 			return Session{}, err
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: eventType, ResourceType: "agent_session", ResourceID: &sessionID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 		}); err != nil {

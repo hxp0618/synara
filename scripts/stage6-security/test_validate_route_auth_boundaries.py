@@ -39,12 +39,14 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
         self.assertEqual(receipt["routes"]["byBoundary"]["platform-signature"], 1)
         self.assertNotIn("billing-provider-signature", receipt["routes"]["byBoundary"])
         self.assertEqual(receipt["routes"]["byBoundary"]["desktop-enrollment-token"], 1)
+        self.assertGreater(receipt["routes"]["byBoundary"]["developer-auth"], 0)
+        self.assertGreater(receipt["routes"]["byExposure"]["public-beta"], 0)
 
     def test_rejects_payment_route_in_internal_self_hosted_runtime(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.HandleFunc("GET /health", server.health)',
-                'mux.HandleFunc("GET /health", server.health)\n\tmux.Handle("POST /v1/tenants/{tenantID}/commercial-billing/checkout", server.requireAuth(http.HandlerFunc(server.createCommercialBillingCheckout)))',
+                'routes.InternalFunc("GET /health", server.health)',
+                'routes.InternalFunc("GET /health", server.health)\n\troutes.Internal("POST /v1/tenants/{tenantID}/commercial-billing/checkout", server.requireAuth(http.HandlerFunc(server.createCommercialBillingCheckout)))',
             )
         )
         self.addCleanup(temporary.cleanup)
@@ -55,8 +57,8 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
     def test_rejects_payment_path_variant_but_allows_internal_cost_accounting_invoice_import(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.HandleFunc("GET /health", server.health)',
-                'mux.HandleFunc("GET /health", server.health)\n\tmux.Handle("POST /v1/tenants/{tenantID}/billing/portal-session", server.requireAuth(http.HandlerFunc(server.health)))',
+                'routes.InternalFunc("GET /health", server.health)',
+                'routes.InternalFunc("GET /health", server.health)\n\troutes.Internal("POST /v1/tenants/{tenantID}/billing/portal-session", server.requireAuth(http.HandlerFunc(server.health)))',
             )
         )
         self.addCleanup(temporary.cleanup)
@@ -71,8 +73,8 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
     def test_rejects_tenant_route_without_login_authentication(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.Handle("GET /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.getTenant)))',
-                'mux.HandleFunc("GET /v1/tenants/{tenantID}", server.getTenant)',
+                'routes.Internal("GET /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.getTenant)))',
+                'routes.InternalFunc("GET /v1/tenants/{tenantID}", server.getTenant)',
             )
         )
         self.addCleanup(temporary.cleanup)
@@ -83,8 +85,8 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
     def test_rejects_new_unclassified_public_route(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.HandleFunc("GET /health", server.health)',
-                'mux.HandleFunc("GET /health", server.health)\n\tmux.HandleFunc("GET /v1/debug", server.health)',
+                'routes.InternalFunc("GET /health", server.health)',
+                'routes.InternalFunc("GET /health", server.health)\n\troutes.InternalFunc("GET /v1/debug", server.health)',
             )
         )
         self.addCleanup(temporary.cleanup)
@@ -95,8 +97,8 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
     def test_rejects_desktop_enrollment_handler_drift(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.HandleFunc("POST /v1/desktop-enrollments/redeem", server.redeemDesktopEnrollment)',
-                'mux.HandleFunc("POST /v1/desktop-enrollments/redeem", server.health)',
+                'routes.InternalFunc("POST /v1/desktop-enrollments/redeem", server.redeemDesktopEnrollment)',
+                'routes.InternalFunc("POST /v1/desktop-enrollments/redeem", server.health)',
             )
         )
         self.addCleanup(temporary.cleanup)
@@ -107,8 +109,8 @@ class ValidateRouteAuthBoundariesTest(unittest.TestCase):
     def test_rejects_artifact_content_handler_drift(self) -> None:
         temporary, path = self.mutated_source(
             lambda source: source.replace(
-                'mux.HandleFunc("GET /v1/artifact-content/{artifactID}", server.downloadArtifactContent)',
-                'mux.HandleFunc("GET /v1/artifact-content/{artifactID}", server.getArtifact)',
+                'routes.InternalFunc("GET /v1/artifact-content/{artifactID}", server.downloadArtifactContent)',
+                'routes.InternalFunc("GET /v1/artifact-content/{artifactID}", server.getArtifact)',
             )
         )
         self.addCleanup(temporary.cleanup)

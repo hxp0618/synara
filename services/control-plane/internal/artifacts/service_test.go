@@ -140,6 +140,14 @@ func TestLocalArtifactLifecycleAndTenantIsolation(t *testing.T) {
 	assertProblemCode(t, err, "artifact_not_found")
 	_, err = fixture.service.List(context.Background(), otherPrincipal, fixture.sessionID)
 	assertProblemCode(t, err, "session_not_found")
+	_, err = fixture.service.ListPage(context.Background(), otherPrincipal, fixture.sessionID, ArtifactListQuery{})
+	assertProblemCode(t, err, "session_not_found")
+	_, _, err = fixture.service.CreateWithIdempotency(
+		context.Background(), otherPrincipal, fixture.sessionID,
+		CreateInput{Kind: "attachment", OriginalName: pointerString("cross-tenant.txt")},
+		"artifact-cross-tenant", "artifact-cross-tenant", "127.0.0.1",
+	)
+	assertProblemCode(t, err, "session_not_found")
 	listed, err := fixture.service.List(context.Background(), fixture.principal, fixture.sessionID)
 	if err != nil || len(listed) != 1 || listed[0].ID != completed.ID {
 		t.Fatalf("Artifact list = %#v, %v", listed, err)

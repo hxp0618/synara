@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
@@ -66,11 +67,15 @@ func (s *Server) createExecutionTarget(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	item, err := s.targets.Create(r.Context(), mustPrincipal(r), tenantID, input)
+	item, replayed, err := s.targets.CreateWithIdempotency(
+		r.Context(), mustPrincipal(r), tenantID, input,
+		strings.TrimSpace(r.Header.Get("Idempotency-Key")), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -84,6 +89,55 @@ func (s *Server) getExecutionTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, err := s.targets.Get(r.Context(), mustPrincipal(r), tenantID, targetID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) createExecutionTargetProvisioningOperation(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var input struct {
+		Action string `json:"action"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, replayed, err := s.targets.CreateProvisioningOperation(
+		r.Context(), mustPrincipal(r), tenantID, targetID, input.Action,
+		strings.TrimSpace(r.Header.Get("Idempotency-Key")), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (s *Server) getExecutionTargetProvisioningOperation(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	operationID, ok := s.pathUUID(w, r, "provisioningOperationID")
+	if !ok {
+		return
+	}
+	item, err := s.targets.GetProvisioningOperation(r.Context(), mustPrincipal(r), tenantID, targetID, operationID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

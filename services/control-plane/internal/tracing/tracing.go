@@ -150,7 +150,7 @@ func exporterSettingsFromEnvironment(policy ExportPolicy) (exporterSettings, err
 		return exporterSettings{}, nil
 	}
 	endpoint, err := url.Parse(rawEndpoint)
-	if err != nil || endpoint.IsAbs() == false || endpoint.Hostname() == "" {
+	if err != nil || !endpoint.IsAbs() || endpoint.Hostname() == "" {
 		return exporterSettings{}, errors.New("OTLP trace endpoint must be an absolute HTTP(S) URL")
 	}
 	endpoint.Scheme = strings.ToLower(endpoint.Scheme)

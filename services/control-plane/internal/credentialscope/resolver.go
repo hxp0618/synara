@@ -32,6 +32,7 @@ type Request struct {
 	TenantID             uuid.UUID
 	OrganizationID       uuid.UUID
 	SessionOwnerUserID   uuid.UUID
+	ExcludeUserScope     bool
 	Provider             string
 	Model                *string
 	ExplicitCredentialID *uuid.UUID
@@ -54,8 +55,8 @@ func Resolve(ctx context.Context, db *gorm.DB, request Request) (*Selection, err
 	if request.Now.IsZero() {
 		request.Now = time.Now().UTC()
 	}
-	if request.TenantID == uuid.Nil || request.OrganizationID == uuid.Nil ||
-		request.SessionOwnerUserID == uuid.Nil || request.Provider == "" {
+	if request.TenantID == uuid.Nil || request.OrganizationID == uuid.Nil || request.Provider == "" ||
+		(request.SessionOwnerUserID == uuid.Nil && !request.ExcludeUserScope) {
 		return nil, problem.New(500, "credential_scope_request_invalid", "Provider Credential scope request is invalid.")
 	}
 
@@ -150,6 +151,9 @@ func eligibleForSession(
 ) (bool, error) {
 	switch credential.Scope {
 	case ScopeUser:
+		if request.ExcludeUserScope {
+			return false, nil
+		}
 		if credential.ScopeUserID == nil || *credential.ScopeUserID != request.SessionOwnerUserID {
 			return false, nil
 		}

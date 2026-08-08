@@ -21,32 +21,50 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
-const tokenPrefix = "syna_sa_"
+const (
+	TokenPrefix               = "syna_sa_"
+	DefaultRateLimitPerMinute = 600
+	MaximumRateLimitPerMinute = 60000
+)
 
 var allowedScopes = map[string]struct{}{
-	"scim.read": {}, "scim.write": {}, "identity.read": {}, "identity.manage": {},
+	"api.access": {}, "scim.read": {}, "scim.write": {}, "identity.read": {}, "identity.manage": {},
+}
+
+var tenantRoles = map[string]struct{}{
+	"owner": {}, "admin": {}, "security_admin": {}, "cost_admin": {}, "auditor": {}, "member": {},
+}
+
+var organizationRoles = map[string]struct{}{
+	"owner": {}, "admin": {}, "agent_operator": {}, "member": {}, "viewer": {},
 }
 
 type Account struct {
-	ID             uuid.UUID  `json:"id"`
-	TenantID       uuid.UUID  `json:"tenantId"`
-	OrganizationID *uuid.UUID `json:"organizationId"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description"`
-	Status         string     `json:"status"`
-	Scopes         []string   `json:"scopes"`
-	CreatedBy      uuid.UUID  `json:"createdBy"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
-	RevokedAt      *time.Time `json:"revokedAt"`
+	ID                 uuid.UUID  `json:"id"`
+	TenantID           uuid.UUID  `json:"tenantId"`
+	OrganizationID     *uuid.UUID `json:"organizationId"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description"`
+	Status             string     `json:"status"`
+	Role               string     `json:"role"`
+	Scopes             []string   `json:"scopes"`
+	RateLimitPerMinute int        `json:"rateLimitPerMinute"`
+	LastUsedAt         *time.Time `json:"lastUsedAt"`
+	CreatedBy          uuid.UUID  `json:"createdBy"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	RevokedAt          *time.Time `json:"revokedAt"`
 }
 
 type Principal struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	OrganizationID *uuid.UUID
-	Name           string
-	Scopes         map[string]struct{}
+	ID                 uuid.UUID
+	TenantID           uuid.UUID
+	OrganizationID     *uuid.UUID
+	Name               string
+	Role               string
+	RateLimitPerMinute int
+	CreatedBy          uuid.UUID
+	Scopes             map[string]struct{}
 }
 
 func (p Principal) Allows(scope string) bool {
@@ -55,11 +73,13 @@ func (p Principal) Allows(scope string) bool {
 }
 
 type CreateInput struct {
-	OrganizationID *uuid.UUID `json:"organizationId"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description"`
-	Scopes         []string   `json:"scopes"`
-	ExpiresAt      *time.Time `json:"expiresAt"`
+	OrganizationID     *uuid.UUID `json:"organizationId"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description"`
+	Role               string     `json:"role"`
+	Scopes             []string   `json:"scopes"`
+	RateLimitPerMinute *int       `json:"rateLimitPerMinute"`
+	ExpiresAt          *time.Time `json:"expiresAt"`
 }
 
 type IssuedAccount struct {
@@ -93,9 +113,24 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 	if err := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID).Order("status, LOWER(name), id").Find(&models).Error; err != nil {
 		return nil, problem.Wrap(500, "service_accounts_load_failed", "Service Accounts could not be loaded.", err)
 	}
+	var activity []persistence.ServiceAccountToken
+	if err := s.db.WithContext(ctx).Model(&persistence.ServiceAccountToken{}).
+		Select("service_account_id, last_used_at").
+		Where("tenant_id = ? AND last_used_at IS NOT NULL", tenantID).
+		Find(&activity).Error; err != nil {
+		return nil, problem.Wrap(500, "service_account_activity_load_failed", "Service Account activity could not be loaded.", err)
+	}
+	lastUsedByAccount := make(map[uuid.UUID]*time.Time, len(activity))
+	for _, item := range activity {
+		current := lastUsedByAccount[item.ServiceAccountID]
+		if item.LastUsedAt != nil && (current == nil || item.LastUsedAt.After(*current)) {
+			lastUsed := *item.LastUsedAt
+			lastUsedByAccount[item.ServiceAccountID] = &lastUsed
+		}
+	}
 	items := make([]Account, 0, len(models))
 	for _, model := range models {
-		items = append(items, toAccount(model))
+		items = append(items, toAccount(model, lastUsedByAccount[model.ID]))
 	}
 	return items, nil
 }
@@ -115,7 +150,8 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	model := persistence.ServiceAccount{
 		ID: accountID, TenantID: tenantID, OrganizationID: normalized.OrganizationID,
 		Name: normalized.Name, Description: normalized.Description, Status: "active",
-		Scopes: normalized.Scopes, CreatedBy: principal.UserID,
+		Role: normalized.Role, Scopes: normalized.Scopes, RateLimitPerMinute: *normalized.RateLimitPerMinute,
+		CreatedBy: principal.UserID,
 	}
 	plainToken, tokenModel, err := s.newToken(tenantID, accountID, normalized.ExpiresAt)
 	if err != nil {
@@ -132,7 +168,10 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "service_account.created", ResourceType: "service_account", ResourceID: &accountID,
 			OrganizationID: normalized.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"name": normalized.Name, "scopes": normalized.Scopes},
+			Metadata: map[string]any{
+				"name": normalized.Name, "role": normalized.Role, "scopes": normalized.Scopes,
+				"rateLimitPerMinute": *normalized.RateLimitPerMinute,
+			},
 		})
 	})
 	if err != nil {
@@ -141,7 +180,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, accountID).Take(&model).Error; err != nil {
 		return IssuedAccount{}, err
 	}
-	return IssuedAccount{Account: toAccount(model), Token: plainToken}, nil
+	return IssuedAccount{Account: toAccount(model, nil), Token: plainToken}, nil
 }
 
 func (s *Service) RotateToken(ctx context.Context, principal identity.Principal, tenantID, accountID uuid.UUID, expiresAt *time.Time, requestID, ipAddress string) (IssuedToken, error) {
@@ -218,7 +257,7 @@ func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tena
 
 func (s *Service) Authenticate(ctx context.Context, token string) (Principal, error) {
 	token = strings.TrimSpace(token)
-	if !strings.HasPrefix(token, tokenPrefix) {
+	if !strings.HasPrefix(token, TokenPrefix) {
 		return Principal{}, problem.New(401, "invalid_service_account_token", "Service Account authentication failed.")
 	}
 	hash := sha256.Sum256([]byte(token))
@@ -252,7 +291,11 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	for _, scope := range matched.Scopes {
 		scopes[scope] = struct{}{}
 	}
-	return Principal{ID: matched.ID, TenantID: matched.TenantID, OrganizationID: matched.OrganizationID, Name: matched.Name, Scopes: scopes}, nil
+	return Principal{
+		ID: matched.ID, TenantID: matched.TenantID, OrganizationID: matched.OrganizationID,
+		Name: matched.Name, Role: matched.Role, RateLimitPerMinute: matched.RateLimitPerMinute,
+		CreatedBy: matched.CreatedBy, Scopes: scopes,
+	}, nil
 }
 
 func (s *Service) normalizeInput(ctx context.Context, principal identity.Principal, tenantID uuid.UUID, input CreateInput) (CreateInput, error) {
@@ -272,12 +315,37 @@ func (s *Service) normalizeInput(ctx context.Context, principal identity.Princip
 	if input.ExpiresAt != nil && !input.ExpiresAt.After(s.now()) {
 		return CreateInput{}, problem.New(400, "invalid_service_account_token_expiry", "Service Account token expiry must be in the future.")
 	}
+	input.Role, err = normalizeRole(input.Role, input.OrganizationID)
+	if err != nil {
+		return CreateInput{}, err
+	}
 	if input.OrganizationID != nil {
 		if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, *input.OrganizationID, authorization.OrganizationRead); err != nil {
 			return CreateInput{}, err
 		}
 	}
+	if input.RateLimitPerMinute == nil {
+		limit := DefaultRateLimitPerMinute
+		input.RateLimitPerMinute = &limit
+	} else if *input.RateLimitPerMinute < 1 || *input.RateLimitPerMinute > MaximumRateLimitPerMinute {
+		return CreateInput{}, problem.New(400, "invalid_service_account_rate_limit", "Service Account rate limit must be between 1 and 60000 requests per minute.")
+	}
 	return input, nil
+}
+
+func normalizeRole(role string, organizationID *uuid.UUID) (string, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" {
+		role = "member"
+	}
+	allowed := tenantRoles
+	if organizationID != nil {
+		allowed = organizationRoles
+	}
+	if _, ok := allowed[role]; !ok {
+		return "", problem.New(400, "invalid_service_account_role", "Service Account role is not supported for its scope.")
+	}
+	return role, nil
 }
 
 func (s *Service) newToken(tenantID, accountID uuid.UUID, expiresAt *time.Time) (string, persistence.ServiceAccountToken, error) {
@@ -285,7 +353,7 @@ func (s *Service) newToken(tenantID, accountID uuid.UUID, expiresAt *time.Time) 
 	if err != nil {
 		return "", persistence.ServiceAccountToken{}, problem.Wrap(500, "service_account_token_generation_failed", "Service Account token could not be generated.", err)
 	}
-	plain = tokenPrefix + plain
+	plain = TokenPrefix + plain
 	hash := sha256.Sum256([]byte(plain))
 	return plain, persistence.ServiceAccountToken{
 		ID: uuid.New(), TenantID: tenantID, ServiceAccountID: accountID,
@@ -313,11 +381,12 @@ func normalizeScopes(scopes []string) ([]string, error) {
 	return result, nil
 }
 
-func toAccount(model persistence.ServiceAccount) Account {
+func toAccount(model persistence.ServiceAccount, lastUsedAt *time.Time) Account {
 	return Account{
 		ID: model.ID, TenantID: model.TenantID, OrganizationID: model.OrganizationID,
 		Name: model.Name, Description: model.Description, Status: model.Status,
-		Scopes: append([]string(nil), model.Scopes...), CreatedBy: model.CreatedBy,
+		Role: model.Role, Scopes: append([]string(nil), model.Scopes...),
+		RateLimitPerMinute: model.RateLimitPerMinute, LastUsedAt: lastUsedAt, CreatedBy: model.CreatedBy,
 		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt, RevokedAt: model.RevokedAt,
 	}
 }

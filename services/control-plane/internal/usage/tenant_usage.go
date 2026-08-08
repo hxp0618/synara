@@ -213,9 +213,7 @@ func (s *Service) loadTenantPlatformCharges(
 	}
 	charges := make([]PlatformCharge, 0, len(rows))
 	for _, row := range rows {
-		charges = append(charges, PlatformCharge{
-			Kind: row.Kind, CurrencyCode: row.CurrencyCode, AmountMicros: row.AmountMicros, Source: row.Source,
-		})
+		charges = append(charges, PlatformCharge(row))
 	}
 	return charges, nil
 }

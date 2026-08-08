@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
@@ -44,7 +45,7 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 
 	var leaseID uuid.UUID
 	if s.eventStreams != nil {
-		lease, err := s.eventStreams.Acquire(r.Context(), tenantID, principal.UserID, sessionID)
+		lease, err := s.eventStreams.Acquire(r.Context(), tenantID, identity.ActorID(principal), sessionID)
 		if err != nil {
 			var apiError *problem.Error
 			if errors.As(err, &apiError) && apiError.Status == http.StatusTooManyRequests {

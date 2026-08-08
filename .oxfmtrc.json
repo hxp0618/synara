@@ -9,6 +9,7 @@
     "bun.lock",
     "*.tsbuildinfo",
     "**/routeTree.gen.ts",
+    "packages/polaris-sdk/src/generated",
     "docs/reports",
     "apps/web/public/mockServiceWorker.js"
   ],

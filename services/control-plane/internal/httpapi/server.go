@@ -25,6 +25,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 	"github.com/synara-ai/synara/services/control-plane/internal/capacitygovernance"
 	"github.com/synara-ai/synara/services/control-plane/internal/compliancegovernance"
@@ -33,6 +34,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/desktopenrollment"
+	"github.com/synara-ai/synara/services/control-plane/internal/developerapi"
+	"github.com/synara-ai/synara/services/control-plane/internal/developerwebhooks"
 	"github.com/synara-ai/synara/services/control-plane/internal/enterpriseidentity"
 	"github.com/synara-ai/synara/services/control-plane/internal/entitlements"
 	"github.com/synara-ai/synara/services/control-plane/internal/eventstream"
@@ -93,6 +96,7 @@ type requestLogScope struct {
 
 type Server struct {
 	config                       config.Config
+	apiRoutes                    []apiRoute
 	db                           *gorm.DB
 	identity                     *identity.Service
 	tenancy                      *tenancy.Service
@@ -135,6 +139,8 @@ type Server struct {
 	outbox                       *outbox.Service
 	enterpriseIdentity           *enterpriseidentity.Service
 	serviceAccounts              *serviceaccounts.Service
+	developerAPIUsage            *developerapi.UsageService
+	developerWebhooks            *developerwebhooks.Service
 	supportAccess                *supportaccess.Service
 	desktopEnrollment            *desktopenrollment.Service
 	desktopRedeemLimit           *desktopRedemptionRateLimiter
@@ -161,6 +167,15 @@ func WithBilling(service *billing.Service) Option {
 			return
 		}
 		server.billing = service
+	}
+}
+
+func WithDeveloperWebhooks(service *developerwebhooks.Service) Option {
+	return func(server *Server) {
+		if server == nil {
+			return
+		}
+		server.developerWebhooks = service
 	}
 }
 
@@ -236,7 +251,8 @@ func New(
 		governanceAuthority:          governanceAuthorityService,
 		metrics:                      metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
-		supportAccess: supportAccessService,
+		developerAPIUsage: developerapi.NewUsageService(db),
+		supportAccess:     supportAccessService,
 		desktopEnrollment: desktopenrollment.NewService(db, supportAccessService, desktopenrollment.Config{
 			ControlPlaneOrigin: cfg.PublicControlPlaneURL, EnrollmentTTL: cfg.DesktopEnrollmentTTL,
 			SessionTTL: cfg.SessionTTL, SessionIdleTTL: cfg.SessionIdleTTL,
@@ -251,322 +267,334 @@ func New(
 			option(server)
 		}
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", server.health)
-	mux.HandleFunc("GET /ready", server.ready)
-	mux.HandleFunc("GET /metrics", server.prometheusMetrics)
-	mux.HandleFunc("GET /v1/platform/profile", server.getPlatformProfile)
-	mux.HandleFunc("PUT /v1/platform/routing-authority/execution-targets/{executionTargetID}/observations", server.publishPlatformRoutingAuthority)
-	mux.HandleFunc("POST /v1/auth/dev-login", server.devLogin)
-	mux.HandleFunc("GET /v1/auth/sso/connections", server.listPublicIdentityConnections)
-	mux.HandleFunc("GET /v1/auth/sso/{connectionID}/start", server.startSSO)
-	mux.HandleFunc("GET /v1/auth/sso/{connectionID}/metadata", server.samlMetadata)
-	mux.HandleFunc("GET /v1/auth/sso/{connectionID}/callback", server.completeSSO)
-	mux.HandleFunc("POST /v1/auth/sso/{connectionID}/callback", server.completeSSO)
-	mux.HandleFunc("POST /v1/desktop-enrollments/redeem", server.redeemDesktopEnrollment)
-	mux.HandleFunc("POST /v1/workers/register", server.registerWorker)
-	mux.Handle("POST /v1/workers/heartbeat", server.requireWorker(http.HandlerFunc(server.workerHeartbeat)))
-	mux.Handle("POST /v1/workers/storage-scrubs/claim", server.requireWorker(http.HandlerFunc(server.claimWorkerStorageScrub)))
-	mux.Handle("POST /v1/workers/storage-scrubs/{scrubID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeWorkerStorageScrub)))
-	mux.Handle("POST /v1/workers/storage-scrubs/{scrubID}/failed", server.requireWorker(http.HandlerFunc(server.failWorkerStorageScrub)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/claim", server.requireWorker(http.HandlerFunc(server.claimWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/{cleanupID}/renew", server.requireWorker(http.HandlerFunc(server.renewWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/{cleanupID}/started", server.requireWorker(http.HandlerFunc(server.startWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/{cleanupID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/{cleanupID}/failed", server.requireWorker(http.HandlerFunc(server.failWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/workspace-cleanups/{cleanupID}/release", server.requireWorker(http.HandlerFunc(server.releaseWorkspaceCleanup)))
-	mux.Handle("POST /v1/workers/executions/claim", server.requireWorker(http.HandlerFunc(server.claimExecution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/renew", server.requireWorker(http.HandlerFunc(server.renewExecutionLease)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/start", server.requireWorker(http.HandlerFunc(server.startExecution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/ready", server.requireWorker(http.HandlerFunc(server.markWorkspaceReady)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/dirty", server.requireWorker(http.HandlerFunc(server.markWorkspaceDirty)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/failed", server.requireWorker(http.HandlerFunc(server.markWorkspaceFailed)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/checkpoints", server.requireWorker(http.HandlerFunc(server.createWorkspaceCheckpoint)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/ready", server.requireWorker(http.HandlerFunc(server.markWorkspaceCheckpointReady)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/failed", server.requireWorker(http.HandlerFunc(server.markWorkspaceCheckpointFailed)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/complete", server.requireWorker(http.HandlerFunc(server.completeExecution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/fail", server.requireWorker(http.HandlerFunc(server.failExecution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/release", server.requireWorker(http.HandlerFunc(server.releaseExecution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/resource-directives/pull", server.requireWorker(http.HandlerFunc(server.pullExecutionResourceDirective)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/quiesced", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendQuiesced)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/checkpoint-ready", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendCheckpointReady)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/complete", server.requireWorker(http.HandlerFunc(server.completeExecutionResourceSuspend)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/abort", server.requireWorker(http.HandlerFunc(server.abortExecutionResourceSuspend)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/events", server.requireWorker(http.HandlerFunc(server.appendRuntimeEvent)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/usage", server.requireWorker(http.HandlerFunc(server.reportExecutionUsage)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/pull", server.requireWorker(http.HandlerFunc(server.pullInteractionResolutions)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered", server.requireWorker(http.HandlerFunc(server.markInteractionResolutionDelivered)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeInteractionResolution)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/control-updates/pull", server.requireWorker(http.HandlerFunc(server.pullControlUpdates)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/pull", server.requireWorker(http.HandlerFunc(server.pullControlCommands)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/delivered", server.requireWorker(http.HandlerFunc(server.markControlCommandDelivered)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeControlCommand)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts", server.requireWorker(http.HandlerFunc(server.createWorkerArtifact)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts/{artifactID}/complete", server.requireWorker(http.HandlerFunc(server.completeWorkerArtifact)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerCheckpointArtifact)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/memory-revisions/{revisionID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerMemoryArtifact)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredential)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/provider-credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionProviderCredentialGrant)))
-	mux.Handle("POST /v1/workers/executions/{executionID}/credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredentialGrant)))
-	mux.Handle("GET /v1/auth/session", server.requireAuth(http.HandlerFunc(server.getSession)))
-	mux.Handle("POST /v1/auth/logout", server.requireAuth(http.HandlerFunc(server.logout)))
-	mux.Handle("PUT /v1/auth/active-tenant", server.requireAuth(http.HandlerFunc(server.setActiveTenant)))
-	mux.Handle("POST /v1/desktop-sessions/rotate", server.requireAuth(http.HandlerFunc(server.rotateDesktopSession)))
-	mux.Handle("POST /v1/desktop/disconnect", server.requireAuth(http.HandlerFunc(server.disconnectDesktop)))
-	mux.Handle("POST /v1/invitations/{token}/accept", server.requireAuth(http.HandlerFunc(server.acceptInvitation)))
+	routes := newClassifiedServeMux()
+	routes.InternalFunc("GET /health", server.health)
+	routes.InternalFunc("GET /ready", server.ready)
+	routes.InternalFunc("GET /metrics", server.prometheusMetrics)
+	routes.InternalFunc("GET /v1/platform/profile", server.getPlatformProfile)
+	routes.InternalFunc("PUT /v1/platform/routing-authority/execution-targets/{executionTargetID}/observations", server.publishPlatformRoutingAuthority)
+	routes.InternalFunc("POST /v1/auth/dev-login", server.devLogin)
+	routes.InternalFunc("GET /v1/auth/sso/connections", server.listPublicIdentityConnections)
+	routes.InternalFunc("GET /v1/auth/sso/{connectionID}/start", server.startSSO)
+	routes.InternalFunc("GET /v1/auth/sso/{connectionID}/metadata", server.samlMetadata)
+	routes.InternalFunc("GET /v1/auth/sso/{connectionID}/callback", server.completeSSO)
+	routes.InternalFunc("POST /v1/auth/sso/{connectionID}/callback", server.completeSSO)
+	routes.InternalFunc("POST /v1/desktop-enrollments/redeem", server.redeemDesktopEnrollment)
+	routes.InternalFunc("POST /v1/workers/register", server.registerWorker)
+	routes.Internal("POST /v1/workers/heartbeat", server.requireWorker(http.HandlerFunc(server.workerHeartbeat)))
+	routes.Internal("POST /v1/workers/storage-scrubs/claim", server.requireWorker(http.HandlerFunc(server.claimWorkerStorageScrub)))
+	routes.Internal("POST /v1/workers/storage-scrubs/{scrubID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeWorkerStorageScrub)))
+	routes.Internal("POST /v1/workers/storage-scrubs/{scrubID}/failed", server.requireWorker(http.HandlerFunc(server.failWorkerStorageScrub)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/claim", server.requireWorker(http.HandlerFunc(server.claimWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/{cleanupID}/renew", server.requireWorker(http.HandlerFunc(server.renewWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/{cleanupID}/started", server.requireWorker(http.HandlerFunc(server.startWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/{cleanupID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/{cleanupID}/failed", server.requireWorker(http.HandlerFunc(server.failWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/workspace-cleanups/{cleanupID}/release", server.requireWorker(http.HandlerFunc(server.releaseWorkspaceCleanup)))
+	routes.Internal("POST /v1/workers/executions/claim", server.requireWorker(http.HandlerFunc(server.claimExecution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/renew", server.requireWorker(http.HandlerFunc(server.renewExecutionLease)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/start", server.requireWorker(http.HandlerFunc(server.startExecution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/ready", server.requireWorker(http.HandlerFunc(server.markWorkspaceReady)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/dirty", server.requireWorker(http.HandlerFunc(server.markWorkspaceDirty)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/failed", server.requireWorker(http.HandlerFunc(server.markWorkspaceFailed)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/checkpoints", server.requireWorker(http.HandlerFunc(server.createWorkspaceCheckpoint)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/ready", server.requireWorker(http.HandlerFunc(server.markWorkspaceCheckpointReady)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/failed", server.requireWorker(http.HandlerFunc(server.markWorkspaceCheckpointFailed)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/complete", server.requireWorker(http.HandlerFunc(server.completeExecution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/fail", server.requireWorker(http.HandlerFunc(server.failExecution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/release", server.requireWorker(http.HandlerFunc(server.releaseExecution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/resource-directives/pull", server.requireWorker(http.HandlerFunc(server.pullExecutionResourceDirective)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/resource-suspend/quiesced", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendQuiesced)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/resource-suspend/checkpoint-ready", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendCheckpointReady)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/resource-suspend/complete", server.requireWorker(http.HandlerFunc(server.completeExecutionResourceSuspend)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/resource-suspend/abort", server.requireWorker(http.HandlerFunc(server.abortExecutionResourceSuspend)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/events", server.requireWorker(http.HandlerFunc(server.appendRuntimeEvent)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/usage", server.requireWorker(http.HandlerFunc(server.reportExecutionUsage)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/interaction-resolutions/pull", server.requireWorker(http.HandlerFunc(server.pullInteractionResolutions)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered", server.requireWorker(http.HandlerFunc(server.markInteractionResolutionDelivered)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeInteractionResolution)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/control-updates/pull", server.requireWorker(http.HandlerFunc(server.pullControlUpdates)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/control-commands/pull", server.requireWorker(http.HandlerFunc(server.pullControlCommands)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/delivered", server.requireWorker(http.HandlerFunc(server.markControlCommandDelivered)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeControlCommand)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/artifacts", server.requireWorker(http.HandlerFunc(server.createWorkerArtifact)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/artifacts/{artifactID}/complete", server.requireWorker(http.HandlerFunc(server.completeWorkerArtifact)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerCheckpointArtifact)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/memory-revisions/{revisionID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerMemoryArtifact)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredential)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/provider-credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionProviderCredentialGrant)))
+	routes.Internal("POST /v1/workers/executions/{executionID}/credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredentialGrant)))
+	routes.Internal("GET /v1/auth/session", server.requireAuth(http.HandlerFunc(server.getSession)))
+	routes.Internal("POST /v1/auth/logout", server.requireAuth(http.HandlerFunc(server.logout)))
+	routes.Internal("PUT /v1/auth/active-tenant", server.requireAuth(http.HandlerFunc(server.setActiveTenant)))
+	routes.Internal("POST /v1/desktop-sessions/rotate", server.requireAuth(http.HandlerFunc(server.rotateDesktopSession)))
+	routes.Internal("POST /v1/desktop/disconnect", server.requireAuth(http.HandlerFunc(server.disconnectDesktop)))
+	routes.Internal("POST /v1/invitations/{token}/accept", server.requireAuth(http.HandlerFunc(server.acceptInvitation)))
 
-	mux.Handle("GET /v1/tenants", server.requireAuth(http.HandlerFunc(server.listTenants)))
-	mux.Handle("POST /v1/tenants", server.requireAuth(http.HandlerFunc(server.createTenant)))
-	mux.Handle("GET /v1/tenants/deletion-requests", server.requireAuth(http.HandlerFunc(server.listTenantDeletionRequests)))
-	mux.Handle("GET /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.getTenant)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.updateTenant)))
-	mux.Handle("POST /v1/tenants/{tenantID}/lifecycle-transitions", server.requireAuth(http.HandlerFunc(server.transitionTenant)))
-	mux.Handle("POST /v1/tenants/{tenantID}/deletion-requests", server.requireAuth(http.HandlerFunc(server.requestTenantDeletion)))
-	mux.Handle("POST /v1/tenants/{tenantID}/restore", server.requireAuth(http.HandlerFunc(server.restoreTenant)))
-	mux.Handle("DELETE /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.deleteTenant)))
-	mux.Handle("GET /v1/tenants/{tenantID}/members", server.requireAuth(http.HandlerFunc(server.listTenantMembers)))
-	mux.Handle("POST /v1/tenants/{tenantID}/invitations", server.requireAuth(http.HandlerFunc(server.inviteTenantMember)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.updateTenantMember)))
-	mux.Handle("DELETE /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeTenantMember)))
-	mux.Handle("POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions", server.requireAuth(http.HandlerFunc(server.revokeTenantUserSessions)))
-	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs", server.requireAuth(http.HandlerFunc(server.listAuditLogs)))
-	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs/export", server.requireAuth(http.HandlerFunc(server.exportAuditLogs)))
-	mux.Handle("GET /v1/tenants/{tenantID}/outbox-messages", server.requireAuth(http.HandlerFunc(server.listOutboxMessages)))
-	mux.Handle("POST /v1/tenants/{tenantID}/outbox-messages/{messageID}/replay", server.requireAuth(http.HandlerFunc(server.replayOutboxMessage)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.listExecutionTargets)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getTenantExecutionSchedulingPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putTenantExecutionSchedulingPolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/data-residency-statement", server.requireAuth(http.HandlerFunc(server.getTenantDataResidencyStatement)))
-	mux.Handle("GET /v1/tenants/{tenantID}/workers", server.requireAuth(http.HandlerFunc(server.listTenantWorkers)))
-	mux.Handle("POST /v1/tenants/{tenantID}/workers/{workerID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeTenantWorker)))
-	mux.Handle("GET /v1/tenants/{tenantID}/worker-manifests", server.requireAuth(http.HandlerFunc(server.listWorkerManifests)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases", server.requireAuth(http.HandlerFunc(server.listWorkerReleases)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases", server.requireAuth(http.HandlerFunc(server.createWorkerRelease)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/canary", server.requireAuth(http.HandlerFunc(server.startWorkerReleaseCanary)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/promote", server.requireAuth(http.HandlerFunc(server.promoteWorkerRelease)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/rollback", server.requireAuth(http.HandlerFunc(server.rollbackWorkerRelease)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.listWorkerPools)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.createWorkerPool)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}", server.requireAuth(http.HandlerFunc(server.updateWorkerPool)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.getWorkerPoolAutoscaling)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.putWorkerPoolAutoscaling)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/placement-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionPlacementPolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.listExecutionTargetGroups)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.createExecutionTargetGroup)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members", server.requireAuth(http.HandlerFunc(server.addExecutionTargetGroupMember)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members/{targetGroupMemberID}", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetGroupMember)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation", server.requireAuth(http.HandlerFunc(server.observeExecutionTargetHealth)))
-	mux.Handle("GET /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.listLocationOutages)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.observeLocationOutage)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.createExecutionTarget)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireAuth(http.HandlerFunc(server.getExecutionTarget)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProviderPolicy)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProcessContainmentPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/runtime-isolation-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetRuntimeIsolationPolicy)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable", server.requireAuth(http.HandlerFunc(server.disableManagedKubernetesExecutionTarget)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install", server.requireAuth(http.HandlerFunc(server.installSSHExecutionTarget)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade", server.requireAuth(http.HandlerFunc(server.upgradeSSHExecutionTarget)))
-	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/revoke", server.requireAuth(http.HandlerFunc(server.revokeSSHExecutionTarget)))
-	mux.Handle("GET /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.getTenantQuota)))
-	mux.Handle("GET /v1/tenants/{tenantID}/entitlements", server.requireAuth(http.HandlerFunc(server.getTenantEntitlements)))
-	mux.Handle("GET /v1/tenants/{tenantID}/usage", server.requireAuth(http.HandlerFunc(server.getTenantUsage)))
-	mux.Handle("GET /v1/tenants/{tenantID}/usage/export.json", server.requireAuth(http.HandlerFunc(server.exportTenantUsageJSON)))
-	mux.Handle("GET /v1/tenants/{tenantID}/support-diagnostic.json", server.requireAuth(http.HandlerFunc(server.exportTenantSupportDiagnosticJSON)))
-	mux.Handle("GET /v1/tenants/{tenantID}/support-policy", server.requireAuth(http.HandlerFunc(server.getTenantSupportPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/support-policy", server.requireAuth(http.HandlerFunc(server.updateTenantSupportPolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/support-access", server.requireAuth(http.HandlerFunc(server.listTenantSupportAccess)))
-	mux.Handle("POST /v1/tenants/{tenantID}/support-access/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeTenantSupportAccess)))
-	mux.Handle("GET /v1/platform/support-access", server.requireAuth(http.HandlerFunc(server.listPlatformSupportAccess)))
-	mux.Handle("GET /v1/platform/tenants", server.requireAuth(http.HandlerFunc(server.listPlatformTenants)))
-	mux.Handle("POST /v1/platform/tenants", server.requireAuth(http.HandlerFunc(server.provisionPlatformTenant)))
-	mux.Handle("GET /v1/platform/tenants/{tenantID}/entitlements", server.requireAuth(http.HandlerFunc(server.getPlatformTenantEntitlements)))
-	mux.Handle("PUT /v1/platform/tenants/{tenantID}/entitlement-profile", server.requireAuth(http.HandlerFunc(server.assignPlatformTenantEntitlementProfile)))
-	mux.Handle("GET /v1/platform/tenants/{tenantID}/desktop-access", server.requireAuth(http.HandlerFunc(server.getPlatformDesktopAccess)))
-	mux.Handle("POST /v1/platform/tenants/{tenantID}/desktop-enrollments", server.requireAuth(http.HandlerFunc(server.issuePlatformDesktopEnrollment)))
-	mux.Handle("POST /v1/platform/desktop-enrollments/{enrollmentID}/opened", server.requireAuth(http.HandlerFunc(server.markPlatformDesktopEnrollmentOpened)))
-	mux.Handle("POST /v1/platform/desktop-enrollments/{enrollmentID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformDesktopEnrollment)))
-	mux.Handle("POST /v1/platform/desktop-devices/{deviceID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformDesktopDevice)))
-	mux.Handle("POST /v1/platform/support-access/requests", server.requireAuth(http.HandlerFunc(server.requestPlatformSupportAccess)))
-	mux.Handle("POST /v1/platform/support-access/{grantID}/approve", server.requireAuth(http.HandlerFunc(server.approvePlatformSupportAccess)))
-	mux.Handle("POST /v1/platform/support-access/{grantID}/deny", server.requireAuth(http.HandlerFunc(server.denyPlatformSupportAccess)))
-	mux.Handle("POST /v1/platform/support-access/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformSupportAccess)))
-	mux.Handle("GET /v1/platform/release-candidates", server.requireAuth(http.HandlerFunc(server.listPlatformReleaseCandidates)))
-	mux.Handle("POST /v1/platform/release-candidates", server.requireAuth(http.HandlerFunc(server.createPlatformReleaseCandidate)))
-	mux.Handle("GET /v1/platform/release-candidates/{candidateRecordID}/readiness", server.requireAuth(http.HandlerFunc(server.getPlatformReleaseCandidateReadiness)))
-	mux.Handle("POST /v1/platform/release-candidates/{candidateRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformReleaseApproval)))
-	mux.Handle("POST /v1/platform/release-candidates/{candidateRecordID}/final-review", server.requireAuth(http.HandlerFunc(server.recordPlatformReleaseFinalReview)))
-	mux.Handle("POST /v1/platform/release-candidates/{candidateRecordID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformReleaseCandidate)))
-	mux.Handle("GET /v1/platform/incidents", server.requireAuth(http.HandlerFunc(server.listPlatformIncidents)))
-	mux.Handle("POST /v1/platform/incidents", server.requireAuth(http.HandlerFunc(server.createPlatformIncident)))
-	mux.Handle("POST /v1/platform/incidents/{incidentID}/status-board", server.requireAuth(http.HandlerFunc(server.bindPlatformIncidentStatusBoard)))
-	mux.Handle("POST /v1/platform/incidents/{incidentID}/internal-updates", server.requireAuth(http.HandlerFunc(server.addPlatformIncidentInternalUpdate)))
-	mux.Handle("POST /v1/platform/incidents/{incidentID}/resolution-approval", server.requireAuth(http.HandlerFunc(server.recordPlatformIncidentResolutionApproval)))
-	mux.Handle("POST /v1/platform/incidents/{incidentID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformIncident)))
-	mux.Handle("GET /v1/platform/incident-exercises", server.requireAuth(http.HandlerFunc(server.listPlatformIncidentExercises)))
-	mux.Handle("POST /v1/platform/incident-exercises", server.requireAuth(http.HandlerFunc(server.importPlatformIncidentExercise)))
-	mux.Handle("POST /v1/platform/incident-exercises/{incidentExerciseID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformIncidentExerciseApproval)))
-	mux.Handle("GET /v1/platform/operations-exercises", server.requireAuth(http.HandlerFunc(server.listPlatformOperationsExercises)))
-	mux.Handle("POST /v1/platform/operations-exercises", server.requireAuth(http.HandlerFunc(server.importPlatformOperationsExercise)))
-	mux.Handle("POST /v1/platform/operations-exercises/{operationsExerciseID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformOperationsExerciseApproval)))
-	mux.Handle("GET /v1/platform/internal-cost-reviews", server.requireAuth(http.HandlerFunc(server.listPlatformInternalCostReviews)))
-	mux.Handle("POST /v1/platform/internal-cost-reviews", server.requireAuth(http.HandlerFunc(server.importPlatformInternalCostReview)))
-	mux.Handle("POST /v1/platform/internal-cost-reviews/{internalCostReviewID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformInternalCostApproval)))
-	mux.Handle("GET /v1/platform/slo-windows", server.requireAuth(http.HandlerFunc(server.listPlatformSLOWindows)))
-	mux.Handle("POST /v1/platform/slo-windows", server.requireAuth(http.HandlerFunc(server.importPlatformSLOWindow)))
-	mux.Handle("POST /v1/platform/slo-windows/{sloWindowRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformSLOApproval)))
-	mux.Handle("GET /v1/platform/recovery-drills", server.requireAuth(http.HandlerFunc(server.listPlatformRecoveryDrills)))
-	mux.Handle("POST /v1/platform/recovery-drills", server.requireAuth(http.HandlerFunc(server.importPlatformRecoveryDrill)))
-	mux.Handle("POST /v1/platform/recovery-drills/{recoveryDrillRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformRecoveryApproval)))
-	mux.Handle("GET /v1/platform/penetration-engagements", server.requireAuth(http.HandlerFunc(server.listPlatformPenetrationEngagements)))
-	mux.Handle("POST /v1/platform/penetration-engagements", server.requireAuth(http.HandlerFunc(server.importPlatformPenetrationEngagement)))
-	mux.Handle("POST /v1/platform/penetration-engagements/{penetrationEngagementID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformPenetrationApproval)))
-	mux.Handle("GET /v1/platform/capacity-runs", server.requireAuth(http.HandlerFunc(server.listPlatformCapacityRuns)))
-	mux.Handle("POST /v1/platform/capacity-runs", server.requireAuth(http.HandlerFunc(server.importPlatformCapacityRun)))
-	mux.Handle("POST /v1/platform/capacity-runs/{capacityRunID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformCapacityApproval)))
-	mux.Handle("GET /v1/platform/compliance-programs", server.requireAuth(http.HandlerFunc(server.listPlatformCompliancePrograms)))
-	mux.Handle("POST /v1/platform/compliance-programs", server.requireAuth(http.HandlerFunc(server.createPlatformComplianceProgram)))
-	mux.Handle("POST /v1/platform/compliance-programs/{programID}/controls", server.requireAuth(http.HandlerFunc(server.createPlatformComplianceControl)))
-	mux.Handle("POST /v1/platform/compliance-programs/{programID}/evidence", server.requireAuth(http.HandlerFunc(server.submitPlatformComplianceEvidence)))
-	mux.Handle("POST /v1/platform/compliance-programs/{programID}/evidence/{evidenceRecordID}/review", server.requireAuth(http.HandlerFunc(server.reviewPlatformComplianceEvidence)))
-	mux.Handle("POST /v1/platform/compliance-programs/{programID}/decisions", server.requireAuth(http.HandlerFunc(server.recordPlatformComplianceDecision)))
-	mux.Handle("POST /v1/platform/compliance-programs/{programID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformComplianceProgram)))
-	mux.Handle("GET /v1/platform/provider-commercial-authorizations", server.requireAuth(http.HandlerFunc(server.listPlatformProviderCommercialAuthorizations)))
-	mux.Handle("POST /v1/platform/provider-commercial-authorizations", server.requireAuth(http.HandlerFunc(server.createPlatformProviderCommercialAuthorization)))
-	mux.Handle("POST /v1/platform/provider-commercial-authorizations/{authorizationID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformProviderCommercialApproval)))
-	mux.Handle("POST /v1/platform/provider-commercial-authorizations/{authorizationID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformProviderCommercialAuthorization)))
-	mux.Handle("GET /v1/platform/governance-authorities", server.requireAuth(http.HandlerFunc(server.listPlatformGovernanceAuthorities)))
-	mux.Handle("POST /v1/platform/governance-authorities", server.requireAuth(http.HandlerFunc(server.createPlatformGovernanceAuthority)))
-	mux.Handle("POST /v1/platform/governance-authorities/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformGovernanceAuthority)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.putTenantQuota)))
-	mux.Handle("GET /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.getScopedExecutionQuota)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.putScopedExecutionQuota)))
-	mux.Handle("GET /v1/tenants/{tenantID}/cost-accounting/tariffs", server.requireAuth(http.HandlerFunc(server.listBillingTariffs)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/tariffs", server.requireAuth(http.HandlerFunc(server.createBillingTariff)))
-	mux.Handle("GET /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.getBillingSharedTargetLedgerCoverage)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.sealBillingSharedTargetLedgerCoverage)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/allocations:sweep", server.requireAuth(http.HandlerFunc(server.sweepBillingSharedTargetAllocations)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations", server.requireAuth(http.HandlerFunc(server.allocateBillingSharedTargetActualInvoice)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/imports/{provider}/{externalImportID}", server.requireAuth(http.HandlerFunc(server.triggerBillingImport)))
-	mux.Handle("POST /v1/tenants/{tenantID}/cost-accounting/imports/{importID}/reconcile", server.requireAuth(http.HandlerFunc(server.reconcileBillingImport)))
-	mux.Handle("GET /v1/tenants/{tenantID}/cost-accounting/report", server.requireAuth(http.HandlerFunc(server.getInternalCostAllocationReport)))
-	mux.Handle("GET /v1/tenants/{tenantID}/cost-accounting/export.csv", server.requireAuth(http.HandlerFunc(server.exportInternalCostAllocationCSV)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/cost-accounting/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.putProjectCostAllocation)))
-	mux.Handle("GET /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.getRetentionPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.putRetentionPolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/legal-holds", server.requireAuth(http.HandlerFunc(server.listLegalHolds)))
-	mux.Handle("POST /v1/tenants/{tenantID}/legal-holds", server.requireAuth(http.HandlerFunc(server.createLegalHold)))
-	mux.Handle("POST /v1/tenants/{tenantID}/legal-holds/{holdID}/release", server.requireAuth(http.HandlerFunc(server.releaseLegalHold)))
-	mux.Handle("GET /v1/tenants/{tenantID}/privacy-requests", server.requireAuth(http.HandlerFunc(server.listPrivacyRequests)))
-	mux.Handle("POST /v1/tenants/{tenantID}/privacy-requests", server.requireAuth(http.HandlerFunc(server.createPrivacyRequest)))
-	mux.Handle("GET /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}", server.requireAuth(http.HandlerFunc(server.getPrivacyRequest)))
-	mux.Handle("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPrivacyRequest)))
-	mux.Handle("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/export", server.requireAuth(http.HandlerFunc(server.executePrivacyExport)))
-	mux.Handle("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/erasure", server.requireAuth(http.HandlerFunc(server.executePrivacyErasure)))
-	mux.Handle("POST /v1/tenants/{tenantID}/data-export", server.requireAuth(http.HandlerFunc(server.executeTenantDataExport)))
-	mux.Handle("GET /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getTenantResourceLifecyclePolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putTenantResourceLifecyclePolicy)))
-	mux.Handle("POST /v1/tenants/{tenantID}/memory-revisions", server.requireAuth(http.HandlerFunc(server.publishMemoryRevision)))
-	mux.Handle("GET /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.listCredentials)))
-	mux.Handle("POST /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.createCredential)))
-	mux.Handle("POST /v1/tenants/{tenantID}/credentials/{credentialID}/rotate", server.requireAuth(http.HandlerFunc(server.rotateCredential)))
-	mux.Handle("POST /v1/tenants/{tenantID}/credentials/{credentialID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeCredential)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/credentials/{credentialID}/auto-select", server.requireAuth(http.HandlerFunc(server.putCredentialAutoSelect)))
-	mux.Handle("GET /v1/tenants/{tenantID}/provider-credential-scope-policy", server.requireAuth(http.HandlerFunc(server.getProviderCredentialScopePolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/provider-credential-scope-policy", server.requireAuth(http.HandlerFunc(server.putProviderCredentialScopePolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/credential-bindings", server.requireAuth(http.HandlerFunc(server.listCredentialBindings)))
-	mux.Handle("POST /v1/tenants/{tenantID}/credential-bindings", server.requireAuth(http.HandlerFunc(server.createCredentialBinding)))
-	mux.Handle("POST /v1/tenants/{tenantID}/credential-bindings/{bindingID}/disable", server.requireAuth(http.HandlerFunc(server.disableCredentialBinding)))
-	mux.Handle("GET /v1/tenants/{tenantID}/identity-connections", server.requireAuth(http.HandlerFunc(server.listIdentityConnections)))
-	mux.Handle("POST /v1/tenants/{tenantID}/identity-connections", server.requireAuth(http.HandlerFunc(server.createIdentityConnection)))
-	mux.Handle("POST /v1/tenants/{tenantID}/identity-connections/{connectionID}/disable", server.requireAuth(http.HandlerFunc(server.disableIdentityConnection)))
-	mux.Handle("GET /v1/tenants/{tenantID}/identity-domains", server.requireAuth(http.HandlerFunc(server.listIdentityDomains)))
-	mux.Handle("POST /v1/tenants/{tenantID}/identity-domains", server.requireAuth(http.HandlerFunc(server.createIdentityDomain)))
-	mux.Handle("POST /v1/tenants/{tenantID}/identity-domains/{domainID}/verify", server.requireAuth(http.HandlerFunc(server.verifyIdentityDomain)))
-	mux.Handle("POST /v1/tenants/{tenantID}/identity-domains/{domainID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeIdentityDomain)))
-	mux.Handle("GET /v1/tenants/{tenantID}/identity-policy", server.requireAuth(http.HandlerFunc(server.getTenantIdentityPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/identity-policy", server.requireAuth(http.HandlerFunc(server.putTenantIdentityPolicy)))
-	mux.Handle("GET /v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings", server.requireAuth(http.HandlerFunc(server.listIdentityGroupMappings)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings", server.requireAuth(http.HandlerFunc(server.replaceIdentityGroupMappings)))
-	mux.Handle("GET /v1/tenants/{tenantID}/service-accounts", server.requireAuth(http.HandlerFunc(server.listServiceAccounts)))
-	mux.Handle("POST /v1/tenants/{tenantID}/service-accounts", server.requireAuth(http.HandlerFunc(server.createServiceAccount)))
-	mux.Handle("POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/rotate-token", server.requireAuth(http.HandlerFunc(server.rotateServiceAccountToken)))
-	mux.Handle("POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeServiceAccount)))
+	routes.Internal("GET /v1/tenants", server.requireAuth(http.HandlerFunc(server.listTenants)))
+	routes.Internal("POST /v1/tenants", server.requireAuth(http.HandlerFunc(server.createTenant)))
+	routes.Internal("GET /v1/tenants/deletion-requests", server.requireAuth(http.HandlerFunc(server.listTenantDeletionRequests)))
+	routes.Internal("GET /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.getTenant)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.updateTenant)))
+	routes.Internal("POST /v1/tenants/{tenantID}/lifecycle-transitions", server.requireAuth(http.HandlerFunc(server.transitionTenant)))
+	routes.Internal("POST /v1/tenants/{tenantID}/deletion-requests", server.requireAuth(http.HandlerFunc(server.requestTenantDeletion)))
+	routes.Internal("POST /v1/tenants/{tenantID}/restore", server.requireAuth(http.HandlerFunc(server.restoreTenant)))
+	routes.Internal("DELETE /v1/tenants/{tenantID}", server.requireAuth(http.HandlerFunc(server.deleteTenant)))
+	routes.Internal("GET /v1/tenants/{tenantID}/members", server.requireAuth(http.HandlerFunc(server.listTenantMembers)))
+	routes.Internal("POST /v1/tenants/{tenantID}/invitations", server.requireAuth(http.HandlerFunc(server.inviteTenantMember)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.updateTenantMember)))
+	routes.Internal("DELETE /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeTenantMember)))
+	routes.Internal("POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions", server.requireAuth(http.HandlerFunc(server.revokeTenantUserSessions)))
+	routes.Internal("GET /v1/tenants/{tenantID}/audit-logs", server.requireAuth(http.HandlerFunc(server.listAuditLogs)))
+	routes.Internal("GET /v1/tenants/{tenantID}/audit-logs/export", server.requireAuth(http.HandlerFunc(server.exportAuditLogs)))
+	routes.Internal("GET /v1/tenants/{tenantID}/outbox-messages", server.requireAuth(http.HandlerFunc(server.listOutboxMessages)))
+	routes.Internal("POST /v1/tenants/{tenantID}/outbox-messages/{messageID}/replay", server.requireAuth(http.HandlerFunc(server.replayOutboxMessage)))
+	routes.Internal("GET /v1/tenants/{tenantID}/developer-webhooks", server.requireAuth(http.HandlerFunc(server.listDeveloperWebhooks)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks", server.requireAuth(http.HandlerFunc(server.createDeveloperWebhook)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/rotate-secret", server.requireAuth(http.HandlerFunc(server.rotateDeveloperWebhookSecret)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/enable", server.requireAuth(http.HandlerFunc(server.enableDeveloperWebhook)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/disable", server.requireAuth(http.HandlerFunc(server.disableDeveloperWebhook)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeDeveloperWebhook)))
+	routes.Internal("GET /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/deliveries", server.requireAuth(http.HandlerFunc(server.listDeveloperWebhookDeliveries)))
+	routes.Internal("POST /v1/tenants/{tenantID}/developer-webhooks/{webhookID}/deliveries/{deliveryID}/replay", server.requireAuth(http.HandlerFunc(server.replayDeveloperWebhookDelivery)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.listExecutionTargets)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getTenantExecutionSchedulingPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putTenantExecutionSchedulingPolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/data-residency-statement", server.requireAuth(http.HandlerFunc(server.getTenantDataResidencyStatement)))
+	routes.Internal("GET /v1/tenants/{tenantID}/workers", server.requireAuth(http.HandlerFunc(server.listTenantWorkers)))
+	routes.Internal("POST /v1/tenants/{tenantID}/workers/{workerID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeTenantWorker)))
+	routes.Internal("GET /v1/tenants/{tenantID}/worker-manifests", server.requireAuth(http.HandlerFunc(server.listWorkerManifests)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases", server.requireAuth(http.HandlerFunc(server.listWorkerReleases)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases", server.requireAuth(http.HandlerFunc(server.createWorkerRelease)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/canary", server.requireAuth(http.HandlerFunc(server.startWorkerReleaseCanary)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/promote", server.requireAuth(http.HandlerFunc(server.promoteWorkerRelease)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/rollback", server.requireAuth(http.HandlerFunc(server.rollbackWorkerRelease)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.listWorkerPools)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.createWorkerPool)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}", server.requireAuth(http.HandlerFunc(server.updateWorkerPool)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.getWorkerPoolAutoscaling)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}/autoscaling", server.requireAuth(http.HandlerFunc(server.putWorkerPoolAutoscaling)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/placement-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionPlacementPolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.listExecutionTargetGroups)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.createExecutionTargetGroup)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members", server.requireAuth(http.HandlerFunc(server.addExecutionTargetGroupMember)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members/{targetGroupMemberID}", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetGroupMember)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation", server.requireAuth(http.HandlerFunc(server.observeExecutionTargetHealth)))
+	routes.Internal("GET /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.listLocationOutages)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.observeLocationOutage)))
+	routes.PublicBeta("POST /v1/tenants/{tenantID}/execution-targets", server.requireDeveloperAuth(http.HandlerFunc(server.createExecutionTarget)))
+	routes.PublicBeta("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireDeveloperAuth(http.HandlerFunc(server.getExecutionTarget)))
+	routes.PublicBeta("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations", server.requireDeveloperAuth(http.HandlerFunc(server.createExecutionTargetProvisioningOperation)))
+	routes.PublicBeta("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provisioning-operations/{provisioningOperationID}", server.requireDeveloperAuth(http.HandlerFunc(server.getExecutionTargetProvisioningOperation)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProviderPolicy)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProcessContainmentPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/runtime-isolation-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetRuntimeIsolationPolicy)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/kubernetes/disable", server.requireAuth(http.HandlerFunc(server.disableManagedKubernetesExecutionTarget)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install", server.requireAuth(http.HandlerFunc(server.installSSHExecutionTarget)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade", server.requireAuth(http.HandlerFunc(server.upgradeSSHExecutionTarget)))
+	routes.Internal("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/revoke", server.requireAuth(http.HandlerFunc(server.revokeSSHExecutionTarget)))
+	routes.Internal("GET /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.getTenantQuota)))
+	routes.Internal("GET /v1/tenants/{tenantID}/entitlements", server.requireAuth(http.HandlerFunc(server.getTenantEntitlements)))
+	routes.Internal("GET /v1/tenants/{tenantID}/usage", server.requireAuth(http.HandlerFunc(server.getTenantUsage)))
+	routes.Internal("GET /v1/tenants/{tenantID}/usage/export.json", server.requireAuth(http.HandlerFunc(server.exportTenantUsageJSON)))
+	routes.Internal("GET /v1/tenants/{tenantID}/support-diagnostic.json", server.requireAuth(http.HandlerFunc(server.exportTenantSupportDiagnosticJSON)))
+	routes.Internal("GET /v1/tenants/{tenantID}/support-policy", server.requireAuth(http.HandlerFunc(server.getTenantSupportPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/support-policy", server.requireAuth(http.HandlerFunc(server.updateTenantSupportPolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/support-access", server.requireAuth(http.HandlerFunc(server.listTenantSupportAccess)))
+	routes.Internal("POST /v1/tenants/{tenantID}/support-access/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeTenantSupportAccess)))
+	routes.Internal("GET /v1/platform/support-access", server.requireAuth(http.HandlerFunc(server.listPlatformSupportAccess)))
+	routes.Internal("GET /v1/platform/tenants", server.requireAuth(http.HandlerFunc(server.listPlatformTenants)))
+	routes.Internal("POST /v1/platform/tenants", server.requireAuth(http.HandlerFunc(server.provisionPlatformTenant)))
+	routes.Internal("GET /v1/platform/tenants/{tenantID}/entitlements", server.requireAuth(http.HandlerFunc(server.getPlatformTenantEntitlements)))
+	routes.Internal("PUT /v1/platform/tenants/{tenantID}/entitlement-profile", server.requireAuth(http.HandlerFunc(server.assignPlatformTenantEntitlementProfile)))
+	routes.Internal("GET /v1/platform/tenants/{tenantID}/desktop-access", server.requireAuth(http.HandlerFunc(server.getPlatformDesktopAccess)))
+	routes.Internal("POST /v1/platform/tenants/{tenantID}/desktop-enrollments", server.requireAuth(http.HandlerFunc(server.issuePlatformDesktopEnrollment)))
+	routes.Internal("POST /v1/platform/desktop-enrollments/{enrollmentID}/opened", server.requireAuth(http.HandlerFunc(server.markPlatformDesktopEnrollmentOpened)))
+	routes.Internal("POST /v1/platform/desktop-enrollments/{enrollmentID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformDesktopEnrollment)))
+	routes.Internal("POST /v1/platform/desktop-devices/{deviceID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformDesktopDevice)))
+	routes.Internal("POST /v1/platform/support-access/requests", server.requireAuth(http.HandlerFunc(server.requestPlatformSupportAccess)))
+	routes.Internal("POST /v1/platform/support-access/{grantID}/approve", server.requireAuth(http.HandlerFunc(server.approvePlatformSupportAccess)))
+	routes.Internal("POST /v1/platform/support-access/{grantID}/deny", server.requireAuth(http.HandlerFunc(server.denyPlatformSupportAccess)))
+	routes.Internal("POST /v1/platform/support-access/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformSupportAccess)))
+	routes.Internal("GET /v1/platform/release-candidates", server.requireAuth(http.HandlerFunc(server.listPlatformReleaseCandidates)))
+	routes.Internal("POST /v1/platform/release-candidates", server.requireAuth(http.HandlerFunc(server.createPlatformReleaseCandidate)))
+	routes.Internal("GET /v1/platform/release-candidates/{candidateRecordID}/readiness", server.requireAuth(http.HandlerFunc(server.getPlatformReleaseCandidateReadiness)))
+	routes.Internal("POST /v1/platform/release-candidates/{candidateRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformReleaseApproval)))
+	routes.Internal("POST /v1/platform/release-candidates/{candidateRecordID}/final-review", server.requireAuth(http.HandlerFunc(server.recordPlatformReleaseFinalReview)))
+	routes.Internal("POST /v1/platform/release-candidates/{candidateRecordID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformReleaseCandidate)))
+	routes.Internal("GET /v1/platform/incidents", server.requireAuth(http.HandlerFunc(server.listPlatformIncidents)))
+	routes.Internal("POST /v1/platform/incidents", server.requireAuth(http.HandlerFunc(server.createPlatformIncident)))
+	routes.Internal("POST /v1/platform/incidents/{incidentID}/status-board", server.requireAuth(http.HandlerFunc(server.bindPlatformIncidentStatusBoard)))
+	routes.Internal("POST /v1/platform/incidents/{incidentID}/internal-updates", server.requireAuth(http.HandlerFunc(server.addPlatformIncidentInternalUpdate)))
+	routes.Internal("POST /v1/platform/incidents/{incidentID}/resolution-approval", server.requireAuth(http.HandlerFunc(server.recordPlatformIncidentResolutionApproval)))
+	routes.Internal("POST /v1/platform/incidents/{incidentID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformIncident)))
+	routes.Internal("GET /v1/platform/incident-exercises", server.requireAuth(http.HandlerFunc(server.listPlatformIncidentExercises)))
+	routes.Internal("POST /v1/platform/incident-exercises", server.requireAuth(http.HandlerFunc(server.importPlatformIncidentExercise)))
+	routes.Internal("POST /v1/platform/incident-exercises/{incidentExerciseID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformIncidentExerciseApproval)))
+	routes.Internal("GET /v1/platform/operations-exercises", server.requireAuth(http.HandlerFunc(server.listPlatformOperationsExercises)))
+	routes.Internal("POST /v1/platform/operations-exercises", server.requireAuth(http.HandlerFunc(server.importPlatformOperationsExercise)))
+	routes.Internal("POST /v1/platform/operations-exercises/{operationsExerciseID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformOperationsExerciseApproval)))
+	routes.Internal("GET /v1/platform/internal-cost-reviews", server.requireAuth(http.HandlerFunc(server.listPlatformInternalCostReviews)))
+	routes.Internal("POST /v1/platform/internal-cost-reviews", server.requireAuth(http.HandlerFunc(server.importPlatformInternalCostReview)))
+	routes.Internal("POST /v1/platform/internal-cost-reviews/{internalCostReviewID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformInternalCostApproval)))
+	routes.Internal("GET /v1/platform/slo-windows", server.requireAuth(http.HandlerFunc(server.listPlatformSLOWindows)))
+	routes.Internal("POST /v1/platform/slo-windows", server.requireAuth(http.HandlerFunc(server.importPlatformSLOWindow)))
+	routes.Internal("POST /v1/platform/slo-windows/{sloWindowRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformSLOApproval)))
+	routes.Internal("GET /v1/platform/recovery-drills", server.requireAuth(http.HandlerFunc(server.listPlatformRecoveryDrills)))
+	routes.Internal("POST /v1/platform/recovery-drills", server.requireAuth(http.HandlerFunc(server.importPlatformRecoveryDrill)))
+	routes.Internal("POST /v1/platform/recovery-drills/{recoveryDrillRecordID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformRecoveryApproval)))
+	routes.Internal("GET /v1/platform/penetration-engagements", server.requireAuth(http.HandlerFunc(server.listPlatformPenetrationEngagements)))
+	routes.Internal("POST /v1/platform/penetration-engagements", server.requireAuth(http.HandlerFunc(server.importPlatformPenetrationEngagement)))
+	routes.Internal("POST /v1/platform/penetration-engagements/{penetrationEngagementID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformPenetrationApproval)))
+	routes.Internal("GET /v1/platform/capacity-runs", server.requireAuth(http.HandlerFunc(server.listPlatformCapacityRuns)))
+	routes.Internal("POST /v1/platform/capacity-runs", server.requireAuth(http.HandlerFunc(server.importPlatformCapacityRun)))
+	routes.Internal("POST /v1/platform/capacity-runs/{capacityRunID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformCapacityApproval)))
+	routes.Internal("GET /v1/platform/compliance-programs", server.requireAuth(http.HandlerFunc(server.listPlatformCompliancePrograms)))
+	routes.Internal("POST /v1/platform/compliance-programs", server.requireAuth(http.HandlerFunc(server.createPlatformComplianceProgram)))
+	routes.Internal("POST /v1/platform/compliance-programs/{programID}/controls", server.requireAuth(http.HandlerFunc(server.createPlatformComplianceControl)))
+	routes.Internal("POST /v1/platform/compliance-programs/{programID}/evidence", server.requireAuth(http.HandlerFunc(server.submitPlatformComplianceEvidence)))
+	routes.Internal("POST /v1/platform/compliance-programs/{programID}/evidence/{evidenceRecordID}/review", server.requireAuth(http.HandlerFunc(server.reviewPlatformComplianceEvidence)))
+	routes.Internal("POST /v1/platform/compliance-programs/{programID}/decisions", server.requireAuth(http.HandlerFunc(server.recordPlatformComplianceDecision)))
+	routes.Internal("POST /v1/platform/compliance-programs/{programID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformComplianceProgram)))
+	routes.Internal("GET /v1/platform/provider-commercial-authorizations", server.requireAuth(http.HandlerFunc(server.listPlatformProviderCommercialAuthorizations)))
+	routes.Internal("POST /v1/platform/provider-commercial-authorizations", server.requireAuth(http.HandlerFunc(server.createPlatformProviderCommercialAuthorization)))
+	routes.Internal("POST /v1/platform/provider-commercial-authorizations/{authorizationID}/approvals", server.requireAuth(http.HandlerFunc(server.recordPlatformProviderCommercialApproval)))
+	routes.Internal("POST /v1/platform/provider-commercial-authorizations/{authorizationID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPlatformProviderCommercialAuthorization)))
+	routes.Internal("GET /v1/platform/governance-authorities", server.requireAuth(http.HandlerFunc(server.listPlatformGovernanceAuthorities)))
+	routes.Internal("POST /v1/platform/governance-authorities", server.requireAuth(http.HandlerFunc(server.createPlatformGovernanceAuthority)))
+	routes.Internal("POST /v1/platform/governance-authorities/{grantID}/revoke", server.requireAuth(http.HandlerFunc(server.revokePlatformGovernanceAuthority)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.putTenantQuota)))
+	routes.Internal("GET /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.getScopedExecutionQuota)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/execution-quotas/{scopeKind}/{scopeID}", server.requireAuth(http.HandlerFunc(server.putScopedExecutionQuota)))
+	routes.Internal("GET /v1/tenants/{tenantID}/cost-accounting/tariffs", server.requireAuth(http.HandlerFunc(server.listBillingTariffs)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/tariffs", server.requireAuth(http.HandlerFunc(server.createBillingTariff)))
+	routes.Internal("GET /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.getBillingSharedTargetLedgerCoverage)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.sealBillingSharedTargetLedgerCoverage)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/allocations:sweep", server.requireAuth(http.HandlerFunc(server.sweepBillingSharedTargetAllocations)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations", server.requireAuth(http.HandlerFunc(server.allocateBillingSharedTargetActualInvoice)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/imports/{provider}/{externalImportID}", server.requireAuth(http.HandlerFunc(server.triggerBillingImport)))
+	routes.Internal("POST /v1/tenants/{tenantID}/cost-accounting/imports/{importID}/reconcile", server.requireAuth(http.HandlerFunc(server.reconcileBillingImport)))
+	routes.Internal("GET /v1/tenants/{tenantID}/cost-accounting/report", server.requireAuth(http.HandlerFunc(server.getInternalCostAllocationReport)))
+	routes.Internal("GET /v1/tenants/{tenantID}/cost-accounting/export.csv", server.requireAuth(http.HandlerFunc(server.exportInternalCostAllocationCSV)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/cost-accounting/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.putProjectCostAllocation)))
+	routes.Internal("GET /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.getRetentionPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.putRetentionPolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/legal-holds", server.requireAuth(http.HandlerFunc(server.listLegalHolds)))
+	routes.Internal("POST /v1/tenants/{tenantID}/legal-holds", server.requireAuth(http.HandlerFunc(server.createLegalHold)))
+	routes.Internal("POST /v1/tenants/{tenantID}/legal-holds/{holdID}/release", server.requireAuth(http.HandlerFunc(server.releaseLegalHold)))
+	routes.Internal("GET /v1/tenants/{tenantID}/privacy-requests", server.requireAuth(http.HandlerFunc(server.listPrivacyRequests)))
+	routes.Internal("POST /v1/tenants/{tenantID}/privacy-requests", server.requireAuth(http.HandlerFunc(server.createPrivacyRequest)))
+	routes.Internal("GET /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}", server.requireAuth(http.HandlerFunc(server.getPrivacyRequest)))
+	routes.Internal("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/transitions", server.requireAuth(http.HandlerFunc(server.transitionPrivacyRequest)))
+	routes.Internal("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/export", server.requireAuth(http.HandlerFunc(server.executePrivacyExport)))
+	routes.Internal("POST /v1/tenants/{tenantID}/privacy-requests/{privacyRequestID}/erasure", server.requireAuth(http.HandlerFunc(server.executePrivacyErasure)))
+	routes.Internal("POST /v1/tenants/{tenantID}/data-export", server.requireAuth(http.HandlerFunc(server.executeTenantDataExport)))
+	routes.Internal("GET /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getTenantResourceLifecyclePolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putTenantResourceLifecyclePolicy)))
+	routes.Internal("POST /v1/tenants/{tenantID}/memory-revisions", server.requireAuth(http.HandlerFunc(server.publishMemoryRevision)))
+	routes.Internal("GET /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.listCredentials)))
+	routes.Internal("POST /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.createCredential)))
+	routes.Internal("POST /v1/tenants/{tenantID}/credentials/{credentialID}/rotate", server.requireAuth(http.HandlerFunc(server.rotateCredential)))
+	routes.Internal("POST /v1/tenants/{tenantID}/credentials/{credentialID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeCredential)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/credentials/{credentialID}/auto-select", server.requireAuth(http.HandlerFunc(server.putCredentialAutoSelect)))
+	routes.Internal("GET /v1/tenants/{tenantID}/provider-credential-scope-policy", server.requireAuth(http.HandlerFunc(server.getProviderCredentialScopePolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/provider-credential-scope-policy", server.requireAuth(http.HandlerFunc(server.putProviderCredentialScopePolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/credential-bindings", server.requireAuth(http.HandlerFunc(server.listCredentialBindings)))
+	routes.Internal("POST /v1/tenants/{tenantID}/credential-bindings", server.requireAuth(http.HandlerFunc(server.createCredentialBinding)))
+	routes.Internal("POST /v1/tenants/{tenantID}/credential-bindings/{bindingID}/disable", server.requireAuth(http.HandlerFunc(server.disableCredentialBinding)))
+	routes.Internal("GET /v1/tenants/{tenantID}/identity-connections", server.requireAuth(http.HandlerFunc(server.listIdentityConnections)))
+	routes.Internal("POST /v1/tenants/{tenantID}/identity-connections", server.requireAuth(http.HandlerFunc(server.createIdentityConnection)))
+	routes.Internal("POST /v1/tenants/{tenantID}/identity-connections/{connectionID}/disable", server.requireAuth(http.HandlerFunc(server.disableIdentityConnection)))
+	routes.Internal("GET /v1/tenants/{tenantID}/identity-domains", server.requireAuth(http.HandlerFunc(server.listIdentityDomains)))
+	routes.Internal("POST /v1/tenants/{tenantID}/identity-domains", server.requireAuth(http.HandlerFunc(server.createIdentityDomain)))
+	routes.Internal("POST /v1/tenants/{tenantID}/identity-domains/{domainID}/verify", server.requireAuth(http.HandlerFunc(server.verifyIdentityDomain)))
+	routes.Internal("POST /v1/tenants/{tenantID}/identity-domains/{domainID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeIdentityDomain)))
+	routes.Internal("GET /v1/tenants/{tenantID}/identity-policy", server.requireAuth(http.HandlerFunc(server.getTenantIdentityPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/identity-policy", server.requireAuth(http.HandlerFunc(server.putTenantIdentityPolicy)))
+	routes.Internal("GET /v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings", server.requireAuth(http.HandlerFunc(server.listIdentityGroupMappings)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/identity-connections/{connectionID}/group-mappings", server.requireAuth(http.HandlerFunc(server.replaceIdentityGroupMappings)))
+	routes.Internal("GET /v1/tenants/{tenantID}/service-accounts", server.requireAuth(http.HandlerFunc(server.listServiceAccounts)))
+	routes.Internal("POST /v1/tenants/{tenantID}/service-accounts", server.requireAuth(http.HandlerFunc(server.createServiceAccount)))
+	routes.Internal("GET /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/usage", server.requireAuth(http.HandlerFunc(server.getServiceAccountAPIUsage)))
+	routes.Internal("POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/rotate-token", server.requireAuth(http.HandlerFunc(server.rotateServiceAccountToken)))
+	routes.Internal("POST /v1/tenants/{tenantID}/service-accounts/{serviceAccountID}/revoke", server.requireAuth(http.HandlerFunc(server.revokeServiceAccount)))
 
-	mux.Handle("GET /scim/v2/ServiceProviderConfig", server.requireServiceAccount(http.HandlerFunc(server.scimServiceProviderConfig)))
-	mux.Handle("GET /scim/v2/ResourceTypes", server.requireServiceAccount(http.HandlerFunc(server.scimResourceTypes)))
-	mux.Handle("GET /scim/v2/Schemas", server.requireServiceAccount(http.HandlerFunc(server.scimSchemas)))
-	mux.Handle("GET /scim/v2/Users", server.requireServiceAccount(http.HandlerFunc(server.scimListUsers)))
-	mux.Handle("POST /scim/v2/Users", server.requireServiceAccount(http.HandlerFunc(server.scimCreateUser)))
-	mux.Handle("GET /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimGetUser)))
-	mux.Handle("PUT /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimReplaceUser)))
-	mux.Handle("PATCH /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimPatchUser)))
-	mux.Handle("DELETE /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimDeleteUser)))
-	mux.Handle("GET /scim/v2/Groups", server.requireServiceAccount(http.HandlerFunc(server.scimListGroups)))
-	mux.Handle("POST /scim/v2/Groups", server.requireServiceAccount(http.HandlerFunc(server.scimCreateGroup)))
-	mux.Handle("GET /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimGetGroup)))
-	mux.Handle("PUT /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimReplaceGroup)))
-	mux.Handle("PATCH /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimPatchGroup)))
-	mux.Handle("DELETE /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimDeleteGroup)))
+	routes.Internal("GET /scim/v2/ServiceProviderConfig", server.requireServiceAccount(http.HandlerFunc(server.scimServiceProviderConfig)))
+	routes.Internal("GET /scim/v2/ResourceTypes", server.requireServiceAccount(http.HandlerFunc(server.scimResourceTypes)))
+	routes.Internal("GET /scim/v2/Schemas", server.requireServiceAccount(http.HandlerFunc(server.scimSchemas)))
+	routes.Internal("GET /scim/v2/Users", server.requireServiceAccount(http.HandlerFunc(server.scimListUsers)))
+	routes.Internal("POST /scim/v2/Users", server.requireServiceAccount(http.HandlerFunc(server.scimCreateUser)))
+	routes.Internal("GET /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimGetUser)))
+	routes.Internal("PUT /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimReplaceUser)))
+	routes.Internal("PATCH /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimPatchUser)))
+	routes.Internal("DELETE /scim/v2/Users/{userID}", server.requireServiceAccount(http.HandlerFunc(server.scimDeleteUser)))
+	routes.Internal("GET /scim/v2/Groups", server.requireServiceAccount(http.HandlerFunc(server.scimListGroups)))
+	routes.Internal("POST /scim/v2/Groups", server.requireServiceAccount(http.HandlerFunc(server.scimCreateGroup)))
+	routes.Internal("GET /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimGetGroup)))
+	routes.Internal("PUT /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimReplaceGroup)))
+	routes.Internal("PATCH /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimPatchGroup)))
+	routes.Internal("DELETE /scim/v2/Groups/{groupID}", server.requireServiceAccount(http.HandlerFunc(server.scimDeleteGroup)))
 
-	mux.Handle("GET /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.listOrganizations)))
-	mux.Handle("POST /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.createOrganization)))
-	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.getOrganization)))
-	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getOrganizationExecutionSchedulingPolicy)))
-	mux.Handle("PUT /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putOrganizationExecutionSchedulingPolicy)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.updateOrganization)))
-	mux.Handle("DELETE /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.archiveOrganization)))
-	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}/members", server.requireAuth(http.HandlerFunc(server.listOrganizationMembers)))
-	mux.Handle("POST /v1/tenants/{tenantID}/organizations/{organizationID}/members", server.requireAuth(http.HandlerFunc(server.putOrganizationMember)))
-	mux.Handle("PATCH /v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.updateOrganizationMember)))
-	mux.Handle("DELETE /v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeOrganizationMember)))
-	mux.Handle("GET /v1/tenants/{tenantID}/organizations/{organizationID}/projects", server.requireAuth(http.HandlerFunc(server.listProjects)))
-	mux.Handle("POST /v1/tenants/{tenantID}/organizations/{organizationID}/projects", server.requireAuth(http.HandlerFunc(server.createProject)))
+	routes.Internal("GET /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.listOrganizations)))
+	routes.Internal("POST /v1/tenants/{tenantID}/organizations", server.requireAuth(http.HandlerFunc(server.createOrganization)))
+	routes.Internal("GET /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.getOrganization)))
+	routes.Internal("GET /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.getOrganizationExecutionSchedulingPolicy)))
+	routes.Internal("PUT /v1/tenants/{tenantID}/organizations/{organizationID}/execution-scheduling-policy", server.requireAuth(http.HandlerFunc(server.putOrganizationExecutionSchedulingPolicy)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.updateOrganization)))
+	routes.Internal("DELETE /v1/tenants/{tenantID}/organizations/{organizationID}", server.requireAuth(http.HandlerFunc(server.archiveOrganization)))
+	routes.Internal("GET /v1/tenants/{tenantID}/organizations/{organizationID}/members", server.requireAuth(http.HandlerFunc(server.listOrganizationMembers)))
+	routes.Internal("POST /v1/tenants/{tenantID}/organizations/{organizationID}/members", server.requireAuth(http.HandlerFunc(server.putOrganizationMember)))
+	routes.Internal("PATCH /v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.updateOrganizationMember)))
+	routes.Internal("DELETE /v1/tenants/{tenantID}/organizations/{organizationID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeOrganizationMember)))
+	routes.PublicBeta("GET /v1/tenants/{tenantID}/organizations/{organizationID}/projects", server.requireDeveloperAuth(http.HandlerFunc(server.listProjects)))
+	routes.PublicBeta("POST /v1/tenants/{tenantID}/organizations/{organizationID}/projects", server.requireDeveloperAuth(http.HandlerFunc(server.createProject)))
 
-	mux.Handle("GET /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.getProject)))
-	mux.Handle("PATCH /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.updateProject)))
-	mux.Handle("DELETE /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.archiveProject)))
-	mux.Handle("GET /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getProjectResourceLifecyclePolicy)))
-	mux.Handle("PUT /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putProjectResourceLifecyclePolicy)))
-	mux.Handle("GET /v1/projects/{projectID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.projectProviderCapabilities)))
-	mux.Handle("GET /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.listProjectSessions)))
-	mux.Handle("POST /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.createSession)))
+	routes.PublicBeta("GET /v1/projects/{projectID}", server.requireDeveloperAuth(http.HandlerFunc(server.getProject)))
+	routes.PublicBeta("PATCH /v1/projects/{projectID}", server.requireDeveloperAuth(http.HandlerFunc(server.updateProject)))
+	routes.PublicBeta("DELETE /v1/projects/{projectID}", server.requireDeveloperAuth(http.HandlerFunc(server.archiveProject)))
+	routes.Internal("GET /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getProjectResourceLifecyclePolicy)))
+	routes.Internal("PUT /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putProjectResourceLifecyclePolicy)))
+	routes.PublicBeta("GET /v1/projects/{projectID}/provider-capabilities", server.requireDeveloperAuth(http.HandlerFunc(server.projectProviderCapabilities)))
+	routes.PublicBeta("GET /v1/projects/{projectID}/sessions", server.requireDeveloperAuth(http.HandlerFunc(server.listProjectSessions)))
+	routes.PublicBeta("POST /v1/projects/{projectID}/sessions", server.requireDeveloperAuth(http.HandlerFunc(server.createSession)))
 
-	mux.Handle("GET /v1/sessions/{sessionID}", server.requireAuth(http.HandlerFunc(server.getAgentSession)))
-	mux.Handle("GET /v1/sessions/{sessionID}/usage", server.requireAuth(http.HandlerFunc(server.getSessionUsage)))
-	mux.Handle("POST /v1/sessions/{sessionID}/model-switch", server.requireAuth(http.HandlerFunc(server.switchSessionModel)))
-	mux.Handle("GET /v1/sessions/{sessionID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.sessionProviderCapabilities)))
-	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
-	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
-	mux.Handle("GET /v1/sessions/{sessionID}/interactions", server.requireAuth(http.HandlerFunc(server.listPendingSessionInteractions)))
-	mux.Handle("GET /v1/sessions/{sessionID}/memory-references", server.requireAuth(http.HandlerFunc(server.listEffectiveMemoryReferences)))
-	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
-	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/steer", server.requireAuth(http.HandlerFunc(server.steerActiveTurn)))
-	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireAuth(http.HandlerFunc(server.interruptActiveTurn)))
-	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurn)))
-	mux.Handle("POST /v1/sessions/{sessionID}/compact", server.requireAuth(http.HandlerFunc(server.compactSession)))
-	mux.Handle("POST /v1/sessions/{sessionID}/reviews", server.requireAuth(http.HandlerFunc(server.startSessionReview)))
-	mux.Handle("POST /v1/sessions/{sessionID}/rollback", server.requireAuth(http.HandlerFunc(server.rollbackSession)))
-	mux.Handle("POST /v1/sessions/{sessionID}/fork", server.requireAuth(http.HandlerFunc(server.forkSession)))
-	mux.Handle("POST /v1/sessions/{sessionID}/suspend", server.requireAuth(http.HandlerFunc(server.suspendSession)))
-	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
-	mux.Handle("PUT /v1/sessions/{sessionID}/settled", server.requireAuth(http.HandlerFunc(server.setSessionSettled)))
-	mux.Handle("POST /v1/sessions/{sessionID}/archive", server.requireAuth(http.HandlerFunc(server.archiveSession)))
-	mux.Handle("POST /v1/executions/{executionID}/cancel", server.requireAuth(http.HandlerFunc(server.cancelExecution)))
-	mux.Handle("POST /v1/executions/{executionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurnExecution)))
-	mux.Handle("GET /v1/executions/{executionID}/interactions", server.requireAuth(http.HandlerFunc(server.listExecutionInteractions)))
-	mux.Handle("GET /v1/executions/{executionID}/runtime-isolation", server.requireAuth(http.HandlerFunc(server.listExecutionRuntimeIsolationDecisions)))
-	mux.Handle("POST /v1/executions/{executionID}/approvals/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionApproval)))
-	mux.Handle("POST /v1/executions/{executionID}/user-input/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionUserInput)))
-	mux.Handle("GET /v1/sessions/{sessionID}/artifacts", server.requireAuth(http.HandlerFunc(server.listArtifacts)))
-	mux.Handle("POST /v1/sessions/{sessionID}/artifacts", server.requireAuth(http.HandlerFunc(server.createArtifact)))
-	mux.Handle("GET /v1/artifacts/{artifactID}", server.requireAuth(http.HandlerFunc(server.getArtifact)))
-	mux.Handle("POST /v1/artifacts/{artifactID}/complete", server.requireAuth(http.HandlerFunc(server.completeArtifact)))
-	mux.Handle("POST /v1/artifacts/{artifactID}/download", server.requireAuth(http.HandlerFunc(server.downloadArtifact)))
-	mux.Handle("DELETE /v1/artifacts/{artifactID}", server.requireAuth(http.HandlerFunc(server.deleteArtifact)))
-	mux.HandleFunc("PUT /v1/artifact-content/{artifactID}", server.uploadArtifactContent)
-	mux.HandleFunc("GET /v1/artifact-content/{artifactID}", server.downloadArtifactContent)
+	routes.PublicBeta("GET /v1/sessions/{sessionID}", server.requireDeveloperAuth(http.HandlerFunc(server.getAgentSession)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/usage", server.requireDeveloperAuth(http.HandlerFunc(server.getSessionUsage)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/model-switch", server.requireDeveloperAuth(http.HandlerFunc(server.switchSessionModel)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/provider-capabilities", server.requireDeveloperAuth(http.HandlerFunc(server.sessionProviderCapabilities)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/events", server.requireDeveloperAuth(http.HandlerFunc(server.listSessionEvents)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/events/stream", server.requireDeveloperAuth(http.HandlerFunc(server.streamSessionEvents)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/interactions", server.requireDeveloperAuth(http.HandlerFunc(server.listPendingSessionInteractions)))
+	routes.Internal("GET /v1/sessions/{sessionID}/memory-references", server.requireAuth(http.HandlerFunc(server.listEffectiveMemoryReferences)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/turns", server.requireDeveloperAuth(http.HandlerFunc(server.createTurn)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/turns/active/steer", server.requireDeveloperAuth(http.HandlerFunc(server.steerActiveTurn)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireDeveloperAuth(http.HandlerFunc(server.interruptActiveTurn)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/turns/active/resume", server.requireDeveloperAuth(http.HandlerFunc(server.resumeActiveTurn)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/compact", server.requireDeveloperAuth(http.HandlerFunc(server.compactSession)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/reviews", server.requireDeveloperAuth(http.HandlerFunc(server.startSessionReview)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/rollback", server.requireDeveloperAuth(http.HandlerFunc(server.rollbackSession)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/fork", server.requireDeveloperAuth(http.HandlerFunc(server.forkSession)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/suspend", server.requireDeveloperAuth(http.HandlerFunc(server.suspendSession)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/resume", server.requireDeveloperAuth(http.HandlerFunc(server.resumeSession)))
+	routes.Internal("PUT /v1/sessions/{sessionID}/settled", server.requireAuth(http.HandlerFunc(server.setSessionSettled)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/archive", server.requireDeveloperAuth(http.HandlerFunc(server.archiveSession)))
+	routes.PublicBeta("POST /v1/executions/{executionID}/cancel", server.requireDeveloperAuth(http.HandlerFunc(server.cancelExecution)))
+	routes.PublicBeta("POST /v1/executions/{executionID}/resume", server.requireDeveloperAuth(http.HandlerFunc(server.resumeActiveTurnExecution)))
+	routes.PublicBeta("GET /v1/executions/{executionID}/interactions", server.requireDeveloperAuth(http.HandlerFunc(server.listExecutionInteractions)))
+	routes.Internal("GET /v1/executions/{executionID}/runtime-isolation", server.requireAuth(http.HandlerFunc(server.listExecutionRuntimeIsolationDecisions)))
+	routes.PublicBeta("POST /v1/executions/{executionID}/approvals/{requestID}/resolve", server.requireDeveloperAuth(http.HandlerFunc(server.resolveExecutionApproval)))
+	routes.PublicBeta("POST /v1/executions/{executionID}/user-input/{requestID}/resolve", server.requireDeveloperAuth(http.HandlerFunc(server.resolveExecutionUserInput)))
+	routes.PublicBeta("GET /v1/sessions/{sessionID}/artifacts", server.requireDeveloperAuth(http.HandlerFunc(server.listArtifacts)))
+	routes.PublicBeta("POST /v1/sessions/{sessionID}/artifacts", server.requireDeveloperAuth(http.HandlerFunc(server.createArtifact)))
+	routes.PublicBeta("GET /v1/artifacts/{artifactID}", server.requireDeveloperAuth(http.HandlerFunc(server.getArtifact)))
+	routes.PublicBeta("POST /v1/artifacts/{artifactID}/complete", server.requireDeveloperAuth(http.HandlerFunc(server.completeArtifact)))
+	routes.PublicBeta("POST /v1/artifacts/{artifactID}/download", server.requireDeveloperAuth(http.HandlerFunc(server.downloadArtifact)))
+	routes.PublicBeta("DELETE /v1/artifacts/{artifactID}", server.requireDeveloperAuth(http.HandlerFunc(server.deleteArtifact)))
+	routes.InternalFunc("PUT /v1/artifact-content/{artifactID}", server.uploadArtifactContent)
+	routes.InternalFunc("GET /v1/artifact-content/{artifactID}", server.downloadArtifactContent)
 
-	server.handler = server.withRequestContext(server.observeRequests(server.recoverPanics(server.securityHeaders(mux))))
+	server.apiRoutes = routes.manifest()
+	server.handler = server.withRequestContext(server.observeRequests(server.recoverPanics(server.securityHeaders(routes))))
 	return server, nil
 }
 
@@ -1081,12 +1109,19 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := s.projects.List(r.Context(), mustPrincipal(r), tenantID, organizationID)
+	limit, err := queryInt(r, "limit", 50)
+	if err != nil || limit < 1 || limit > 200 {
+		s.writeError(w, r, problem.New(400, "invalid_project_limit", "Project list limit must be between 1 and 200."))
+		return
+	}
+	page, err := s.projects.ListPage(r.Context(), mustPrincipal(r), tenantID, organizationID, projects.ProjectListQuery{
+		Limit: limit, Cursor: r.URL.Query().Get("cursor"),
+	})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -1144,11 +1179,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	item, err := s.projects.Update(r.Context(), mustPrincipal(r), tenantID, projectID, input, requestID(r), clientIP(r))
+	item, replayed, err := s.projects.UpdateWithIdempotency(
+		r.Context(), mustPrincipal(r), tenantID, projectID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -1162,10 +1201,15 @@ func (s *Server) archiveProject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.projects.Archive(r.Context(), mustPrincipal(r), tenantID, projectID, requestID(r), clientIP(r)); err != nil {
+	_, replayed, err := s.projects.ArchiveWithIdempotency(
+		r.Context(), mustPrincipal(r), tenantID, projectID,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1174,12 +1218,19 @@ func (s *Server) listProjectSessions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := s.sessions.ListByProject(r.Context(), mustPrincipal(r), projectID)
+	limit, err := queryInt(r, "limit", 50)
+	if err != nil || limit < 1 || limit > 200 {
+		s.writeError(w, r, problem.New(400, "invalid_session_limit", "Session list limit must be between 1 and 200."))
+		return
+	}
+	page, err := s.sessions.ListByProjectPage(r.Context(), mustPrincipal(r), projectID, sessions.SessionListQuery{
+		Limit: limit, Cursor: r.URL.Query().Get("cursor"),
+	})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -1254,9 +1305,13 @@ func (s *Server) listSessionEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	limit, err := queryInt(r, "limit", 100)
+	limit, err := queryInt(r, "limit", 50)
 	if err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	if limit < 1 || limit > 200 {
+		s.writeError(w, r, problem.New(400, "invalid_event_limit", "limit must be between 1 and 200."))
 		return
 	}
 	page, err := s.sessions.ListEvents(r.Context(), mustPrincipal(r), sessionID, afterSequence, limit)
@@ -1350,7 +1405,7 @@ func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperExecution(result.Value))
 }
 
 func (s *Server) resumeActiveTurnExecution(w http.ResponseWriter, r *http.Request) {
@@ -1367,7 +1422,7 @@ func (s *Server) resumeActiveTurnExecution(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperExecution(result.Value))
 }
 
 func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
@@ -1383,7 +1438,7 @@ func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperControlCommand(result.Value))
 }
 
 func (s *Server) resumeActiveTurn(w http.ResponseWriter, r *http.Request) {
@@ -1400,7 +1455,7 @@ func (s *Server) resumeActiveTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperExecution(result.Value))
 }
 
 func (s *Server) steerActiveTurn(w http.ResponseWriter, r *http.Request) {
@@ -1422,12 +1477,28 @@ func (s *Server) steerActiveTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperControlCommand(result.Value))
 }
 
 func (s *Server) listExecutionInteractions(w http.ResponseWriter, r *http.Request) {
 	executionID, ok := s.pathUUID(w, r, "executionID")
 	if !ok {
+		return
+	}
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		limit, err := queryInt(r, "limit", 50)
+		if err != nil || limit < 1 || limit > 200 {
+			s.writeError(w, r, problem.New(400, "invalid_interaction_limit", "Interaction list limit must be between 1 and 200."))
+			return
+		}
+		page, err := s.executions.ListInteractionsPage(r.Context(), mustPrincipal(r), executionID, executions.InteractionListQuery{
+			Limit: limit, Cursor: r.URL.Query().Get("cursor"),
+		})
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": projectDeveloperInteractions(page.Items), "nextCursor": page.NextCursor})
 		return
 	}
 	items, err := s.executions.ListInteractions(r.Context(), mustPrincipal(r), executionID)
@@ -1454,6 +1525,22 @@ func (s *Server) listExecutionRuntimeIsolationDecisions(w http.ResponseWriter, r
 func (s *Server) listPendingSessionInteractions(w http.ResponseWriter, r *http.Request) {
 	sessionID, ok := s.pathUUID(w, r, "sessionID")
 	if !ok {
+		return
+	}
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		limit, err := queryInt(r, "limit", 50)
+		if err != nil || limit < 1 || limit > 200 {
+			s.writeError(w, r, problem.New(400, "invalid_interaction_limit", "Interaction list limit must be between 1 and 200."))
+			return
+		}
+		page, err := s.executions.ListPendingInteractionsPage(r.Context(), mustPrincipal(r), sessionID, executions.InteractionListQuery{
+			Limit: limit, Cursor: r.URL.Query().Get("cursor"),
+		})
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
 		return
 	}
 	snapshot, err := s.executions.ListPendingInteractions(r.Context(), mustPrincipal(r), sessionID)
@@ -1483,6 +1570,10 @@ func (s *Server) resolveExecutionApproval(w http.ResponseWriter, r *http.Request
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		writeJSON(w, result.StatusCode, projectDeveloperInteraction(result.Value))
+		return
+	}
 	writeJSON(w, result.StatusCode, result.Value)
 }
 
@@ -1505,6 +1596,10 @@ func (s *Server) resolveExecutionUserInput(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
+	if _, machine := authorization.MachinePrincipalFromContext(r.Context()); machine {
+		writeJSON(w, result.StatusCode, projectDeveloperInteraction(result.Value))
+		return
+	}
 	writeJSON(w, result.StatusCode, result.Value)
 }
 
@@ -1575,6 +1670,99 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) requireDeveloperAuth(next http.Handler) http.Handler {
+	userAuthentication := s.requireAuth(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizationHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		bearer, bearerOK := desktopBearerToken(authorizationHeader)
+		if authorizationHeader == "" || !bearerOK || !strings.HasPrefix(bearer, serviceaccounts.TokenPrefix) {
+			userAuthentication.ServeHTTP(w, r)
+			return
+		}
+		if _, cookieErr := r.Cookie(s.config.CookieName); cookieErr == nil {
+			s.writeError(w, r, problem.New(400, "ambiguous_authentication", "Use either a Web cookie or a Service Account Bearer credential, not both."))
+			return
+		}
+		if s.serviceAccounts == nil {
+			s.writeError(w, r, problem.New(503, "developer_api_authentication_unavailable", "Developer API authentication is unavailable."))
+			return
+		}
+		machine, err := s.serviceAccounts.Authenticate(r.Context(), bearer)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if !machine.Allows("api.access") {
+			s.writeError(w, r, problem.New(403, "service_account_scope_forbidden", "Service Account is not allowed to access the developer API."))
+			return
+		}
+		if _, patternPath, ok := strings.Cut(r.Pattern, " "); ok &&
+			(patternPath == "/v1/tenants/{tenantID}" || strings.HasPrefix(patternPath, "/v1/tenants/{tenantID}/")) {
+			if pathTenantID, parseErr := uuid.Parse(r.PathValue("tenantID")); parseErr == nil && pathTenantID != machine.TenantID {
+				s.writeError(w, r, problem.New(403, "service_account_tenant_forbidden", "Service Account cannot access this tenant."))
+				return
+			}
+		}
+		activeTenantID := machine.TenantID
+		serviceAccountID := machine.ID
+		principal := identity.Principal{
+			UserID: machine.CreatedBy, ActiveTenantID: &activeTenantID, Audience: "service-account",
+			DisplayName: machine.Name, ServiceAccountID: &serviceAccountID,
+		}
+		scope := requestLogScopeFor(r)
+		scope.tenantID = machine.TenantID
+		if machine.OrganizationID != nil {
+			scope.organizationID = *machine.OrganizationID
+		}
+		ctx := authorization.WithMachinePrincipal(r.Context(), authorization.MachinePrincipal{
+			ActorID: machine.ID, TenantID: machine.TenantID,
+			OrganizationID: machine.OrganizationID, Role: machine.Role,
+		})
+		ctx = context.WithValue(ctx, principalContextKey{}, principal)
+		admission, err := s.developerAPIUsage.Admit(
+			ctx, machine.TenantID, machine.ID, machine.OrganizationID, r.Pattern, machine.RateLimitPerMinute,
+		)
+		if err != nil {
+			s.writeError(w, r, problem.Wrap(
+				http.StatusServiceUnavailable,
+				"developer_api_admission_unavailable",
+				"Developer API admission is temporarily unavailable.",
+				err,
+			))
+			return
+		}
+		setDeveloperAPIRateLimitHeaders(w.Header(), admission)
+		if !admission.Allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(developerAPIRetryAfterSeconds(admission.ResetAfter)))
+			s.writeError(w, r, problem.New(
+				http.StatusTooManyRequests,
+				"developer_api_rate_limited",
+				"Developer API rate limit exceeded for this Service Account.",
+			))
+			return
+		}
+		recorder := &developerAPIResponseWriter{ResponseWriter: w}
+		startedAt := time.Now()
+		next.ServeHTTP(recorder, r.WithContext(ctx))
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if err := s.developerAPIUsage.RecordOutcome(
+			context.WithoutCancel(ctx), machine.TenantID, machine.ID,
+			admission.ResetAt.Add(-time.Minute), r.Pattern, status, time.Since(startedAt),
+		); err != nil {
+			s.logger.Warn(
+				"developer API usage outcome could not be recorded",
+				"tenantId", machine.TenantID,
+				"serviceAccountId", machine.ID,
+				"routePattern", r.Pattern,
+				"error", err,
+			)
+		}
 	})
 }
 

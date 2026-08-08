@@ -1,6 +1,111 @@
 # Stage 7：对外 SDK 与开发者平台
 
-状态：TODO（设计已冻结 2026-07-26，待实施）
+状态：IN PROGRESS（设计已冻结 2026-07-26；源码 public beta 已完成，外部激活待办）
+
+2026-08-04 快照：OpenAPI、双语言 SDK、开发者文档、示例、Service Account 机器鉴权、Webhook、
+BYO Execution Target 与 durable SSH provisioning 的仓库内实现已经收敛。当前公开面为 41 条
+`public-beta` / `codegen-ready` operation，0 条 `route-only`，且 TypeScript、Python、真实
+HTTP/SQLite conformance、SDK release artifact verifier 和全量 Go 测试均通过。一次性 OrbStack
+Ubuntu VM 上的真实 SSH 验收也已通过，Service Account 通过公共 beta API 创建 Target、以稳定
+幂等键提交并重放 provisioning operation，最终 Worker online；后续 Worker replacement、Control
+Plane restart continuity、cleanup 与输出 secret scan 同样通过。详见
+[Stage 7 Developer API SSH 验收报告](../reports/stage-7-developer-api-ssh-acceptance-20260804.md)。另一个
+独立 curl 进程从 API Key 签发开始，经 Session、Turn、SSE、Approval 到 Execution 完成只用
+11.143 秒，见 [curl quickstart 验收](../reports/stage-7-curl-quickstart-acceptance-20260804.md)。
+
+尚未完成的工作均属于仓库外激活：开发者站点部署、受控环境的外网 Webhook egress、npm/PyPI
+项目 ownership 与 OIDC Trusted Publisher 登记，以及真实 Provider release gate。因此这里的
+“源码 public beta 已完成”不等于已经发布、生产 GA 或完成外部 Registry 所有权审批。
+
+当前实施进度：M1 的路由公开面分级与 OpenAPI 3.1 路由面 SSOT 已完成源码与受控运行时出口。控制面所有注册路由
+必须通过分类 mux 显式选择 `internal`、`public-beta` 或 `public-ga`，并与
+`docs/api/openapi.yaml` 的完整 `x-synara-route-surfaces` 清单双向一致；核心 Project / Session /
+Execution interaction / Artifact 开发者面先进入 `public-beta`，Worker、平台治理、dev-login、SCIM
+与 Artifact 内容通道保持 `internal`。防暴露守卫会阻止绕过分类 mux 的新增路由，并在 Stage 5/6
+与 Stage 7 GA 门禁通过前拒绝出现 `public-ga` 路由。公开 operation 默认标记为 `route-only`，
+表示路由身份、operationId、鉴权方案和统一错误 envelope 已进入契约，但完整请求/成功响应 schema
+尚未冻结，因此不得用于 SDK codegen 或外部发布。首条纵向流程的 `createSession`、`createTurn`、
+`streamSessionEvents` 与 `resolveExecutionApproval` 已补齐请求、成功响应、幂等和限流 header schema，
+提升为 `codegen-ready`，并通过固定版本的 OpenAPI 3.1 语义校验。用于连接限额回退的
+`listSessionEvents` 也已冻结为 `codegen-ready`：公开分页默认 50、最大 200，保留
+`afterSequence` 领域游标。Service Account 资源角色与机器 Principal 已接入
+`public-beta` 路由：`api.access`、tenant/organization 固定 RBAC、即时撤销、机器 actor 的
+Idempotency/Event/Audit/SSE 归因和用户级 Provider Credential 隔离已有端到端门禁；原先无界的
+Project 与 Project Session 列表均已改为默认 50、最大 200 的 scope-bound opaque cursor 分页，并保持
+机器 Principal 不可见 private Project/Session。per-key 通用准入限制现由 Service Account 的 `rateLimitPerMinute` 驱动（默认 600、
+范围 1–60000），使用数据库 UTC 分钟窗口原子计数，跨实例共享额度；响应携带
+`RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`，超限返回 429 + `Retry-After`。
+每次已准入请求和 429 都按 Tenant / Organization / Service Account / 路由模板持久化，成功、4xx、
+5xx 与耗时分别累计，并提供受 `service_accounts.read` RBAC 保护的控制台汇总接口。41 条公开操作的
+完整 schema、分页与机器归因已经冻结；curl/API Key 实机 quickstart 证明 M1 的受控运行时出口。
+尚未部署的外部 Control Plane 仍不能称为公开可用服务。
+
+M2 的 TypeScript SDK source beta 已形成完整可运行闭环：新增私有（防误发布）
+`@polaris-agents/sdk@0.1.0-beta.1` workspace 包；底层类型由 OpenAPI 生成并有 drift gate，手写领域层
+提供 `Polaris`、Session handle、自动 `Idempotency-Key`、429/5xx/网络重试、稳定错误类型、限流与
+重放 metadata，以及按 durable sequence 解码/续传的 SSE async iterator。SSE 消费者提前退出时
+SDK 会主动取消底层 HTTP 请求，避免泄漏连接 lease；当 user/Tenant SSE 连接池满时，会自动切换到
+同样执行 replay 抑制和 sequence-gap fail-closed 的 bounded Event 分页轮询。该包当前暴露上述五个
+Session/Approval operation、bounded Project 创建/列表/读取及幂等更新/归档、Session 列表/读取/Usage/模型 CAS/挂起/恢复/幂等归档、Project/Session
+安全 Provider capability 投影、带 watermark 的 pending
+Interaction 与安全历史投影、幂等注册/安全读取 BYO Execution Target，以及创建/查询 durable provisioning operation，
+并支持幂等 structured user-input resolve、bounded Artifact metadata、短时 download grant，以及响应丢失安全的
+Artifact create/upload/complete/delete、安全 Execution cancel、active Turn interrupt/steer、双入口 checkpoint resume，
+以及 sequence-guarded Compact/Review/Fork/Rollback，共四十一个
+`codegen-ready` operation，测试和双格式构建已通过；仓库内发布
+制品/流水线已经落地，但 npm 组织占位与 OIDC trusted publisher 的仓库外登记仍未完成，因此不是已发布 beta。
+
+M2 的开发者入口已形成可构建闭环：新增 Astro 静态文档站，覆盖 quickstart、机器鉴权、
+幂等与重试、SSE 序列语义、Approval 和 typed error，并在同一构建产物中用 Redocly 生成 API
+Reference。公开 Reference 不是直接渲染完整路由 SSOT，而是由仓库内过滤器只选择
+`codegen-ready` operation；当前 41 条 `public-beta` operation 已全部冻结为可生成契约，不再保留
+`route-only` 灰区。
+新增 CI 修复 bot、PR review bot、批量迁移三个完整 TypeScript 示例；批量示例包含 durable
+sequence checkpoint，CI/PR 示例从外部任务身份派生稳定幂等键。统一的
+`stage7:developer:check` 已进入主 CI，覆盖 OpenAPI lint、生成漂移、SDK 类型/测试/双格式构建、
+示例 typecheck、文档内容测试与静态站/API Reference 构建。受控 SSH 部署上的 curl quickstart
+已满足 ≤5 分钟验收线；外部文档部署、外部 Control Plane 与 npm ownership 仍未完成，因此 M2
+只能标为 source beta 完成，不能标为已发布 beta。
+
+SDK conformance 已从 mock 扩展到真实 HTTP/SQLite Control Plane：Go 测试启动完整 handler，创建
+真实 Service Account API Key 与 pending Approval，再分别由独立 Bun/Python 进程加载官方 SDK，验证 Session
+创建与幂等重放、Turn 创建、Event 分页、原生 SSE 连续回放、SSE pool 饱和后的轮询回退、Approval
+resolve 与幂等重放，以及 provisioning create + poll terminal state；Go 侧再核对机器 Audit actor。
+Control Plane CI 显式安装 Bun 和 Python 3.11，
+因此双语言用例不会因缺少 runtime 而静默跳过。该夹具仍不是部署环境、真实 Provider 或外部网络验收。
+
+M3 的 Webhook、Python SDK 与 BYO target/provisioning 纵向切片已经完成仓库内实现。Python 3.11+
+`polaris-agents@0.1.0b1` 使用标准库传输、OpenAPI 生成的 TypedDict/operation 清单和手写领域层，
+已具备自动幂等键、429/5xx/网络重试、Event list/SSE、连接池饱和轮询回退、replay 抑制和 sequence
+gap fail-closed；与 TypeScript SDK 共享上述真实控制面 conformance，但尚未完成 PyPI ownership、
+trusted publisher 的仓库外配置和部署环境验收。Tenant-scoped owner/admin API Key 现可用两个新增
+`codegen-ready` operation 幂等注册 SSH/Docker/Kubernetes Execution Target，并读取不含加密
+configuration 的安全投影；Service Account 不能创建 local target。SSH install/upgrade/revoke、Worker
+release/pool/placement 与 isolation policy mutation 仍是 internal，直到其跨进程 idempotency 和运维
+契约实现，因此当前不能把注册成功解释为 compute ready。外部 provisioning v1 已按持久化异步
+operation resource 实现为两个 `public-beta` operation（见
+`docs/contracts/execution-target-provisioning-v1.md`），具备 durable receipt、
+单 target 单活动操作、leader claim/lease/takeover、operation + target 双重 fencing、稳定 Worker
+identity、安全结果投影、过期 claim takeover，以及“远端命令成功后进程退出”的同 operation 恢复；
+现有同步 SSH 路由仍不公开。一次性本地部署的真实 SSH 演练已经通过，但尚未替代外部生产环境和
+真实 Provider release gate。租户管理员可在
+控制台创建、禁用、启用、轮换密钥和吊销 HTTPS Webhook，并查看投递状态；签名密钥通过现有 KMS
+envelope 加密且仅创建/轮换时显示。选定 Session Event 在业务事务内按 endpoint 独立投影为 Outbox
+消息，外发 body 只含版本、delivery/event/sequence 和资源 ID，不含 prompt、credential 或原始
+Event payload；投递使用 `timestamp.body` 的 HMAC-SHA256、稳定幂等键、无 redirect/proxy 的安全
+HTTP client，并拒绝 literal/DNS 解析后的 private、loopback、link-local 与 reserved 目标。已有本地
+夹具验证成功签名投递、独立重试、死信和响应 body 不落库。M3 的 source beta 与受控 SSH 出口已经
+完成；外部 HTTPS egress 与 PyPI 激活仍未完成，因此不能称为已发布 M3。
+
+SDK 发布工程已经建立默认不发布的受控 beta 流水线：源码 workspace 的 npm 包继续保持
+`private: true`，发布任务只把 allowlist 中的构建产物与清理后的 manifest 复制到一次性 staging；
+npm tarball、Python wheel 和 sdist 在发布前验证精确内容、包名、跨生态版本映射与 SHA-256 manifest，
+并生成 GitHub artifact attestation。流水线先运行双 SDK 源码门禁和真实 Control Plane conformance，
+只有从精确 `polaris-sdk-v<version>` tag 手动选择 publish、仓库变量确认两个 registry 均已就绪、且通过
+`polaris-npm` / `polaris-pypi` protected environment 后，才分别使用 npm/PyPI OIDC trusted
+publishing；请求发布但 tag 或任一 readiness 变量不成立时 preflight 会显式失败，不会把两个跳过的
+publish job 显示成成功发布。仓库不保存 registry token。npm organization/package ownership、PyPI project/publisher
+登记和受保护环境审批都属于仓库外待办，因此当前实现只是可审计发布路径，不代表已经发布 beta。
 
 Stage 1–6 把 Synara 从单机 GUI 变成了带租户体系、分布式执行平台和企业运营能力的 SaaS。但当前
 `/v1` 的消费者全部是第一方：Web UI（浏览器 → Node 代理 → Go Control Plane，cookie 鉴权）、

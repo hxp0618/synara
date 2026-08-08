@@ -64,8 +64,9 @@ type SSHWorkerAuthorityRevoker func(
 ) (func(), error)
 
 type sshTargetOperationFence struct {
-	Generation int64
-	Kind       string
+	Generation              int64
+	Kind                    string
+	ProvisioningOperationID *uuid.UUID
 }
 
 type sshTargetConfiguration struct {
@@ -166,7 +167,7 @@ func (p *SSHProvisioner) Install(
 	tenantID, targetID uuid.UUID,
 	requestID, ipAddress string,
 ) (SSHProvisionResult, error) {
-	return p.apply(ctx, principal, tenantID, targetID, "install", requestID, ipAddress)
+	return p.apply(ctx, principal, tenantID, targetID, "install", requestID, ipAddress, nil, nil)
 }
 
 func (p *SSHProvisioner) Upgrade(
@@ -175,7 +176,28 @@ func (p *SSHProvisioner) Upgrade(
 	tenantID, targetID uuid.UUID,
 	requestID, ipAddress string,
 ) (SSHProvisionResult, error) {
-	return p.apply(ctx, principal, tenantID, targetID, "upgrade", requestID, ipAddress)
+	return p.apply(ctx, principal, tenantID, targetID, "upgrade", requestID, ipAddress, nil, nil)
+}
+
+func (p *SSHProvisioner) ApplyProvisioningOperation(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, targetID uuid.UUID,
+	action string,
+	operationID uuid.UUID,
+	requestID, ipAddress string,
+) (SSHProvisionResult, error) {
+	if operationID == uuid.Nil {
+		return SSHProvisionResult{}, errors.New("SSH provisioning operation ID is required")
+	}
+	if action == "revoke" {
+		return p.revoke(ctx, principal, tenantID, targetID, requestID, ipAddress, &operationID)
+	}
+	if action != "install" && action != "upgrade" {
+		return SSHProvisionResult{}, problem.New(400, "invalid_provisioning_action", "Provisioning action must be install, upgrade, or revoke.")
+	}
+	workerInstanceUID := StableProvisioningWorkerInstanceUID(operationID)
+	return p.apply(ctx, principal, tenantID, targetID, action, requestID, ipAddress, &operationID, &workerInstanceUID)
 }
 
 func (p *SSHProvisioner) Revoke(
@@ -184,6 +206,16 @@ func (p *SSHProvisioner) Revoke(
 	tenantID, targetID uuid.UUID,
 	requestID, ipAddress string,
 ) (SSHProvisionResult, error) {
+	return p.revoke(ctx, principal, tenantID, targetID, requestID, ipAddress, nil)
+}
+
+func (p *SSHProvisioner) revoke(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, targetID uuid.UUID,
+	requestID, ipAddress string,
+	provisioningOperationID *uuid.UUID,
+) (SSHProvisionResult, error) {
 	target, err := p.loadTargetMetadata(ctx, principal, tenantID, targetID)
 	if err != nil {
 		return SSHProvisionResult{}, err
@@ -191,12 +223,15 @@ func (p *SSHProvisioner) Revoke(
 	if p.revokeWorkers == nil {
 		return SSHProvisionResult{}, problem.New(503, "ssh_worker_revocation_unavailable", "SSH Worker authority revocation is not configured.")
 	}
-	fence, err := p.beginSSHRevokeOperation(ctx, target, principal, requestID, ipAddress)
+	fence, err := p.beginSSHRevokeOperationForProvisioning(ctx, target, principal, requestID, ipAddress, provisioningOperationID)
 	if err != nil {
 		return SSHProvisionResult{}, err
 	}
 	fail := func(primary error) error {
-		return errors.Join(primary, p.failSSHOperation(ctx, target, principal.UserID, fence, requestID, ipAddress))
+		if provisioningOperationID != nil && ctx.Err() != nil {
+			return primary
+		}
+		return errors.Join(primary, p.failSSHOperation(ctx, target, identity.ActorID(principal), fence, requestID, ipAddress))
 	}
 	configuration, err := decryptSSHConfiguration(p.targets, target.ConfigurationEncrypted)
 	if err != nil {
@@ -222,7 +257,7 @@ func (p *SSHProvisioner) Revoke(
 	if err := remote.Run(operationContext, command); err != nil {
 		return SSHProvisionResult{}, fail(problem.Wrap(502, "ssh_revoke_failed", "SSH Worker revocation failed.", err))
 	}
-	if err := p.finishSSHOperation(ctx, target, principal.UserID, fence, "completed", "disabled", requestID, ipAddress); err != nil {
+	if err := p.finishSSHOperation(ctx, target, identity.ActorID(principal), fence, "completed", "disabled", requestID, ipAddress); err != nil {
 		return SSHProvisionResult{}, fail(err)
 	}
 	return SSHProvisionResult{
@@ -235,6 +270,7 @@ func (p *SSHProvisioner) apply(
 	principal identity.Principal,
 	tenantID, targetID uuid.UUID,
 	operation, requestID, ipAddress string,
+	provisioningOperationID, requestedWorkerInstanceUID *uuid.UUID,
 ) (SSHProvisionResult, error) {
 	target, configuration, err := p.load(ctx, principal, tenantID, targetID)
 	if err != nil {
@@ -253,14 +289,20 @@ func (p *SSHProvisioner) apply(
 	}
 	defer binary.Close()
 	workerInstanceUID := uuid.New()
-	fence, err := p.beginSSHOperation(
-		ctx, target, principal.UserID, operation, &workerInstanceUID, requestID, ipAddress,
+	if requestedWorkerInstanceUID != nil {
+		workerInstanceUID = *requestedWorkerInstanceUID
+	}
+	fence, resumed, err := p.beginSSHOperationForProvisioning(
+		ctx, target, identity.ActorID(principal), operation, &workerInstanceUID, requestID, ipAddress, provisioningOperationID,
 	)
 	if err != nil {
 		return SSHProvisionResult{}, err
 	}
 	fail := func(primary error) error {
-		return errors.Join(primary, p.failSSHOperation(ctx, target, principal.UserID, fence, requestID, ipAddress))
+		if provisioningOperationID != nil && ctx.Err() != nil {
+			return primary
+		}
+		return errors.Join(primary, p.failSSHOperation(ctx, target, identity.ActorID(principal), fence, requestID, ipAddress))
 	}
 	remote, err := p.connect(ctx, configuration)
 	if err != nil {
@@ -269,7 +311,7 @@ func (p *SSHProvisioner) apply(
 	defer remote.Close()
 	operationContext, cancel := context.WithTimeout(ctx, p.timeout())
 	defer cancel()
-	if operation == "install" {
+	if operation == "install" && !resumed {
 		if err := ensureSSHInstallPathsAvailable(operationContext, remote, paths); err != nil {
 			if !errors.Is(err, errSSHInstallConflict) {
 				return SSHProvisionResult{}, fail(problem.Wrap(
@@ -350,7 +392,7 @@ func (p *SSHProvisioner) apply(
 		configuration,
 		workerInstanceUID.String(),
 		fence,
-		principal.UserID,
+		identity.ActorID(principal),
 		requestID,
 		ipAddress,
 	); err != nil {
@@ -799,22 +841,37 @@ func (p *SSHProvisioner) beginSSHOperation(
 	expectedInstanceUID *uuid.UUID,
 	requestID, ipAddress string,
 ) (sshTargetOperationFence, error) {
+	fence, _, err := p.beginSSHOperationForProvisioning(ctx, target, actorID, operation, expectedInstanceUID, requestID, ipAddress, nil)
+	return fence, err
+}
+
+func (p *SSHProvisioner) beginSSHOperationForProvisioning(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	actorID uuid.UUID,
+	operation string,
+	expectedInstanceUID *uuid.UUID,
+	requestID, ipAddress string,
+	provisioningOperationID *uuid.UUID,
+) (sshTargetOperationFence, bool, error) {
 	if (operation == "install" || operation == "upgrade") &&
 		(expectedInstanceUID == nil || *expectedInstanceUID == uuid.Nil) {
-		return sshTargetOperationFence{}, problem.New(500, "ssh_bootstrap_authority_missing", "SSH Worker bootstrap authority is missing its expected instance UID.")
+		return sshTargetOperationFence{}, false, problem.New(500, "ssh_bootstrap_authority_missing", "SSH Worker bootstrap authority is missing its expected instance UID.")
 	}
 	if operation == "revoke" {
 		expectedInstanceUID = nil
 	}
 	fence := sshTargetOperationFence{}
+	resumed := false
 	err := persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
-		started, _, err := p.beginSSHOperationLocked(
-			ctx, tx, target, actorID, operation, expectedInstanceUID, requestID, ipAddress,
+		started, _, wasResumed, err := p.beginSSHOperationLockedForProvisioning(
+			ctx, tx, target, actorID, operation, expectedInstanceUID, requestID, ipAddress, provisioningOperationID,
 		)
 		fence = started
+		resumed = wasResumed
 		return err
 	})
-	return fence, err
+	return fence, resumed, err
 }
 
 func (p *SSHProvisioner) beginSSHRevokeOperation(
@@ -823,11 +880,21 @@ func (p *SSHProvisioner) beginSSHRevokeOperation(
 	principal identity.Principal,
 	requestID, ipAddress string,
 ) (sshTargetOperationFence, error) {
+	return p.beginSSHRevokeOperationForProvisioning(ctx, target, principal, requestID, ipAddress, nil)
+}
+
+func (p *SSHProvisioner) beginSSHRevokeOperationForProvisioning(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	principal identity.Principal,
+	requestID, ipAddress string,
+	provisioningOperationID *uuid.UUID,
+) (sshTargetOperationFence, error) {
 	fence := sshTargetOperationFence{}
 	var postCommit func()
 	err := persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
-		started, current, err := p.beginSSHOperationLocked(
-			ctx, tx, target, principal.UserID, "revoke", nil, requestID, ipAddress,
+		started, current, _, err := p.beginSSHOperationLockedForProvisioning(
+			ctx, tx, target, identity.ActorID(principal), "revoke", nil, requestID, ipAddress, provisioningOperationID,
 		)
 		if err != nil {
 			return err
@@ -858,43 +925,67 @@ func (p *SSHProvisioner) beginSSHOperationLocked(
 	expectedInstanceUID *uuid.UUID,
 	requestID, ipAddress string,
 ) (sshTargetOperationFence, persistence.ExecutionTarget, error) {
+	fence, current, _, err := p.beginSSHOperationLockedForProvisioning(ctx, tx, target, actorID, operation, expectedInstanceUID, requestID, ipAddress, nil)
+	return fence, current, err
+}
+
+func (p *SSHProvisioner) beginSSHOperationLockedForProvisioning(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	actorID uuid.UUID,
+	operation string,
+	expectedInstanceUID *uuid.UUID,
+	requestID, ipAddress string,
+	provisioningOperationID *uuid.UUID,
+) (sshTargetOperationFence, persistence.ExecutionTarget, bool, error) {
 	var current persistence.ExecutionTarget
 	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 		Where("id = ? AND kind = ? AND tenant_id = ?", target.ID, "ssh", *target.TenantID).
 		Take(&current).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.New(404, "execution_target_not_found", "SSH execution target not found.")
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, false, problem.New(404, "execution_target_not_found", "SSH execution target not found.")
 	} else if err != nil {
-		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.Wrap(500, "ssh_operation_target_lookup_failed", "SSH Target operation could not be started.", err)
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, false, problem.Wrap(500, "ssh_operation_target_lookup_failed", "SSH Target operation could not be started.", err)
+	}
+	if provisioningOperationID != nil && current.SSHProvisioningOperationID != nil &&
+		*current.SSHProvisioningOperationID == *provisioningOperationID && current.SSHOperationKind != nil &&
+		*current.SSHOperationKind == operation && sameOptionalUUID(current.SSHExpectedInstanceUID, expectedInstanceUID) {
+		return sshTargetOperationFence{Generation: current.SSHOperationGeneration, Kind: operation, ProvisioningOperationID: provisioningOperationID}, current, true, nil
 	}
 	if operation == "revoke" && current.Status == "offline" && current.SSHOperationKind != nil &&
 		*current.SSHOperationKind == "revoke" && current.SSHOperationStartedAt != nil &&
 		current.SSHExpectedInstanceUID == nil {
-		return sshTargetOperationFence{Generation: current.SSHOperationGeneration, Kind: operation}, current, nil
+		return sshTargetOperationFence{Generation: current.SSHOperationGeneration, Kind: operation}, current, true, nil
 	}
 	now := p.now()
 	if current.SSHOperationKind != nil && current.SSHOperationStartedAt != nil &&
 		current.SSHOperationStartedAt.Add(p.timeout()+30*time.Second).After(now) {
-		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.New(409, "ssh_operation_in_progress", "Another SSH Target operation is already in progress.")
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, false, problem.New(409, "ssh_operation_in_progress", "Another SSH Target operation is already in progress.")
 	}
-	fence := sshTargetOperationFence{Generation: current.SSHOperationGeneration + 1, Kind: operation}
+	fence := sshTargetOperationFence{Generation: current.SSHOperationGeneration + 1, Kind: operation, ProvisioningOperationID: provisioningOperationID}
 	result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
 		Where("id = ? AND kind = ? AND ssh_operation_generation = ?", target.ID, "ssh", current.SSHOperationGeneration).
 		Updates(map[string]any{
 			"status": "offline", "ssh_operation_generation": fence.Generation,
 			"ssh_operation_kind": operation, "ssh_operation_started_at": now,
-			"ssh_expected_instance_uid": expectedInstanceUID, "updated_at": now,
+			"ssh_expected_instance_uid": expectedInstanceUID, "ssh_provisioning_operation_id": provisioningOperationID, "updated_at": now,
 		})
 	if result.Error != nil || result.RowsAffected != 1 {
-		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, problem.Wrap(409, "ssh_operation_start_conflict", "SSH Target operation changed concurrently.", result.Error)
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, false, problem.Wrap(409, "ssh_operation_start_conflict", "SSH Target operation changed concurrently.", result.Error)
 	}
 	current.Status = "offline"
 	current.SSHOperationGeneration = fence.Generation
 	current.SSHOperationKind = &operation
 	current.SSHOperationStartedAt = &now
 	current.SSHExpectedInstanceUID = expectedInstanceUID
+	current.SSHProvisioningOperationID = provisioningOperationID
 	current.UpdatedAt = now
+	actorType := "user"
+	if _, ok := authorization.MachinePrincipalFromContext(ctx); ok {
+		actorType = "service_account"
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
+		TenantID: *target.TenantID, ActorType: actorType, ActorID: &actorID,
 		Action:       "execution_target.ssh_" + operation + "_started",
 		ResourceType: "execution_target", ResourceID: &target.ID,
 		OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
@@ -902,9 +993,9 @@ func (p *SSHProvisioner) beginSSHOperationLocked(
 			"kind": "ssh", "operation": operation, "status": "offline", "operationGeneration": fence.Generation,
 		},
 	}); err != nil {
-		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, err
+		return sshTargetOperationFence{}, persistence.ExecutionTarget{}, false, err
 	}
-	return fence, current, nil
+	return fence, current, false, nil
 }
 
 func (p *SSHProvisioner) finishSSHOperation(
@@ -919,14 +1010,19 @@ func (p *SSHProvisioner) finishSSHOperation(
 ) error {
 	return persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
 		now := p.now()
-		result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
-			Where(
-				"id = ? AND kind = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ?",
-				target.ID, "ssh", fence.Generation, fence.Kind,
-			).
+		query := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).Where(
+			"id = ? AND kind = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ?",
+			target.ID, "ssh", fence.Generation, fence.Kind,
+		)
+		if fence.ProvisioningOperationID == nil {
+			query = query.Where("ssh_provisioning_operation_id IS NULL")
+		} else {
+			query = query.Where("ssh_provisioning_operation_id = ?", *fence.ProvisioningOperationID)
+		}
+		result := query.
 			Updates(map[string]any{
 				"status": status, "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
-				"ssh_expected_instance_uid": nil, "updated_at": now,
+				"ssh_expected_instance_uid": nil, "ssh_provisioning_operation_id": nil, "updated_at": now,
 			})
 		if result.Error != nil {
 			return problem.Wrap(500, "ssh_operation_finish_failed", "SSH Target operation status could not be persisted.", result.Error)
@@ -934,8 +1030,12 @@ func (p *SSHProvisioner) finishSSHOperation(
 		if result.RowsAffected != 1 {
 			return problem.New(409, "ssh_operation_superseded", "SSH Target operation was superseded and cannot change Target status.")
 		}
+		actorType := "user"
+		if _, ok := authorization.MachinePrincipalFromContext(ctx); ok {
+			actorType = "service_account"
+		}
 		return audit.Record(ctx, tx, audit.Entry{
-			TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
+			TenantID: *target.TenantID, ActorType: actorType, ActorID: &actorID,
 			Action:       "execution_target.ssh_" + fence.Kind + "_" + phase,
 			ResourceType: "execution_target", ResourceID: &target.ID,
 			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
@@ -1069,12 +1169,16 @@ func (p *SSHProvisioner) activateReadySSHWorker(
 ) error {
 	return persistence.InTransaction(ctx, p.targets.db, func(tx *gorm.DB) error {
 		var currentTarget persistence.ExecutionTarget
-		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Where(
-				"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
-				target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
-			).
-			Take(&currentTarget).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		lookup := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where(
+			"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
+			target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
+		)
+		if fence.ProvisioningOperationID == nil {
+			lookup = lookup.Where("ssh_provisioning_operation_id IS NULL")
+		} else {
+			lookup = lookup.Where("ssh_provisioning_operation_id = ?", *fence.ProvisioningOperationID)
+		}
+		if err := lookup.Take(&currentTarget).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 			return problem.New(409, "ssh_worker_activation_conflict", "SSH Target status changed before Worker readiness could be committed.")
 		} else if err != nil {
 			return problem.Wrap(500, "ssh_worker_activation_lookup_failed", "SSH Target readiness could not be committed.", err)
@@ -1089,20 +1193,28 @@ func (p *SSHProvisioner) activateReadySSHWorker(
 		if !ready {
 			return problem.New(409, "ssh_worker_readiness_changed", "SSH Worker readiness changed before Target activation: "+state+".")
 		}
-		result := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).
-			Where(
-				"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
-				target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
-			).
-			Updates(map[string]any{
-				"status": "active", "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
-				"ssh_expected_instance_uid": nil, "updated_at": p.now(),
-			})
+		update := tx.WithContext(ctx).Model(&persistence.ExecutionTarget{}).Where(
+			"id = ? AND kind = ? AND status = ? AND ssh_operation_generation = ? AND ssh_operation_kind = ? AND ssh_expected_instance_uid = ?",
+			target.ID, "ssh", "offline", fence.Generation, fence.Kind, instanceUID,
+		)
+		if fence.ProvisioningOperationID == nil {
+			update = update.Where("ssh_provisioning_operation_id IS NULL")
+		} else {
+			update = update.Where("ssh_provisioning_operation_id = ?", *fence.ProvisioningOperationID)
+		}
+		result := update.Updates(map[string]any{
+			"status": "active", "ssh_operation_kind": nil, "ssh_operation_started_at": nil,
+			"ssh_expected_instance_uid": nil, "ssh_provisioning_operation_id": nil, "updated_at": p.now(),
+		})
 		if result.Error != nil || result.RowsAffected != 1 {
 			return problem.Wrap(409, "ssh_worker_activation_conflict", "SSH Target status changed before Worker readiness could be committed.", result.Error)
 		}
+		actorType := "user"
+		if _, ok := authorization.MachinePrincipalFromContext(ctx); ok {
+			actorType = "service_account"
+		}
 		return audit.Record(ctx, tx, audit.Entry{
-			TenantID: *target.TenantID, ActorType: "user", ActorID: &actorID,
+			TenantID: *target.TenantID, ActorType: actorType, ActorID: &actorID,
 			Action:       "execution_target.ssh_" + fence.Kind + "_completed",
 			ResourceType: "execution_target", ResourceID: &target.ID,
 			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress,

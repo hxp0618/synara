@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
@@ -35,6 +36,18 @@ func TestExecutionTargetMutationsRejectInactiveTenantBeforePolicyOrStorage(t *te
 	service := NewService(nil, config, nil)
 
 	_, err = service.Create(ctx, principal, requestedTenantID, CreateInput{})
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, _, err = service.CreateWithIdempotency(
+		ctx, principal, requestedTenantID, CreateInput{},
+		"execution-target-inactive-create", "execution-target-inactive-create", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, _, err = service.CreateProvisioningOperation(
+		ctx, principal, requestedTenantID, uuid.New(), "install",
+		"execution-target-inactive-provision", "execution-target-inactive-provision", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
+	_, err = service.GetProvisioningOperation(ctx, principal, requestedTenantID, uuid.New(), uuid.New())
 	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
 	_, err = service.UpdateProviderPolicy(ctx, principal, requestedTenantID, uuid.New(), nil)
 	assertExecutionTargetProblem(t, err, 404, "tenant_not_found")
@@ -134,6 +147,70 @@ func TestTargetAPIModelNeverExposesEncryptedConfiguration(t *testing.T) {
 		Kind: "local", Name: "tenant-wide-personal",
 	}); err == nil {
 		t.Fatal("personal execution target without organization ownership was accepted")
+	}
+	idempotentInput := CreateInput{
+		OrganizationID: &domain.OrganizationID, Kind: "ssh", Name: "idempotent-build-host",
+		Configuration: map[string]any{"privateKey": "another-secret", "host": "idempotent.example"},
+		Capabilities:  map[string]any{},
+	}
+	first, replayed, err := service.CreateWithIdempotency(
+		ctx, principal, domain.TenantID, idempotentInput, "target-create-key", "target-create", "127.0.0.1",
+	)
+	if err != nil || replayed {
+		t.Fatalf("first idempotent target create = %#v replayed=%t err=%v", first, replayed, err)
+	}
+	second, replayed, err := service.CreateWithIdempotency(
+		ctx, principal, domain.TenantID, idempotentInput, "target-create-key", "target-replay", "127.0.0.1",
+	)
+	if err != nil || !replayed || second.ID != first.ID {
+		t.Fatalf("replayed target create = %#v replayed=%t err=%v", second, replayed, err)
+	}
+	conflictInput := idempotentInput
+	conflictInput.Name = "different-build-host"
+	_, _, err = service.CreateWithIdempotency(
+		ctx, principal, domain.TenantID, conflictInput, "target-create-key", "target-conflict", "127.0.0.1",
+	)
+	assertExecutionTargetProblem(t, err, 409, "idempotency_conflict")
+	var idempotentCount int64
+	if err := store.DB().Model(&persistence.ExecutionTarget{}).Where("id = ?", first.ID).Count(&idempotentCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if idempotentCount != 1 {
+		t.Fatalf("idempotent Execution Target count = %d, want 1", idempotentCount)
+	}
+
+	serviceAccountID := uuid.New()
+	machinePrincipal := identity.Principal{
+		UserID: domain.UserID, ActiveTenantID: &domain.TenantID, ServiceAccountID: &serviceAccountID,
+	}
+	machineContext := authorization.WithMachinePrincipal(ctx, authorization.MachinePrincipal{
+		ActorID: serviceAccountID, TenantID: domain.TenantID, Role: "owner",
+	})
+	machineTarget, replayed, err := service.CreateWithIdempotency(
+		machineContext, machinePrincipal, domain.TenantID, CreateInput{
+			OrganizationID: &domain.OrganizationID, Kind: "ssh", Name: "machine-build-host",
+			Configuration: map[string]any{"privateKey": "machine-secret", "host": "machine.example"},
+		}, "machine-target-create-key", "machine-target-create", "127.0.0.1",
+	)
+	if err != nil || replayed {
+		t.Fatalf("machine target create = %#v replayed=%t err=%v", machineTarget, replayed, err)
+	}
+	var machineReceipt persistence.APIIdempotencyKey
+	if err := store.DB().Where(
+		"tenant_id = ? AND actor_id = ? AND idempotency_key = ?",
+		domain.TenantID, serviceAccountID, "machine-target-create-key",
+	).Take(&machineReceipt).Error; err != nil {
+		t.Fatal(err)
+	}
+	var machineAudit persistence.AuditLog
+	if err := store.DB().Where(
+		"tenant_id = ? AND resource_id = ? AND request_id = ?",
+		domain.TenantID, machineTarget.ID, "machine-target-create",
+	).Take(&machineAudit).Error; err != nil {
+		t.Fatal(err)
+	}
+	if machineAudit.ActorType != "service_account" || machineAudit.ActorID == nil || *machineAudit.ActorID != serviceAccountID {
+		t.Fatalf("machine target audit actor = %#v", machineAudit)
 	}
 }
 

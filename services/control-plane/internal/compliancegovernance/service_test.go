@@ -288,9 +288,7 @@ func (f complianceFixture) createRequiredControls(t *testing.T, program Program)
 		}
 		program = updated
 	}
-	for _, control := range program.Controls {
-		controls = append(controls, control)
-	}
+	controls = append(controls, program.Controls...)
 	return controls
 }
 

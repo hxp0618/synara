@@ -83,10 +83,11 @@ func (s *Service) SwitchModelWithIdempotency(
 	if err != nil {
 		return Session{}, false, err
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	var changedEvent persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: "session.model.switch", SuccessStatus: 200,
 		Request: map[string]any{
 			"sessionId": sessionID, "model": modelName, "expectedModel": expectedModel,
@@ -175,8 +176,8 @@ func (s *Service) SwitchModelWithIdempotency(
 			return Session{}, err
 		}
 
-		changedEvent, err = appendEvent(ctx, tx, &locked, eventInput{
-			EventType: "session.model.changed", ActorType: "user", ActorID: &principal.UserID,
+		changedEvent, err = s.appendEvent(ctx, tx, &locked, eventInput{
+			EventType: "session.model.changed", ActorType: actorType, ActorID: &actorID,
 			Payload: map[string]any{
 				"previousModel": previousModel, "model": modelName,
 				"provider": locked.Provider, "supportMode": modelSwitchSupportMode,
@@ -186,7 +187,7 @@ func (s *Service) SwitchModelWithIdempotency(
 			return Session{}, err
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: "session.model.changed", ResourceType: "agent_session", ResourceID: &sessionID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{

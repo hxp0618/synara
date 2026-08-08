@@ -36,8 +36,8 @@
   "database": {
     "rollbackPolicy": "application-only-after-previous-build-target-schema-proof",
     "targetTail": {
-      "name": "000164_session_settlement.sql",
-      "sha256": "sha256:9094065b2ee3881d0a4c83f1b68430d7deec522cc46b557eeec97582f3407b38"
+      "name": "000167_stage7_execution_target_provisioning.sql",
+      "sha256": "sha256:0a18a1d02755f27967f62cc3cd0d72ba907559f88993b822ceed8dac182c9fd1"
     },
     "upgradePolicy": "forward-only-expand-contract"
   },

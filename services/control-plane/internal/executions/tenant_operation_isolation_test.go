@@ -43,6 +43,8 @@ func TestUserExecutionOperationsRejectCrossTenantIDsWithoutMutation(t *testing.T
 
 	_, err = fixture.service.ListPendingInteractions(ctx, otherPrincipal, fixture.sessionID)
 	assertAdvancedOperationProblem(t, err, 404, "session_not_found")
+	_, err = fixture.service.ListPendingInteractionsPage(ctx, otherPrincipal, fixture.sessionID, InteractionListQuery{})
+	assertAdvancedOperationProblem(t, err, 404, "session_not_found")
 	_, err = fixture.service.ProjectProviderCapabilitiesForProject(ctx, otherPrincipal, fixture.projectID, nil)
 	assertAdvancedOperationProblem(t, err, 404, "project_not_found")
 	_, err = fixture.service.ProjectProviderCapabilitiesForSession(ctx, otherPrincipal, fixture.sessionID)
@@ -103,6 +105,8 @@ func TestUserExecutionOperationsRejectCrossTenantIDsWithoutMutation(t *testing.T
 	)
 	assertAdvancedOperationProblem(t, err, 404, "session_not_found")
 	_, err = fixture.service.ListInteractions(ctx, otherPrincipal, created.Value.ExecutionID)
+	assertAdvancedOperationProblem(t, err, 404, "execution_not_found")
+	_, err = fixture.service.ListInteractionsPage(ctx, otherPrincipal, created.Value.ExecutionID, InteractionListQuery{})
 	assertAdvancedOperationProblem(t, err, 404, "execution_not_found")
 	_, err = fixture.service.ListRuntimeIsolationDecisions(
 		ctx, otherPrincipal, created.Value.ExecutionID,

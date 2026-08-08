@@ -101,6 +101,121 @@ func TestActiveTurnSuspendExplicitResumeBindsReceiptOnce(t *testing.T) {
 	}
 }
 
+func TestActiveTurnResumeAttributesServiceAccountAndSharesReplayAcrossRoutes(t *testing.T) {
+	fixture := setupDurableActiveTurnSuspend(t, "active-service-account-resume")
+	acknowledgeActiveTurnSuspend(t, fixture, "cursor-active-service-account")
+	markResourceSuspendQuiescedForTest(
+		t, fixture.service, fixture.worker, fixture.execution.ExecutionID,
+		fixture.lease, fixture.directive.SuspendAttemptID, "active-service-account-quiesced",
+	)
+	completed, err := fixture.service.CompleteResourceSuspend(
+		context.Background(), fixture.worker, fixture.execution.ExecutionID,
+		CompleteResourceSuspendInput{
+			LeaseInput: fixture.lease, SuspendAttemptID: fixture.directive.SuspendAttemptID,
+			CheckpointStatus: "unchanged",
+		},
+		"active-service-account-complete",
+	)
+	if err != nil || completed.Value.Status != "suspended" {
+		t.Fatalf("complete Service Account resume fixture = %#v, %v", completed, err)
+	}
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.execution.TenantID, fixture.execution.SessionID).
+		Update("visibility", "organization").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	serviceAccountID := uuid.New()
+	principal := identity.Principal{
+		UserID: fixture.execution.UserID, ActiveTenantID: &fixture.execution.TenantID,
+		ServiceAccountID: &serviceAccountID,
+	}
+	resumed, err := fixture.service.ResumeActiveTurn(
+		context.Background(), principal, fixture.execution.ExecutionID,
+		"active-service-account-resume-key", "active-service-account-resume-request", "127.0.0.1",
+	)
+	if err != nil || resumed.Replayed || resumed.Value.Status != "recovering" {
+		t.Fatalf("Service Account resume = %#v, %v", resumed, err)
+	}
+	replay, err := fixture.service.ResumeActiveTurnForSession(
+		context.Background(), principal, fixture.execution.SessionID,
+		"active-service-account-resume-key", "active-service-account-resume-replay", "127.0.0.1",
+	)
+	if err != nil || !replay.Replayed || replay.Value.ID != resumed.Value.ID {
+		t.Fatalf("cross-route Service Account resume replay = %#v, %v", replay, err)
+	}
+
+	var auditLog persistence.AuditLog
+	if err := fixture.db.Where(
+		"tenant_id = ? AND action = ? AND resource_id = ?", fixture.execution.TenantID,
+		"execution.active_turn_resumed", fixture.execution.ExecutionID,
+	).Take(&auditLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditLog.ActorType != "service_account" || auditLog.ActorID == nil || *auditLog.ActorID != serviceAccountID {
+		t.Fatalf("Service Account resume Audit attribution = %#v", auditLog)
+	}
+	var receipt persistence.APIIdempotencyKey
+	if err := fixture.db.Where(
+		"tenant_id = ? AND actor_id = ? AND operation = ?", fixture.execution.TenantID,
+		serviceAccountID, "execution.active-turn.resume",
+	).Take(&receipt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if receipt.CompletedAt == nil {
+		t.Fatalf("Service Account resume idempotency receipt = %#v", receipt)
+	}
+}
+
+func TestActiveTurnSteerAttributesServiceAccountAndReplaysWithoutTextProjection(t *testing.T) {
+	fixture := setupDurableActiveTurnSuspend(t, "active-service-account-steer")
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.execution.TenantID, fixture.execution.SessionID).
+		Update("visibility", "organization").Error; err != nil {
+		t.Fatal(err)
+	}
+	serviceAccountID := uuid.New()
+	principal := identity.Principal{
+		UserID: fixture.execution.UserID, ActiveTenantID: &fixture.execution.TenantID,
+		ServiceAccountID: &serviceAccountID,
+	}
+	input := SteerActiveTurnInput{InputText: "continue without leaking this text"}
+	steered, err := fixture.service.RequestSteer(
+		context.Background(), principal, fixture.execution.SessionID, input,
+		"active-service-account-steer-key", "active-service-account-steer-request", "127.0.0.1",
+	)
+	if err != nil || steered.Replayed || steered.Value.CommandType != "SteerTurn" {
+		t.Fatalf("Service Account steer = %#v, %v", steered, err)
+	}
+	replay, err := fixture.service.RequestSteer(
+		context.Background(), principal, fixture.execution.SessionID, input,
+		"active-service-account-steer-key", "active-service-account-steer-replay", "127.0.0.1",
+	)
+	if err != nil || !replay.Replayed || replay.Value.ID != steered.Value.ID {
+		t.Fatalf("Service Account steer replay = %#v, %v", replay, err)
+	}
+	var auditLog persistence.AuditLog
+	if err := fixture.db.Where(
+		"tenant_id = ? AND action = ? AND resource_id = ?", fixture.execution.TenantID,
+		"turn.steer_requested", fixture.execution.ExecutionID,
+	).Take(&auditLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditLog.ActorType != "service_account" || auditLog.ActorID == nil || *auditLog.ActorID != serviceAccountID {
+		t.Fatalf("Service Account steer Audit attribution = %#v", auditLog)
+	}
+	var receipt persistence.APIIdempotencyKey
+	if err := fixture.db.Where(
+		"tenant_id = ? AND actor_id = ? AND operation = ?", fixture.execution.TenantID,
+		serviceAccountID, "session.turn.steer",
+	).Take(&receipt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if receipt.CompletedAt == nil {
+		t.Fatalf("Service Account steer idempotency receipt = %#v", receipt)
+	}
+}
+
 func TestActiveTurnSuspendResumeReacquiresTenantExecutionQuota(t *testing.T) {
 	fixture := setupDurableActiveTurnSuspend(t, "active-resume-quota")
 	acknowledgeActiveTurnSuspend(t, fixture, "cursor-active-resume-quota")
@@ -438,7 +553,18 @@ func setupDurableActiveTurnSuspend(t *testing.T, label string) activeTurnSuspend
 		t.Fatal(err)
 	}
 
-	current = current.Add(1801 * time.Second)
+	// SQLite trigger time advances while the race detector executes this heavy
+	// fixture. Derive the idle boundary from the persisted authority instead of
+	// assuming setup completed within one second of the initial test clock.
+	var session persistence.AgentSession
+	if err := db.Select("meaningful_activity_at", "suspend_after_idle_seconds").
+		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+		Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	current = session.MeaningfulActivityAt.Add(
+		time.Duration(session.SuspendAfterIdleSeconds+1) * time.Second,
+	)
 	if err := db.Model(&persistence.WorkerLease{}).
 		Where("tenant_id = ? AND execution_id = ?", execution.TenantID, execution.ExecutionID).
 		Updates(map[string]any{"heartbeat_at": current, "expires_at": current.Add(service.leaseTTL)}).Error; err != nil {

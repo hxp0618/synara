@@ -26,7 +26,7 @@ func (s *Server) compactSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperQueuedSessionOperation(result.Value))
 }
 
 func (s *Server) startSessionReview(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +48,7 @@ func (s *Server) startSessionReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setIdempotencyReplayHeader(w, result.Replayed)
-	writeJSON(w, result.StatusCode, result.Value)
+	writeJSON(w, result.StatusCode, projectDeveloperQueuedSessionOperation(result.Value))
 }
 
 func (s *Server) rollbackSession(w http.ResponseWriter, r *http.Request) {

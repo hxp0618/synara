@@ -178,7 +178,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	workerMode := effectiveWorkerMode(d.config)
 	d.logger.Info("agentd registered", "workerId", registered.Worker.ID, "executionTargetId", registered.Worker.ExecutionTargetID, "targetKind", registered.Worker.TargetKind, "workerMode", workerMode)
-	runContext, cancelRun := context.WithCancel(context.Background())
+	runContext, cancelRunCause := context.WithCancelCause(context.Background())
+	cancelRun := func() { cancelRunCause(nil) }
 	defer cancelRun()
 	runDone := make(chan struct{})
 	defer close(runDone)
@@ -186,8 +187,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.waitForDrain(ctx, cancelRun, runDone, drainMarked)
 	heartbeatContext, stopHeartbeat := context.WithCancel(runContext)
 	defer stopHeartbeat()
-	workerFatalErrors := make(chan error, 1)
-	go d.heartbeatLoop(heartbeatContext, cancelRun, workerFatalErrors)
+	go d.heartbeatLoop(heartbeatContext, cancelRunCause)
 	if providerHostPrestartEnabled(d.config) {
 		d.runner.startProviderHostV2Prestart(ctx, d.config.RequestTimeout)
 		defer d.runner.stopProviderHostV2Prestart()
@@ -197,7 +197,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	for {
 		if d.draining.Load() || runContext.Err() != nil {
-			if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+			if fatalErr := workerFatalError(runContext); fatalErr != nil {
 				return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
 			}
 			if d.draining.Load() {
@@ -241,7 +241,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return fmt.Errorf("claim execution: %w", err)
 			}
 			if d.draining.Load() || runContext.Err() != nil {
-				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+				if fatalErr := workerFatalError(runContext); fatalErr != nil {
 					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
 				}
 				if d.draining.Load() {
@@ -251,7 +251,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			d.logger.Warn("execution claim failed", "error", err)
 			if !waitContext(runContext, d.config.PollInterval) {
-				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+				if fatalErr := workerFatalError(runContext); fatalErr != nil {
 					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
 				}
 				return nil
@@ -272,6 +272,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 						return fmt.Errorf("claim Workspace cleanup: %w", cleanupErr)
 					}
 					if d.draining.Load() || runContext.Err() != nil {
+						if fatalErr := workerFatalError(runContext); fatalErr != nil {
+							return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+						}
 						if d.draining.Load() {
 							<-drainMarked
 						}
@@ -279,7 +282,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 					}
 					d.logger.Warn("Workspace cleanup claim failed", "error", cleanupErr)
 					if !waitContext(runContext, d.config.PollInterval) {
-						if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+						if fatalErr := workerFatalError(runContext); fatalErr != nil {
 							return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
 						}
 						return nil
@@ -291,7 +294,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				}
 			}
 			if !waitContext(runContext, d.config.PollInterval) {
-				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+				if fatalErr := workerFatalError(runContext); fatalErr != nil {
 					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
 				}
 				return nil
@@ -657,8 +660,7 @@ func (d *Daemon) waitForDrain(
 
 func (d *Daemon) heartbeatLoop(
 	ctx context.Context,
-	cancelRun context.CancelFunc,
-	fatalErrors chan<- error,
+	cancelRun context.CancelCauseFunc,
 ) {
 	ticker := time.NewTicker(d.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -672,11 +674,7 @@ func (d *Daemon) heartbeatLoop(
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				if isWorkerRevocationError(err) {
-					select {
-					case fatalErrors <- err:
-					default:
-					}
-					cancelRun()
+					cancelRun(err)
 					return
 				}
 				d.logger.Warn("worker heartbeat failed", "error", err)
@@ -685,13 +683,12 @@ func (d *Daemon) heartbeatLoop(
 	}
 }
 
-func receiveWorkerFatalError(fatalErrors <-chan error) error {
-	select {
-	case err := <-fatalErrors:
+func workerFatalError(ctx context.Context) error {
+	err := context.Cause(ctx)
+	if isWorkerRevocationError(err) {
 		return err
-	default:
-		return nil
 	}
+	return nil
 }
 
 func (d *Daemon) runExecution(

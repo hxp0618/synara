@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
@@ -346,9 +347,13 @@ func completeProviderCapabilityExecutionWithManifest(
 
 type providerCapabilityHTTPFixture struct {
 	db               *gorm.DB
+	server           *Server
+	executionService *executions.Service
 	handler          http.Handler
 	cookieName       string
 	tenantID         uuid.UUID
+	organizationID   uuid.UUID
+	ownerUserID      uuid.UUID
 	projectID        uuid.UUID
 	sessionID        uuid.UUID
 	privateSessionID uuid.UUID
@@ -427,6 +432,7 @@ func newProviderCapabilityHTTPFixture(t *testing.T) providerCapabilityHTTPFixtur
 	cfg := config.Config{
 		Platform: profile, CookieName: "synara_provider_capability_session", CookiePath: "/",
 		SessionTTL: time.Hour, SessionIdleTTL: time.Hour,
+		ArtifactPresignTTL: time.Minute, ArtifactMaxUploadBytes: 1 << 20,
 		SSEPollInterval: 20 * time.Millisecond, SSEHeartbeatInterval: time.Second,
 		SSEWriteTimeout: time.Second, SSELeaseTTL: time.Minute,
 		SSEMaxConnectionsPerUser: 1, SSEMaxConnectionsPerTenant: 10,
@@ -436,16 +442,23 @@ func newProviderCapabilityHTTPFixture(t *testing.T) providerCapabilityHTTPFixtur
 		store.DB(), sessionService, time.Minute, 90*time.Second, time.Hour, nil, targetService,
 		executions.WithProjectService(projectService),
 	)
+	artifactStore, err := artifacts.NewLocalStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactService := artifacts.NewService(store.DB(), artifactStore, cfg, executionService, sessionService)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := New(
 		cfg, store.DB(), identityService, nil, projectService, sessionService, executionService, targetService,
-		nil, nil, nil, nil, nil, observability.New(store.DB(), observability.Config{SessionIdleTTL: cfg.SessionIdleTTL}), nil, nil, nil, nil, nil, logger,
+		nil, artifactService, nil, nil, nil, observability.New(store.DB(), observability.Config{SessionIdleTTL: cfg.SessionIdleTTL}), nil, nil, nil, nil, nil, logger,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return providerCapabilityHTTPFixture{
-		db: store.DB(), handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
+		db: store.DB(), server: server, executionService: executionService,
+		handler: server.Handler(), cookieName: cfg.CookieName,
+		tenantID: domain.TenantID, organizationID: domain.OrganizationID, ownerUserID: domain.UserID,
 		projectID: projectID, sessionID: created.ID, privateSessionID: privateSession.ID,
 		executionID: execution.ID, targetID: targetID,
 		memberToken:   createProviderCapabilityLogin(t, store.DB(), memberID, domain.TenantID),

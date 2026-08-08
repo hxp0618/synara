@@ -33,6 +33,16 @@ type Artifact struct {
 	DeletedAt      *time.Time `json:"deletedAt"`
 }
 
+type ArtifactListQuery struct {
+	Limit  int
+	Cursor string
+}
+
+type ArtifactPage struct {
+	Items      []Artifact `json:"items"`
+	NextCursor *string    `json:"nextCursor"`
+}
+
 type CreateInput struct {
 	Kind         string     `json:"kind"`
 	OriginalName *string    `json:"originalName"`

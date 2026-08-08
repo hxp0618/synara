@@ -46,19 +46,21 @@ func startProviderCredentialBroker(
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen for Provider Credential broker: %w", err)
 	}
-	reverseProxy := httputil.NewSingleHostReverseProxy(configuration.upstream)
-	reverseProxy.Transport, err = providerCredentialBrokerTransport(configuration.upstream)
+	transport, err := providerCredentialBrokerTransport(configuration.upstream)
 	if err != nil {
 		_ = listener.Close()
 		return nil, nil, err
 	}
-	originalDirector := reverseProxy.Director
-	reverseProxy.Director = func(request *http.Request) {
-		originalDirector(request)
-		request.Host = configuration.upstream.Host
-		request.Header.Del("Authorization")
-		request.Header.Del("X-Api-Key")
-		configuration.authorizeUpstream(request.Header)
+	reverseProxy := &httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.SetURL(configuration.upstream)
+			request.SetXForwarded()
+			request.Out.Host = configuration.upstream.Host
+			request.Out.Header.Del("Authorization")
+			request.Out.Header.Del("X-Api-Key")
+			configuration.authorizeUpstream(request.Out.Header)
+		},
 	}
 	reverseProxy.ErrorHandler = func(response http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(response, "Provider upstream is unavailable", http.StatusBadGateway)

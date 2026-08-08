@@ -114,10 +114,11 @@ func (s *Service) requestControlCommand(
 	); err != nil {
 		return OperationResult[ControlCommand]{}, err
 	}
+	actorType, actorID := identity.ActorType(principal), identity.ActorID(principal)
 
 	appended := make([]persistence.SessionEvent, 0, 2)
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
-		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		TenantID: tenantID, ActorID: actorID, Key: idempotencyKey,
 		Operation: request.Operation, SuccessStatus: 202,
 		Request: map[string]any{"sessionId": sessionID, "payload": request.Payload},
 	}, func(tx *gorm.DB) (ControlCommand, error) {
@@ -199,7 +200,7 @@ func (s *Service) requestControlCommand(
 			return ControlCommand{}, problem.Wrap(409, "control_command_conflict", "The Control command conflicts with another active command.", err)
 		}
 		requestedEvent, err := s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
-			EventType: request.RequestedEvent, ActorType: "user", ActorID: &principal.UserID,
+			EventType: request.RequestedEvent, ActorType: actorType, ActorID: &actorID,
 			ExecutionID: &execution.ID, WorkerID: execution.WorkerID,
 			Generation: model.DeliveryGeneration,
 			Payload:    controlCommandEventPayload(model, request.Payload),
@@ -215,7 +216,7 @@ func (s *Service) requestControlCommand(
 			return ControlCommand{}, problem.Wrap(500, "control_command_outbox_failed", "The Control command event could not be queued.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: &actorID,
 			Action: request.AuditAction, ResourceType: "agent_execution", ResourceID: &execution.ID,
 			OrganizationID: &session.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
@@ -226,7 +227,7 @@ func (s *Service) requestControlCommand(
 		}
 		if immediateInterrupt {
 			cancelledEvent, err := s.cancelExecutionLocked(
-				ctx, tx, &execution, nil, "user", &principal.UserID, now, "interrupt-before-claim",
+				ctx, tx, &execution, nil, actorType, &actorID, now, "interrupt-before-claim",
 			)
 			if err != nil {
 				return ControlCommand{}, err

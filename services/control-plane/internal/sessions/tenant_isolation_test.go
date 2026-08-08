@@ -33,6 +33,8 @@ func TestSessionOperationsRejectCrossTenantNestedIDSubstitution(t *testing.T) {
 	assertSessionProblemCode(t, err, "session_not_found")
 	_, err = fixture.service.ListByProject(ctx, otherPrincipal, fixture.projectID)
 	assertSessionProblemCode(t, err, "project_not_found")
+	_, err = fixture.service.ListByProjectPage(ctx, otherPrincipal, fixture.projectID, SessionListQuery{})
+	assertSessionProblemCode(t, err, "project_not_found")
 	_, err = fixture.service.CreateTurn(
 		ctx, otherPrincipal, fixture.sessionID, CreateTurnInput{InputText: "cross-Tenant turn"},
 		"session-cross-tenant-turn", "127.0.0.1",

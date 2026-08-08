@@ -47,6 +47,17 @@ func (a *Authorizer) ActiveSupportGrant(
 }
 
 func (a *Authorizer) TenantRole(ctx context.Context, userID, tenantID uuid.UUID) (string, error) {
+	if machine, ok := MachinePrincipalFromContext(ctx); ok {
+		if machine.TenantID != tenantID {
+			return "", problem.New(403, "service_account_tenant_forbidden", "Service Account cannot access this tenant.")
+		}
+		if machine.OrganizationID != nil {
+			// Organization-scoped keys have no tenant-wide authority. The member
+			// baseline permits tenant identity reads needed by shared domain code.
+			return "member", nil
+		}
+		return machine.Role, nil
+	}
 	var membership persistence.TenantMembership
 	err := a.db.WithContext(ctx).
 		Where("tenant_id = ? AND user_id = ? AND status = ?", tenantID, userID, "active").
@@ -99,6 +110,35 @@ func (a *Authorizer) RequireOrganization(
 	userID, tenantID, organizationID uuid.UUID,
 	permission Permission,
 ) (OrganizationAccess, error) {
+	if machine, ok := MachinePrincipalFromContext(ctx); ok {
+		if machine.TenantID != tenantID {
+			return OrganizationAccess{}, problem.New(403, "service_account_tenant_forbidden", "Service Account cannot access this tenant.")
+		}
+		var organization persistence.Organization
+		err := a.db.WithContext(ctx).
+			Select("id", "status").
+			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, organizationID).
+			Take(&organization).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return OrganizationAccess{}, problem.New(404, "organization_not_found", "Organization not found.")
+		}
+		if err != nil {
+			return OrganizationAccess{}, problem.Wrap(500, "organization_authorization_failed", "Failed to authorize organization access.", err)
+		}
+		if machine.OrganizationID != nil {
+			if *machine.OrganizationID != organizationID {
+				return OrganizationAccess{}, problem.New(404, "organization_not_found", "Organization not found.")
+			}
+			if !OrganizationAllows(machine.Role, permission) {
+				return OrganizationAccess{}, problem.New(403, "organization_forbidden", "Service Account does not have permission to perform this organization action.")
+			}
+			return OrganizationAccess{TenantRole: "member", OrganizationRole: machine.Role}, nil
+		}
+		if !TenantAllows(machine.Role, permission) {
+			return OrganizationAccess{}, problem.New(403, "tenant_forbidden", "Service Account does not have permission to perform this tenant action.")
+		}
+		return OrganizationAccess{TenantRole: machine.Role}, nil
+	}
 	tenantRole, err := a.TenantRole(ctx, userID, tenantID)
 	if err != nil {
 		return OrganizationAccess{}, err

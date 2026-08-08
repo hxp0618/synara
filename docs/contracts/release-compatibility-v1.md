@@ -27,9 +27,10 @@ properties protect the evidence input boundary but do not authenticate Git clean
 - Managed Provider Host emits Protocol `2.2`; Control Plane accepts major `2` with minor `>= 1`. Major mismatch and older
   minor are non-schedulable. The Worker manifest's provider/runtime compatibility checks remain the per-image authority.
 - Worker Manifest storage schema is `3` and is independent from Workspace layout v3.
-- The current Control Plane Migration tail is `000164_session_settlement.sql` with its exact
-  SHA-256 frozen in the machine matrix. Migration 164 adds the authoritative Session settlement marker used by the
-  Activity lifecycle. Migration 163 makes Candidate v5 the only active release authority, binds the
+- The current Control Plane Migration tail is `000167_stage7_execution_target_provisioning.sql` with its exact
+  SHA-256 frozen in the machine matrix. Migrations 165-167 add the Stage 7 developer-platform authorities while retaining
+  the same forward-only application rollback boundary. Migration 164 adds the authoritative Session settlement marker
+  used by the Activity lifecycle. Migration 163 makes Candidate v5 the only active release authority, binds the
   source-current compatibility matrix projection at PostgreSQL and SQLite boundaries, and retains terminal v2-v4 bytes
   as audit history. Migration 162 upgrades current Operations evidence to v2 and retains v1 history without authority.
   Earlier migrations remain immutable. Migrations are forward-only expand/contract; application rollback is allowed only

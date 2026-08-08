@@ -74,7 +74,7 @@ func (s *Service) ArchiveByRetention(
 			); err != nil {
 				return err
 			}
-			event, err := appendEvent(ctx, tx, &model, eventInput{
+			event, err := s.appendEvent(ctx, tx, &model, eventInput{
 				EventType: "session.archived", ActorType: "system",
 				Payload: map[string]any{"reason": "retention_policy", "cutoff": cutoff},
 			})

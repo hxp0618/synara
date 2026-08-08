@@ -23,6 +23,7 @@ htmlcov/
 *.tsbuildinfo
 apps/*/dist
 .astro
+apps/developer-docs/.generated
 packages/*/dist
 .env
 .env.*

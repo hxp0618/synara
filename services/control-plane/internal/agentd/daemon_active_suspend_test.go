@@ -246,7 +246,7 @@ func TestDaemonRunExecutionActiveTurnSuspendTimeoutFencesGeneration(t *testing.T
 		Reason:               resourceSuspendReasonActiveIdleTimeout,
 		SuspendAttemptID:     uuid.New(),
 		RequestedAt:          time.Now().UTC(),
-		CheckpointDeadlineAt: time.Now().UTC().Add(150 * time.Millisecond),
+		CheckpointDeadlineAt: time.Now().UTC().Add(2 * time.Second),
 	}
 	delivery := executions.ControlCommandDelivery{
 		ControlCommandID: controlCommandID,
@@ -343,7 +343,7 @@ func TestDaemonRunExecutionActiveTurnSuspendTimeoutFencesGeneration(t *testing.T
 	}))
 	defer server.Close()
 
-	daemon := newProviderHostTestDaemon(t, server.URL, 250*time.Millisecond)
+	daemon := newProviderHostTestDaemon(t, server.URL, time.Second)
 	execution := executions.Execution{ID: executionID, TurnID: turnID, Generation: lease.Generation, Status: "leased"}
 	workload := executions.Workload{
 		TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(),

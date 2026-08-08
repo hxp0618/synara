@@ -21,7 +21,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 	models := []any{
 		&persistence.AgentExecution{}, &persistence.WorkerInstance{}, &persistence.WorkerLease{},
-		&persistence.ExecutionTarget{}, &persistence.OutboxMessage{}, &persistence.SSEConnectionLease{},
+		&persistence.ExecutionTarget{}, &persistence.ExecutionTargetProvisioningOperation{}, &persistence.OutboxMessage{}, &persistence.SSEConnectionLease{},
 		&persistence.LoginSession{}, &persistence.Artifact{}, &persistence.AgentSession{},
 		&persistence.ExecutionRecoveryBundle{}, &persistence.ExecutionSuspendAttempt{}, &persistence.SessionEvent{},
 		&persistence.ProviderCredential{}, &persistence.ExecutionProviderCredentialGrant{},
@@ -49,6 +49,14 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	turnID := uuid.New()
 	now := time.Now().UTC()
 	if err := db.Create(&persistence.ExecutionTarget{ID: targetID, Kind: "docker", Name: "test", Status: "active", Capabilities: map[string]any{}}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&persistence.ExecutionTargetProvisioningOperation{
+		ID: uuid.New(), TenantID: uuid.New(), ExecutionTargetID: targetID, ActorType: "user", ActorID: uuid.New(),
+		Action: "install", IdempotencyKey: "metrics-operation", RequestHash: strings.Repeat("a", 64),
+		State: "accepted", AttemptGeneration: 2, Result: map[string]any{}, RequestID: "metrics", IPAddress: "127.0.0.1",
+		CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 	for _, session := range []persistence.AgentSession{
@@ -277,6 +285,9 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		`synara_workers_administrative{status="revoked",target_kind="docker"} 1`,
 		`synara_stale_workers{status="online",target_kind="docker"} 1`,
 		`synara_executions{status="running",target_kind="docker"} 1`,
+		`synara_execution_target_provisioning_operations{action="install",state="accepted"} 1`,
+		`synara_execution_target_provisioning_claim_takeovers_total 1`,
+		`synara_execution_target_provisioning_oldest_accepted_age_seconds`,
 		`synara_sessions_resource_state{resource_state="active",session_status="active"} 1`,
 		`synara_sessions_resource_state{resource_state="waiting",session_status="active"} 1`,
 		`synara_sessions_resource_state{resource_state="suspended",session_status="suspended"} 1`,

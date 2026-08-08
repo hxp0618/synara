@@ -1,0 +1,12 @@
+[
+  {
+    "id": "service-a",
+    "projectId": "00000000-0000-0000-0000-000000000001",
+    "instruction": "Migrate this service from the legacy HTTP client to the shared client and update its focused tests."
+  },
+  {
+    "id": "service-b",
+    "projectId": "00000000-0000-0000-0000-000000000002",
+    "instruction": "Apply the same migration while preserving this service's custom retry policy."
+  }
+]

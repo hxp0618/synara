@@ -116,6 +116,7 @@ COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
+COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
@@ -172,6 +173,56 @@ ENV SYNARA_ADMIN_HOST=0.0.0.0 \
 
 USER node
 EXPOSE 3774
+CMD ["node", "/app/server.mjs"]
+
+FROM ${BUN_IMAGE} AS developer-docs-build
+
+WORKDIR /app
+COPY package.json bun.lock bunfig.toml ./
+COPY apps/admin/package.json ./apps/admin/package.json
+COPY apps/desktop/package.json ./apps/desktop/package.json
+COPY apps/developer-docs/package.json ./apps/developer-docs/package.json
+COPY apps/marketing/package.json ./apps/marketing/package.json
+COPY apps/provider-host/package.json ./apps/provider-host/package.json
+COPY apps/server/package.json ./apps/server/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
+COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
+COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY scripts/package.json ./scripts/package.json
+COPY patches ./patches
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile \
+    --filter @synara/developer-docs \
+    --filter @synara/scripts
+COPY apps/developer-docs ./apps/developer-docs
+COPY scripts/generate-stage7-public-openapi.ts ./scripts/generate-stage7-public-openapi.ts
+COPY scripts/lib/stage7-public-openapi.ts ./scripts/lib/stage7-public-openapi.ts
+COPY docs/api ./docs/api
+
+ARG PUBLIC_POLARIS_CONSOLE_URL=/console
+ENV PUBLIC_POLARIS_CONSOLE_URL=${PUBLIC_POLARIS_CONSOLE_URL}
+RUN bun run stage7:docs:build
+
+FROM ${SERVER_RUNTIME_IMAGE} AS developer-docs-runtime
+
+ARG POLARIS_DEVELOPER_DOCS_REVISION=unknown
+LABEL org.opencontainers.image.title="Polaris Developer Docs" \
+  org.opencontainers.image.revision="${POLARIS_DEVELOPER_DOCS_REVISION}"
+
+WORKDIR /app
+COPY --from=developer-docs-build /app/apps/developer-docs/dist ./dist
+COPY apps/developer-docs/server.mjs ./server.mjs
+
+ENV NODE_ENV=production \
+  POLARIS_DEVELOPER_DOCS_HOST=0.0.0.0 \
+  POLARIS_DEVELOPER_DOCS_PORT=8080 \
+  POLARIS_DEVELOPER_DOCS_REVISION=${POLARIS_DEVELOPER_DOCS_REVISION}
+
+USER node
+EXPOSE 8080
 CMD ["node", "/app/server.mjs"]
 
 FROM ${AGENTD_BUILD_IMAGE} AS agentd-build

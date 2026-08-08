@@ -81,7 +81,8 @@ func (s *Service) GetSessionUsage(
 	if err != nil {
 		return SessionUsage{}, err
 	}
-	if session.Visibility == "private" && session.CreatedBy != principal.UserID && !authorization.TenantAllows(access.TenantRole, authorization.SessionRead) {
+	if session.Visibility == "private" && (identity.IsServiceAccount(principal) ||
+		(session.CreatedBy != principal.UserID && !authorization.TenantAllows(access.TenantRole, authorization.SessionRead))) {
 		return SessionUsage{}, problem.New(404, "session_not_found", "Session not found.")
 	}
 	var summaries []persistence.ExecutionUsageSummary

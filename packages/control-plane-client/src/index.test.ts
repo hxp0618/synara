@@ -46,6 +46,38 @@ afterEach(() => {
 });
 
 describe("controlPlaneClient", () => {
+  it("encodes bounded Organization Project pagination", async () => {
+    const fetchMock = vi.fn<RequiredInitFetch>(
+      async () => new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.listProjects("tenant/one", "organization/one", {
+      limit: 50,
+      cursor: "cursor+/=value",
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/tenants/tenant%2Fone/organizations/organization%2Fone/projects?limit=50&cursor=cursor%2B%2F%3Dvalue",
+    ]);
+  });
+
+  it("encodes bounded Project Session pagination", async () => {
+    const fetchMock = vi.fn<RequiredInitFetch>(
+      async () => new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.listProjectSessions("project/one", {
+      limit: 50,
+      cursor: "cursor+/=value",
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/projects/project%2Fone/sessions?limit=50&cursor=cursor%2B%2F%3Dvalue",
+    ]);
+  });
+
   it("resolves only a configured credential-free HTTPS internal Status Board URL", () => {
     expect(
       resolveControlPlaneInternalStatusBoardURL({
@@ -1006,7 +1038,7 @@ describe("controlPlaneClient", () => {
     expect(page.lastSequence).toBe(23);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "/v1/sessions/session%2Fone/events?afterSequence=0&limit=500",
+      "/v1/sessions/session%2Fone/events?afterSequence=0&limit=200",
       expect.objectContaining({ credentials: "include" }),
     );
     const turnRequest = fetchMock.mock.calls[1]![1];
@@ -2599,6 +2631,77 @@ describe("controlPlaneClient", () => {
           scopes: ["scim.write"],
         }),
       }),
+    );
+  });
+
+  it("queries bounded per-key developer API usage", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            tenantId: "tenant/one",
+            serviceAccountId: "key/one",
+            from: "2026-08-02T00:00:00Z",
+            to: "2026-08-03T00:00:00Z",
+            items: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.getServiceAccountAPIUsage("tenant/one", "key/one", {
+      from: "2026-08-02T00:00:00Z",
+      to: "2026-08-03T00:00:00Z",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/tenants/tenant%2Fone/service-accounts/key%2Fone/usage?from=2026-08-02T00%3A00%3A00Z&to=2026-08-03T00%3A00%3A00Z",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("manages signed developer Webhooks without exposing secrets on list", async () => {
+    const responses = [
+      new Response(
+        JSON.stringify({
+          endpoint: { id: "webhook/one", name: "CI events", status: "active" },
+          secret: "whsec_once",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const issued = await controlPlaneClient.createDeveloperWebhook("tenant/one", {
+      name: "CI events",
+      url: "https://example.com/hooks/polaris",
+      eventTypes: ["turn.completed", "execution.failed"],
+    });
+    await controlPlaneClient.listDeveloperWebhookDeliveries("tenant/one", "webhook/one", 25);
+
+    expect(issued.secret).toBe("whsec_once");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/tenants/tenant%2Fone/developer-webhooks",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "CI events",
+          url: "https://example.com/hooks/polaris",
+          eventTypes: ["turn.completed", "execution.failed"],
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/tenants/tenant%2Fone/developer-webhooks/webhook%2Fone/deliveries?limit=25",
+      expect.objectContaining({ credentials: "include" }),
     );
   });
 

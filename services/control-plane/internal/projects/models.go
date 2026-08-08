@@ -23,6 +23,16 @@ type Project struct {
 	ArchivedAt      *time.Time `json:"archivedAt"`
 }
 
+type ProjectListQuery struct {
+	Limit  int
+	Cursor string
+}
+
+type ProjectPage struct {
+	Items      []Project `json:"items"`
+	NextCursor *string   `json:"nextCursor"`
+}
+
 type CreateProjectInput struct {
 	Name            string               `json:"name"`
 	RepositoryURL   *string              `json:"repositoryUrl"`
