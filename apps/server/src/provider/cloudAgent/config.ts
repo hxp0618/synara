@@ -8,6 +8,19 @@ export interface CloudAgentBackendConfig {
   readonly runtimeSha256?: string;
 }
 
+export function assertCloudAgentNode24(
+  nodeVersion = process.versions.node,
+  bunVersion = process.versions.bun,
+): void {
+  const [major = 0, minor = 0, patch = 0] = nodeVersion.split(".").map(Number);
+  const isSupportedNode = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
+  if (!isSupportedNode || bunVersion !== undefined) {
+    throw new Error(
+      `The Cloud Agent Codex backend requires Node.js >=24.13.1 <25; current runtime is ${bunVersion ? `Bun ${bunVersion} (Node compatibility ${nodeVersion})` : `Node.js ${nodeVersion}`}.`,
+    );
+  }
+}
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
 export function readCloudAgentBackendConfig(

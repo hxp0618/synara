@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   CLOUD_AGENT_PROTOCOL_VERSION,
+  assertCloudAgentCommandEnvelope,
   type CloudAgentCapabilityMap,
   type CloudAgentCommandEnvelope,
   type CloudAgentCommandType,
@@ -85,7 +86,7 @@ export function makeCloudAgentCommand(input: {
   readonly commandId?: string;
 }): CloudAgentCommandEnvelope {
   const commandId = input.commandId ?? randomUUID();
-  return {
+  const command: CloudAgentCommandEnvelope = {
     requestId: commandId,
     protocolVersion: CLOUD_AGENT_PROTOCOL_VERSION,
     executionId: input.executionId,
@@ -95,6 +96,8 @@ export function makeCloudAgentCommand(input: {
     occurredAt: new Date().toISOString(),
     payload: input.payload ?? {},
   };
+  assertCloudAgentCommandEnvelope(command);
+  return command;
 }
 
 export function cloudAgentRunnerInput(input: ProviderSessionStartInput): Record<string, unknown> {

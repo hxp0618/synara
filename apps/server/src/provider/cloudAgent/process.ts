@@ -1,18 +1,44 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 
 import {
   createCloudAgentStdioClient,
-  type CloudAgentStdioClient,
-} from "@synara/cloud-agent-runtime";
+  resolveCloudAgentRuntimeExecutable,
+} from "@synara/cloud-agent-distribution";
 
 import { buildProviderChildEnvironment } from "../../providerChildEnvironment.ts";
 import type { CloudAgentBackendConfig } from "./config.ts";
 
-export type CloudAgentProcessClient = CloudAgentStdioClient;
+export type CloudAgentProcessClient = ReturnType<typeof createCloudAgentStdioClient>;
 export type CloudAgentProcessClientFactory = (input: {
   readonly cwd: string;
 }) => Promise<CloudAgentProcessClient>;
+
+export function buildCloudAgentProcessEnvironment(
+  baseEnvironment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return buildProviderChildEnvironment({
+    provider: "codex",
+    ...(baseEnvironment ? { baseEnv: baseEnvironment } : {}),
+    // A packaged desktop server is itself running through Electron in Node mode.
+    // Its process.execPath is the Electron binary, so the runtime child needs the
+    // same narrowly granted flag to execute the bundled standalone module.
+    inheritedNativeCapabilityKeys: ["ELECTRON_RUN_AS_NODE"],
+  });
+}
+
+export function resolveDefaultCloudAgentRuntimePath(entrypoint = process.argv[1]): string {
+  const moduleDirectory = entrypoint ? dirname(resolve(entrypoint)) : process.cwd();
+  const bundledRuntime = resolve(moduleDirectory, "cloudAgentRuntimeChild.mjs");
+  if (existsSync(bundledRuntime)) return bundledRuntime;
+  const manifestPath = createRequire(resolve(moduleDirectory, "package.json")).resolve(
+    "@synara/cloud-agent-distribution/manifest.json",
+  );
+  return resolveCloudAgentRuntimeExecutable(dirname(manifestPath));
+}
 
 export function makeCloudAgentProcessClientFactory(input: {
   readonly config: CloudAgentBackendConfig;
@@ -29,10 +55,7 @@ export function makeCloudAgentProcessClientFactory(input: {
 
   return async ({ cwd }) => {
     await verify();
-    const environment = buildProviderChildEnvironment({
-      provider: "codex",
-      ...(input.baseEnvironment ? { baseEnv: input.baseEnvironment } : {}),
-    });
+    const environment = buildCloudAgentProcessEnvironment(input.baseEnvironment);
     return createCloudAgentStdioClient({
       command: process.execPath,
       args: [runtimePath],

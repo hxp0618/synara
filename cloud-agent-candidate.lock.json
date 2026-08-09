@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "kind": "synara-cloud-agent-release-candidate-lock",
+  "source": {
+    "repository": "https://github.com/hxp0618/cloud-agents",
+    "commit": "49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a"
+  },
+  "release": {
+    "tag": "cloud-agent-m1-rc.1",
+    "baseUrl": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1"
+  },
+  "candidateSha256": "sha256:b9931233d46aeaf1392197095483c2e3409f628a47b2ba92c8e57bb38b444676",
+  "standaloneRuntime": {
+    "filename": "cloud-agent-runtime-standalone.mjs",
+    "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/cloud-agent-runtime-standalone.mjs",
+    "sha256": "sha256:c24a1c23f89f62e714e3465b59a4be12e1b5cb75387a2d0d6de9811803064521"
+  },
+  "packages": [
+    {
+      "name": "@synara/cloud-agent-distribution",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+      "sha256": "sha256:0326203b90a5be4f566b3d4282aea5fda8532753855a8a6b4b449776a966e29c"
+    },
+    {
+      "name": "@synara/cloud-agent-protocol",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+      "sha256": "sha256:e46c5a639482ac8af5c9794cda2c03e93779ce7d10cd1aac52761d6ec3cb2ac2"
+    },
+    {
+      "name": "@synara/cloud-agent-provider-api",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+      "sha256": "sha256:88737cda1b0cef0922f50509acb154e2112a2d78acf219a1a5568edf3d731a59"
+    },
+    {
+      "name": "@synara/cloud-agent-provider-claude",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+      "sha256": "sha256:e6a3058fe21fc9799d242bd8c3ae7d8e7bcf7674f2003319d493d4afdda636fd"
+    },
+    {
+      "name": "@synara/cloud-agent-provider-codex",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+      "sha256": "sha256:8715b6c9d116d8b229c810903d1d7da16aaa6fed327020a06e0bd48813f49ec8"
+    },
+    {
+      "name": "@synara/cloud-agent-runtime",
+      "version": "0.2.0-rc.1",
+      "filename": "synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
+      "sha256": "sha256:89aaa8bc42b2527fee584dfa9bccbc3e994dc1c67b99166989ca20be9fcf6488"
+    },
+    {
+      "name": "@synara/cloud-agent-testkit",
+      "version": "0.1.0-rc.1",
+      "filename": "synara-cloud-agent-testkit-0.1.0-rc.1.tgz",
+      "url": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-testkit-0.1.0-rc.1.tgz",
+      "sha256": "sha256:5e4031c8bc449a78e0d5dff6721c7ab708361a5c1b7efa5dfd833752d5add21c"
+    }
+  ]
+}

@@ -59,6 +59,12 @@
         "@effect/sql-sqlite-bun": "catalog:",
         "@opencode-ai/sdk": "^1.15.13",
         "@pierre/diffs": "^1.2.12",
+        "@synara/cloud-agent-distribution": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+        "@synara/cloud-agent-protocol": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+        "@synara/cloud-agent-provider-api": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+        "@synara/cloud-agent-provider-claude": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+        "@synara/cloud-agent-provider-codex": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+        "@synara/cloud-agent-runtime": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
         "@xterm/headless": "^6.0.0",
         "effect": "catalog:",
         "node-pty": "^1.1.0",
@@ -202,6 +208,12 @@
     "@effect/platform-node-shared@https://pkg.pr.new/Effect-TS/effect-smol/@effect/platform-node-shared@8881a9b606d84a6f5eb6615279138322984f5368": "patches/@effect%2Fplatform-node-shared@8881a9b.patch",
   },
   "overrides": {
+    "@synara/cloud-agent-distribution": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-protocol": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-api": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-claude": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-codex": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-runtime": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
     "axios": "^1.16.0",
     "defu": "^6.1.5",
     "fast-uri": "^3.1.2",
@@ -959,6 +971,18 @@
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
     "@synara/cli": ["@synara/cli@workspace:apps/server"],
+
+    "@synara/cloud-agent-distribution": ["@synara/cloud-agent-distribution@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz", { "peerDependencies": { "@synara/cloud-agent-protocol": "0.1.0-rc.1", "@synara/cloud-agent-provider-api": "0.1.0-rc.1", "@synara/cloud-agent-provider-claude": "0.1.0-rc.1", "@synara/cloud-agent-provider-codex": "0.1.0-rc.1", "@synara/cloud-agent-runtime": "0.2.0-rc.1" }, "bin": { "cloud-agent-runtime": "./dist/stdio.mjs" } }, "sha512-4SYOfTPV3LJ8dL2vMYgBVX5B00Aye4Dg1Z77FkyL3DxgjK7pO3O8B61RybMMR60tUmxy2boU2awmaU1AJsbQyg=="],
+
+    "@synara/cloud-agent-protocol": ["@synara/cloud-agent-protocol@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz", {}, "sha512-H/u54ExSuc1/Phi8hBMj87Mmwag0Wt4z/Mhw9UrgLlEqtOG1ERsvUzdFiO5uuaCM5/xi5D49Uk67WaD4S8NJUg=="],
+
+    "@synara/cloud-agent-provider-api": ["@synara/cloud-agent-provider-api@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-api-0.1.0-rc.1.tgz", { "peerDependencies": { "@synara/cloud-agent-protocol": "0.1.0-rc.1" } }, "sha512-iRkToFahNR8wyep2qrc9zipB79ZckU1fowoNsMvArxzcwRBj/Mk+Cxc0M712wpj6UhdPuzs1vJV5GzFsV5EA8Q=="],
+
+    "@synara/cloud-agent-provider-claude": ["@synara/cloud-agent-provider-claude@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz", { "dependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.207" }, "peerDependencies": { "@synara/cloud-agent-provider-api": "0.1.0-rc.1" } }, "sha512-0JA9WVtwX+a5mRbU85L+ig42jruI6OS0ijrBCOzem/v9lE6hfR76AvZTolLmykYbDXNHxblkwqxPvC9ElTB4wQ=="],
+
+    "@synara/cloud-agent-provider-codex": ["@synara/cloud-agent-provider-codex@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz", { "peerDependencies": { "@synara/cloud-agent-provider-api": "0.1.0-rc.1" } }, "sha512-fet912+k1uzUNJKwaeJHWmCav3l9m98YktQ4inr+9Mm7YG7ca4zeFEMJx4vSggGZWZx/6FF9/eLseKZOTGIrfQ=="],
+
+    "@synara/cloud-agent-runtime": ["@synara/cloud-agent-runtime@https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-runtime-0.2.0-rc.1.tgz", { "peerDependencies": { "@synara/cloud-agent-protocol": "0.1.0-rc.1", "@synara/cloud-agent-provider-api": "0.1.0-rc.1" } }, "sha512-XAb7BlX5++I6UgjIPNurv1dB7K9XNoz1KDszF/qTjHboEKpAx0gmBhYEZmbhzSjLOqmZjdUsFmtPJJgaWN4z4A=="],
 
     "@synara/contracts": ["@synara/contracts@workspace:packages/contracts"],
 

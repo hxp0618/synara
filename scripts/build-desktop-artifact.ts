@@ -13,6 +13,11 @@ import { join } from "node:path";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
+import {
+  assertCloudAgentRuntimeAsset,
+  CLOUD_AGENT_RUNTIME_ASSET_NAME,
+  readCloudAgentCandidateLock,
+} from "../apps/server/scripts/cloudAgentRuntimeAsset.ts";
 
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import {
@@ -679,14 +684,14 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
         ...commandOutputOptions(verbose),
         // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
         shell: process.platform === "win32",
-      })`bun install --omit=dev --ignore-scripts --linker hoisted`,
+      })`bun install --omit=dev --ignore-scripts --linker hoisted --network-concurrency 1`,
     );
   } else {
     yield* runCommand(
       ChildProcess.make({
         cwd: stageAppDir,
         ...commandOutputOptions(verbose),
-      })`bun install --frozen-lockfile --ignore-scripts --linker hoisted`,
+      })`bun install --frozen-lockfile --ignore-scripts --linker hoisted --network-concurrency 1`,
     );
   }
 
@@ -990,6 +995,21 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  yield* Effect.try({
+    try: () => {
+      const candidateLock = readCloudAgentCandidateLock(repoRoot, { required: true })!;
+      assertCloudAgentRuntimeAsset({
+        assetPath: path.join(distDirs.serverDist, CLOUD_AGENT_RUNTIME_ASSET_NAME),
+        expectedSha256: candidateLock.standaloneRuntime.sha256,
+      });
+    },
+    catch: (cause) =>
+      new BuildScriptError({
+        message: `Bundled Cloud Agent Runtime verification failed: ${cause instanceof Error ? cause.message : String(cause)}.`,
+        cause,
+      }),
+  });
+
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
@@ -999,6 +1019,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  yield* Effect.try({
+    try: () => {
+      const candidateLock = readCloudAgentCandidateLock(repoRoot, { required: true })!;
+      assertCloudAgentRuntimeAsset({
+        assetPath: path.join(stageAppDir, "apps/server/dist", CLOUD_AGENT_RUNTIME_ASSET_NAME),
+        expectedSha256: candidateLock.standaloneRuntime.sha256,
+      });
+    },
+    catch: (cause) =>
+      new BuildScriptError({
+        message: `Staged Cloud Agent Runtime verification failed: ${cause instanceof Error ? cause.message : String(cause)}.`,
+        cause,
+      }),
+  });
 
   yield* assertPlatformBuildResources(options.platform, stageResourcesDir, options.verbose);
 

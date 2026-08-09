@@ -69,6 +69,12 @@
     "vitest": "catalog:"
   },
   "overrides": {
+    "@synara/cloud-agent-distribution": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-protocol": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-api": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-claude": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-provider-codex": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+    "@synara/cloud-agent-runtime": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
     "axios": "^1.16.0",
     "defu": "^6.1.5",
     "fast-uri": "^3.1.2",

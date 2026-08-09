@@ -13,6 +13,13 @@ import {
 import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
+import {
+  assertCloudAgentDependencyUrls,
+  assertCloudAgentRuntimeAsset,
+  CLOUD_AGENT_RUNTIME_ASSET_NAME,
+  installCloudAgentRuntimeAsset,
+  readCloudAgentCandidateLock,
+} from "./cloudAgentRuntimeAsset.ts";
 
 class CliError extends Data.TaggedError("CliError")<{
   readonly message: string;
@@ -142,6 +149,27 @@ const buildCmd = Command.make(
         })`bun tsdown`,
       );
 
+      yield* Effect.try({
+        try: () =>
+          installCloudAgentRuntimeAsset({
+            repoRoot,
+            targetDirectory: path.join(serverDir, "dist"),
+          }),
+        catch: (cause) =>
+          new CliError({ message: "Failed to bundle the Cloud Agent Runtime child.", cause }),
+      });
+      const candidateLock = readCloudAgentCandidateLock(repoRoot);
+      if (candidateLock) {
+        yield* Effect.try({
+          try: () => {
+            assertCloudAgentDependencyUrls(serverPackageJson.dependencies, candidateLock);
+            assertCloudAgentDependencyUrls(rootPackageJson.overrides, candidateLock);
+          },
+          catch: (cause) =>
+            new CliError({ message: "Cloud Agent dependency lock validation failed.", cause }),
+        });
+      }
+
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
 
@@ -180,6 +208,7 @@ const publishCmd = Command.make(
       for (const relPath of [
         "dist/index.mjs",
         "dist/restoreMigrationBackup.mjs",
+        `dist/${CLOUD_AGENT_RUNTIME_ASSET_NAME}`,
         "dist/client/index.html",
       ]) {
         const abs = path.join(serverDir, relPath);
@@ -189,6 +218,29 @@ const publishCmd = Command.make(
           });
         }
       }
+
+      const candidateLock = yield* Effect.try({
+        try: () => readCloudAgentCandidateLock(repoRoot, { required: true })!,
+        catch: (cause) =>
+          new CliError({ message: "Cloud Agent candidate lock is invalid.", cause }),
+      });
+      yield* Effect.try({
+        try: () => {
+          assertCloudAgentDependencyUrls(serverPackageJson.dependencies, candidateLock);
+          assertCloudAgentDependencyUrls(rootPackageJson.overrides, candidateLock);
+        },
+        catch: (cause) =>
+          new CliError({ message: "Cloud Agent dependency lock validation failed.", cause }),
+      });
+      yield* Effect.try({
+        try: () =>
+          assertCloudAgentRuntimeAsset({
+            assetPath: path.join(serverDir, "dist", CLOUD_AGENT_RUNTIME_ASSET_NAME),
+            expectedSha256: candidateLock.standaloneRuntime.sha256,
+          }),
+        catch: (cause) =>
+          new CliError({ message: "Cloud Agent Runtime asset verification failed.", cause }),
+      });
 
       const version = Option.getOrElse(config.appVersion, () => serverPackageJson.version);
       const pkg = {

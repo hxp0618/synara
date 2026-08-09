@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
 
+import type { CloudAgentMessageEnvelope } from "@synara/cloud-agent-protocol";
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
@@ -24,9 +24,14 @@ import {
 } from "../Errors.ts";
 import { CodexAdapter, type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY } from "../Services/ProviderAdapter.ts";
-import { readCloudAgentBackendConfig, type CloudAgentBackendConfig } from "../cloudAgent/config.ts";
+import {
+  assertCloudAgentNode24,
+  readCloudAgentBackendConfig,
+  type CloudAgentBackendConfig,
+} from "../cloudAgent/config.ts";
 import {
   makeCloudAgentProcessClientFactory,
+  resolveDefaultCloudAgentRuntimePath,
   type CloudAgentProcessClient,
   type CloudAgentProcessClientFactory,
 } from "../cloudAgent/process.ts";
@@ -100,13 +105,12 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
           new Error("CloudAgentCodexAdapter cannot be registered unless its backend is selected."),
         );
       }
+      assertCloudAgentNode24();
       const clientFactory =
         options.clientFactory ??
         makeCloudAgentProcessClientFactory({
           config,
-          bundledRuntimePath:
-            options.bundledRuntimePath ??
-            resolve(import.meta.dirname, "cloudAgentRuntimeChild.mjs"),
+          bundledRuntimePath: options.bundledRuntimePath ?? resolveDefaultCloudAgentRuntimePath(),
         });
       const eventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
         PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
@@ -142,11 +146,7 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
 
       const receiveMessage = async (
         session: ActiveCloudAgentSession,
-        message: Parameters<CloudAgentProcessClient["subscribe"]>[0] extends (
-          message: infer Message,
-        ) => unknown
-          ? Message
-          : never,
+        message: CloudAgentMessageEnvelope,
       ): Promise<void> => {
         const cursor = providerCursorFromTerminal(message);
         if (cursor) {
