@@ -14,7 +14,7 @@
 - Synara hardening worktree：`/Users/huang/devel/project/huang/business/synara-cloud-agent-hardening`
 - T3 Code hardening worktree：`/Users/huang/devel/project/huang/business/t3code-cloud-agent-hardening`
 - hardening source commit：Synara `f9fb3d695c3188a1878475986133ffee64d8befc`；T3 Code `e449555de9a31b1988e8c05c2f577eeb88518c30`
-- 当前合并目标：Synara `codex/saas-tenancy-user` @ `8df69a72e8708d9a725af6743bc76f94ab7defc6`；
+- 当前已验证代码基线：Synara `codex/saas-tenancy-user` @ `8df69a72e8708d9a725af6743bc76f94ab7defc6`；
   T3 Code `origin/codex/saas-tenancy-user` @ `6b5b4a501a084efb2b7e3b5a110e2196238336a6`
 
 > 本文同时记录目标设计和当前隔离 worktree 的 source implementation 与 local validation evidence。
@@ -2418,14 +2418,14 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
 
 ### A.1 实施位置与变更边界
 
-源码先在隔离 worktree harden，再进入以下合并目标；表中不预写本文自己的最终提交哈希：
+源码先在隔离 worktree harden，再进入以下已验证代码基线；表中不预写本文自己的最终提交哈希：
 
-| 宿主   | hardening worktree                                                       | hardening commit                           | 固定基线                                            | 当前合并目标                                                                  |
+| 宿主   | hardening worktree                                                       | hardening commit                           | 固定基线                                            | 已验证代码基线                                                                |
 | ------ | ------------------------------------------------------------------------ | ------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------- |
 | Synara | `/Users/huang/devel/project/huang/business/synara-cloud-agent-hardening` | `f9fb3d695c3188a1878475986133ffee64d8befc` | 原集成树（由 hardening commit 记录 parent）         | `codex/saas-tenancy-user` @ `8df69a72e8708d9a725af6743bc76f94ab7defc6`        |
 | T3     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent-hardening` | `e449555de9a31b1988e8c05c2f577eeb88518c30` | upstream `1a003e383ac6b10258b8100c2617d938c4f06c69` | `origin/codex/saas-tenancy-user` @ `6b5b4a501a084efb2b7e3b5a110e2196238336a6` |
 
-Synara `f9fb3d695...` 与合并目标 `8df69a72e...` 的 tree 一致；T3 hardening 与 descriptor 兼容修复已合入
+Synara `f9fb3d695...` 与代码基线 `8df69a72e...` 的 tree 一致；T3 hardening 与 descriptor 兼容修复已合入
 `6b5b4a501...`。
 这些 ref 与 clean source evidence 证明 source-control/本地构建状态，不等同于 npm 发布、部署、
 public beta 或 GA。
