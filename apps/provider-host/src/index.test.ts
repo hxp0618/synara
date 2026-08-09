@@ -43,6 +43,7 @@ describe("external Cloud Agent Runtime boundary", () => {
     const dockerfile = readFileSync(resolve(root, "Dockerfile"), "utf8");
     expect(dockerfile).not.toMatch(/COPY packages\/cloud-agent-/u);
     expect(dockerfile).toContain("COPY --chown=0:0 --chmod=0444 cloud-agent-candidate.lock.json");
+    expect(dockerfile).toContain("COPY deploy/worker/cloud-agent-candidate.mjs");
     expect(dockerfile).toContain("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
     expect(dockerfile).toContain("--cloud-agent-candidate-lockfile");
   });

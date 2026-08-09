@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -139,6 +141,68 @@ func TestLoadWorkerImageManifestRejectsInvalidOrChangedInputs(t *testing.T) {
 		}
 	})
 
+	t.Run("Cloud Agent candidate differs from embedded lock", func(t *testing.T) {
+		fixture := newWorkerImageManifestFixture(t)
+		fixture.Manifest.CloudAgentCandidate.Packages[0].SHA256 = "sha256:" + strings.Repeat("a", 64)
+		writeWorkerImageManifestFixture(t, fixture.Path, fixture.Manifest)
+		t.Setenv(workerImageManifestEnvironment, fixture.Path)
+		if _, err := loadConfiguredWorkerImageManifest(); err == nil || !strings.Contains(err.Error(), "embedded lock") {
+			t.Fatalf("Worker image manifest accepted a candidate projection that differs from its lock: %v", err)
+		}
+	})
+
+	t.Run("self-consistent forged Cloud Agent lock", func(t *testing.T) {
+		fixture := newWorkerImageManifestFixture(t)
+		encoded, err := os.ReadFile(fixture.Files["cloud-agent-candidate"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lock workerImageCloudAgentCandidateLock
+		if err := json.Unmarshal(encoded, &lock); err != nil {
+			t.Fatal(err)
+		}
+		forged := lock.Packages["@synara/cloud-agent-protocol"]
+		forged.SHA256 = "sha256:" + strings.Repeat("a", 64)
+		lock.Packages["@synara/cloud-agent-protocol"] = forged
+		names := make([]string, 0, len(lock.Packages))
+		for name := range lock.Packages {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		var canonical strings.Builder
+		for _, name := range names {
+			asset := lock.Packages[name]
+			fmt.Fprintf(&canonical, "%s@%s %s\n", name, asset.Version, asset.SHA256)
+		}
+		digestBytes := sha256.Sum256([]byte(canonical.String()))
+		lock.Release.CandidateDigest = "sha256:" + hex.EncodeToString(digestBytes[:])
+		for index := range fixture.Manifest.CloudAgentCandidate.Packages {
+			item := &fixture.Manifest.CloudAgentCandidate.Packages[index]
+			if item.Name == "@synara/cloud-agent-protocol" {
+				item.SHA256 = forged.SHA256
+			}
+		}
+		fixture.Manifest.CloudAgentCandidate.CandidateDigest = lock.Release.CandidateDigest
+		forgedEncoded, err := json.Marshal(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forgedContent := string(forgedEncoded) + "\n"
+		if err := os.WriteFile(fixture.Files["cloud-agent-candidate"], []byte(forgedContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for index := range fixture.Manifest.Lockfiles {
+			if fixture.Manifest.Lockfiles[index].Name == "cloud-agent-candidate" {
+				fixture.Manifest.Lockfiles[index].SHA256 = workerImageFixtureSHA256(forgedContent)
+			}
+		}
+		writeWorkerImageManifestFixture(t, fixture.Path, fixture.Manifest)
+		t.Setenv(workerImageManifestEnvironment, fixture.Path)
+		if _, err := loadConfiguredWorkerImageManifest(); err == nil || !strings.Contains(err.Error(), "immutable RC") {
+			t.Fatalf("agentd accepted a self-consistent forged Cloud Agent lock: %v", err)
+		}
+	})
+
 	t.Run("unpinned Base Image", func(t *testing.T) {
 		fixture := newWorkerImageManifestFixture(t)
 		fixture.Manifest.BaseImages[0].Reference = "golang:1.26-bookworm"
@@ -189,6 +253,7 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 	if err := os.MkdirAll(artifacts, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	cloudAgentLock, cloudAgentCandidate := workerImageCloudAgentCandidateLockFixture(t)
 	files := map[string]string{}
 	lockfiles := make([]workerImageLockfile, 0, 3)
 	for _, item := range []struct {
@@ -196,7 +261,7 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 		content string
 	}{
 		{name: "provider-tools-npm", content: `{"lockfileVersion":3}`},
-		{name: "cloud-agent-candidate", content: "cloud-agent-candidate-v1"},
+		{name: "cloud-agent-candidate", content: cloudAgentLock},
 		{name: "worker-apk", content: "apk-lock-v1"},
 	} {
 		path := filepath.Join(artifacts, item.name+".lock")
@@ -226,20 +291,7 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 			{Provider: "claudeAgent", Kind: "sdk", Package: "@anthropic-ai/claude-agent-sdk", Version: "0.3.207"},
 			{Provider: "claudeAgent", Kind: "cli", Package: "@anthropic-ai/claude-code", Version: "2.1.197"},
 		},
-		CloudAgentCandidate: workerImageCloudAgentCandidate{
-			SourceCommit:            strings.Repeat("e", 40),
-			CandidateDigest:         "sha256:" + strings.Repeat("d", 64),
-			StandaloneRuntimeSHA256: "sha256:" + strings.Repeat("c", 64),
-			Packages: []workerImageCloudAgentPackage{
-				{Name: "@synara/cloud-agent-protocol", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("1", 64)},
-				{Name: "@synara/cloud-agent-provider-api", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("2", 64)},
-				{Name: "@synara/cloud-agent-runtime", Version: "0.2.0-rc.1", SHA256: "sha256:" + strings.Repeat("3", 64)},
-				{Name: "@synara/cloud-agent-provider-codex", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("4", 64)},
-				{Name: "@synara/cloud-agent-provider-claude", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("5", 64)},
-				{Name: "@synara/cloud-agent-testkit", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("6", 64)},
-				{Name: "@synara/cloud-agent-distribution", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("7", 64)},
-			},
-		},
+		CloudAgentCandidate: cloudAgentCandidate,
 		SBOMs: []workerImageSoftwareBill{{
 			Name: "provider-tools", Format: "spdx-json",
 			Path:   filepath.ToSlash(filepath.Join("artifacts", filepath.Base(sbomPath))),
@@ -249,6 +301,54 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 	path := filepath.Join(root, "worker-image-manifest.json")
 	writeWorkerImageManifestFixture(t, path, manifest)
 	return workerImageManifestFixture{Path: path, Manifest: manifest, Files: files}
+}
+
+func workerImageCloudAgentCandidateLockFixture(
+	t *testing.T,
+) (string, workerImageCloudAgentCandidate) {
+	t.Helper()
+	expectedAssets := expectedWorkerImageCloudAgentAssets()
+	names := make([]string, 0, len(expectedAssets))
+	packages := make(map[string]workerImageCloudAgentAsset, len(expectedAssets))
+	for name, expected := range expectedAssets {
+		names = append(names, name)
+		packages[name] = workerImageCloudAgentAsset{
+			Version: expected.Version,
+			URL:     expected.URL,
+			SHA256:  expected.SHA256,
+		}
+	}
+	sort.Strings(names)
+	var canonical strings.Builder
+	manifestPackages := make([]workerImageCloudAgentPackage, 0, len(names))
+	for _, name := range names {
+		asset := packages[name]
+		fmt.Fprintf(&canonical, "%s@%s %s\n", name, asset.Version, asset.SHA256)
+		manifestPackages = append(manifestPackages, workerImageCloudAgentPackage{
+			Name: name, Version: asset.Version, SHA256: asset.SHA256,
+		})
+	}
+	digestBytes := sha256.Sum256([]byte(canonical.String()))
+	candidateDigest := "sha256:" + hex.EncodeToString(digestBytes[:])
+	lock := workerImageCloudAgentCandidateLock{
+		SchemaVersion: 1,
+		Release: workerImageCloudAgentRelease{
+			Repository: cloudAgentReleaseRepository, Tag: cloudAgentReleaseTag,
+			SourceCommit: cloudAgentSourceCommit, CandidateDigest: candidateDigest,
+		},
+		StandaloneRuntime: workerImageCloudAgentStandalone{
+			URL: cloudAgentStandaloneURL, SHA256: cloudAgentStandaloneSHA256,
+		},
+		Packages: packages,
+	}
+	encoded, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded) + "\n", workerImageCloudAgentCandidate{
+		SourceCommit: cloudAgentSourceCommit, CandidateDigest: candidateDigest,
+		StandaloneRuntimeSHA256: cloudAgentStandaloneSHA256, Packages: manifestPackages,
+	}
 }
 
 func writeWorkerImageManifestFixture(t *testing.T, path string, manifest workerImageManifest) {

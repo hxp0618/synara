@@ -4,6 +4,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
+import { validateCloudAgentCandidateLock } from "./cloud-agent-candidate.mjs";
+
 const SCHEMA_VERSION = 1;
 const PROVIDER_TOOLS_LOCKFILE_PATH = "/opt/synara/provider-tools/package-lock.json";
 const CLOUD_AGENT_CANDIDATE_LOCKFILE_PATH =
@@ -183,59 +185,6 @@ function providerRuntimes(providerToolsLockfile, claudeSDKPackageJSON) {
   );
 }
 
-const CLOUD_AGENT_PACKAGE_NAMES = [
-  "@synara/cloud-agent-protocol",
-  "@synara/cloud-agent-provider-api",
-  "@synara/cloud-agent-runtime",
-  "@synara/cloud-agent-provider-codex",
-  "@synara/cloud-agent-provider-claude",
-  "@synara/cloud-agent-testkit",
-  "@synara/cloud-agent-distribution",
-];
-
-function normalizeCloudAgentCandidate(value) {
-  const lock = parseJSONObject(value, "Cloud Agent candidate lock");
-  const release = lock.release;
-  const standalone = lock.standaloneRuntime;
-  const packages = lock.packages;
-  invariant(lock.schemaVersion === 1, "Cloud Agent candidate lock schemaVersion must be 1");
-  invariant(
-    isRecord(release) &&
-      release.repository === "hxp0618/cloud-agents" &&
-      release.tag === "cloud-agent-m1-rc.1" &&
-      /^[0-9a-f]{40}$/.test(String(release.sourceCommit ?? "")) &&
-      /^sha256:[0-9a-f]{64}$/.test(String(release.candidateDigest ?? "")),
-    "Cloud Agent candidate release identity is invalid",
-  );
-  invariant(
-    isRecord(standalone) && /^sha256:[0-9a-f]{64}$/.test(String(standalone.sha256 ?? "")),
-    "Cloud Agent standalone Runtime digest is invalid",
-  );
-  invariant(
-    isRecord(packages) && Object.keys(packages).length === CLOUD_AGENT_PACKAGE_NAMES.length,
-    "Cloud Agent candidate must contain exactly seven packages",
-  );
-  const packageVersions = {};
-  const normalizedPackages = CLOUD_AGENT_PACKAGE_NAMES.map((name) => {
-    const artifact = packages[name];
-    invariant(
-      isRecord(artifact) &&
-        /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(String(artifact.version ?? "")) &&
-        /^sha256:[0-9a-f]{64}$/.test(String(artifact.sha256 ?? "")),
-      `Cloud Agent candidate package ${name} is invalid`,
-    );
-    packageVersions[name] = artifact.version;
-    return { name, version: artifact.version, sha256: artifact.sha256 };
-  }).sort((left, right) => left.name.localeCompare(right.name));
-  return {
-    sourceCommit: release.sourceCommit,
-    candidateDigest: release.candidateDigest,
-    standaloneRuntimeSha256: standalone.sha256,
-    packages: normalizedPackages,
-    packageVersions,
-  };
-}
-
 function codexPlatformRuntime(providerToolsLockfile, architecture) {
   const lockfile = parseJSONObject(providerToolsLockfile, "Provider tools package-lock");
   const packages = lockfile.packages;
@@ -360,7 +309,7 @@ export function buildWorkerImageArtifacts({
   const created = normalizeSourceDateEpoch(sourceDateEpoch);
   const normalizedBaseImages = normalizeBaseImages(baseImages);
   validateAPKLockfile(workerAPKLockfile);
-  const cloudAgentCandidate = normalizeCloudAgentCandidate(cloudAgentCandidateLockfile);
+  const cloudAgentCandidate = validateCloudAgentCandidateLock(cloudAgentCandidateLockfile);
   const runtimes = providerRuntimes(providerToolsLockfile, claudeSDKPackageJSON);
   const codexPlatform = codexPlatformRuntime(providerToolsLockfile, workerArchitecture);
   const providerToolsLockfileSHA256 = sha256Hex(providerToolsLockfile);
@@ -397,8 +346,12 @@ export function buildWorkerImageArtifacts({
     cloudAgentCandidate: {
       sourceCommit: cloudAgentCandidate.sourceCommit,
       candidateDigest: cloudAgentCandidate.candidateDigest,
-      standaloneRuntimeSha256: cloudAgentCandidate.standaloneRuntimeSha256,
-      packages: cloudAgentCandidate.packages,
+      standaloneRuntimeSha256: cloudAgentCandidate.standaloneRuntime.sha256,
+      packages: cloudAgentCandidate.packages.map(({ name, version, sha256 }) => ({
+        name,
+        version,
+        sha256,
+      })),
     },
     sboms: [
       {

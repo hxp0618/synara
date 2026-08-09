@@ -3,6 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  CLOUD_AGENT_PACKAGE_NAMES,
+  validateCloudAgentCandidateLock,
+} from "../deploy/worker/cloud-agent-candidate.mjs";
+
 const root = resolve(import.meta.dirname, "..");
 const lockPath = join(root, "cloud-agent-candidate.lock.json");
 const providerHostRequire = createRequire(join(root, "apps/provider-host/package.json"));
@@ -10,7 +15,27 @@ const distributionEntrypoint = providerHostRequire.resolve("@synara/cloud-agent-
 const distributionRequire = createRequire(
   resolve(dirname(distributionEntrypoint), "../package.json"),
 );
-const packageNames = [
+type PackageName =
+  | "@synara/cloud-agent-protocol"
+  | "@synara/cloud-agent-provider-api"
+  | "@synara/cloud-agent-runtime"
+  | "@synara/cloud-agent-provider-codex"
+  | "@synara/cloud-agent-provider-claude"
+  | "@synara/cloud-agent-testkit"
+  | "@synara/cloud-agent-distribution";
+type CandidateArtifact = {
+  name: PackageName;
+  version: string;
+  url: string;
+  sha256: `sha256:${string}`;
+};
+type ValidatedCandidate = {
+  candidateDigest: `sha256:${string}`;
+  standaloneRuntime: { url: string; sha256: `sha256:${string}` };
+  packages: CandidateArtifact[];
+};
+const packageNames = CLOUD_AGENT_PACKAGE_NAMES as readonly PackageName[];
+const expectedPackageNames = [
   "@synara/cloud-agent-protocol",
   "@synara/cloud-agent-provider-api",
   "@synara/cloud-agent-runtime",
@@ -26,12 +51,20 @@ if (!existsSync(lockPath)) {
     "cloud-agent-candidate.lock.json is missing; do not resolve the host until the immutable GitHub RC is published.",
   );
 }
-const lock = parseObject(readFileSync(lockPath, "utf8"), "Cloud Agent candidate lock");
-assertCandidateLock(lock);
-assertManifestReferences(lock);
+const candidate = validateCloudAgentCandidateLock(
+  readFileSync(lockPath, "utf8"),
+) as ValidatedCandidate;
+if (
+  packageNames.length !== expectedPackageNames.length ||
+  expectedPackageNames.some((name) => !packageNames.includes(name))
+) {
+  throw new Error("Shared Cloud Agent candidate validator package catalog is incomplete.");
+}
+assertManifestReferences(candidate);
 
 for (const name of packageNames) {
-  const artifact = packageArtifact(lock, name);
+  const artifact = candidate.packages.find((item) => item.name === name);
+  if (!artifact) throw new Error(`Validated candidate omitted ${name}.`);
   if (name !== "@synara/cloud-agent-testkit") {
     const installedManifest = installedPackageManifest(name);
     if (installedManifest.version !== artifact.version) {
@@ -43,7 +76,7 @@ for (const name of packageNames) {
   if (!offline) await verifyRemoteArtifact(name, artifact.url, artifact.sha256);
 }
 
-const standalone = parseObject(lock.standaloneRuntime, "standaloneRuntime");
+const standalone = candidate.standaloneRuntime;
 const runtimeEntrypoint = resolve(dirname(distributionEntrypoint), "stdio.mjs");
 const installedRuntimeDigest = sha256(readFileSync(runtimeEntrypoint));
 if (installedRuntimeDigest !== standalone.sha256) {
@@ -52,49 +85,21 @@ if (installedRuntimeDigest !== standalone.sha256) {
   );
 }
 if (!offline) {
-  await verifyRemoteArtifact(
-    "standalone runtime",
-    requireString(standalone.url, "standaloneRuntime.url"),
-    requireDigest(standalone.sha256, "standaloneRuntime.sha256"),
-  );
+  await verifyRemoteArtifact("standalone runtime", standalone.url, standalone.sha256);
 }
 process.stdout.write(
-  `cloud-agent-candidate: verified ${offline ? "installed runtime closure" : "installed runtime closure and seven remote artifacts"} for ${String(lock.release && parseObject(lock.release, "release").candidateDigest)}\n`,
+  `cloud-agent-candidate: verified ${offline ? "installed runtime closure" : "installed runtime closure and seven remote artifacts"} for ${candidate.candidateDigest}\n`,
 );
 
-function assertCandidateLock(lock: Record<string, unknown>): void {
-  if (lock.schemaVersion !== 1)
-    throw new Error("Cloud Agent candidate lock schemaVersion must be 1.");
-  const release = parseObject(lock.release, "release");
-  if (
-    release.repository !== "hxp0618/cloud-agents" ||
-    release.tag !== "cloud-agent-m1-rc.1" ||
-    !/^[0-9a-f]{40}$/u.test(String(release.sourceCommit))
-  ) {
-    throw new Error("Cloud Agent release identity is invalid.");
-  }
-  requireDigest(release.candidateDigest, "release.candidateDigest");
-  const packages = parseObject(lock.packages, "packages");
-  if (
-    Object.keys(packages).length !== packageNames.length ||
-    packageNames.some((name) => packages[name] === undefined)
-  ) {
-    throw new Error("Cloud Agent candidate lock must contain exactly seven public packages.");
-  }
-  for (const name of packageNames) packageArtifact(lock, name);
-  const standalone = parseObject(lock.standaloneRuntime, "standaloneRuntime");
-  requireReleaseUrl(standalone.url, "standaloneRuntime.url");
-  requireDigest(standalone.sha256, "standaloneRuntime.sha256");
-}
-
-function assertManifestReferences(lock: Record<string, unknown>): void {
+function assertManifestReferences(candidate: ValidatedCandidate): void {
   const rootManifest = parseObject(
     JSON.parse(readFileSync(join(root, "package.json"), "utf8")),
     "root package.json",
   );
   const overrides = parseObject(rootManifest.overrides, "root overrides");
   for (const name of packageNames) {
-    if (overrides[name] !== packageArtifact(lock, name).url) {
+    const artifact = candidate.packages.find((item) => item.name === name);
+    if (!artifact || overrides[name] !== artifact.url) {
       throw new Error(`Root override for ${name} does not match the candidate lock.`);
     }
   }
@@ -104,13 +109,14 @@ function assertManifestReferences(lock: Record<string, unknown>): void {
   ] as const) {
     const manifest = parseObject(JSON.parse(readFileSync(join(root, path), "utf8")), path);
     const dependencies = parseObject(manifest.dependencies, `${path} dependencies`);
-    if (dependencies[name] !== packageArtifact(lock, name).url) {
+    const artifact = candidate.packages.find((item) => item.name === name);
+    if (!artifact || dependencies[name] !== artifact.url) {
       throw new Error(`${path} does not consume the candidate URL for ${name}.`);
     }
   }
 }
 
-function installedPackageManifest(name: (typeof packageNames)[number]): Record<string, unknown> {
+function installedPackageManifest(name: PackageName): Record<string, unknown> {
   const entrypoint =
     name === "@synara/cloud-agent-distribution"
       ? distributionEntrypoint
@@ -143,36 +149,6 @@ async function verifyRemoteArtifact(name: string, url: string, expected: string)
     }
   }
   throw failure;
-}
-
-function packageArtifact(lock: Record<string, unknown>, name: (typeof packageNames)[number]) {
-  const packages = parseObject(lock.packages, "packages");
-  const artifact = parseObject(packages[name], name);
-  return {
-    version: requireString(artifact.version, `${name}.version`),
-    url: requireReleaseUrl(artifact.url, `${name}.url`),
-    sha256: requireDigest(artifact.sha256, `${name}.sha256`),
-  };
-}
-
-function requireReleaseUrl(value: unknown, label: string): string {
-  const url = requireString(value, label);
-  const prefix = "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/";
-  if (!url.startsWith(prefix) || url.slice(prefix.length).includes("/")) {
-    throw new Error(`${label} must use the immutable cloud-agent-m1-rc.1 GitHub Release.`);
-  }
-  return url;
-}
-
-function requireDigest(value: unknown, label: string): `sha256:${string}` {
-  const digest = requireString(value, label);
-  if (!/^sha256:[0-9a-f]{64}$/u.test(digest)) throw new Error(`${label} is invalid.`);
-  return digest as `sha256:${string}`;
-}
-
-function requireString(value: unknown, label: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is missing.`);
-  return value;
 }
 
 function parseObject(value: unknown, label: string): Record<string, unknown>;

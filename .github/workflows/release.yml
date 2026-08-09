@@ -173,6 +173,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify immutable Cloud Agent candidate lock
+        run: bun run cloud-agent:candidate:verify:offline
+
       - name: Verify Synara identity
         run: bun run brand:check
 

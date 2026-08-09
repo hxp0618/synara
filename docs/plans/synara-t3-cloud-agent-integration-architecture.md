@@ -533,7 +533,9 @@ export type CloudAgentMessage =
 - [`runtime-event-v2.md`](../contracts/runtime-event-v2.md)
 - `packages/contracts/src/providerHost.ts`
 - `packages/contracts/src/providerRuntime.ts`
-- `packages/cloud-agent-protocol/provider-capability-catalog.json`（唯一可编辑来源）
+- `hxp0618/cloud-agents` 的
+  [`packages/cloud-agent-protocol/provider-capability-catalog.json`](https://github.com/hxp0618/cloud-agents/blob/49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a/packages/cloud-agent-protocol/provider-capability-catalog.json)
+  （唯一可编辑来源；本宿主消费 immutable `cloud-agent-m1-rc.1` RC，不保留副本）
 
 迁移时先复制 schema 到新包，再让 `@synara/contracts` 从新包 re-export；不能同时保留两份可编辑
 定义。
@@ -2546,6 +2548,11 @@ ADR-0005 已将上述 source-candidate 记录降级为历史本地证据。`hxp0
 SHA-256 与七包 URL/version/SHA-256。production manifests 和 root overrides 必须与该 lock 一致，且不得以
 workspace/file/Git dependency 或未发布 npm semver 回退。Worker image publication 同样登记公共 candidate
 digest；Synara root lock 只锁宿主完整依赖图，不再被描述为公共 Runtime release identity。
+
+Worker producer 与 Node release verifier 共用 fail-closed validator：它严格绑定 repository/tag/source、
+standalone tuple 与七包 name/version/filename/URL/SHA tuple，并按 public producer 的排序行加末尾换行算法
+重算 candidate digest。agentd 与 Registry gate 独立解析 embedded lock，再将这些字段与 Worker manifest
+projection 交叉绑定；普通离线 Docker 构建不隐式联网，匿名远端 asset SHA 仅由显式 release verifier 执行。
 
 最终 immutable `cloud-agent-m1-rc.1`（source `49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a`，candidate
 `sha256:b9931233d46aeaf1392197095483c2e3409f628a47b2ba92c8e57bb38b444676`）已完成匿名远端 SHA、重解

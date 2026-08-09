@@ -2583,6 +2583,30 @@ class EmbeddedArtifactTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "release.registry_embedded_lock_invalid")
 
+    def test_rejects_checkout_with_self_consistent_forged_candidate_lock(self) -> None:
+        lock = json.loads(
+            (REPO_ROOT / "cloud-agent-candidate.lock.json").read_text(encoding="utf-8")
+        )
+        lock["packages"]["@synara/cloud-agent-protocol"]["sha256"] = (
+            "sha256:" + "a" * 64
+        )
+        lines = [
+            f"{name}@{artifact['version']} {artifact['sha256']}"
+            for name, artifact in sorted(lock["packages"].items())
+        ]
+        lock["release"]["candidateDigest"] = "sha256:" + hashlib.sha256(
+            ("\n".join(lines) + "\n").encode("utf-8")
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            (repo_root / "cloud-agent-candidate.lock.json").write_text(
+                json.dumps(lock), encoding="utf-8"
+            )
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate._expected_cloud_agent_candidate(repo_root)
+
+        self.assertEqual(caught.exception.code, "release.registry_embedded_manifest_invalid")
+
     def test_malformed_lockfiles_packages_and_creation_info_raise_gate_error(self) -> None:
         mutations = [
             (lambda manifest: manifest.update({"lockfiles": None}), None),

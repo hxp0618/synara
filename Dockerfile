@@ -367,6 +367,7 @@ RUN set -eu; \
 COPY --chown=0:0 --chmod=0444 cloud-agent-candidate.lock.json \
   /opt/synara/provider-host/cloud-agent-candidate.lock.json
 COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs
+COPY deploy/worker/cloud-agent-candidate.mjs /opt/synara/build/cloud-agent-candidate.mjs
 RUN --mount=from=worker-provider-tools,source=/tmp/provider-tools.raw.spdx.json,target=/tmp/provider-tools.raw.spdx.json,ro \
   --mount=from=provider-host-build,source=/out/claude-agent-sdk.package.json,target=/tmp/claude-agent-sdk.package.json,ro \
   node /opt/synara/build/worker-image-manifest.mjs \

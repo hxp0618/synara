@@ -21,6 +21,12 @@ const (
 	workerImageManifestMaximumSize  = 128 << 10
 	workerImageReferenceMaximumSize = 64 << 20
 	workerImageBuildFeatureFlag     = "workerImageBuild"
+	cloudAgentReleaseRepository     = "hxp0618/cloud-agents"
+	cloudAgentReleaseTag            = "cloud-agent-m1-rc.1"
+	cloudAgentReleaseBaseURL        = "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/"
+	cloudAgentSourceCommit          = "49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a"
+	cloudAgentStandaloneURL         = cloudAgentReleaseBaseURL + "cloud-agent-runtime-standalone.mjs"
+	cloudAgentStandaloneSHA256      = "sha256:c24a1c23f89f62e714e3465b59a4be12e1b5cb75387a2d0d6de9811803064521"
 )
 
 var (
@@ -80,6 +86,37 @@ type workerImageCloudAgentPackage struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	SHA256  string `json:"sha256"`
+}
+
+type workerImageCloudAgentCandidateLock struct {
+	SchemaVersion     int                                   `json:"schemaVersion"`
+	Release           workerImageCloudAgentRelease          `json:"release"`
+	StandaloneRuntime workerImageCloudAgentStandalone       `json:"standaloneRuntime"`
+	Packages          map[string]workerImageCloudAgentAsset `json:"packages"`
+}
+
+type workerImageCloudAgentRelease struct {
+	Repository      string `json:"repository"`
+	Tag             string `json:"tag"`
+	SourceCommit    string `json:"sourceCommit"`
+	CandidateDigest string `json:"candidateDigest"`
+}
+
+type workerImageCloudAgentStandalone struct {
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+}
+
+type workerImageCloudAgentAsset struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+}
+
+type workerImageCloudAgentExpectedAsset struct {
+	Version string
+	URL     string
+	SHA256  string
 }
 
 type workerImageSoftwareBill struct {
@@ -159,6 +196,13 @@ func validateWorkerImageManifest(manifest *workerImageManifest, manifestPath str
 	if err := validateWorkerImageLockfiles(manifest.Lockfiles, manifestPath); err != nil {
 		return err
 	}
+	if err := validateWorkerImageCloudAgentLock(
+		&manifest.CloudAgentCandidate,
+		manifest.Lockfiles,
+		manifestPath,
+	); err != nil {
+		return err
+	}
 	if err := validateWorkerImageSBOMs(manifest.SBOMs, manifestPath); err != nil {
 		return err
 	}
@@ -222,6 +266,119 @@ func validateWorkerImageCloudAgentCandidate(candidate *workerImageCloudAgentCand
 	sort.Slice(candidate.Packages, func(left, right int) bool {
 		return candidate.Packages[left].Name < candidate.Packages[right].Name
 	})
+	return nil
+}
+
+func expectedWorkerImageCloudAgentAssets() map[string]workerImageCloudAgentExpectedAsset {
+	return map[string]workerImageCloudAgentExpectedAsset{
+		"@synara/cloud-agent-distribution": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+			SHA256: "sha256:0326203b90a5be4f566b3d4282aea5fda8532753855a8a6b4b449776a966e29c",
+		},
+		"@synara/cloud-agent-protocol": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+			SHA256: "sha256:e46c5a639482ac8af5c9794cda2c03e93779ce7d10cd1aac52761d6ec3cb2ac2",
+		},
+		"@synara/cloud-agent-provider-api": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+			SHA256: "sha256:88737cda1b0cef0922f50509acb154e2112a2d78acf219a1a5568edf3d731a59",
+		},
+		"@synara/cloud-agent-provider-claude": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+			SHA256: "sha256:e6a3058fe21fc9799d242bd8c3ae7d8e7bcf7674f2003319d493d4afdda636fd",
+		},
+		"@synara/cloud-agent-provider-codex": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+			SHA256: "sha256:8715b6c9d116d8b229c810903d1d7da16aaa6fed327020a06e0bd48813f49ec8",
+		},
+		"@synara/cloud-agent-runtime": {
+			Version: "0.2.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
+			SHA256: "sha256:89aaa8bc42b2527fee584dfa9bccbc3e994dc1c67b99166989ca20be9fcf6488",
+		},
+		"@synara/cloud-agent-testkit": {
+			Version: "0.1.0-rc.1", URL: cloudAgentReleaseBaseURL + "synara-cloud-agent-testkit-0.1.0-rc.1.tgz",
+			SHA256: "sha256:5e4031c8bc449a78e0d5dff6721c7ab708361a5c1b7efa5dfd833752d5add21c",
+		},
+	}
+}
+
+func validateWorkerImageCloudAgentLock(
+	candidate *workerImageCloudAgentCandidate,
+	lockfiles []workerImageLockfile,
+	manifestPath string,
+) error {
+	var lockPath string
+	for _, lockfile := range lockfiles {
+		if lockfile.Name != "cloud-agent-candidate" {
+			continue
+		}
+		resolved, err := resolveWorkerImageReferencePath(manifestPath, lockfile.Path)
+		if err != nil {
+			return errors.New("Worker image Cloud Agent candidate lock path is invalid")
+		}
+		lockPath = resolved
+		break
+	}
+	if lockPath == "" {
+		return errors.New("Worker image Cloud Agent candidate lock is missing")
+	}
+	encoded, err := readSmallRegularFile(lockPath, workerImageManifestMaximumSize)
+	if err != nil {
+		return errors.New("Worker image Cloud Agent candidate lock is unavailable")
+	}
+	var lock workerImageCloudAgentCandidateLock
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&lock); err != nil {
+		return errors.New("Worker image Cloud Agent candidate lock is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("Worker image Cloud Agent candidate lock is invalid")
+	}
+	expectedAssets := expectedWorkerImageCloudAgentAssets()
+	if lock.SchemaVersion != 1 ||
+		lock.Release.Repository != cloudAgentReleaseRepository ||
+		lock.Release.Tag != cloudAgentReleaseTag ||
+		lock.Release.SourceCommit != cloudAgentSourceCommit ||
+		lock.StandaloneRuntime.URL != cloudAgentStandaloneURL ||
+		lock.StandaloneRuntime.SHA256 != cloudAgentStandaloneSHA256 ||
+		len(lock.Packages) != len(expectedAssets) {
+		return errors.New("Worker image Cloud Agent candidate lock does not match the immutable RC")
+	}
+	names := make([]string, 0, len(expectedAssets))
+	for name, expected := range expectedAssets {
+		asset, found := lock.Packages[name]
+		if !found || asset.Version != expected.Version || asset.URL != expected.URL || asset.SHA256 != expected.SHA256 {
+			return fmt.Errorf("Worker image Cloud Agent candidate lock package %q does not match the immutable RC", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var canonical strings.Builder
+	normalizedPackages := make([]workerImageCloudAgentPackage, 0, len(names))
+	for _, name := range names {
+		asset := lock.Packages[name]
+		fmt.Fprintf(&canonical, "%s@%s %s\n", name, asset.Version, asset.SHA256)
+		normalizedPackages = append(normalizedPackages, workerImageCloudAgentPackage{
+			Name: name, Version: asset.Version, SHA256: asset.SHA256,
+		})
+	}
+	digestBytes := sha256.Sum256([]byte(canonical.String()))
+	candidateDigest := "sha256:" + hex.EncodeToString(digestBytes[:])
+	if lock.Release.CandidateDigest != candidateDigest {
+		return errors.New("Worker image Cloud Agent candidate lock canonical digest is invalid")
+	}
+	if candidate.SourceCommit != lock.Release.SourceCommit ||
+		candidate.CandidateDigest != candidateDigest ||
+		candidate.StandaloneRuntimeSHA256 != lock.StandaloneRuntime.SHA256 ||
+		len(candidate.Packages) != len(normalizedPackages) {
+		return errors.New("Worker image manifest Cloud Agent candidate does not match its embedded lock")
+	}
+	for index := range normalizedPackages {
+		if candidate.Packages[index] != normalizedPackages[index] {
+			return errors.New("Worker image manifest Cloud Agent packages do not match their embedded lock")
+		}
+	}
 	return nil
 }
 

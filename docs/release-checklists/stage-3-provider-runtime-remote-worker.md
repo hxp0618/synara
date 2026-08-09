@@ -340,12 +340,8 @@ TypeScript/Web：只能使用 `bun run test`，禁止 `bun test`。
 ```bash
 bun run --cwd packages/contracts test src/providerHost.test.ts src/providerRuntime.test.ts
 bun run --cwd packages/control-plane-client test
-bun run --cwd apps/provider-host test \
-  src/protocol.test.ts \
-  src/runtimeEventV2.test.ts \
-  src/turnDiffs.test.ts \
-  src/codexAppServerRuntime.test.ts \
-  src/claudeAgentSdkRuntime.test.ts
+bun run --cwd apps/provider-host test
+bun run test scripts/cloud-agent-candidate.test.ts scripts/worker-image-manifest.test.ts
 bun run --cwd apps/web test \
   src/lib/controlPlaneProjection.test.ts \
   src/session-logic.test.ts \
@@ -362,6 +358,8 @@ bun run --cwd apps/web test \
 The prior source-copy commands above are historical. For the external Runtime boundary, use:
 
 ```bash
+node scripts/verify-cloud-agent-candidate.ts --offline
+# Release validation only: performs anonymous network SHA-256 verification.
 node scripts/verify-cloud-agent-candidate.ts
 bun run --cwd apps/provider-host test
 bun run --cwd apps/provider-host typecheck
@@ -370,6 +368,7 @@ bun run --cwd packages/contracts test src/providerHost.test.ts src/providerRunti
 ```
 
 - [x] The immutable Linux-validated `cloud-agent-m1-rc.1` assets are anonymously reachable and match every SHA-256 in `cloud-agent-candidate.lock.json`.
+- [x] The shared fail-closed validator reproduces the producer's canonical candidate digest from the seven exact package tuples before Worker manifest generation; ordinary Docker builds use this local gate and do not require the network.
 - [x] The installed Distribution stdio bundle matches the standalone Runtime SHA-256.
 - [x] Provider Host, contracts, agentd, Worker manifest, Dockerfile validation, and the Docker Provider Host packaging stage pass from the regenerated host lock.
 - [x] Authenticated real-provider Turns remain recorded as open rather than replaced by mocks or Describe-only evidence.

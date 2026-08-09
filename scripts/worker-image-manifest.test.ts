@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error -- the Worker image helper is an executable ESM script without a published
@@ -104,38 +107,14 @@ const claudeSDKPackageJSON = `${JSON.stringify({
   name: "@anthropic-ai/claude-agent-sdk",
   version: "0.3.207",
 })}\n`;
-const candidatePackages = [
-  "@synara/cloud-agent-protocol",
-  "@synara/cloud-agent-provider-api",
-  "@synara/cloud-agent-runtime",
-  "@synara/cloud-agent-provider-codex",
-  "@synara/cloud-agent-provider-claude",
-  "@synara/cloud-agent-testkit",
-  "@synara/cloud-agent-distribution",
-];
-const cloudAgentCandidateLockfile = `${JSON.stringify({
-  schemaVersion: 1,
-  release: {
-    repository: "hxp0618/cloud-agents",
-    tag: "cloud-agent-m1-rc.1",
-    sourceCommit: "e".repeat(40),
-    candidateDigest: `sha256:${"d".repeat(64)}`,
-  },
-  standaloneRuntime: {
-    url: "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/cloud-agent-runtime-standalone.mjs",
-    sha256: `sha256:${"c".repeat(64)}`,
-  },
-  packages: Object.fromEntries(
-    candidatePackages.map((name, index) => [
-      name,
-      {
-        version: name === "@synara/cloud-agent-runtime" ? "0.2.0-rc.1" : "0.1.0-rc.1",
-        url: `https://example.test/${index}`,
-        sha256: `sha256:${String(index + 1).repeat(64)}`,
-      },
-    ]),
-  ),
-})}\n`;
+const cloudAgentCandidateLockfile = readFileSync(
+  resolve(import.meta.dirname, "../cloud-agent-candidate.lock.json"),
+  "utf8",
+);
+const cloudAgentCandidate = JSON.parse(cloudAgentCandidateLockfile) as {
+  release: { sourceCommit: string; candidateDigest: string };
+  standaloneRuntime: { sha256: string };
+};
 const workerAPKLockfile = `
 bash=5.3.9-r1
 ca-certificates=20260611-r0
@@ -216,9 +195,9 @@ describe("Worker image manifest", () => {
       { provider: "codex", kind: "cli", package: "@openai/codex", version: "0.145.0" },
     ]);
     expect(first.manifest.cloudAgentCandidate).toMatchObject({
-      sourceCommit: "e".repeat(40),
-      candidateDigest: `sha256:${"d".repeat(64)}`,
-      standaloneRuntimeSha256: `sha256:${"c".repeat(64)}`,
+      sourceCommit: cloudAgentCandidate.release.sourceCommit,
+      candidateDigest: cloudAgentCandidate.release.candidateDigest,
+      standaloneRuntimeSha256: cloudAgentCandidate.standaloneRuntime.sha256,
     });
     expect(first.manifest.cloudAgentCandidate.packages).toHaveLength(7);
     expect(first.manifest.lockfiles).toHaveLength(3);
@@ -258,6 +237,26 @@ describe("Worker image manifest", () => {
     );
     expect(() => build({ rawProviderToolsSBOM: JSON.stringify(withoutCodexPlatform) })).toThrow(
       /does not describe @openai\/codex@0.145.0-linux-arm64/,
+    );
+  });
+
+  it("rejects an arbitrary or self-consistent non-release candidate", () => {
+    const arbitraryDigest = JSON.parse(cloudAgentCandidateLockfile) as {
+      release: { candidateDigest: string };
+      packages: Record<string, { sha256: string }>;
+    };
+    arbitraryDigest.release.candidateDigest = `sha256:${"d".repeat(64)}`;
+    expect(() => build({ cloudAgentCandidateLockfile: JSON.stringify(arbitraryDigest) })).toThrow(
+      /candidate digest/,
+    );
+
+    const wrongTuple = JSON.parse(cloudAgentCandidateLockfile) as {
+      release: { candidateDigest: string };
+      packages: Record<string, { sha256: string }>;
+    };
+    wrongTuple.packages["@synara/cloud-agent-protocol"]!.sha256 = `sha256:${"a".repeat(64)}`;
+    expect(() => build({ cloudAgentCandidateLockfile: JSON.stringify(wrongTuple) })).toThrow(
+      /tuple does not match/,
     );
   });
 });

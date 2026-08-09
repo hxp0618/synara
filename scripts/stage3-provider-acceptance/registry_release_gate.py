@@ -86,6 +86,53 @@ PEM_CERTIFICATE_PATTERN = re.compile(
     re.DOTALL,
 )
 CONTAINER_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
+CLOUD_AGENT_RELEASE_REPOSITORY = "hxp0618/cloud-agents"
+CLOUD_AGENT_RELEASE_TAG = "cloud-agent-m1-rc.1"
+CLOUD_AGENT_RELEASE_BASE_URL = (
+    "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/"
+)
+CLOUD_AGENT_SOURCE_COMMIT = "49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a"
+CLOUD_AGENT_STANDALONE = {
+    "filename": "cloud-agent-runtime-standalone.mjs",
+    "sha256": "sha256:c24a1c23f89f62e714e3465b59a4be12e1b5cb75387a2d0d6de9811803064521",
+}
+CLOUD_AGENT_PACKAGES = {
+    "@synara/cloud-agent-distribution": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-distribution-0.1.0-rc.1.tgz",
+        "sha256:0326203b90a5be4f566b3d4282aea5fda8532753855a8a6b4b449776a966e29c",
+    ),
+    "@synara/cloud-agent-protocol": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
+        "sha256:e46c5a639482ac8af5c9794cda2c03e93779ce7d10cd1aac52761d6ec3cb2ac2",
+    ),
+    "@synara/cloud-agent-provider-api": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-provider-api-0.1.0-rc.1.tgz",
+        "sha256:88737cda1b0cef0922f50509acb154e2112a2d78acf219a1a5568edf3d731a59",
+    ),
+    "@synara/cloud-agent-provider-claude": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-provider-claude-0.1.0-rc.1.tgz",
+        "sha256:e6a3058fe21fc9799d242bd8c3ae7d8e7bcf7674f2003319d493d4afdda636fd",
+    ),
+    "@synara/cloud-agent-provider-codex": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-provider-codex-0.1.0-rc.1.tgz",
+        "sha256:8715b6c9d116d8b229c810903d1d7da16aaa6fed327020a06e0bd48813f49ec8",
+    ),
+    "@synara/cloud-agent-runtime": (
+        "0.2.0-rc.1",
+        "synara-cloud-agent-runtime-0.2.0-rc.1.tgz",
+        "sha256:89aaa8bc42b2527fee584dfa9bccbc3e994dc1c67b99166989ca20be9fcf6488",
+    ),
+    "@synara/cloud-agent-testkit": (
+        "0.1.0-rc.1",
+        "synara-cloud-agent-testkit-0.1.0-rc.1.tgz",
+        "sha256:5e4031c8bc449a78e0d5dff6721c7ab708361a5c1b7efa5dfd833752d5add21c",
+    ),
+}
 
 ReleaseGateError = common.ReleaseGateError
 
@@ -1152,29 +1199,70 @@ def _expected_cloud_agent_candidate(repo_root: pathlib.Path) -> dict[str, Any]:
             "release.registry_embedded_manifest_invalid",
             "Worker Registry gate could not read the Cloud Agent candidate lock.",
         ) from None
-    release = lock.get("release") if isinstance(lock, dict) else None
-    standalone = lock.get("standaloneRuntime") if isinstance(lock, dict) else None
-    packages = lock.get("packages") if isinstance(lock, dict) else None
-    if not isinstance(release, dict) or not isinstance(standalone, dict) or not isinstance(packages, dict):
+    return _validate_cloud_agent_candidate_lock(lock)
+
+
+def _validate_cloud_agent_candidate_lock(lock: Any) -> dict[str, Any]:
+    try:
+        if not isinstance(lock, dict) or set(lock) != {
+            "schemaVersion",
+            "release",
+            "standaloneRuntime",
+            "packages",
+        }:
+            raise ValueError("top-level fields")
+        release = lock["release"]
+        standalone = lock["standaloneRuntime"]
+        packages = lock["packages"]
+        if (
+            lock["schemaVersion"] != 1
+            or not isinstance(release, dict)
+            or set(release)
+            != {"repository", "tag", "sourceCommit", "candidateDigest"}
+            or release["repository"] != CLOUD_AGENT_RELEASE_REPOSITORY
+            or release["tag"] != CLOUD_AGENT_RELEASE_TAG
+            or release["sourceCommit"] != CLOUD_AGENT_SOURCE_COMMIT
+            or not isinstance(standalone, dict)
+            or set(standalone) != {"url", "sha256"}
+            or standalone["url"]
+            != CLOUD_AGENT_RELEASE_BASE_URL + CLOUD_AGENT_STANDALONE["filename"]
+            or standalone["sha256"] != CLOUD_AGENT_STANDALONE["sha256"]
+            or not isinstance(packages, dict)
+            or set(packages) != set(CLOUD_AGENT_PACKAGES)
+        ):
+            raise ValueError("release identity or package set")
+        normalized_packages = []
+        candidate_lines = []
+        for name in sorted(CLOUD_AGENT_PACKAGES):
+            artifact = packages[name]
+            version, filename, sha256_digest = CLOUD_AGENT_PACKAGES[name]
+            if (
+                not isinstance(artifact, dict)
+                or set(artifact) != {"version", "url", "sha256"}
+                or artifact["version"] != version
+                or artifact["url"] != CLOUD_AGENT_RELEASE_BASE_URL + filename
+                or artifact["sha256"] != sha256_digest
+            ):
+                raise ValueError(f"package tuple {name}")
+            normalized_packages.append(
+                {"name": name, "version": version, "sha256": sha256_digest}
+            )
+            candidate_lines.append(f"{name}@{version} {sha256_digest}")
+        canonical_payload = "\n".join(candidate_lines) + "\n"
+        candidate_digest = "sha256:" + hashlib.sha256(
+            canonical_payload.encode("utf-8")
+        ).hexdigest()
+        if release["candidateDigest"] != candidate_digest:
+            raise ValueError("candidate digest")
+    except (KeyError, TypeError, ValueError):
         raise ReleaseGateError(
             "release.registry_embedded_manifest_invalid",
-            "Cloud Agent candidate lock is incomplete.",
-        )
-    normalized_packages = []
-    for name in sorted(packages):
-        artifact = packages[name]
-        if not isinstance(artifact, dict):
-            raise ReleaseGateError(
-                "release.registry_embedded_manifest_invalid",
-                "Cloud Agent candidate package metadata is invalid.",
-            )
-        normalized_packages.append(
-            {"name": name, "version": artifact.get("version"), "sha256": artifact.get("sha256")}
-        )
+            "Cloud Agent candidate lock does not match the immutable RC or canonical digest.",
+        ) from None
     return {
-        "sourceCommit": release.get("sourceCommit"),
-        "candidateDigest": release.get("candidateDigest"),
-        "standaloneRuntimeSha256": standalone.get("sha256"),
+        "sourceCommit": CLOUD_AGENT_SOURCE_COMMIT,
+        "candidateDigest": candidate_digest,
+        "standaloneRuntimeSha256": CLOUD_AGENT_STANDALONE["sha256"],
         "packages": normalized_packages,
     }
 
@@ -1291,6 +1379,7 @@ def validate_embedded_artifacts(
         "worker-apk": files["workerAPKLock"],
     }
     lock_hashes: dict[str, str] = {}
+    embedded_cloud_agent_candidate: dict[str, Any] | None = None
     for name, local_relative_path in LOCAL_LOCK_PATHS.items():
         embedded_path = embedded_lock_files[name]
         embedded_bytes = embedded_path.read_bytes()
@@ -1308,6 +1397,17 @@ def validate_embedded_artifacts(
                 "Worker Registry image embedded lockfile did not match the clean checkout.",
                 {"platform": platform, "lockfile": name},
             )
+        if name == "cloud-agent-candidate":
+            try:
+                embedded_cloud_agent_candidate = _validate_cloud_agent_candidate_lock(
+                    json.loads(embedded_bytes)
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ReleaseGateError(
+                    "release.registry_embedded_manifest_invalid",
+                    "Worker Registry image embedded Cloud Agent candidate lock is invalid.",
+                    {"platform": platform},
+                ) from None
         lock_hashes[name] = digest
     sboms = manifest.get("sboms")
     sbom_descriptor = sboms[0] if isinstance(sboms, list) and len(sboms) == 1 else None
@@ -1331,6 +1431,7 @@ def validate_embedded_artifacts(
         or manifest.get("platform") != {"os": "linux", "architecture": architecture}
         or manifest.get("providerRuntimes") != expected_runtimes
         or manifest.get("cloudAgentCandidate") != expected_cloud_agent_candidate
+        or manifest.get("cloudAgentCandidate") != embedded_cloud_agent_candidate
         or not isinstance(sbom_descriptor, dict)
         or sbom_descriptor.get("name") != "provider-tools"
         or sbom_descriptor.get("format") != "spdx-json"
