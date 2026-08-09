@@ -10,6 +10,7 @@ import {
 import { ServerSettingsLive } from "../serverSettings";
 import { makeClaudeAdapterLive } from "./Layers/ClaudeAdapter";
 import { makeCodexAdapterLive } from "./Layers/CodexAdapter";
+import { makeCloudAgentCodexAdapterLive } from "./Layers/CloudAgentCodexAdapter";
 import { makeCursorAdapterLive } from "./Layers/CursorAdapter";
 import { makeEventNdjsonLogger } from "./Layers/EventNdjsonLogger";
 import { makeAntigravityAdapterLive } from "./Layers/AntigravityAdapter";
@@ -23,6 +24,7 @@ import { makeDurableProviderServiceLive } from "./Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./Layers/ProviderSessionDirectory";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime";
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
+import { readCloudAgentBackendConfig } from "./cloudAgent/config";
 
 export function makeServerProviderLayer(
   options: {
@@ -51,9 +53,13 @@ export function makeServerProviderLayer(
     // the same MCP catalog/dispatcher through its native custom-tool API.
     const agentGatewayCredentialsLayer =
       options.agentGatewayCredentialsLayer ?? AgentGatewayCredentialsWithSecretsLive;
-    const codexAdapterLayer = makeCodexAdapterLive(
-      nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
+    const codexBackend = readCloudAgentBackendConfig();
+    const codexAdapterLayer =
+      codexBackend.backend === "cloud-agent"
+        ? makeCloudAgentCodexAdapterLive({ config: codexBackend })
+        : makeCodexAdapterLive(nativeEventLogger ? { nativeEventLogger } : undefined).pipe(
+            Layer.provide(agentGatewayCredentialsLayer),
+          );
     const claudeAdapterLayer = makeClaudeAdapterLive(
       nativeEventLogger ? { nativeEventLogger } : undefined,
     ).pipe(Layer.provide(agentGatewayCredentialsLayer));
