@@ -33,7 +33,7 @@ ATTESTATION_DIGESTS = {
 }
 EMBEDDED_LOCK_FILE_NAMES = {
     "provider-tools-npm": "providerToolsLock",
-    "provider-host-bun": "providerHostLock",
+    "cloud-agent-candidate": "cloudAgentCandidateLock",
     "worker-apk": "workerAPKLock",
 }
 
@@ -349,6 +349,7 @@ def write_embedded_fixture(
         ],
         "lockfiles": lockfiles,
         "providerRuntimes": runtimes,
+        "cloudAgentCandidate": gate._expected_cloud_agent_candidate(REPO_ROOT),
         "sboms": [
             {
                 "name": "provider-tools",
@@ -1881,9 +1882,10 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("rm -f /var/log/apk.log", dockerfile)
         self.assertIn("--mount=from=worker-provider-tools", dockerfile)
         self.assertIn('/opt/synara/.build-revision', dockerfile)
-        self.assertIn("COPY packages/shared/src ./packages/shared/src", dockerfile)
+        self.assertNotIn("COPY packages/cloud-agent-", dockerfile)
+        self.assertIn("cloud-agent-candidate.lock.json", dockerfile)
         self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd', dockerfile)
-        self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs', dockerfile)
+        self.assertIn("/out/provider-host.mjs /out/claude-agent-sdk.package.json", dockerfile)
         self.assertNotIn(
             "COPY --from=worker-provider-tools /tmp/provider-tools.raw.spdx.json",
             dockerfile,
@@ -2568,7 +2570,7 @@ class EmbeddedArtifactTest(unittest.TestCase):
     def test_rejects_embedded_lockfile_that_differs_from_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             files = write_embedded_fixture(pathlib.Path(directory))
-            files["providerHostLock"].write_bytes(b"different lock")
+            files["cloudAgentCandidateLock"].write_bytes(b"different lock")
             with self.assertRaises(gate.ReleaseGateError) as caught:
                 gate.validate_embedded_artifacts(
                     options(pathlib.Path(directory) / "output"),

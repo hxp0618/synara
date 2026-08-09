@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Moved the seven public Cloud Agent packages to the independently released `hxp0618/cloud-agents` Runtime source and removed Synara's editable copies and producer-side packing helpers.
+- Kept the Synara Effect contracts, Provider Host compatibility bin, agentd/Control Plane authority, and Worker adapters while changing their public Runtime dependency to one immutable GitHub RC closure.
+- Added a dedicated Cloud Agent candidate lock, installed/remote same-bits verifier, Worker manifest candidate identity, and release ADR so the public candidate digest is recorded independently from the wider Synara root lock.
+
+### Verification boundary
+
+- The immutable Linux-validated `cloud-agent-m1-rc.1` GitHub Release, final candidate lock, regenerated `bun.lock`, anonymous artifact SHA checks, installed/standalone same-bits check, Provider Host, contracts, agentd, Worker-manifest tests, and Docker static/Provider Host packaging checks passed. This is RC-consumer evidence, not npm publication, deployment, public beta, or GA.
+- A complete Worker image rebuild is still blocked before candidate-manifest generation by drift in the existing Alpine package lock (`openjdk21 21.0.11` is no longer served); that host-owned supply-chain refresh remains separate from the verified public Runtime bits.
+- Real authenticated Codex and Claude Provider turns remain an external-credential gate.
+
 ## 0.7.0 - 2026-08-05
 
 **A review of the Synara codebase found an analytics configuration that came from the original T3 Code codebase when Synara was created as a clone in March. We did not add it, and we have no access to the PostHog project receiving the events.**

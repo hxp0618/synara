@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synara.dev/build/cloud-agent-candidate-lock-v1.schema.json",
+  "title": "Synara Cloud Agent candidate lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "release", "standaloneRuntime", "packages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "sourceCommit", "candidateDigest"],
+      "properties": {
+        "repository": { "const": "hxp0618/cloud-agents" },
+        "tag": { "const": "cloud-agent-m1-rc.1" },
+        "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "candidateDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "standaloneRuntime": {
+      "$ref": "#/$defs/artifact"
+    },
+    "packages": {
+      "type": "object",
+      "minProperties": 7,
+      "maxProperties": 7,
+      "additionalProperties": false,
+      "required": [
+        "@synara/cloud-agent-protocol",
+        "@synara/cloud-agent-provider-api",
+        "@synara/cloud-agent-runtime",
+        "@synara/cloud-agent-provider-codex",
+        "@synara/cloud-agent-provider-claude",
+        "@synara/cloud-agent-testkit",
+        "@synara/cloud-agent-distribution"
+      ],
+      "properties": {
+        "@synara/cloud-agent-protocol": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-provider-api": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-runtime": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-provider-codex": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-provider-claude": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-testkit": { "$ref": "#/$defs/package" },
+        "@synara/cloud-agent-distribution": { "$ref": "#/$defs/package" }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "sha256"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc\\.1/[^/]+$"
+        },
+        "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "url", "sha256"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc\\.1/[^/]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

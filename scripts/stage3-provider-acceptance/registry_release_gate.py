@@ -52,7 +52,7 @@ EMBEDDED_PATHS = {
     "manifest": "/opt/synara/worker-image-manifest.json",
     "sbom": "/opt/synara/provider-tools.spdx.json",
     "providerToolsLock": "/opt/synara/provider-tools/package-lock.json",
-    "providerHostLock": "/opt/synara/provider-host/bun.lock",
+    "cloudAgentCandidateLock": "/opt/synara/provider-host/cloud-agent-candidate.lock.json",
     "workerAPKLock": "/opt/synara/worker-apk-packages.lock",
     "providerHost": "/opt/synara/provider-host/index.mjs",
     "agentd": "/usr/local/bin/synara-agentd",
@@ -61,13 +61,13 @@ EMBEDDED_PATHS = {
 }
 LOCAL_LOCK_PATHS = {
     "provider-tools-npm": pathlib.Path("deploy/worker/provider-tools/package-lock.json"),
-    "provider-host-bun": pathlib.Path("bun.lock"),
+    "cloud-agent-candidate": pathlib.Path("cloud-agent-candidate.lock.json"),
     "worker-apk": pathlib.Path("deploy/worker/apk-packages.lock"),
 }
 SBOM_GENERATOR_LOCK_PATH = pathlib.Path("deploy/worker/buildkit-sbom-generator.lock")
 EMBEDDED_LOCK_PATHS = {
     "provider-tools-npm": EMBEDDED_PATHS["providerToolsLock"],
-    "provider-host-bun": EMBEDDED_PATHS["providerHostLock"],
+    "cloud-agent-candidate": EMBEDDED_PATHS["cloudAgentCandidateLock"],
     "worker-apk": EMBEDDED_PATHS["workerAPKLock"],
 }
 CREDENTIAL_ENVIRONMENT_PATTERN = re.compile(
@@ -1092,25 +1092,24 @@ def _expected_provider_runtimes(repo_root: pathlib.Path) -> list[dict[str, str]]
                 encoding="utf-8"
             )
         )
-        provider_package = json.loads(
-            (repo_root / "apps/provider-host/package.json").read_text(encoding="utf-8")
-        )
+        bun_lock = (repo_root / "bun.lock").read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError):
         raise ReleaseGateError(
             "release.registry_embedded_manifest_invalid",
             "Worker Registry gate could not read locked Provider runtime metadata.",
         ) from None
     packages = provider_lock.get("packages") if isinstance(provider_lock, dict) else None
-    dependencies = (
-        provider_package.get("dependencies") if isinstance(provider_package, dict) else None
-    )
     codex = packages.get("node_modules/@openai/codex") if isinstance(packages, dict) else None
     claude = (
         packages.get("node_modules/@anthropic-ai/claude-code")
         if isinstance(packages, dict)
         else None
     )
-    sdk = dependencies.get("@anthropic-ai/claude-agent-sdk") if isinstance(dependencies, dict) else None
+    sdk_match = re.search(
+        r'"@anthropic-ai/claude-agent-sdk": \["@anthropic-ai/claude-agent-sdk@([^"\s]+)"',
+        bun_lock,
+    )
+    sdk = sdk_match.group(1) if sdk_match is not None else None
     versions = {
         "codex": codex.get("version") if isinstance(codex, dict) else None,
         "claude": claude.get("version") if isinstance(claude, dict) else None,
@@ -1141,6 +1140,43 @@ def _expected_provider_runtimes(repo_root: pathlib.Path) -> list[dict[str, str]]
             "version": str(versions["codex"]),
         },
     ]
+
+
+def _expected_cloud_agent_candidate(repo_root: pathlib.Path) -> dict[str, Any]:
+    try:
+        lock = json.loads(
+            (repo_root / "cloud-agent-candidate.lock.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        raise ReleaseGateError(
+            "release.registry_embedded_manifest_invalid",
+            "Worker Registry gate could not read the Cloud Agent candidate lock.",
+        ) from None
+    release = lock.get("release") if isinstance(lock, dict) else None
+    standalone = lock.get("standaloneRuntime") if isinstance(lock, dict) else None
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    if not isinstance(release, dict) or not isinstance(standalone, dict) or not isinstance(packages, dict):
+        raise ReleaseGateError(
+            "release.registry_embedded_manifest_invalid",
+            "Cloud Agent candidate lock is incomplete.",
+        )
+    normalized_packages = []
+    for name in sorted(packages):
+        artifact = packages[name]
+        if not isinstance(artifact, dict):
+            raise ReleaseGateError(
+                "release.registry_embedded_manifest_invalid",
+                "Cloud Agent candidate package metadata is invalid.",
+            )
+        normalized_packages.append(
+            {"name": name, "version": artifact.get("version"), "sha256": artifact.get("sha256")}
+        )
+    return {
+        "sourceCommit": release.get("sourceCommit"),
+        "candidateDigest": release.get("candidateDigest"),
+        "standaloneRuntimeSha256": standalone.get("sha256"),
+        "packages": normalized_packages,
+    }
 
 
 def _expected_codex_platform_sbom_package(
@@ -1251,7 +1287,7 @@ def validate_embedded_artifacts(
     }
     embedded_lock_files = {
         "provider-tools-npm": files["providerToolsLock"],
-        "provider-host-bun": files["providerHostLock"],
+        "cloud-agent-candidate": files["cloudAgentCandidateLock"],
         "worker-apk": files["workerAPKLock"],
     }
     lock_hashes: dict[str, str] = {}
@@ -1277,6 +1313,7 @@ def validate_embedded_artifacts(
     sbom_descriptor = sboms[0] if isinstance(sboms, list) and len(sboms) == 1 else None
     sbom_digest = hashlib.sha256(sbom_bytes).hexdigest()
     expected_runtimes = _expected_provider_runtimes(options.repo_root)
+    expected_cloud_agent_candidate = _expected_cloud_agent_candidate(options.repo_root)
     expected_codex_platform = _expected_codex_platform_sbom_package(
         options.repo_root, architecture
     )
@@ -1293,6 +1330,7 @@ def validate_embedded_artifacts(
         or manifest.get("source") != {"version": version, "gitSha": git_sha}
         or manifest.get("platform") != {"os": "linux", "architecture": architecture}
         or manifest.get("providerRuntimes") != expected_runtimes
+        or manifest.get("cloudAgentCandidate") != expected_cloud_agent_candidate
         or not isinstance(sbom_descriptor, dict)
         or sbom_descriptor.get("name") != "provider-tools"
         or sbom_descriptor.get("format") != "spdx-json"

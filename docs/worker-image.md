@@ -28,6 +28,13 @@ The image contains Node.js 24, `synara-agentd`, `provider-host`, Codex CLI, Clau
 and a writable Workspace root. It runs as non-root UID/GID 10001 with no embedded registration, Lease,
 Provider, Git, or cloud credentials.
 
+On 2026-08-10, executing `node --version` from both digest-pinned runtime bases recorded above
+(`node:24-alpine@sha256:a0b9...fbfd` and `node:24-bookworm@sha256:d5ad...f41f`) returned `v24.18.0`.
+This satisfies the public Runtime engine range `>=24.13.1 <25`. The bundled immutable RC Provider Host also
+started under exact Node `v24.13.1` and returned Protocol 2.3 `Describe` descriptors for both `codex` and
+`claudeAgent`. A final Worker image rebuild is separately open because the existing Alpine package lock requests
+an `openjdk21` patch version no longer served by the pinned base repositories.
+
 ## Reproducible inputs
 
 The Worker build fails closed unless all of these inputs are immutable:
@@ -36,7 +43,9 @@ The Worker build fails closed unless all of these inputs are immutable:
 - `deploy/worker/provider-tools/package-lock.json` pins npm integrity hashes for Codex CLI, Claude Code CLI, and
   npm `12.0.1`. The final Worker removes the older npm bundled in the Node base image and points npm, npx, and
   node-gyp at the locked tree; npm's transient `/tmp/node-compile-cache` is removed in the producing layer.
-- `bun.lock` pins the Provider Host and Claude Agent SDK graph.
+- `cloud-agent-candidate.lock.json` pins the external public Runtime source/candidate/standalone digests and all
+  seven GitHub RC package artifacts. The root `bun.lock` still locks the wider Synara build graph but is not the
+  public Runtime release identity.
 - `deploy/worker/apk-packages.lock` pins the complete Alpine package closure installed over the runtime base.
 - `deploy/worker/buildkit-sbom-generator.lock` pins the BuildKit Syft scanner image used for outer SPDX
   attestations; release builds never resolve the mutable `stable-1` tag.
@@ -71,7 +80,7 @@ Every official Worker image contains:
 /opt/synara/worker-image-manifest.json
 /opt/synara/provider-tools.spdx.json
 /opt/synara/provider-tools/package-lock.json
-/opt/synara/provider-host/bun.lock
+/opt/synara/provider-host/cloud-agent-candidate.lock.json
 /opt/synara/worker-apk-packages.lock
 /opt/synara/.build-revision
 ```
@@ -108,7 +117,7 @@ docker run --rm --entrypoint sh synara-worker:0.5.3 -euxc '
     /opt/synara/worker-image-manifest.json \
     /opt/synara/provider-tools.spdx.json \
     /opt/synara/provider-tools/package-lock.json \
-    /opt/synara/provider-host/bun.lock \
+    /opt/synara/provider-host/cloud-agent-candidate.lock.json \
     /opt/synara/worker-apk-packages.lock
   codex --version
   claude --version

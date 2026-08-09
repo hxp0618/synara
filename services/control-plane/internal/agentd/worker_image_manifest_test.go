@@ -43,7 +43,7 @@ func TestLoadWorkerImageManifestValidatesReferencesAndProducesRedactedFeatureFla
 	}
 	for _, required := range []string{
 		`"schemaVersion":1`, `"source"`, `"platform"`, `"baseImages"`,
-		`"lockfiles"`, `"providerRuntimes"`, `"sboms"`,
+		`"lockfiles"`, `"providerRuntimes"`, `"cloudAgentCandidate"`, `"sboms"`,
 	} {
 		if !strings.Contains(string(encoded), required) {
 			t.Fatalf("Worker image build Feature Flag omitted %s: %s", required, encoded)
@@ -58,8 +58,10 @@ func TestLoadWorkerImageManifestRejectsInvalidOrChangedInputs(t *testing.T) {
 			"schemaVersion": fixture.Manifest.SchemaVersion,
 			"source":        fixture.Manifest.Source, "platform": fixture.Manifest.Platform,
 			"baseImages": fixture.Manifest.BaseImages, "lockfiles": fixture.Manifest.Lockfiles,
-			"providerRuntimes": fixture.Manifest.ProviderRuntimes, "sboms": fixture.Manifest.SBOMs,
-			"unexpected": true,
+			"providerRuntimes":    fixture.Manifest.ProviderRuntimes,
+			"cloudAgentCandidate": fixture.Manifest.CloudAgentCandidate,
+			"sboms":               fixture.Manifest.SBOMs,
+			"unexpected":          true,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -127,6 +129,16 @@ func TestLoadWorkerImageManifestRejectsInvalidOrChangedInputs(t *testing.T) {
 		}
 	})
 
+	t.Run("missing Cloud Agent candidate", func(t *testing.T) {
+		fixture := newWorkerImageManifestFixture(t)
+		fixture.Manifest.CloudAgentCandidate = workerImageCloudAgentCandidate{}
+		writeWorkerImageManifestFixture(t, fixture.Path, fixture.Manifest)
+		t.Setenv(workerImageManifestEnvironment, fixture.Path)
+		if _, err := loadConfiguredWorkerImageManifest(); err == nil || !strings.Contains(err.Error(), "candidate identity") {
+			t.Fatalf("Worker image manifest omitted the Cloud Agent candidate: %v", err)
+		}
+	})
+
 	t.Run("unpinned Base Image", func(t *testing.T) {
 		fixture := newWorkerImageManifestFixture(t)
 		fixture.Manifest.BaseImages[0].Reference = "golang:1.26-bookworm"
@@ -184,7 +196,7 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 		content string
 	}{
 		{name: "provider-tools-npm", content: `{"lockfileVersion":3}`},
-		{name: "provider-host-bun", content: "bun-lock-v1"},
+		{name: "cloud-agent-candidate", content: "cloud-agent-candidate-v1"},
 		{name: "worker-apk", content: "apk-lock-v1"},
 	} {
 		path := filepath.Join(artifacts, item.name+".lock")
@@ -213,6 +225,20 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 			{Provider: "codex", Kind: "cli", Package: "@openai/codex", Version: "0.145.0"},
 			{Provider: "claudeAgent", Kind: "sdk", Package: "@anthropic-ai/claude-agent-sdk", Version: "0.3.207"},
 			{Provider: "claudeAgent", Kind: "cli", Package: "@anthropic-ai/claude-code", Version: "2.1.197"},
+		},
+		CloudAgentCandidate: workerImageCloudAgentCandidate{
+			SourceCommit:            strings.Repeat("e", 40),
+			CandidateDigest:         "sha256:" + strings.Repeat("d", 64),
+			StandaloneRuntimeSHA256: "sha256:" + strings.Repeat("c", 64),
+			Packages: []workerImageCloudAgentPackage{
+				{Name: "@synara/cloud-agent-protocol", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("1", 64)},
+				{Name: "@synara/cloud-agent-provider-api", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("2", 64)},
+				{Name: "@synara/cloud-agent-runtime", Version: "0.2.0-rc.1", SHA256: "sha256:" + strings.Repeat("3", 64)},
+				{Name: "@synara/cloud-agent-provider-codex", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("4", 64)},
+				{Name: "@synara/cloud-agent-provider-claude", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("5", 64)},
+				{Name: "@synara/cloud-agent-testkit", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("6", 64)},
+				{Name: "@synara/cloud-agent-distribution", Version: "0.1.0-rc.1", SHA256: "sha256:" + strings.Repeat("7", 64)},
+			},
 		},
 		SBOMs: []workerImageSoftwareBill{{
 			Name: "provider-tools", Format: "spdx-json",

@@ -357,6 +357,25 @@ bun run --cwd apps/web test \
 - [x] 操作人已明确授权，并且最终一次 `bun fmt`、`bun lint`、`bun typecheck` 全部通过。
 - [x] Final gate 后没有再修改受格式化、Lint 或 TypeScript 检查覆盖的文件。
 
+### 5.1 External Runtime RC addendum
+
+The prior source-copy commands above are historical. For the external Runtime boundary, use:
+
+```bash
+node scripts/verify-cloud-agent-candidate.ts
+bun run --cwd apps/provider-host test
+bun run --cwd apps/provider-host typecheck
+bun run --cwd apps/provider-host build
+bun run --cwd packages/contracts test src/providerHost.test.ts src/providerRuntime.test.ts
+```
+
+- [x] The immutable Linux-validated `cloud-agent-m1-rc.1` assets are anonymously reachable and match every SHA-256 in `cloud-agent-candidate.lock.json`.
+- [x] The installed Distribution stdio bundle matches the standalone Runtime SHA-256.
+- [x] Provider Host, contracts, agentd, Worker manifest, Dockerfile validation, and the Docker Provider Host packaging stage pass from the regenerated host lock.
+- [x] Authenticated real-provider Turns remain recorded as open rather than replaced by mocks or Describe-only evidence.
+
+The final Worker image rebuild currently stops before candidate-manifest generation because the host-owned Alpine lock still requests `openjdk21 21.0.11`, while the pinned base repositories now serve `21.0.12`. This is an open Worker supply-chain refresh gate; it does not change or weaken the verified public candidate digests.
+
 ## 6. Acceptance 证据等级
 
 下列命令是 closure 前用于诊断 Adapter/Provider 可用性的历史示例，不是继续执行的双模型发布要求。最终

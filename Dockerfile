@@ -115,13 +115,6 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
-COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
-COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
-COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
-COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
-COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
-COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
-COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
@@ -195,13 +188,6 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
-COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
-COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
-COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
-COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
-COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
-COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
-COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
@@ -289,13 +275,6 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
-COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
-COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
-COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
-COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
-COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
-COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
-COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
@@ -303,17 +282,12 @@ COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-  bun install --frozen-lockfile --filter @synara/provider-host
+  bun install --frozen-lockfile --no-cache --filter @synara/provider-host
 COPY apps/provider-host/src ./apps/provider-host/src
-COPY packages/cloud-agent-distribution ./packages/cloud-agent-distribution
-COPY packages/cloud-agent-protocol ./packages/cloud-agent-protocol
-COPY packages/cloud-agent-provider-api ./packages/cloud-agent-provider-api
-COPY packages/cloud-agent-provider-claude ./packages/cloud-agent-provider-claude
-COPY packages/cloud-agent-provider-codex ./packages/cloud-agent-provider-codex
-COPY packages/cloud-agent-runtime ./packages/cloud-agent-runtime
-COPY packages/cloud-agent-testkit ./packages/cloud-agent-testkit
 RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs \
-  && touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs
+  && bun -e 'const matches = [...new Bun.Glob("node_modules/.bun/**/node_modules/@anthropic-ai/claude-agent-sdk/package.json").scanSync({ cwd: ".", dot: true })]; if (matches.length !== 1) throw new Error(`expected one Claude Agent SDK manifest, found ${matches.length}`); await Bun.write("/out/claude-agent-sdk.package.json", Bun.file(matches[0]));' \
+  && touch -d "@${SOURCE_DATE_EPOCH}" \
+    /out/provider-host.mjs /out/claude-agent-sdk.package.json
 
 FROM provider-host-build AS provider-host-fixture-build
 
@@ -390,10 +364,11 @@ RUN set -eu; \
     /usr/local/bin/node-gyp; \
   test "$(npm --version)" = "$expected_npm"; \
   rm -rf /tmp/node-compile-cache
-COPY bun.lock /opt/synara/provider-host/bun.lock
-COPY apps/provider-host/package.json /opt/synara/provider-host/package.json
+COPY --chown=0:0 --chmod=0444 cloud-agent-candidate.lock.json \
+  /opt/synara/provider-host/cloud-agent-candidate.lock.json
 COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs
 RUN --mount=from=worker-provider-tools,source=/tmp/provider-tools.raw.spdx.json,target=/tmp/provider-tools.raw.spdx.json,ro \
+  --mount=from=provider-host-build,source=/out/claude-agent-sdk.package.json,target=/tmp/claude-agent-sdk.package.json,ro \
   node /opt/synara/build/worker-image-manifest.mjs \
     --version "${SYNARA_VERSION}" \
     --git-sha "${SYNARA_GIT_SHA}" \
@@ -403,8 +378,8 @@ RUN --mount=from=worker-provider-tools,source=/tmp/provider-tools.raw.spdx.json,
     --base-image "provider-host-build=${BUN_IMAGE}" \
     --base-image "worker-runtime=${WORKER_RUNTIME_IMAGE}" \
     --provider-tools-lockfile /opt/synara/provider-tools/package-lock.json \
-    --provider-host-lockfile /opt/synara/provider-host/bun.lock \
-    --provider-host-package /opt/synara/provider-host/package.json \
+    --cloud-agent-candidate-lockfile /opt/synara/provider-host/cloud-agent-candidate.lock.json \
+    --claude-agent-sdk-package /tmp/claude-agent-sdk.package.json \
     --worker-apk-lockfile /opt/synara/worker-apk-packages.lock \
     --raw-provider-tools-sbom /tmp/provider-tools.raw.spdx.json \
     --provider-tools-sbom-output /opt/synara/provider-tools.spdx.json \

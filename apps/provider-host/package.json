@@ -9,10 +9,10 @@
   "scripts": {
     "build": "bun build src/index.ts --target=node --outfile=dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "bun run --cwd ../../packages/cloud-agent-distribution test && bun run --cwd ../../packages/cloud-agent-runtime test"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@synara/cloud-agent-distribution": "0.1.0"
+    "@synara/cloud-agent-distribution": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-distribution-0.1.0-rc.1.tgz"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -6,7 +6,8 @@ import { parseArgs } from "node:util";
 
 const SCHEMA_VERSION = 1;
 const PROVIDER_TOOLS_LOCKFILE_PATH = "/opt/synara/provider-tools/package-lock.json";
-const PROVIDER_HOST_LOCKFILE_PATH = "/opt/synara/provider-host/bun.lock";
+const CLOUD_AGENT_CANDIDATE_LOCKFILE_PATH =
+  "/opt/synara/provider-host/cloud-agent-candidate.lock.json";
 const WORKER_APK_LOCKFILE_PATH = "/opt/synara/worker-apk-packages.lock";
 const PROVIDER_TOOLS_SBOM_PATH = "/opt/synara/provider-tools.spdx.json";
 
@@ -153,19 +154,14 @@ function packageVersion(lockfile, packageName) {
   return version;
 }
 
-function providerRuntimes(providerToolsLockfile, providerHostPackageJSON) {
+function providerRuntimes(providerToolsLockfile, claudeSDKPackageJSON) {
   const lockfile = parseJSONObject(providerToolsLockfile, "Provider tools package-lock");
-  const providerHostPackage = parseJSONObject(
-    providerHostPackageJSON,
-    "Provider Host package.json",
-  );
+  const claudeSDKPackage = parseJSONObject(claudeSDKPackageJSON, "Claude Agent SDK package.json");
   invariant(
-    isRecord(providerHostPackage.dependencies),
-    "Provider Host package.json is missing dependencies",
+    claudeSDKPackage.name === "@anthropic-ai/claude-agent-sdk",
+    "Cloud Agent candidate did not install the Claude Agent SDK",
   );
-  const sdkVersion = String(
-    providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"] ?? "",
-  ).trim();
+  const sdkVersion = String(claudeSDKPackage.version ?? "").trim();
   invariant(
     /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(sdkVersion),
     "Claude Agent SDK must use an exact version",
@@ -185,6 +181,59 @@ function providerRuntimes(providerToolsLockfile, providerHostPackageJSON) {
       `${right.provider}:${right.kind}:${right.package}`,
     ),
   );
+}
+
+const CLOUD_AGENT_PACKAGE_NAMES = [
+  "@synara/cloud-agent-protocol",
+  "@synara/cloud-agent-provider-api",
+  "@synara/cloud-agent-runtime",
+  "@synara/cloud-agent-provider-codex",
+  "@synara/cloud-agent-provider-claude",
+  "@synara/cloud-agent-testkit",
+  "@synara/cloud-agent-distribution",
+];
+
+function normalizeCloudAgentCandidate(value) {
+  const lock = parseJSONObject(value, "Cloud Agent candidate lock");
+  const release = lock.release;
+  const standalone = lock.standaloneRuntime;
+  const packages = lock.packages;
+  invariant(lock.schemaVersion === 1, "Cloud Agent candidate lock schemaVersion must be 1");
+  invariant(
+    isRecord(release) &&
+      release.repository === "hxp0618/cloud-agents" &&
+      release.tag === "cloud-agent-m1-rc.1" &&
+      /^[0-9a-f]{40}$/.test(String(release.sourceCommit ?? "")) &&
+      /^sha256:[0-9a-f]{64}$/.test(String(release.candidateDigest ?? "")),
+    "Cloud Agent candidate release identity is invalid",
+  );
+  invariant(
+    isRecord(standalone) && /^sha256:[0-9a-f]{64}$/.test(String(standalone.sha256 ?? "")),
+    "Cloud Agent standalone Runtime digest is invalid",
+  );
+  invariant(
+    isRecord(packages) && Object.keys(packages).length === CLOUD_AGENT_PACKAGE_NAMES.length,
+    "Cloud Agent candidate must contain exactly seven packages",
+  );
+  const packageVersions = {};
+  const normalizedPackages = CLOUD_AGENT_PACKAGE_NAMES.map((name) => {
+    const artifact = packages[name];
+    invariant(
+      isRecord(artifact) &&
+        /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(String(artifact.version ?? "")) &&
+        /^sha256:[0-9a-f]{64}$/.test(String(artifact.sha256 ?? "")),
+      `Cloud Agent candidate package ${name} is invalid`,
+    );
+    packageVersions[name] = artifact.version;
+    return { name, version: artifact.version, sha256: artifact.sha256 };
+  }).sort((left, right) => left.name.localeCompare(right.name));
+  return {
+    sourceCommit: release.sourceCommit,
+    candidateDigest: release.candidateDigest,
+    standaloneRuntimeSha256: standalone.sha256,
+    packages: normalizedPackages,
+    packageVersions,
+  };
 }
 
 function codexPlatformRuntime(providerToolsLockfile, architecture) {
@@ -300,8 +349,8 @@ export function buildWorkerImageArtifacts({
   architecture,
   baseImages,
   providerToolsLockfile,
-  providerHostLockfile,
-  providerHostPackageJSON,
+  cloudAgentCandidateLockfile,
+  claudeSDKPackageJSON,
   workerAPKLockfile,
   rawProviderToolsSBOM,
 }) {
@@ -311,7 +360,8 @@ export function buildWorkerImageArtifacts({
   const created = normalizeSourceDateEpoch(sourceDateEpoch);
   const normalizedBaseImages = normalizeBaseImages(baseImages);
   validateAPKLockfile(workerAPKLockfile);
-  const runtimes = providerRuntimes(providerToolsLockfile, providerHostPackageJSON);
+  const cloudAgentCandidate = normalizeCloudAgentCandidate(cloudAgentCandidateLockfile);
+  const runtimes = providerRuntimes(providerToolsLockfile, claudeSDKPackageJSON);
   const codexPlatform = codexPlatformRuntime(providerToolsLockfile, workerArchitecture);
   const providerToolsLockfileSHA256 = sha256Hex(providerToolsLockfile);
   const providerToolsSBOM = normalizeProviderToolsSBOM(rawProviderToolsSBOM, {
@@ -328,9 +378,9 @@ export function buildWorkerImageArtifacts({
     baseImages: normalizedBaseImages,
     lockfiles: [
       {
-        name: "provider-host-bun",
-        path: PROVIDER_HOST_LOCKFILE_PATH,
-        sha256: sha256Hex(providerHostLockfile),
+        name: "cloud-agent-candidate",
+        path: CLOUD_AGENT_CANDIDATE_LOCKFILE_PATH,
+        sha256: sha256Hex(cloudAgentCandidateLockfile),
       },
       {
         name: "provider-tools-npm",
@@ -344,6 +394,12 @@ export function buildWorkerImageArtifacts({
       },
     ],
     providerRuntimes: runtimes,
+    cloudAgentCandidate: {
+      sourceCommit: cloudAgentCandidate.sourceCommit,
+      candidateDigest: cloudAgentCandidate.candidateDigest,
+      standaloneRuntimeSha256: cloudAgentCandidate.standaloneRuntimeSha256,
+      packages: cloudAgentCandidate.packages,
+    },
     sboms: [
       {
         name: "provider-tools",
@@ -374,8 +430,8 @@ async function main() {
       architecture: { type: "string" },
       "base-image": { type: "string", multiple: true },
       "provider-tools-lockfile": { type: "string" },
-      "provider-host-lockfile": { type: "string" },
-      "provider-host-package": { type: "string" },
+      "cloud-agent-candidate-lockfile": { type: "string" },
+      "claude-agent-sdk-package": { type: "string" },
       "worker-apk-lockfile": { type: "string" },
       "raw-provider-tools-sbom": { type: "string" },
       "provider-tools-sbom-output": { type: "string" },
@@ -385,8 +441,8 @@ async function main() {
   });
   const requiredPaths = [
     "provider-tools-lockfile",
-    "provider-host-lockfile",
-    "provider-host-package",
+    "cloud-agent-candidate-lockfile",
+    "claude-agent-sdk-package",
     "worker-apk-lockfile",
     "raw-provider-tools-sbom",
     "provider-tools-sbom-output",
@@ -402,8 +458,8 @@ async function main() {
     architecture: values.architecture,
     baseImages: values["base-image"] ?? [],
     providerToolsLockfile: await readFile(values["provider-tools-lockfile"], "utf8"),
-    providerHostLockfile: await readFile(values["provider-host-lockfile"], "utf8"),
-    providerHostPackageJSON: await readFile(values["provider-host-package"], "utf8"),
+    cloudAgentCandidateLockfile: await readFile(values["cloud-agent-candidate-lockfile"], "utf8"),
+    claudeSDKPackageJSON: await readFile(values["claude-agent-sdk-package"], "utf8"),
     workerAPKLockfile: await readFile(values["worker-apk-lockfile"], "utf8"),
     rawProviderToolsSBOM: await readFile(values["raw-provider-tools-sbom"], "utf8"),
   });

@@ -4034,7 +4034,7 @@ class ManagedWorkerDriver(LocalDriver):
                 "test -r /opt/synara/worker-image-manifest.json && "
                 "test -r /opt/synara/provider-tools.spdx.json && "
                 "test -r /opt/synara/provider-tools/package-lock.json && "
-                "test -r /opt/synara/provider-host/bun.lock && "
+                "test -r /opt/synara/provider-host/cloud-agent-candidate.lock.json && "
                 "test -r /opt/synara/worker-apk-packages.lock && "
                 "test \"$(id -u)\" = 10001 && "
                 "node --version && codex --version && claude --version",

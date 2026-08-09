@@ -29,7 +29,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@synara/cloud-agent-protocol": "workspace:*",
+    "@synara/cloud-agent-protocol": "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/synara-cloud-agent-protocol-0.1.0-rc.1.tgz",
     "effect": "catalog:"
   },
   "devDependencies": {

@@ -31,13 +31,14 @@ var (
 )
 
 type workerImageManifest struct {
-	SchemaVersion    int                          `json:"schemaVersion"`
-	Source           workerImageSource            `json:"source"`
-	Platform         workerImagePlatform          `json:"platform"`
-	BaseImages       []workerImageBaseImage       `json:"baseImages"`
-	Lockfiles        []workerImageLockfile        `json:"lockfiles"`
-	ProviderRuntimes []workerImageProviderRuntime `json:"providerRuntimes"`
-	SBOMs            []workerImageSoftwareBill    `json:"sboms"`
+	SchemaVersion       int                            `json:"schemaVersion"`
+	Source              workerImageSource              `json:"source"`
+	Platform            workerImagePlatform            `json:"platform"`
+	BaseImages          []workerImageBaseImage         `json:"baseImages"`
+	Lockfiles           []workerImageLockfile          `json:"lockfiles"`
+	ProviderRuntimes    []workerImageProviderRuntime   `json:"providerRuntimes"`
+	CloudAgentCandidate workerImageCloudAgentCandidate `json:"cloudAgentCandidate"`
+	SBOMs               []workerImageSoftwareBill      `json:"sboms"`
 }
 
 type workerImageSource struct {
@@ -66,6 +67,19 @@ type workerImageProviderRuntime struct {
 	Kind     string `json:"kind"`
 	Package  string `json:"package"`
 	Version  string `json:"version"`
+}
+
+type workerImageCloudAgentCandidate struct {
+	SourceCommit            string                         `json:"sourceCommit"`
+	CandidateDigest         string                         `json:"candidateDigest"`
+	StandaloneRuntimeSHA256 string                         `json:"standaloneRuntimeSha256"`
+	Packages                []workerImageCloudAgentPackage `json:"packages"`
+}
+
+type workerImageCloudAgentPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
 }
 
 type workerImageSoftwareBill struct {
@@ -139,6 +153,9 @@ func validateWorkerImageManifest(manifest *workerImageManifest, manifestPath str
 	if err := validateWorkerImageProviderRuntimes(manifest.ProviderRuntimes); err != nil {
 		return err
 	}
+	if err := validateWorkerImageCloudAgentCandidate(&manifest.CloudAgentCandidate); err != nil {
+		return err
+	}
 	if err := validateWorkerImageLockfiles(manifest.Lockfiles, manifestPath); err != nil {
 		return err
 	}
@@ -158,6 +175,52 @@ func validateWorkerImageManifest(manifest *workerImageManifest, manifestPath str
 	})
 	sort.Slice(manifest.SBOMs, func(left, right int) bool {
 		return manifest.SBOMs[left].Name < manifest.SBOMs[right].Name
+	})
+	return nil
+}
+
+func validateWorkerImageCloudAgentCandidate(candidate *workerImageCloudAgentCandidate) error {
+	required := map[string]struct{}{
+		"@synara/cloud-agent-protocol":        {},
+		"@synara/cloud-agent-provider-api":    {},
+		"@synara/cloud-agent-runtime":         {},
+		"@synara/cloud-agent-provider-codex":  {},
+		"@synara/cloud-agent-provider-claude": {},
+		"@synara/cloud-agent-testkit":         {},
+		"@synara/cloud-agent-distribution":    {},
+	}
+	candidate.SourceCommit = strings.TrimSpace(candidate.SourceCommit)
+	candidate.CandidateDigest = strings.TrimSpace(candidate.CandidateDigest)
+	candidate.StandaloneRuntimeSHA256 = strings.TrimSpace(candidate.StandaloneRuntimeSHA256)
+	if !validFullBuildGitSHA(candidate.SourceCommit) ||
+		!strings.HasPrefix(candidate.CandidateDigest, "sha256:") ||
+		!validSHA256Hex(strings.TrimPrefix(candidate.CandidateDigest, "sha256:")) ||
+		!strings.HasPrefix(candidate.StandaloneRuntimeSHA256, "sha256:") ||
+		!validSHA256Hex(strings.TrimPrefix(candidate.StandaloneRuntimeSHA256, "sha256:")) {
+		return errors.New("Worker image manifest Cloud Agent candidate identity is invalid")
+	}
+	if len(candidate.Packages) != len(required) {
+		return errors.New("Worker image manifest Cloud Agent candidate must contain seven packages")
+	}
+	seen := make(map[string]struct{}, len(candidate.Packages))
+	for index := range candidate.Packages {
+		item := &candidate.Packages[index]
+		item.Name = strings.TrimSpace(item.Name)
+		item.Version = strings.TrimSpace(item.Version)
+		item.SHA256 = strings.TrimSpace(item.SHA256)
+		if _, expected := required[item.Name]; !expected ||
+			!pinnedPackageVersionPattern.MatchString(item.Version) ||
+			!strings.HasPrefix(item.SHA256, "sha256:") ||
+			!validSHA256Hex(strings.TrimPrefix(item.SHA256, "sha256:")) {
+			return fmt.Errorf("Worker image manifest Cloud Agent package %q is invalid", item.Name)
+		}
+		if _, duplicate := seen[item.Name]; duplicate {
+			return fmt.Errorf("Worker image manifest Cloud Agent package %q is duplicated", item.Name)
+		}
+		seen[item.Name] = struct{}{}
+	}
+	sort.Slice(candidate.Packages, func(left, right int) bool {
+		return candidate.Packages[left].Name < candidate.Packages[right].Name
 	})
 	return nil
 }
@@ -221,9 +284,9 @@ func validateWorkerImageProviderRuntimes(runtimes []workerImageProviderRuntime) 
 
 func validateWorkerImageLockfiles(lockfiles []workerImageLockfile, manifestPath string) error {
 	required := map[string]bool{
-		"provider-tools-npm": false,
-		"provider-host-bun":  false,
-		"worker-apk":         false,
+		"provider-tools-npm":    false,
+		"cloud-agent-candidate": false,
+		"worker-apk":            false,
 	}
 	seen := make(map[string]struct{}, len(lockfiles))
 	for index := range lockfiles {
@@ -382,7 +445,13 @@ func (manifest workerImageManifest) featureFlagValue() map[string]any {
 		"baseImages":       baseImages,
 		"lockfiles":        lockfiles,
 		"providerRuntimes": providerRuntimes,
-		"sboms":            sboms,
+		"cloudAgentCandidate": map[string]any{
+			"sourceCommit":            manifest.CloudAgentCandidate.SourceCommit,
+			"candidateDigest":         manifest.CloudAgentCandidate.CandidateDigest,
+			"standaloneRuntimeSha256": manifest.CloudAgentCandidate.StandaloneRuntimeSHA256,
+			"packages":                manifest.CloudAgentCandidate.Packages,
+		},
+		"sboms": sboms,
 	}
 }
 

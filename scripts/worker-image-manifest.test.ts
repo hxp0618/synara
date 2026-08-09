@@ -37,6 +37,12 @@ type WorkerImageArtifacts = {
     baseImages: WorkerImageBaseImage[];
     lockfiles: WorkerImageLockfile[];
     providerRuntimes: WorkerImageProviderRuntime[];
+    cloudAgentCandidate: {
+      sourceCommit: string;
+      candidateDigest: string;
+      standaloneRuntimeSha256: string;
+      packages: Array<{ name: string; version: string; sha256: string }>;
+    };
     sboms: WorkerImageSbom[];
   };
   manifestJSON: string;
@@ -51,8 +57,8 @@ const { buildWorkerImageArtifacts, sha256Hex } = workerImageManifestModule as {
     architecture: string;
     baseImages: string[];
     providerToolsLockfile: string;
-    providerHostLockfile: string;
-    providerHostPackageJSON: string;
+    cloudAgentCandidateLockfile: string;
+    claudeSDKPackageJSON: string;
     workerAPKLockfile: string;
     rawProviderToolsSBOM: string;
   }): WorkerImageArtifacts;
@@ -94,8 +100,41 @@ const providerToolsLockfile = `${JSON.stringify(
   null,
   2,
 )}\n`;
-const providerHostPackageJSON = `${JSON.stringify({
-  dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.207" },
+const claudeSDKPackageJSON = `${JSON.stringify({
+  name: "@anthropic-ai/claude-agent-sdk",
+  version: "0.3.207",
+})}\n`;
+const candidatePackages = [
+  "@synara/cloud-agent-protocol",
+  "@synara/cloud-agent-provider-api",
+  "@synara/cloud-agent-runtime",
+  "@synara/cloud-agent-provider-codex",
+  "@synara/cloud-agent-provider-claude",
+  "@synara/cloud-agent-testkit",
+  "@synara/cloud-agent-distribution",
+];
+const cloudAgentCandidateLockfile = `${JSON.stringify({
+  schemaVersion: 1,
+  release: {
+    repository: "hxp0618/cloud-agents",
+    tag: "cloud-agent-m1-rc.1",
+    sourceCommit: "e".repeat(40),
+    candidateDigest: `sha256:${"d".repeat(64)}`,
+  },
+  standaloneRuntime: {
+    url: "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1/cloud-agent-runtime-standalone.mjs",
+    sha256: `sha256:${"c".repeat(64)}`,
+  },
+  packages: Object.fromEntries(
+    candidatePackages.map((name, index) => [
+      name,
+      {
+        version: name === "@synara/cloud-agent-runtime" ? "0.2.0-rc.1" : "0.1.0-rc.1",
+        url: `https://example.test/${index}`,
+        sha256: `sha256:${String(index + 1).repeat(64)}`,
+      },
+    ]),
+  ),
 })}\n`;
 const workerAPKLockfile = `
 bash=5.3.9-r1
@@ -137,8 +176,8 @@ function build(overrides: Record<string, unknown> = {}) {
     architecture: "arm64",
     baseImages,
     providerToolsLockfile,
-    providerHostLockfile: "locked bun graph\n",
-    providerHostPackageJSON,
+    cloudAgentCandidateLockfile,
+    claudeSDKPackageJSON,
     workerAPKLockfile,
     rawProviderToolsSBOM: rawSBOM("2026-01-01T00:00:00.000Z", "urn:uuid:random-a"),
     ...overrides,
@@ -176,6 +215,12 @@ describe("Worker image manifest", () => {
       },
       { provider: "codex", kind: "cli", package: "@openai/codex", version: "0.145.0" },
     ]);
+    expect(first.manifest.cloudAgentCandidate).toMatchObject({
+      sourceCommit: "e".repeat(40),
+      candidateDigest: `sha256:${"d".repeat(64)}`,
+      standaloneRuntimeSha256: `sha256:${"c".repeat(64)}`,
+    });
+    expect(first.manifest.cloudAgentCandidate.packages).toHaveLength(7);
     expect(first.manifest.lockfiles).toHaveLength(3);
     expect(first.manifest.sboms[0]?.sha256).toBe(sha256Hex(first.providerToolsSBOM));
     const normalizedSBOM = JSON.parse(first.providerToolsSBOM);

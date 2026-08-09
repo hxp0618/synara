@@ -811,8 +811,9 @@ import "@synara/cloud-agent-distribution/stdio";
 ```
 
 兼容壳继续提供 `provider-host` bin，因此 `agentd` 命令名和运维调用面无需切换。
-Docker build 与 provider-host-build context 已同步复制七个新包的 manifest/源码，镜像内仍只产出一个
-`/opt/synara/provider-host/index.mjs` 及既有 wrapper。
+Docker build 与 provider-host-build 只从 `cloud-agent-candidate.lock.json` 指向的同一组 GitHub RC
+tarball 安装 Distribution closure，不再复制七个包的可编辑源码。镜像内仍只产出一个
+`/opt/synara/provider-host/index.mjs` 及既有 wrapper，并记录公共 candidate digest。
 
 ## 6. 插件 Manifest 与加载策略
 
@@ -2449,9 +2450,10 @@ public beta 或 GA。
 - stdio client 的正常关闭和所有 fatal path 共享幂等 `reapProcess()`：SIGTERM 后 bounded wait，再 SIGKILL 和
   第二次 bounded wait；取消命令保留 30 秒有界 tombstone，UTF-8 decode/correlation/协议异常均 fail closed。
   stdio server 使用有界串行 NDJSON writer、字节上限、drain backpressure 与 flush。
-- Docker main/provider-host-build stages 已同步七包 manifest/source；Provider Host bundle 由 Distribution
-  stdio 入口构建。源码 manifest 保持 `releaseDigest: null`，本地 candidate digest 不能冒充 managed
-  release record。
+- Docker main/provider-host-build stages 已切换为同一 GitHub RC tarball closure；Provider Host bundle 由
+  Distribution stdio 入口构建。Synara 不再保留公共 transport/schema 的可编辑副本；Worker release record
+  记录 `cloud-agent-candidate.lock.json` 的公共 candidate digest，而不是把 Synara root `bun.lock` 冒充
+  公共 Runtime identity。
 - outer sandbox 当前仍只接受启动者显式选择的 local trust profile。这个字符串不是绑定 lease、generation、
   Distribution digest 或进程身份的证明，因此不构成 M2 managed sandbox attestation。
 
@@ -2532,5 +2534,22 @@ out-of-process Distribution 使用 Synara Provider 包。每次任一侧升级�
   审计均未实施；当前 `trusted-local` outer sandbox profile 不是绑定 lease/generation/digest/process 的
   managed generation-bound attestation。Deferred D1 suspend/resume 更未开始；
 - 因此本批只能标记 **M0 open；M1 Phase 1–3 source implementation in progress**，不能标记任何 M1 Phase
-  complete、M1 RC、deployed、
-  public beta 或 GA。
+  complete、M1 RC、deployed、public beta 或 GA。
+
+### A.6 外部 Runtime same-bits 消费边界（2026-08-09）
+
+ADR-0005 已将上述 source-candidate 记录降级为历史本地证据。`hxp0618/cloud-agents` 现在是七个公共包
+唯一可编辑来源；Synara 删除七包源码与 producer release helper，只保留 Effect Schema/re-export、
+`apps/provider-host` 兼容 bin、agentd/Control Plane、Artifact/Workspace/Credential adapter 与 Worker/Docker。
+
+宿主使用 `cloud-agent-candidate.lock.json` 固定公共 source commit、candidate digest、standalone Runtime
+SHA-256 与七包 URL/version/SHA-256。production manifests 和 root overrides 必须与该 lock 一致，且不得以
+workspace/file/Git dependency 或未发布 npm semver 回退。Worker image publication 同样登记公共 candidate
+digest；Synara root lock 只锁宿主完整依赖图，不再被描述为公共 Runtime release identity。
+
+最终 immutable `cloud-agent-m1-rc.1`（source `49e8cdc6a3a4f88c7324d055ce519e9f25a8ca8a`，candidate
+`sha256:b9931233d46aeaf1392197095483c2e3409f628a47b2ba92c8e57bb38b444676`）已完成匿名远端 SHA、重解
+`bun.lock`、安装后 standalone same-bits、Provider Host/agentd/Worker manifest 与 Docker 静态/Provider Host
+打包门，因此可标记 RC consumer verified。完整 Worker image 仍在公共 Runtime 接入之前的 Alpine lock
+步骤因 `openjdk21 21.0.11` 仓库漂移而阻断；这属于宿主供应链 refresh gate。真实外部凭据 Turn 仍是独立
+open gate，不能由 Describe、静态打包或本地测试代替。
