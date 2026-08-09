@@ -15,6 +15,9 @@
     { "kind": "claudeAgent", "package": "@synara/cloud-agent-provider-claude", "version": "0.1.0" }
   ],
   "entrypoints": { "node": "./dist/index.mjs", "stdio": "./dist/stdio.mjs" },
+  "schemas": {
+    "cloudAgentEnvelopeV2": "./schemas/cloud-agent-envelope-v2"
+  },
   "permissions": [
     "spawn-provider-process",
     "read-host-workspace",

@@ -10,12 +10,13 @@ import {
   PROVIDER_CONTENT_TRUST_POLICY_MARKER,
   PROVIDER_CONTENT_TRUST_POLICY_VERSION,
   PROVIDER_UNTRUSTED_CONTENT_SCHEMA_VERSION,
-} from "@synara/shared/providerContentTrustPolicy";
+} from "./providerContentTrustPolicy";
 import { describe, expect, it } from "vitest";
 
 import type { ClaudeQueryFactory, ClaudeQueryRuntime } from "./claudeAgentSdkRuntime";
-import { startProviderHostRun, type RunnerInput, type RunnerMessage } from "./providerHost";
-import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "./providerOuterSandbox";
+import type { RunnerInput, RunnerMessage } from "@synara/cloud-agent-provider-api/internal";
+import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "@synara/cloud-agent-provider-api/internal";
+import { startClaudeProviderRun as startProviderHostRun } from "./index";
 
 process.env[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = "single-tenant-trusted-v1";
 
@@ -1639,7 +1640,7 @@ describe("Claude Agent SDK runtime", () => {
       payload: {
         provider: "claudeAgent",
         message:
-          "Native Claude resume failed before turn activity; authoritative-history fallback selected.",
+          "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
         kind: "session_resume",
         attemptedStrategy: "native-cursor",
         selectedStrategy: "authoritative-history",
@@ -1976,6 +1977,67 @@ describe("Claude Agent SDK runtime", () => {
     run.interrupt();
     await expect(run.result).rejects.toThrow("interrupted");
     expect(nativeInterrupts).toBe(1);
+  });
+
+  it("hard-disables every Claude tool for GenerateText without changing ordinary Turns", async () => {
+    const queryFactory: ClaudeQueryFactory = ({ options }) =>
+      fakeQuery(
+        (async function* () {
+          const queryOptions = requiredOptions(options);
+          expect(queryOptions.permissionMode).toBe("dontAsk");
+          expect(queryOptions.settingSources).toEqual([]);
+          expect(queryOptions.strictMcpConfig).toBe(true);
+          expect(queryOptions.tools).toEqual([]);
+          expect(queryOptions.allowedTools).toEqual([]);
+          expect(queryOptions.disallowedTools).toEqual(
+            expect.arrayContaining(["Bash", "Write", "Edit", "Read", "Glob", "Grep"]),
+          );
+          await expect(
+            queryOptions.canUseTool?.(
+              "Write",
+              { file_path: "/tmp/unsafe", content: "mutated" },
+              {
+                signal: new AbortController().signal,
+                toolUseID: "generate-write-1",
+                requestId: "generate-write-request-1",
+              },
+            ),
+          ).resolves.toMatchObject({ behavior: "deny" });
+          const preToolUse = queryOptions.hooks?.PreToolUse?.[0]?.hooks[0];
+          expect(
+            await preToolUse?.(
+              {
+                hook_event_name: "PreToolUse",
+                tool_name: "Read",
+                tool_input: { file_path: "/tmp/even-reads-are-disabled" },
+                tool_use_id: "generate-read-1",
+              } as never,
+              undefined,
+              { signal: new AbortController().signal },
+            ),
+          ).toMatchObject({
+            hookSpecificOutput: { permissionDecision: "deny" },
+          });
+          yield sdkMessage(systemInit("session-generate", "claude-test"));
+          yield sdkMessage(
+            successResult("session-generate", '{"task":"thread-title","title":"Safe"}', {}),
+          );
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "generate metadata", runtimeMode: "full-access" }),
+      null,
+      () => {},
+      {
+        interactive: false,
+        operation: { commandType: "GenerateText", payload: {} },
+        claudeQueryFactory: queryFactory,
+      },
+    );
+
+    await expect(run.result).resolves.toMatchObject({
+      output: { text: '{"task":"thread-title","title":"Safe"}' },
+    });
   });
 
   it("emulates review with a fixed read-only prompt and an immutable tool allowlist", async () => {

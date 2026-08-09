@@ -9,10 +9,10 @@
   "scripts": {
     "build": "bun build src/index.ts --target=node --outfile=dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "bun run --cwd ../../packages/cloud-agent-runtime test"
+    "test": "bun run --cwd ../../packages/cloud-agent-distribution test && bun run --cwd ../../packages/cloud-agent-runtime test"
   },
   "dependencies": {
-    "@synara/cloud-agent-runtime": "workspace:*"
+    "@synara/cloud-agent-distribution": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",

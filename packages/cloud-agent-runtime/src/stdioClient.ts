@@ -6,7 +6,6 @@
  * keeps writes/process teardown bounded and explicit.
  */
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from "node:child_process";
-import { once } from "node:events";
 
 import {
   CLOUD_AGENT_MAX_COMMAND_BYTES,
@@ -17,6 +16,8 @@ import {
 
 const CLOUD_AGENT_MAX_IN_FLIGHT_COMMANDS = 128;
 const CLOUD_AGENT_CREDENTIAL_CHILD_FD = 3;
+const ABORTED_COMMAND_TOMBSTONE_TTL_MS = 30_000;
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 export interface CloudAgentStdioClientOptions {
   readonly command: string;
@@ -44,6 +45,7 @@ type PendingCommand = {
   readonly reject: (error: Error) => void;
   readonly removeAbortListener: () => void;
   aborted: boolean;
+  tombstoneTimer?: ReturnType<typeof setTimeout>;
 };
 
 export function createCloudAgentStdioClient(
@@ -70,6 +72,7 @@ export function createCloudAgentStdioClient(
   }
 
   const process = child as ChildProcessWithoutNullStreams;
+  const processExit = new Promise<void>((resolve) => process.once("exit", () => resolve()));
   const pending = new Map<string, PendingCommand>();
   const listeners = new Set<(message: CloudAgentMessageEnvelope) => void>();
   let stdoutBuffer = Buffer.alloc(0);
@@ -79,6 +82,7 @@ export function createCloudAgentStdioClient(
 
   const rejectAll = (error: Error) => {
     for (const command of pending.values()) {
+      if (command.tombstoneTimer) clearTimeout(command.tombstoneTimer);
       command.removeAbortListener();
       command.reject(error);
     }
@@ -101,6 +105,7 @@ export function createCloudAgentStdioClient(
   process.once("error", (cause) => {
     closed = true;
     rejectAll(errorWithCause("Cloud Agent Runtime failed to start.", cause));
+    void reapProcess().catch(() => undefined);
   });
   process.once("exit", (code, signal) => {
     closed = true;
@@ -130,9 +135,14 @@ export function createCloudAgentStdioClient(
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(frame.toString("utf8"));
+        parsed = JSON.parse(decodeRuntimeFrame(frame));
       } catch (cause) {
-        failProtocol("Cloud Agent Runtime emitted invalid JSON.", cause);
+        failProtocol(
+          cause instanceof InvalidRuntimeUtf8Error
+            ? "Cloud Agent Runtime emitted invalid UTF-8."
+            : "Cloud Agent Runtime emitted invalid JSON.",
+          cause,
+        );
         return;
       }
       if (!isMessageEnvelope(parsed)) {
@@ -156,6 +166,8 @@ export function createCloudAgentStdioClient(
       // frame arrives so expected late output cannot poison other sessions.
       if (command.aborted) {
         if (parsed.messageType === "Result" || parsed.messageType === "Error") {
+          if (command.tombstoneTimer) clearTimeout(command.tombstoneTimer);
+          command.removeAbortListener();
           pending.delete(parsed.commandId);
         }
         continue;
@@ -163,6 +175,7 @@ export function createCloudAgentStdioClient(
       for (const listener of listeners) listener(parsed);
       if (parsed.messageType !== "Result" && parsed.messageType !== "Error") continue;
       pending.delete(parsed.commandId);
+      if (command.tombstoneTimer) clearTimeout(command.tombstoneTimer);
       command.removeAbortListener();
       command.resolve(parsed);
     }
@@ -172,7 +185,7 @@ export function createCloudAgentStdioClient(
     const error = errorWithCause(message, cause);
     closed = true;
     rejectAll(error);
-    process.kill("SIGTERM");
+    void reapProcess().catch(() => undefined);
   }
 
   async function execute(
@@ -201,6 +214,13 @@ export function createCloudAgentStdioClient(
         current.aborted = true;
         current.removeAbortListener();
         reject(abortError(signal?.reason));
+        current.tombstoneTimer = setTimeout(() => {
+          const tombstone = pending.get(command.commandId);
+          if (tombstone !== current || !tombstone.aborted) return;
+          pending.delete(command.commandId);
+          delete tombstone.tombstoneTimer;
+        }, ABORTED_COMMAND_TOMBSTONE_TTL_MS);
+        current.tombstoneTimer.unref();
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       pending.set(command.commandId, {
@@ -213,38 +233,53 @@ export function createCloudAgentStdioClient(
     });
 
     try {
-      if (!process.stdin.write(frame)) await once(process.stdin, "drain");
+      if (!process.stdin.write(frame)) {
+        await new Promise<void>((resolve) => process.stdin.once("drain", resolve));
+      }
     } catch (cause) {
       const current = pending.get(command.commandId);
       pending.delete(command.commandId);
+      if (current?.tombstoneTimer) clearTimeout(current.tombstoneTimer);
       current?.removeAbortListener();
       current?.reject(errorWithCause("Failed to write Cloud Agent command.", cause));
     }
     return terminal;
   }
 
-  async function close(): Promise<void> {
+  function reapProcess(): Promise<void> {
     if (closePromise) return closePromise;
     closePromise = (async () => {
-      if (closed) return;
       closed = true;
       rejectAll(new Error("Cloud Agent Runtime client was closed."));
-      process.stdin.end();
+      if (process.stdin.writable) process.stdin.end();
       if (process.exitCode !== null || process.signalCode !== null) return;
-      process.kill("SIGTERM");
+      try {
+        process.kill("SIGTERM");
+      } catch {
+        // The exit check below remains authoritative.
+      }
       const timeoutMs = options.gracefulStopTimeoutMs ?? 5_000;
-      await Promise.race([
-        once(process, "exit").then(() => undefined),
-        new Promise<void>((resolve) => {
-          const timeout = setTimeout(() => {
-            if (process.exitCode === null && process.signalCode === null) process.kill("SIGKILL");
-            resolve();
-          }, timeoutMs);
-          timeout.unref();
-        }),
-      ]);
+      if (await settlesBefore(processExit, timeoutMs)) return;
+      if (process.exitCode === null && process.signalCode === null) {
+        try {
+          process.kill("SIGKILL");
+        } catch (cause) {
+          if (process.exitCode === null && process.signalCode === null) {
+            throw errorWithCause("Failed to force-stop Cloud Agent Runtime.", cause);
+          }
+        }
+      }
+      if (!(await settlesBefore(processExit, timeoutMs))) {
+        throw new Error(
+          `Cloud Agent Runtime did not exit within ${timeoutMs}ms after forced termination.`,
+        );
+      }
     })();
     return closePromise;
+  }
+
+  async function close(): Promise<void> {
+    return reapProcess();
   }
 
   return Object.freeze({
@@ -258,6 +293,16 @@ export function createCloudAgentStdioClient(
     },
     close,
   });
+}
+
+class InvalidRuntimeUtf8Error extends Error {}
+
+function decodeRuntimeFrame(frame: Uint8Array): string {
+  try {
+    return FATAL_UTF8_DECODER.decode(frame);
+  } catch {
+    throw new InvalidRuntimeUtf8Error("Runtime frame is not valid UTF-8.");
+  }
 }
 
 function environmentForChild(
@@ -360,4 +405,18 @@ function errorWithCause(message: string, cause?: unknown): Error {
 
 function abortError(reason: unknown): Error {
   return new Error("Cloud Agent command was aborted.", { cause: reason });
+}
+
+async function settlesBefore(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }

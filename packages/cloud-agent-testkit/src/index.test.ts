@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createCodexProvider } from "@synara/cloud-agent-provider-codex";
+import { CLOUD_AGENT_CAPABILITY_IDS } from "@synara/cloud-agent-protocol";
+import {
+  CLOUD_AGENT_PROVIDER_PLUGIN_ABI_VERSION,
+  type CloudAgentProviderDescriptor,
+} from "@synara/cloud-agent-provider-api";
 
 import {
   assertCloudAgentDescriptor,
@@ -10,8 +14,8 @@ import {
 } from "./index";
 
 describe("cloud-agent testkit", () => {
-  it("checks the complete provider descriptor surface", async () => {
-    const descriptor = await createCodexProvider().describe();
+  it("checks the complete provider descriptor surface", () => {
+    const descriptor = fakeDescriptor();
     expect(() => assertCloudAgentDescriptor(descriptor)).not.toThrow();
   });
 
@@ -30,8 +34,8 @@ describe("cloud-agent testkit", () => {
     expect(() => assertTerminalCorrelation(command, terminal)).not.toThrow();
   });
 
-  it("rejects invalid capability values even when a caller bypasses TypeScript", async () => {
-    const descriptor = await createCodexProvider().describe();
+  it("rejects invalid capability values even when a caller bypasses TypeScript", () => {
+    const descriptor = fakeDescriptor();
     expect(() =>
       assertCloudAgentDescriptor({
         ...descriptor,
@@ -66,3 +70,24 @@ describe("cloud-agent testkit", () => {
     ).toThrow("eventVersion");
   });
 });
+
+function fakeDescriptor(): CloudAgentProviderDescriptor {
+  return {
+    abiVersion: CLOUD_AGENT_PROVIDER_PLUGIN_ABI_VERSION,
+    providerKind: "test-provider",
+    displayName: "Test Provider",
+    adapterVersion: "test-adapter-v1",
+    runtime: {
+      kind: "local",
+      name: "test-runtime",
+      version: "1.0.0",
+      available: true,
+      compatible: true,
+      compatibleRange: { minimumInclusive: "1.0.0", maximumExclusive: "2.0.0" },
+    },
+    capabilities: Object.fromEntries(
+      CLOUD_AGENT_CAPABILITY_IDS.map((capability) => [capability, "unsupported"]),
+    ) as CloudAgentProviderDescriptor["capabilities"],
+    configurationSchema: { type: "object", additionalProperties: false },
+  };
+}

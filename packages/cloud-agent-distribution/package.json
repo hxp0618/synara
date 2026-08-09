@@ -32,6 +32,20 @@
       "require": "./dist/index.cjs"
     },
     "./manifest.json": "./manifest.json",
+    "./schemas": {
+      "types": "./src/schemas.ts",
+      "bun": "./src/schemas.ts",
+      "development": "./src/schemas.ts",
+      "import": "./dist/schemas.mjs",
+      "require": "./dist/schemas.cjs"
+    },
+    "./schemas/cloud-agent-envelope-v2": {
+      "types": "./src/schemas.ts",
+      "bun": "./src/schemas.ts",
+      "development": "./src/schemas.ts",
+      "import": "./dist/schemas.mjs",
+      "require": "./dist/schemas.cjs"
+    },
     "./stdio": {
       "bun": "./src/stdio.ts",
       "development": "./src/stdio.ts",
@@ -43,21 +57,21 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format esm,cjs --dts --clean && bun build src/stdio.ts --target=node --outfile=dist/stdio.mjs",
+    "build": "tsdown src/index.ts src/schemas.ts --format esm,cjs --dts --clean && bun build src/stdio.ts --target=node --outfile=dist/stdio.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@synara/cloud-agent-protocol": "workspace:*",
-    "@synara/cloud-agent-provider-api": "workspace:*",
-    "@synara/cloud-agent-provider-claude": "workspace:*",
-    "@synara/cloud-agent-provider-codex": "workspace:*",
-    "@synara/cloud-agent-runtime": "workspace:*"
+    "@synara/cloud-agent-protocol": "0.1.0",
+    "@synara/cloud-agent-provider-api": "0.1.0",
+    "@synara/cloud-agent-provider-claude": "0.1.0",
+    "@synara/cloud-agent-provider-codex": "0.1.0",
+    "@synara/cloud-agent-runtime": "0.2.0"
   },
   "devDependencies": {
-    "tsdown": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "catalog:"
+    "tsdown": "^0.20.3",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=24.13.1 <25"

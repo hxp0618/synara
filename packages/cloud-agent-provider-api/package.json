@@ -26,6 +26,13 @@
       "development": "./src/index.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
+    },
+    "./internal": {
+      "types": "./src/internal.ts",
+      "bun": "./src/internal.ts",
+      "development": "./src/internal.ts",
+      "import": "./dist/internal.mjs",
+      "require": "./dist/internal.cjs"
     }
   },
   "publishConfig": {
@@ -33,17 +40,17 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsdown src/index.ts src/internal.ts --format esm,cjs --dts --clean",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@synara/cloud-agent-protocol": "workspace:*"
+    "@synara/cloud-agent-protocol": "0.1.0"
   },
   "devDependencies": {
-    "tsdown": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "catalog:"
+    "tsdown": "^0.20.3",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=20.3.0"

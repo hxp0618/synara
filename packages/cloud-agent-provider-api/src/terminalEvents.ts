@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
-import type { RunnerMessage } from "./providerHost";
+import type { RunnerMessage } from "./internalExecution";
 
 const TERMINAL_OUTPUT_CHUNK_BYTES = 8 * 1024;
 const TERMINAL_COMMAND_SUMMARY_LENGTH = 1_000;
@@ -75,7 +75,7 @@ function comparablePath(value: string): string {
 
 export function emitTerminalOutput(input: {
   emit: RunnerEmitter;
-  provider: "codex" | "claudeAgent";
+  provider: string;
   terminalId: string;
   output: string;
   redact: TerminalRedactor;
@@ -88,7 +88,7 @@ export function emitTerminalOutput(input: {
 
 export function createTerminalOutputStream(input: {
   emit: RunnerEmitter;
-  provider: "codex" | "claudeAgent";
+  provider: string;
   terminalId: string;
   redact: TerminalRedactor;
 }): TerminalOutputStream {

@@ -4,12 +4,12 @@ import { join } from "node:path";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
-} from "@synara/shared/codexCollaborationMode";
+} from "./codexCollaborationMode";
 import {
   CODEX_DISABLED_RUNTIME_FEATURES,
   CODEX_HOSTED_TOOL_ISOLATION_CONFIG,
-} from "@synara/shared/codexRuntimeIsolation";
-import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "@synara/shared/providerContentTrustPolicy";
+} from "./codexRuntimeIsolation";
+import { PROVIDER_CONTENT_TRUST_POLICY_MARKER } from "./providerContentTrustPolicy";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -19,8 +19,9 @@ import {
   managedCodexAppServerArguments,
 } from "./codexAppServerRuntime";
 import { CODEX_TOOL_POLICY_HOOK_ARGUMENT } from "./codexPostToolUseProvenance";
-import { startProviderHostRun, type RunnerMessage } from "./providerHost";
-import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "./providerOuterSandbox";
+import type { RunnerMessage } from "@synara/cloud-agent-provider-api/internal";
+import { PROVIDER_OUTER_SANDBOX_PROFILE_ENV } from "@synara/cloud-agent-provider-api/internal";
+import { startCodexProviderRun as startProviderHostRun } from "./index";
 
 process.env[PROVIDER_OUTER_SANDBOX_PROFILE_ENV] = "single-tenant-trusted-v1";
 
@@ -131,6 +132,11 @@ describe("Codex app-server runtime", () => {
       approvalPolicy: "never",
       approvalsReviewer: "user",
       sandbox: "danger-full-access",
+    });
+    expect(codexThreadOpenPermissions("full-access", false, true)).toEqual({
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: "read-only",
     });
   });
 
@@ -452,6 +458,7 @@ describe("Codex app-server runtime", () => {
           cachedInputTokens: 1,
           outputTokens: 3,
           reasoningOutputTokens: 0,
+          compactsAutomatically: true,
         },
       });
     });
@@ -835,7 +842,7 @@ describe("Codex app-server runtime", () => {
         payload: {
           provider: "codex",
           message:
-            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+            "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
           kind: "session_resume",
           attemptedStrategy: "native-cursor",
           selectedStrategy: "authoritative-history",
@@ -1022,7 +1029,7 @@ describe("Codex app-server runtime", () => {
         payload: {
           provider: "codex",
           message:
-            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+            "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
           kind: "session_resume",
           attemptedStrategy: "native-cursor",
           selectedStrategy: "authoritative-history",

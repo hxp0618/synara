@@ -1,8 +1,8 @@
-import type { RunnerInput, RunnerMessage } from "./providerHost";
+import type { RunnerInput, RunnerMessage } from "./internalExecution";
 
 export type ProviderResumeFallbackReasonCode = "session_resume_invalid" | "session_resume_expired";
 
-type ResumeFallbackProvider = "codex" | "claudeAgent";
+type ResumeFallbackProvider = string;
 
 const NON_RESUME_FAILURE_MARKERS = [
   "api key",
@@ -62,13 +62,13 @@ export function providerResumeFallbackWarning(
   reasonCode: ProviderResumeFallbackReasonCode,
 ): Extract<RunnerMessage, { type: "event" }> {
   const authoritativeHistorySequence = resumeHistorySequence(input);
-  const providerName = provider === "codex" ? "Codex" : "Claude";
   return {
     type: "event",
     eventType: "runtime.provider.warning",
     payload: {
       provider,
-      message: `Native ${providerName} resume failed before turn activity; authoritative-history fallback selected.`,
+      message:
+        "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
       kind: "session_resume",
       attemptedStrategy: "native-cursor",
       selectedStrategy: "authoritative-history",

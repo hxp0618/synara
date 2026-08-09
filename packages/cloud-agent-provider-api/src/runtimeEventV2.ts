@@ -4,20 +4,41 @@
 import { createHash } from "node:crypto";
 
 import {
-  PROVIDER_RUNTIME_EVENT_TYPES,
-  PROVIDER_RUNTIME_EVENT_VERSION,
-  type CanonicalItemType,
-  type ProviderRuntimeEventType,
-  type RuntimeItemStatus,
-  type ThreadTokenUsageSnapshot,
-} from "@synara/contracts";
-import type { ProviderHostRuntimeEventPayload } from "@synara/contracts/provider-host";
+  CLOUD_AGENT_RUNTIME_EVENT_TYPES as PROVIDER_RUNTIME_EVENT_TYPES,
+  CLOUD_AGENT_RUNTIME_EVENT_VERSION as PROVIDER_RUNTIME_EVENT_VERSION,
+  type CloudAgentRuntimeEventType as ProviderRuntimeEventType,
+} from "@synara/cloud-agent-protocol";
 
-import type { RunnerMessage } from "./providerHost";
+import type { RunnerMessage } from "./internalExecution";
+
+type CanonicalItemType =
+  | "user_message"
+  | "assistant_message"
+  | "reasoning"
+  | "plan"
+  | "command_execution"
+  | "file_change"
+  | "mcp_tool_call"
+  | "dynamic_tool_call"
+  | "collab_agent_tool_call"
+  | "web_search"
+  | "image_view"
+  | "image_generation"
+  | "review_entered"
+  | "review_exited"
+  | "context_compaction"
+  | "error"
+  | "unknown";
+type RuntimeItemStatus = "inProgress" | "completed" | "failed" | "declined";
+type ThreadTokenUsageSnapshot = Readonly<Record<string, number | boolean>>;
 
 type RunnerEvent = Extract<RunnerMessage, { type: "event" }>;
 
-export type RuntimeEventV2WirePayload = ProviderHostRuntimeEventPayload;
+export type RuntimeEventV2WirePayload = {
+  readonly eventVersion: typeof PROVIDER_RUNTIME_EVENT_VERSION;
+  readonly eventType: ProviderRuntimeEventType;
+  readonly payload: Record<string, unknown>;
+};
 
 const CANONICAL_EVENT_TYPES = new Set<string>(PROVIDER_RUNTIME_EVENT_TYPES);
 
@@ -137,7 +158,7 @@ function normalizeUsage(payload: Record<string, unknown>): ThreadTokenUsageSnaps
           lastReasoningOutputTokens: reasoningOutputTokens,
         }
       : {}),
-    ...(stringValue(payload.provider) === "codex" ? { compactsAutomatically: true } : {}),
+    ...(payload.compactsAutomatically === true ? { compactsAutomatically: true } : {}),
   };
 }
 

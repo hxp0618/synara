@@ -1,7 +1,7 @@
 const MAX_INTERACTION_REQUEST_ID_BYTES = 200;
 
 export function providerInteractionRequestId(
-  provider: "codex" | "claude",
+  provider: string,
   generation: number | undefined,
   kind: string | undefined,
   nativeId: string | number,

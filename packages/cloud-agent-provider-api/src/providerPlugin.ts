@@ -10,36 +10,45 @@ import {
   type CloudAgentProviderDescriptor,
   type CloudAgentProviderPluginV1,
   type CloudAgentProviderSession,
-} from "@synara/cloud-agent-provider-api";
-import type { ProviderHostCommandEnvelope } from "@synara/contracts/provider-host";
-
+} from "./index";
 import {
   createProviderHostProtocolHandler,
   providerHostDescriptor,
   type ProviderHostDescriptorOptions,
-} from "./protocol";
-import { readRunnerCredential, startProviderHostRun, type RunnerInput } from "./providerHost";
+} from "./providerProtocol";
+import {
+  readRunnerCredential,
+  type ProviderRunExecutor,
+  type RunnerInput,
+} from "./internalExecution";
 
-export type PortableProviderKind = "codex" | "claudeAgent";
+export type PortableProviderKind = string;
 
-export interface LegacyProviderPluginOptions {
+export interface ProviderPluginOptions {
   readonly providerKind: PortableProviderKind;
   readonly displayName: string;
+  readonly providerAliases?: ReadonlyArray<string>;
   readonly descriptor?: ProviderHostDescriptorOptions;
   readonly configurationSchema?: Readonly<Record<string, unknown>>;
   /** @internal Provider execution seam retained for adapter-level conformance tests. */
-  readonly startRun?: typeof startProviderHostRun;
+  readonly startRun: ProviderRunExecutor;
+  /** @internal Bounded shutdown tuning used by conformance tests. */
+  readonly stopQuiesceTimeoutMs?: number;
+  /** @internal Bounded shutdown tuning used by conformance tests. */
+  readonly stopForceTimeoutMs?: number;
+  /** @internal Total deadline for command/control/artifact convergence after Stop. */
+  readonly closeTaskTimeoutMs?: number;
 }
+
+const DEFAULT_CLOSE_TASK_TIMEOUT_MS = 5_000;
 
 /**
  * Compatibility adapter used while the Provider Host v2 implementation is
  * moved out of the historical Synara package. The returned plugin exposes
- * only the app-neutral Provider Plugin ABI; legacy RunnerInput details remain
+ * only the app-neutral Provider Plugin ABI; wire-compatible RunnerInput details remain
  * behind Cloud Agent command payloads and are not added to the public ABI.
  */
-export function createLegacyProviderPlugin(
-  options: LegacyProviderPluginOptions,
-): CloudAgentProviderPluginV1 {
+export function createProviderPlugin(options: ProviderPluginOptions): CloudAgentProviderPluginV1 {
   const descriptor = () => providerHostDescriptor(options.providerKind, options.descriptor);
   const plugin: CloudAgentProviderPluginV1 = {
     abiVersion: CLOUD_AGENT_PROVIDER_PLUGIN_ABI_VERSION,
@@ -75,6 +84,7 @@ export function createLegacyProviderPlugin(
         const commandTasks = new Set<Promise<unknown>>();
         const controlTasks = new Set<Promise<unknown>>();
         const suppressedCommandIds = new Set<string>();
+        const artifactAbort = new AbortController();
         let closed = false;
         let closePromise: Promise<void> | undefined;
         let lastCommand: CloudAgentCommandEnvelope | undefined;
@@ -82,14 +92,14 @@ export function createLegacyProviderPlugin(
         const handle = createProviderHostProtocolHandler({
           credential,
           emit(message) {
-            if (suppressedCommandIds.has(message.commandId)) return;
+            if (closed || suppressedCommandIds.has(message.commandId)) return;
             events.push(message);
             if (message.messageType === "ArtifactCandidate" && host.acceptArtifact) {
               const artifact = readArtifactCandidate(message.payload);
               if (artifact) {
                 trackTask(
                   artifactTasks,
-                  host.acceptArtifact(artifact).catch((cause) =>
+                  host.acceptArtifact(artifact, artifactAbort.signal).catch((cause) =>
                     host.log.warn("Cloud Agent artifact candidate was rejected by the host.", {
                       cause: cause instanceof Error ? cause.message : String(cause),
                     }),
@@ -101,18 +111,19 @@ export function createLegacyProviderPlugin(
             }
           },
           descriptorForProvider(provider) {
-            assertProvider(options.providerKind, provider);
+            assertProvider(options.providerKind, provider, options.providerAliases);
             return descriptor();
           },
           startRun(runnerInput, runnerCredential, emit, runOptions) {
-            assertRunnerProvider(options.providerKind, runnerInput);
-            return (options.startRun ?? startProviderHostRun)(
-              runnerInput,
-              runnerCredential,
-              emit,
-              runOptions,
-            );
+            assertRunnerProvider(options.providerKind, runnerInput, options.providerAliases);
+            return options.startRun(runnerInput, runnerCredential, emit, runOptions);
           },
+          ...(options.stopQuiesceTimeoutMs === undefined
+            ? {}
+            : { stopQuiesceTimeoutMs: options.stopQuiesceTimeoutMs }),
+          ...(options.stopForceTimeoutMs === undefined
+            ? {}
+            : { stopForceTimeoutMs: options.stopForceTimeoutMs }),
         });
 
         const execute = async (
@@ -127,9 +138,9 @@ export function createLegacyProviderPlugin(
             workspaceRoot,
             configuredModel,
           );
-          assertCommandProvider(options.providerKind, authorizedCommand);
+          assertCommandProvider(options.providerKind, authorizedCommand, options.providerAliases);
           lastCommand = authorizedCommand;
-          const operation = handle(authorizedCommand as ProviderHostCommandEnvelope);
+          const operation = handle(authorizedCommand);
           trackTask(commandTasks, operation);
           operation.then(
             () => suppressedCommandIds.delete(command.commandId),
@@ -145,7 +156,7 @@ export function createLegacyProviderPlugin(
                 const interrupt = interruptCommand(command);
                 if (interrupt) {
                   suppressedCommandIds.add(interrupt.commandId);
-                  const interruption = handle(interrupt as ProviderHostCommandEnvelope);
+                  const interruption = handle(interrupt);
                   interruption.then(
                     () => suppressedCommandIds.delete(interrupt.commandId),
                     () => suppressedCommandIds.delete(interrupt.commandId),
@@ -191,13 +202,27 @@ export function createLegacyProviderPlugin(
                   payload: {},
                 };
                 suppressedCommandIds.add(stopCommand.commandId);
-                await handle(stopCommand as ProviderHostCommandEnvelope).catch(() => undefined);
+                await handle(stopCommand).catch(() => undefined);
               }
-              await settleTasks(commandTasks);
-              await settleTasks(controlTasks);
-              // Artifact validation may outlive the command terminal, but must not outlive the lease.
-              await settleTasks(artifactTasks);
+              artifactAbort.abort(new Error("Cloud Agent Provider session is closing."));
+              const timeoutMs = options.closeTaskTimeoutMs ?? DEFAULT_CLOSE_TASK_TIMEOUT_MS;
+              const settled = await settleTaskSetsWithin(
+                [commandTasks, controlTasks, artifactTasks],
+                timeoutMs,
+              );
+              if (!settled) {
+                host.log.warn(
+                  "Cloud Agent Provider close timed out waiting for background tasks; late output was suppressed.",
+                  {
+                    timeoutMs,
+                    commandTasks: commandTasks.size,
+                    controlTasks: controlTasks.size,
+                    artifactTasks: artifactTasks.size,
+                  },
+                );
+              }
             } finally {
+              artifactAbort.abort(new Error("Cloud Agent Provider session is closed."));
               events.close();
               await credentialLease?.[Symbol.asyncDispose]();
             }
@@ -225,7 +250,7 @@ export function createLegacyProviderPlugin(
 }
 
 function toPluginDescriptor(
-  options: LegacyProviderPluginOptions,
+  options: ProviderPluginOptions,
   descriptor: ReturnType<typeof providerHostDescriptor>,
 ): CloudAgentProviderDescriptor {
   const capability = descriptor.capabilityDescriptor;
@@ -258,29 +283,32 @@ function toPluginDescriptor(
 function assertCommandProvider(
   expected: PortableProviderKind,
   command: CloudAgentCommandEnvelope,
+  aliases?: ReadonlyArray<string>,
 ): void {
   if (command.commandType === "Describe") {
-    assertProvider(expected, command.payload.provider);
+    assertProvider(expected, command.payload.provider, aliases);
     return;
   }
   if (command.commandType !== "StartSession" && command.commandType !== "ResumeSession") return;
   const runnerInput = command.payload.runnerInput;
   if (!isRecord(runnerInput)) throw new Error("Cloud Agent runnerInput is required.");
-  assertRunnerProvider(expected, runnerInput as RunnerInput);
+  assertRunnerProvider(expected, runnerInput as RunnerInput, aliases);
 }
 
-function assertRunnerProvider(expected: PortableProviderKind, runnerInput: RunnerInput): void {
+function assertRunnerProvider(
+  expected: PortableProviderKind,
+  runnerInput: RunnerInput,
+  aliases?: ReadonlyArray<string>,
+): void {
   const actual = runnerInput.workload?.provider;
-  assertProvider(expected, actual);
+  assertProvider(expected, actual, aliases);
 }
 
 function writableWorkspaceRoot(host: CloudAgentHostServices): string {
   const root = host.workspace.root?.trim();
-  if (!root) throw new Error("Legacy Provider compatibility requires a host-owned Workspace root.");
+  if (!root) throw new Error("Provider execution requires a host-owned Workspace root.");
   if (host.workspace.authority !== "host" || host.workspace.readOnly) {
-    throw new Error(
-      "Legacy Provider compatibility cannot enforce an external or read-only Workspace.",
-    );
+    throw new Error("Provider execution cannot enforce an external or read-only Workspace.");
   }
   return resolve(root);
 }
@@ -288,11 +316,11 @@ function writableWorkspaceRoot(host: CloudAgentHostServices): string {
 function readConfiguredModel(configuration: Readonly<Record<string, unknown>>): string | undefined {
   const unsupported = Object.keys(configuration).filter((name) => name !== "model");
   if (unsupported.length > 0) {
-    throw new Error(`Legacy Provider configuration does not support '${unsupported[0]}'.`);
+    throw new Error(`Provider configuration does not support '${unsupported[0]}'.`);
   }
   if (configuration.model === undefined) return undefined;
   if (typeof configuration.model !== "string" || !configuration.model.trim()) {
-    throw new Error("Legacy Provider model configuration must be a non-empty string.");
+    throw new Error("Provider model configuration must be a non-empty string.");
   }
   return configuration.model.trim();
 }
@@ -334,12 +362,14 @@ function bindHostAuthority(
   };
 }
 
-function assertProvider(expected: PortableProviderKind, actual: unknown): void {
+function assertProvider(
+  expected: PortableProviderKind,
+  actual: unknown,
+  aliases: ReadonlyArray<string> = [],
+): void {
   const normalized = typeof actual === "string" ? actual.trim().toLowerCase() : "";
-  const matches =
-    expected === "codex"
-      ? normalized === "codex"
-      : normalized === "claude" || normalized === "claudeagent";
+  const accepted = new Set([expected, ...aliases].map((value) => value.trim().toLowerCase()));
+  const matches = accepted.has(normalized);
   if (!matches)
     throw new Error(`Provider plugin ${expected} cannot execute provider ${String(actual)}.`);
 }
@@ -474,8 +504,24 @@ function trackTask<T>(tasks: Set<Promise<unknown>>, task: Promise<T>): Promise<T
   return task;
 }
 
-async function settleTasks(tasks: Set<Promise<unknown>>): Promise<void> {
-  while (tasks.size > 0) await Promise.allSettled(tasks);
+async function settleTaskSetsWithin(
+  taskSets: ReadonlyArray<Set<Promise<unknown>>>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const tasks = taskSets.flatMap((taskSet) => [...taskSet]);
+  if (tasks.length === 0) return true;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.allSettled(tasks).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function commandAbortError(): Error {

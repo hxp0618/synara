@@ -1,62 +1,125 @@
 // FILE: protocol.ts
 // Purpose: Implements Provider Host Protocol v2 negotiation and command envelopes.
 
-import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
 import {
-  PROVIDER_CAPABILITY_CATALOG,
-  PROVIDER_CAPABILITY_IDS,
-  PROVIDER_HOST_MAX_COMMAND_BYTES,
-  PROVIDER_HOST_MAX_MESSAGE_BYTES,
-  PROVIDER_HOST_PROTOCOL_VERSION,
-  ProviderHostCommandEnvelope,
-  type ProviderCapabilityCatalogEntry,
-  type ProviderCapabilityMap,
-  type ProviderHostCommandEnvelope as ProviderHostCommand,
-  type ProviderHostDescriptor,
-  type ProviderHostError,
-  type ProviderHostMessageEnvelope,
-  type ProviderHostProviderKind,
-  type ProviderRuntimeCompatibleRange,
-  type ProviderRuntimeDescriptor,
-} from "@synara/contracts/provider-host";
-import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
-import { CLOUD_AGENT_TEXT_GENERATION_TASKS } from "@synara/cloud-agent-protocol";
-import { Schema } from "effect";
-
-import providerHostPackage from "../package.json";
+  CLOUD_AGENT_CAPABILITY_IDS as PROVIDER_CAPABILITY_IDS,
+  CLOUD_AGENT_MAX_COMMAND_BYTES as PROVIDER_HOST_MAX_COMMAND_BYTES,
+  CLOUD_AGENT_MAX_MESSAGE_BYTES as PROVIDER_HOST_MAX_MESSAGE_BYTES,
+  CLOUD_AGENT_PROTOCOL_VERSION as PROVIDER_HOST_PROTOCOL_VERSION,
+  CLOUD_AGENT_PROVIDER_CAPABILITY_CATALOG as PROVIDER_CAPABILITY_CATALOG,
+  CLOUD_AGENT_RUNTIME_EVENT_VERSION as PROVIDER_RUNTIME_EVENT_VERSION,
+  CLOUD_AGENT_TEXT_GENERATION_TASKS,
+  type CloudAgentCapabilityMap as ProviderCapabilityMap,
+  type CloudAgentCommandEnvelope as ProviderHostCommand,
+  type CloudAgentError as ProviderHostError,
+  type CloudAgentMessageEnvelope as ProviderHostMessageEnvelope,
+  type CloudAgentProviderCapabilityCatalogEntry as ProviderCapabilityCatalogEntry,
+} from "@synara/cloud-agent-protocol";
 import {
   hasAuthoritativeResumeData,
-  providerProcessEnvironment,
-  startProviderHostRun,
   validateRunnerInput,
   type ProviderPrimaryOperation,
   type ProviderRunController,
   type RunnerCredential,
   type RunnerInput,
   type RunnerMessage,
-} from "./providerHost";
+  type ProviderRunExecutor,
+} from "./internalExecution";
 import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 
-const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
-const HOST_BUILD_VERSION = providerHostPackage.version;
-const CLAUDE_AGENT_SDK_VERSION = providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
+const HOST_BUILD_VERSION = "0.1.0";
 const SUSPEND_TURN_CHECKPOINT_PROTOCOL = "provider-host-suspend-terminal-v1";
 const MAX_IN_FLIGHT_COMMANDS = 128;
 const MAX_TERMINAL_RECEIPTS = 4_096;
 const STOP_SESSION_QUIESCE_TIMEOUT_MS = 5_000;
+const STOP_SESSION_FORCE_TIMEOUT_MS = 1_000;
 
-export type CodexVersionProbeResult = {
+function decodeCommand(value: unknown): ProviderHostCommand {
+  if (!isRecord(value)) throw new Error("Command envelope must be an object.");
+  const commandType = value.commandType;
+  if (
+    typeof value.requestId !== "string" ||
+    !isRecord(value.protocolVersion) ||
+    typeof value.protocolVersion.major !== "number" ||
+    typeof value.protocolVersion.minor !== "number" ||
+    typeof value.executionId !== "string" ||
+    !Number.isSafeInteger(value.generation) ||
+    typeof commandType !== "string" ||
+    !new Set([
+      "Describe",
+      "StartSession",
+      "ResumeSession",
+      "SendTurn",
+      "SteerTurn",
+      "InterruptTurn",
+      "SuspendTurn",
+      "ResolveApproval",
+      "ResolveUserInput",
+      "CompactSession",
+      "RollbackSession",
+      "ForkSession",
+      "StartReview",
+      "GenerateText",
+      "StopSession",
+    ]).has(commandType) ||
+    typeof value.commandId !== "string" ||
+    typeof value.occurredAt !== "string" ||
+    !isRecord(value.payload)
+  ) {
+    throw new Error("Command envelope is invalid.");
+  }
+  return value as unknown as ProviderHostCommand;
+}
+
+export type ProviderVersionProbeResult = {
   readonly available: boolean;
   readonly output?: string;
 };
 
+export type ProviderHostProviderKind = string;
+export type ProviderRuntimeCompatibleRange = {
+  readonly minimumInclusive: string;
+  readonly maximumExclusive?: string;
+};
+export type ProviderRuntimeDescriptor = {
+  readonly kind: "cli" | "sdk" | "local";
+  readonly name: string;
+  readonly version?: string;
+  readonly available: boolean;
+  readonly versionSource: "probe" | "package" | "build";
+  readonly compatibleRange: ProviderRuntimeCompatibleRange;
+  readonly compatible: boolean;
+};
+export type ProviderHostDescriptor = {
+  readonly protocolVersion: { readonly major: number; readonly minor: number };
+  readonly hostBuildVersion: string;
+  readonly capabilityDescriptor: {
+    readonly provider: string;
+    readonly supportTier: ProviderCapabilityCatalogEntry["supportTier"];
+    readonly adapterVersion: string;
+    readonly providerCliVersion?: string;
+    readonly runtime: ProviderRuntimeDescriptor;
+    readonly releasePolicy: {
+      readonly requiresExplicitEnablement: boolean;
+      readonly enabled: boolean;
+    };
+    readonly capabilities: ProviderCapabilityMap;
+  };
+  readonly maximumCommandBytes: number;
+  readonly maximumMessageBytes: number;
+  readonly runtimeEventVersions: { readonly minimum: number; readonly maximum: number };
+  readonly credentialDeliveryModes: ReadonlyArray<"anonymous-fd">;
+  readonly resumeStrategies: ReadonlyArray<"native-cursor" | "authoritative-history">;
+  readonly textGenerationTasks?: ReadonlyArray<(typeof CLOUD_AGENT_TEXT_GENERATION_TASKS)[number]>;
+};
+
 export type ProviderHostDescriptorOptions = {
   readonly environment?: Readonly<Record<string, string | undefined>>;
-  readonly codexVersionProbe?: () => CodexVersionProbeResult;
-  readonly claudeSdkVersion?: string;
+  readonly runtimeVersionProbe?: () => ProviderVersionProbeResult;
+  readonly runtimeVersion?: string;
   readonly hostBuildVersion?: string;
 };
 
@@ -67,7 +130,7 @@ type ProtocolState = {
   sessionEpoch: number;
   activeOperation: {
     commandId: string;
-    commandType: "SendTurn" | "CompactSession" | "StartReview";
+    commandType: "SendTurn" | "CompactSession" | "StartReview" | "GenerateText";
     sessionEpoch: number;
     run: ProviderRunController;
   } | null;
@@ -93,7 +156,9 @@ export function providerHostDescriptor(
       provider,
       supportTier: catalogEntry.supportTier,
       adapterVersion: catalogEntry.adapterVersion,
-      ...(provider === "codex" && runtime.version ? { providerCliVersion: runtime.version } : {}),
+      ...(catalogEntry.runtimePolicy.versionSource === "probe" && runtime.version
+        ? { providerCliVersion: runtime.version }
+        : {}),
       runtime,
       releasePolicy: releasePolicy(catalogEntry, options.environment ?? process.env),
       capabilities: capabilityMapForProvider(provider),
@@ -136,8 +201,8 @@ function runtimeDescriptor(
   const policy = entry.runtimePolicy;
   const compatibleRange = { ...policy.compatibleRange };
 
-  if (entry.provider === "codex") {
-    const probe = options.codexVersionProbe?.() ?? probeCodexVersion();
+  if (entry.runtimePolicy.versionSource === "probe") {
+    const probe = options.runtimeVersionProbe?.() ?? { available: false };
     const version = extractStableSemver(probe.output ?? "");
     return {
       kind: policy.kind,
@@ -151,8 +216,8 @@ function runtimeDescriptor(
     };
   }
 
-  if (entry.provider === "claudeAgent") {
-    const declaredVersion = (options.claudeSdkVersion ?? CLAUDE_AGENT_SDK_VERSION).trim();
+  if (entry.runtimePolicy.versionSource === "package") {
+    const declaredVersion = (options.runtimeVersion ?? "").trim();
     const version = extractStableSemver(declaredVersion);
     const available = declaredVersion.length > 0;
     return {
@@ -203,25 +268,12 @@ function experimentalProviderAllowlist(
   const providers = new Set<ProviderHostProviderKind>();
   for (const token of (environment.SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS ?? "").split(",")) {
     const normalized = token.trim().toLowerCase();
-    if (normalized === "codex") providers.add("codex");
-    if (normalized === "claude" || normalized === "claudeagent") {
-      providers.add("claudeAgent");
-    }
+    const match = PROVIDER_CAPABILITY_CATALOG.providers.find(
+      (entry) => entry.provider.toLowerCase() === normalized,
+    );
+    if (match) providers.add(match.provider);
   }
   return providers;
-}
-
-function probeCodexVersion(): CodexVersionProbeResult {
-  const result = spawnSync("codex", ["--version"], {
-    encoding: "utf8",
-    timeout: 5_000,
-    env: providerProcessEnvironment(process.env),
-  });
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-  return {
-    available: result.error === undefined && result.status !== null,
-    ...(output ? { output } : {}),
-  };
 }
 
 function extractStableSemver(value: string): string | undefined {
@@ -253,8 +305,10 @@ function compareSemver(left: Semver, right: Semver): number {
 export function createProviderHostProtocolHandler(input: {
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
-  startRun?: typeof startProviderHostRun;
-  descriptorForProvider?: ProviderDescriptorFactory;
+  startRun?: ProviderRunExecutor;
+  descriptorForProvider: ProviderDescriptorFactory;
+  stopQuiesceTimeoutMs?: number;
+  stopForceTimeoutMs?: number;
 }): ProtocolHandler {
   const state: ProtocolState = {
     sessionInput: null,
@@ -263,8 +317,8 @@ export function createProviderHostProtocolHandler(input: {
     inFlightByCommandId: new Map(),
     terminalByCommandId: new Map(),
   };
-  const startRun = input.startRun ?? startProviderHostRun;
-  const descriptorForProvider = input.descriptorForProvider ?? providerHostDescriptor;
+  const startRun = input.startRun ?? missingProviderExecutor;
+  const descriptorForProvider = input.descriptorForProvider;
 
   return async (command) => {
     const cached = state.terminalByCommandId.get(command.commandId);
@@ -299,6 +353,8 @@ export function createProviderHostProtocolHandler(input: {
       input.emit,
       startRun,
       descriptorForProvider,
+      input.stopQuiesceTimeoutMs ?? STOP_SESSION_QUIESCE_TIMEOUT_MS,
+      input.stopForceTimeoutMs ?? STOP_SESSION_FORCE_TIMEOUT_MS,
     ).catch((error) => errorMessage(command, classifyProviderHostError(error)));
     state.inFlightByCommandId.set(command.commandId, terminalPromise);
     const terminal = await terminalPromise;
@@ -341,14 +397,14 @@ export async function runProviderHostProtocolV2(input: {
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
   flush?: () => Promise<void>;
-  startRun?: typeof startProviderHostRun;
-  descriptorForProvider?: ProviderDescriptorFactory;
+  startRun?: ProviderRunExecutor;
+  descriptorForProvider: ProviderDescriptorFactory;
 }): Promise<void> {
   const handle = createProviderHostProtocolHandler({
     credential: input.credential,
     emit: input.emit,
     ...(input.startRun ? { startRun: input.startRun } : {}),
-    ...(input.descriptorForProvider ? { descriptorForProvider: input.descriptorForProvider } : {}),
+    descriptorForProvider: input.descriptorForProvider,
   });
   const lines = createInterface({ input: input.source, crlfDelay: Infinity });
   const inFlight = new Set<Promise<ReadonlyArray<ProviderHostMessageEnvelope>>>();
@@ -416,13 +472,19 @@ export async function runProviderHostProtocolV2(input: {
   await input.flush?.();
 }
 
+const missingProviderExecutor: ProviderRunExecutor = () => {
+  throw new Error("Cloud Agent Provider executor was not injected.");
+};
+
 async function executeCommand(
   command: ProviderHostCommand,
   state: ProtocolState,
   credential: RunnerCredential | null,
   emit: (message: ProviderHostMessageEnvelope) => void,
-  startRun: typeof startProviderHostRun,
+  startRun: ProviderRunExecutor,
   descriptorForProvider: ProviderDescriptorFactory,
+  stopQuiesceTimeoutMs: number,
+  stopForceTimeoutMs: number,
 ): Promise<ProviderHostMessageEnvelope> {
   assertCompatibleProtocol(command);
 
@@ -588,10 +650,13 @@ async function executeCommand(
       const sessionEpoch = state.sessionEpoch;
       const sessionInput = state.sessionInput;
       const provider = readProvider(sessionInput.workload.provider);
-      if (command.commandType === "CompactSession" && provider !== "codex") {
+      if (
+        command.commandType === "CompactSession" &&
+        descriptorForProvider(provider).capabilityDescriptor.capabilities.compact === "unsupported"
+      ) {
         throw unsupportedSessionOperation(
           command.commandType,
-          "Claude Agent SDK does not expose a stable manual compact API.",
+          "The selected Provider does not expose a stable manual compact API.",
         );
       }
       const operation: ProviderPrimaryOperation =
@@ -666,8 +731,25 @@ async function executeCommand(
           resumeSnapshot: null,
         },
       };
-      const run = startRun(textRunInput, credential, () => undefined, { interactive: false });
-      const terminal = await run.result;
+      const sessionEpoch = state.sessionEpoch;
+      const run = startRun(textRunInput, credential, () => undefined, {
+        interactive: false,
+        operation: { commandType: "GenerateText", payload: command.payload },
+      });
+      state.activeOperation = {
+        commandId: command.commandId,
+        commandType: command.commandType,
+        sessionEpoch,
+        run,
+      };
+      let terminal: Extract<RunnerMessage, { type: "result" }>;
+      try {
+        terminal = await run.result;
+      } finally {
+        if (state.activeOperation?.commandId === command.commandId) {
+          state.activeOperation = null;
+        }
+      }
       const outputText = terminal.output.text;
       if (typeof outputText !== "string" || !outputText.trim()) {
         throw new Error("GenerateText Provider returned empty output.");
@@ -780,21 +862,34 @@ async function executeCommand(
       state.sessionInput = null;
       if (activeOperation) {
         const terminal = state.inFlightByCommandId.get(activeOperation.commandId);
-        activeOperation.run.interrupt();
-        if (!terminal || !(await settlesWithin(terminal, STOP_SESSION_QUIESCE_TIMEOUT_MS))) {
-          throw new ProtocolFailure({
-            code: "provider_unavailable",
-            message:
-              "StopSession timed out while waiting for the active Provider operation to quiesce.",
-            retryable: true,
-            requiresNewExecution: true,
-            requiresUserAction: false,
-            canReconstructFromHistory: true,
-            canMoveWorker: true,
-          });
+        try {
+          activeOperation.run.interrupt();
+        } catch (error) {
+          return stopResultMessage(command, "failed", error);
+        }
+        if (!terminal) {
+          return stopResultMessage(
+            command,
+            "failed",
+            new Error("StopSession could not observe the active operation terminal."),
+          );
+        }
+        if (!(await settlesWithin(terminal, stopQuiesceTimeoutMs))) {
+          if (!activeOperation.run.forceStop) {
+            return stopResultMessage(command, "timed-out");
+          }
+          try {
+            activeOperation.run.forceStop();
+          } catch (error) {
+            return stopResultMessage(command, "failed", error);
+          }
+          if (await settlesWithin(terminal, stopForceTimeoutMs)) {
+            return stopResultMessage(command, "forced");
+          }
+          return stopResultMessage(command, "timed-out");
         }
       }
-      return resultMessage(command, { stopped: true, quiesced: true });
+      return stopResultMessage(command, "quiesced");
     }
     default:
       throw new ProtocolFailure({
@@ -1200,21 +1295,8 @@ function bindRunnerInputGeneration(input: RunnerInput, commandGeneration: number
 
 function readProvider(value: unknown): ProviderHostProviderKind {
   if (typeof value !== "string") throw new Error("provider is required");
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "claude") return "claudeAgent";
-  if (normalized === "gemini") return "antigravity";
-  if (
-    normalized === "codex" ||
-    normalized === "claudeagent" ||
-    normalized === "cursor" ||
-    normalized === "antigravity" ||
-    normalized === "grok" ||
-    normalized === "kilo" ||
-    normalized === "opencode" ||
-    normalized === "pi"
-  ) {
-    return normalized === "claudeagent" ? "claudeAgent" : normalized;
-  }
+  const normalized = value.trim();
+  if (/^[a-z][a-z0-9._-]{0,79}$/iu.test(normalized)) return normalized;
   throw new ProtocolFailure({
     code: "provider_not_installed",
     message: `Provider ${value.trim()} is not known to this Provider Host.`,
@@ -1247,6 +1329,24 @@ function resultMessage(
     messageType: "Result",
     payload,
   };
+}
+
+type StopOutcome = "quiesced" | "timed-out" | "forced" | "failed";
+
+function stopResultMessage(
+  command: ProviderHostCommand,
+  outcome: StopOutcome,
+  cause?: unknown,
+): ProviderHostMessageEnvelope {
+  const detail =
+    cause instanceof Error ? cause.message : cause === undefined ? undefined : String(cause);
+  return resultMessage(command, {
+    stopped: true,
+    outcome,
+    quiesced: outcome === "quiesced",
+    graceful: outcome === "quiesced",
+    ...(detail ? { detail } : {}),
+  });
 }
 
 function errorMessage(

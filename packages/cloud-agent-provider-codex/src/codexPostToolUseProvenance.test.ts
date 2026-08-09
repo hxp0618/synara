@@ -6,16 +6,75 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_TOOL_POLICY_HOOK_ARGUMENT,
   CODEX_TOOL_POLICY_HOOK_INPUT_LIMIT_BYTES,
+  CODEX_NO_TOOL_OPERATION_ENV,
   buildCodexToolPolicyHookCommand,
   buildInlineCodexToolPolicyHookCommand,
   codexPreToolUseSensitiveActionHookResponse,
   codexPostToolUseProvenanceHookResponse,
   codexToolPolicyHookResponse,
   runCodexPostToolUseProvenanceHook,
+  runCodexNoToolAwarePolicyHook,
   runCodexToolPolicyHook,
 } from "./codexPostToolUseProvenance";
 
 describe("Codex tool-policy hook", () => {
+  it("denies every tool category for a host-marked GenerateText operation", async () => {
+    for (const toolName of ["Read", "Bash", "apply_patch", "web_search", "mcp__github__read"]) {
+      let output = "";
+      await runCodexNoToolAwarePolicyHook({
+        source: Readable.from([
+          JSON.stringify({
+            hook_event_name: "PreToolUse",
+            permission_mode: "never",
+            tool_name: toolName,
+            tool_input: {},
+          }),
+        ]),
+        output: new Writable({
+          write(chunk, _encoding, callback) {
+            output += chunk.toString();
+            callback();
+          },
+        }),
+        environment: { [CODEX_NO_TOOL_OPERATION_ENV]: "1" },
+      });
+      expect(JSON.parse(output)).toMatchObject({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+        },
+      });
+    }
+  });
+
+  it("makes the immutable inline hook deny PreToolUse under the host-only no-tool marker", () => {
+    const command = buildInlineCodexToolPolicyHookCommand({
+      nodeExecutable: process.execPath,
+      platform: process.platform,
+    });
+    const result = spawnSync(command, {
+      shell: true,
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        permission_mode: "default",
+        tool_name: "Read",
+        tool_input: { file_path: "README.md" },
+      }),
+      encoding: "utf8",
+      timeout: 5_000,
+      env: { ...process.env, [CODEX_NO_TOOL_OPERATION_ENV]: "1" },
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "GenerateText does not permit Provider tools.",
+      },
+    });
+  });
+
   it("adds host context without copying hostile native output", () => {
     const response = codexPostToolUseProvenanceHookResponse({
       hook_event_name: "PostToolUse",
@@ -84,7 +143,7 @@ describe("Codex tool-policy hook", () => {
     expect(ordinary).toMatchObject({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        additionalContext: expect.stringContaining('\"toolName\":\"Bash\"'),
+        additionalContext: expect.stringContaining('"toolName":"Bash"'),
       },
     });
   });
@@ -100,7 +159,7 @@ describe("Codex tool-policy hook", () => {
     expect(response).toMatchObject({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        additionalContext: expect.stringContaining('\"source\":\"external-mcp-result\"'),
+        additionalContext: expect.stringContaining('"source":"external-mcp-result"'),
       },
     });
     expect(

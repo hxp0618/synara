@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import type { RunnerMessage } from "./providerHost";
+import type { RunnerMessage } from "./internalExecution";
 import { summarizeUnifiedDiff, TurnDiffCollector } from "./turnDiffs";
 
 describe("Turn Diff collector", () => {
