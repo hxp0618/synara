@@ -541,6 +541,7 @@ import {
   dispatchThreadMarkerRemove,
 } from "../threadMarkers";
 import { getComposerProviderState } from "./chat/composerProviderRegistry";
+import { composerTranscriptBottomInsetPx, useComposerOverlayHeight } from "./chat/composerOverlay";
 import {
   COMPOSER_COMMAND_MENU_FLOATING_WRAPPER_CLASS_NAME,
   COMPOSER_INPUT_SHELL_CLASS_NAME,
@@ -587,6 +588,7 @@ import {
   worktreeSetupHasError,
   WorktreeSetupCancelledError,
   createWorktreeSetupResolution,
+  runWorktreeCreationFlow,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
   type LocalDispatchSnapshot,
@@ -1257,6 +1259,14 @@ export default function ChatView({
     (store) => store.setModelSelectionAndSticky,
   );
   const timestampFormat = settings.timestampFormat;
+  // The composer floats over the transcript; its measured height becomes the
+  // transcript's bottom content inset (see composerOverlay.ts).
+  const {
+    overlayRef: composerOverlayRef,
+    overlayHeightPx: composerOverlayHeightPx,
+    overlayBottomClearancePx: composerOverlayBottomClearancePx,
+  } = useComposerOverlayHeight();
+  const composerTranscriptInsetPx = composerTranscriptBottomInsetPx(composerOverlayHeightPx);
   const navigate = useNavigate();
   const { handleNewThread } = useHandleNewThread();
   const { handleNewChat } = useHandleNewChat();
@@ -4848,7 +4858,7 @@ export default function ChatView({
       });
 
       if (isElectron && keybindingRule) {
-        await api.server.upsertKeybinding(keybindingRule);
+        await api.server.upsertKeybinding({ rule: keybindingRule });
         await queryClient.invalidateQueries({ queryKey: serverQueryKeys.all });
       }
     },
@@ -5641,58 +5651,47 @@ export default function ChatView({
     };
   }, [activeThread?.id, composerFooterHasWideActions, isInactiveSplitPane]);
 
+  // A composer that grows (attachments, approval cards, queued turns) eats into the
+  // transcript's bottom content inset, which would push the tail behind the frosted
+  // surface. Re-stick a transcript that was already parked at the end.
+  //
+  // This is driven by the *committed* inset rather than by a ResizeObserver on the
+  // composer: the inset lands a render after the measurement, so a scroll scheduled
+  // from the observer would race the padding it is supposed to compensate for. Here
+  // the new padding is already in the DOM, so the pre-resize viewport is simply the
+  // current one with the inset delta backed out.
+  const previousComposerTranscriptInsetRef = useRef({
+    threadId: activeThread?.id ?? null,
+    insetPx: composerTranscriptInsetPx,
+  });
   useLayoutEffect(() => {
-    if (isInactiveSplitPane || typeof ResizeObserver === "undefined") return;
-    const composerForm = composerFormRef.current;
-    if (!composerForm) return;
-
-    let previousHeight = composerForm.getBoundingClientRect().height;
-    let pendingScrollTimeout: number | null = null;
-    const observer = new ResizeObserver((entries) => {
-      const [entry] = entries;
-      if (!entry) return;
-
-      const nextHeight = entry.contentRect.height;
-      const heightDelta = nextHeight - previousHeight;
-      previousHeight = nextHeight;
-      if (Math.abs(heightDelta) < 0.5) return;
-
-      const scrollContainer = legendListRef.current?.getScrollableNode?.();
-      // A composer resize can make LegendList report `isAtEnd: false` after the viewport
-      // has already changed. Reconstruct the pre-resize viewport so only an existing
-      // tail stick is preserved; a user who was already scrolled away stays there.
-      const wasNearEndBeforeResize =
-        scrollContainer instanceof HTMLElement &&
-        isScrollContainerNearBottom({
-          scrollTop: scrollContainer.scrollTop,
-          clientHeight: scrollContainer.clientHeight + heightDelta,
-          scrollHeight: scrollContainer.scrollHeight,
-        });
-      if (!wasNearEndBeforeResize) return;
-
-      if (pendingScrollTimeout !== null) {
-        window.clearTimeout(pendingScrollTimeout);
-      }
-      pendingScrollTimeout = window.setTimeout(() => {
-        pendingScrollTimeout = null;
-        scrollToEnd(false);
-      }, 0);
-    });
-
-    observer.observe(composerForm);
-    return () => {
-      observer.disconnect();
-      if (pendingScrollTimeout !== null) {
-        window.clearTimeout(pendingScrollTimeout);
-      }
+    const threadId = activeThread?.id ?? null;
+    const previous = previousComposerTranscriptInsetRef.current;
+    previousComposerTranscriptInsetRef.current = {
+      threadId,
+      insetPx: composerTranscriptInsetPx,
     };
-  }, [
-    activeThread?.id,
-    isInactiveSplitPane,
-    scrollToEnd,
-    secondaryChromeReady,
-    shouldRenderChatPaneContent,
-  ]);
+    if (previous.threadId !== threadId) return;
+
+    const insetDeltaPx = composerTranscriptInsetPx - previous.insetPx;
+    if (isInactiveSplitPane || Math.abs(insetDeltaPx) < 0.5) return;
+
+    const scrollContainer = legendListRef.current?.getScrollableNode?.();
+    if (!(scrollContainer instanceof HTMLElement)) return;
+    const wasNearEndBeforeResize = isScrollContainerNearBottom({
+      scrollTop: scrollContainer.scrollTop,
+      clientHeight: scrollContainer.clientHeight,
+      scrollHeight: scrollContainer.scrollHeight - insetDeltaPx,
+    });
+    if (!wasNearEndBeforeResize) return;
+
+    // Compensate by the exact inset delta rather than asking the list to scroll to its
+    // end: LegendList re-measures the padded viewport on its own schedule, so an
+    // end-scroll issued in this commit would aim at the pre-padding content height and
+    // land a composer-growth short of the tail.
+    programmaticScrollUntilRef.current = performance.now() + 200;
+    scrollContainer.scrollTop += insetDeltaPx;
+  }, [activeThread?.id, composerTranscriptInsetPx, isInactiveSplitPane]);
 
   useEffect(() => {
     isAtEndRef.current = true;
@@ -8218,6 +8217,10 @@ export default function ChatView({
       ? setupProjectScript(targetProjectScriptsForSend)
       : null;
     const worktreeSetupScriptName = setupScriptForWorktree?.name ?? null;
+    // Branching off the checkout's current branch also carries its uncommitted
+    // changes into the worktree, which the setup card surfaces as its own step.
+    const worktreeCopiesLocalChanges =
+      Boolean(baseBranchForWorktree) && baseBranchForWorktree === activeRootBranch;
     const messageIdForSend = newMessageId();
     const worktreeSetupResolution = baseBranchForWorktree ? createWorktreeSetupResolution() : null;
     worktreeSetupResolutionRef.current = worktreeSetupResolution;
@@ -8229,7 +8232,11 @@ export default function ChatView({
     beginLocalDispatch({
       expectedUserMessageId: messageIdForSend,
       ...(baseBranchForWorktree
-        ? { worktreeSetupStepId: "create-worktree", setupScriptName: worktreeSetupScriptName }
+        ? {
+            worktreeSetupStepId: "create-branch" as const,
+            setupScriptName: worktreeSetupScriptName,
+            copyLocalChanges: worktreeCopiesLocalChanges,
+          }
         : {}),
     });
 
@@ -8442,36 +8449,44 @@ export default function ChatView({
 
       // On first message: lock in branch + create worktree if needed.
       if (baseBranchForWorktree && worktreeSetupResolution) {
-        const creation = createWorktreeMutation.mutateAsync({
-          cwd: targetProjectCwdForSend,
-          ref: baseBranchForWorktree,
-          newBranch: buildTemporaryWorktreeBranchName(),
-          ...(baseBranchForWorktree === activeRootBranch
-            ? { copyChangesFrom: targetProjectCwdForSend }
-            : {}),
+        // The server streams each real setup phase (branch → worktree → copy
+        // changes); advance the card's rows from those events instead of
+        // letting one row spin through the whole creation.
+        const worktreeProgressId = randomUUID();
+        const creationFlow = await runWorktreeCreationFlow({
+          progressId: worktreeProgressId,
+          subscribeToProgress: (listener) => api.git.onWorktreeSetupProgress(listener),
+          startCreation: () =>
+            createWorktreeMutation.mutateAsync({
+              cwd: targetProjectCwdForSend,
+              ref: baseBranchForWorktree,
+              newBranch: buildTemporaryWorktreeBranchName(),
+              progressId: worktreeProgressId,
+              ...(worktreeCopiesLocalChanges ? { copyChangesFrom: targetProjectCwdForSend } : {}),
+            }),
+          resolution: worktreeSetupResolution,
+          onCreationStep: (stepId) =>
+            beginLocalDispatch({
+              worktreeSetupStepId: stepId,
+              setupScriptName: worktreeSetupScriptName,
+              copyLocalChanges: worktreeCopiesLocalChanges,
+            }),
+          removeWorktree: (worktreePath) =>
+            api.git.removeWorktree({
+              cwd: targetProjectCwdForSend,
+              path: worktreePath,
+              force: true,
+              reclaimTemporaryBranch: true,
+            }),
         });
-        // `git worktree add` is the longest step; let the card's buttons win
-        // the wait instead of only taking effect once it finishes.
-        await Promise.race([creation, worktreeSetupResolution.promise]);
-        if (worktreeSetupResolution.action !== null) {
-          // The worktree may still be materializing — tear it down whenever
-          // the creation lands so a resolved send leaves no stray checkout.
-          void creation
-            .then((result) =>
-              api.git.removeWorktree({
-                cwd: targetProjectCwdForSend,
-                path: result.worktree.path,
-                force: true,
-                reclaimTemporaryBranch: true,
-              }),
-            )
-            .catch(() => undefined);
+        if (creationFlow.outcome === "resolved") {
           await consumeWorktreeSetupResolution();
         } else {
-          const result = await creation;
+          const result = creationFlow.result;
           beginLocalDispatch({
             worktreeSetupStepId: "prepare-thread",
             setupScriptName: worktreeSetupScriptName,
+            copyLocalChanges: worktreeCopiesLocalChanges,
           });
           nextThreadBranch = result.worktree.branch;
           nextThreadWorktreePath = result.worktree.path;
@@ -8585,6 +8600,7 @@ export default function ChatView({
           beginLocalDispatch({
             worktreeSetupStepId: "run-setup-action",
             setupScriptName: setupScript.name,
+            copyLocalChanges: worktreeCopiesLocalChanges,
           });
           const setupScriptOptions: Parameters<typeof runProjectScript>[1] = {
             worktreePath: nextThreadWorktreePath,
@@ -8637,7 +8653,11 @@ export default function ChatView({
       beginLocalDispatch({
         expectedUserMessageId: messageIdForSend,
         ...(baseBranchForWorktree && !switchedToLocalCheckout
-          ? { worktreeSetupStepId: "start-session", setupScriptName: worktreeSetupScriptName }
+          ? {
+              worktreeSetupStepId: "start-session" as const,
+              setupScriptName: worktreeSetupScriptName,
+              copyLocalChanges: worktreeCopiesLocalChanges,
+            }
           : {}),
       });
       rememberCustomBinaryPathForDispatch({
@@ -12476,45 +12496,56 @@ export default function ChatView({
                         ? ENVIRONMENT_DOCKED_CONTENT_INSET_PX
                         : undefined
                     }
+                    contentInsetBottomPx={composerTranscriptInsetPx}
+                    contentInsetBottomClearancePx={composerOverlayBottomClearancePx}
                   />
                 </div>
 
-                <div
-                  className={cn(
-                    "relative z-10 -mt-5 w-full shrink-0 overflow-visible pt-0 sm:pt-0",
-                    ENVIRONMENT_CONTENT_INSET_MOTION_CLASS,
-                    CHAT_COLUMN_GUTTER_CLASS_NAME,
-                    // A trailing BranchToolbar only renders for legacy git threads; otherwise the
-                    // composer is the last element, so give it a comfortable bottom margin.
-                    isGitRepo && !environmentEnabled ? "pb-0.5" : "pb-3 sm:pb-4",
-                  )}
-                  // Match the transcript's right inset so the composer stays aligned with chat
-                  // content (and clear of the docked Environment overlay).
-                  style={
-                    environmentAppliesContentInset
-                      ? { paddingRight: ENVIRONMENT_DOCKED_CONTENT_INSET_PX }
-                      : undefined
-                  }
-                >
-                  {composerSection}
-                </div>
-                {secondaryChromeReady &&
-                ((isGitRepo && !environmentEnabled) || relocateComposerLeadingControls) ? (
-                  <div className={CHAT_COLUMN_GUTTER_CLASS_NAME}>
-                    <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
-                      <div className="flex w-full items-center gap-1">
-                        {relocateComposerLeadingControls ? (
-                          <div className="flex shrink-0 items-center gap-1 pl-1">
-                            {renderComposerLeadingControls({ iconOnly: true })}
-                          </div>
-                        ) : null}
-                        {isGitRepo && !environmentEnabled ? (
-                          <BranchToolbar {...branchToolbarProps} className="min-w-0 flex-1" />
-                        ) : null}
+                {/* Trailing block below the transcript: the composer floats on top of it
+                    (`bottom-full`), so the transcript's scroll viewport — and therefore every
+                    row scrolling behind the frosted composer — is clipped at the composer's
+                    bottom edge. Nothing ever shows through this gutter or the BranchToolbar row. */}
+                <div className="relative z-10 w-full shrink-0">
+                  <div
+                    ref={composerOverlayRef}
+                    className={cn(
+                      "pointer-events-none absolute inset-x-0 bottom-full w-full overflow-visible",
+                      ENVIRONMENT_CONTENT_INSET_MOTION_CLASS,
+                      CHAT_COLUMN_GUTTER_CLASS_NAME,
+                    )}
+                    // Match the transcript's right inset so the composer stays aligned with chat
+                    // content (and clear of the docked Environment overlay).
+                    style={
+                      environmentAppliesContentInset
+                        ? { paddingRight: ENVIRONMENT_DOCKED_CONTENT_INSET_PX }
+                        : undefined
+                    }
+                  >
+                    <div className="pointer-events-auto">{composerSection}</div>
+                  </div>
+                  {/* A trailing BranchToolbar only renders for legacy git threads; otherwise the
+                      composer is the last element, so give it a comfortable bottom margin. */}
+                  <div
+                    className={cn(isGitRepo && !environmentEnabled ? "pt-0.5" : "pt-3 sm:pt-4")}
+                  />
+                  {secondaryChromeReady &&
+                  ((isGitRepo && !environmentEnabled) || relocateComposerLeadingControls) ? (
+                    <div className={CHAT_COLUMN_GUTTER_CLASS_NAME}>
+                      <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
+                        <div className="flex w-full items-center gap-1">
+                          {relocateComposerLeadingControls ? (
+                            <div className="flex shrink-0 items-center gap-1 pl-1">
+                              {renderComposerLeadingControls({ iconOnly: true })}
+                            </div>
+                          ) : null}
+                          {isGitRepo && !environmentEnabled ? (
+                            <BranchToolbar {...branchToolbarProps} className="min-w-0 flex-1" />
+                          ) : null}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
               </div>
             ) : null}
 

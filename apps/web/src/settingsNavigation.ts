@@ -113,8 +113,8 @@ export const CORE_SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
   {
     id: "shortcuts",
     group: "personal",
-    label: "Keyboard shortcuts",
-    description: "Search and customize shortcuts, grouped by where they work.",
+    label: "Keybindings",
+    description: "Capture, customize, and add shortcuts for every Synara command.",
     icon: "shortcut",
     eyebrow: "Key bindings",
   },

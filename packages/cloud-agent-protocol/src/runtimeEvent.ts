@@ -48,6 +48,7 @@ export const CLOUD_AGENT_RUNTIME_EVENT_TYPES = [
   "config.warning",
   "deprecation.notice",
   "files.persisted",
+  "vcs.state.changed",
   "runtime.warning",
   "runtime.error",
 ] as const;

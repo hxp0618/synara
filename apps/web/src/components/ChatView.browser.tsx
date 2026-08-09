@@ -145,7 +145,7 @@ const ATTACHMENT_VIEWPORT_MATRIX = [
 interface UserRowMeasurement {
   measuredRowHeightPx: number;
   timelineWidthMeasuredPx: number;
-  renderedInVirtualizedRegion: boolean;
+  renderedInTimelineRegion: boolean;
 }
 
 interface MountedChatView {
@@ -2139,7 +2139,7 @@ async function measureUserRow(options: {
 
   let timelineWidthMeasuredPx = 0;
   let measuredRowHeightPx = 0;
-  let renderedInVirtualizedRegion = false;
+  let renderedInTimelineRegion = false;
   await vi.waitFor(
     async () => {
       scrollContainer.scrollTop = 0;
@@ -2149,7 +2149,11 @@ async function measureUserRow(options: {
       expect(measuredRow, "Unable to measure targeted user row height.").toBeTruthy();
       timelineWidthMeasuredPx = measuredRow!.getBoundingClientRect().width;
       measuredRowHeightPx = measuredRow!.getBoundingClientRect().height;
-      renderedInVirtualizedRegion = measuredRow!.closest("[data-index]") instanceof HTMLElement;
+      // LegendList no longer exposes its former private `data-index` wrapper.
+      // The semantic timeline root is stable and every transcript row beneath it
+      // is rendered through the virtualized MessagesTimeline list.
+      renderedInTimelineRegion =
+        measuredRow!.closest("[data-messages-timeline-root='true']") instanceof HTMLElement;
       expect(timelineWidthMeasuredPx, "Unable to measure timeline width.").toBeGreaterThan(0);
       expect(measuredRowHeightPx, "Unable to measure targeted user row height.").toBeGreaterThan(0);
     },
@@ -2159,7 +2163,7 @@ async function measureUserRow(options: {
     },
   );
 
-  return { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInVirtualizedRegion };
+  return { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInTimelineRegion };
 }
 
 async function measureChatLayout(host: HTMLElement): Promise<ChatLayoutMeasurement> {
@@ -2566,10 +2570,10 @@ describe("ChatView timeline estimator parity (full app)", () => {
       });
 
       try {
-        const { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInVirtualizedRegion } =
+        const { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInTimelineRegion } =
           await mounted.measureUserRow(targetMessageId);
 
-        expect(renderedInVirtualizedRegion).toBe(true);
+        expect(renderedInTimelineRegion).toBe(true);
 
         const estimatedHeightPx = estimateTimelineMessageHeight(
           { role: "user", text: userText, attachments: [] },
@@ -2609,7 +2613,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
           { timelineWidthPx: measurement.timelineWidthMeasuredPx },
         );
 
-        expect(measurement.renderedInVirtualizedRegion).toBe(true);
+        expect(measurement.renderedInTimelineRegion).toBe(true);
         expect(Math.abs(measurement.measuredRowHeightPx - estimatedHeightPx)).toBeLessThanOrEqual(
           viewport.textTolerancePx,
         );
@@ -4441,10 +4445,10 @@ describe("ChatView timeline estimator parity (full app)", () => {
       });
 
       try {
-        const { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInVirtualizedRegion } =
+        const { measuredRowHeightPx, timelineWidthMeasuredPx, renderedInTimelineRegion } =
           await mounted.measureUserRow(targetMessageId);
 
-        expect(renderedInVirtualizedRegion).toBe(true);
+        expect(renderedInTimelineRegion).toBe(true);
 
         const estimatedHeightPx = estimateTimelineMessageHeight(
           {
@@ -5974,6 +5978,46 @@ describe("ChatView timeline estimator parity (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+      expect(mounted.router.state.location.pathname).toBe(newThreadPath);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("focuses and keyboard-selects from the new-thread project picker", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: withOpenProjectPickerFixtures(
+        createSnapshotForTargetUser({
+          targetMessageId: "msg-user-project-picker-keyboard-test" as MessageId,
+          targetText: "project picker keyboard test",
+        }),
+      ),
+    });
+
+    try {
+      await page.getByLabelText("Create new thread in Project").click();
+      const newThreadPath = await waitForURL(
+        mounted.router,
+        (path) => UUID_ROUTE_RE.test(path),
+        "Route should have changed to a new draft thread UUID.",
+      );
+      const newThreadId = newThreadPath.slice(1) as ThreadId;
+
+      await page.getByTestId("project-picker-trigger").click();
+      const searchInput = page.getByPlaceholder("Search projects");
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(searchInput.element());
+      });
+
+      await searchInput.fill("oth");
+      await userEvent.keyboard("{ArrowDown}{Enter}");
+
+      await vi.waitFor(() => {
+        expect(useComposerDraftStore.getState().getDraftThread(newThreadId)).toMatchObject({
+          projectId: OTHER_PROJECT_ID,
+        });
+      });
       expect(mounted.router.state.location.pathname).toBe(newThreadPath);
     } finally {
       await mounted.cleanup();

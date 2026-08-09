@@ -85,6 +85,7 @@ const NON_REPOSITORY_STATUS_DETAILS = Object.freeze({
   branch: null,
   upstreamRef: null,
   upstreamBranch: null,
+  configuredPrBaseBranch: null,
   hasWorkingTreeChanges: false,
   workingTree: { files: [], insertions: 0, deletions: 0 },
   hasUpstream: false,
@@ -1371,6 +1372,19 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           );
         }
 
+        const configuredPrBaseBranch = branch
+          ? yield* runGitStdout(
+              "GitCore.statusDetails.configuredPrBaseBranch",
+              cwd,
+              ["config", "--get", `branch.${branch}.gh-merge-base`],
+              true,
+            ).pipe(
+              Effect.map((stdout) => stdout.trim()),
+              Effect.map((trimmed) => (trimmed.length > 0 ? trimmed : null)),
+              Effect.catch(() => Effect.succeed(null)),
+            )
+          : null;
+
         if (!upstreamRef && branch) {
           aheadCount = yield* computeAheadCountAgainstBase(cwd, branch).pipe(
             Effect.catch(() => Effect.succeed(0)),
@@ -1411,6 +1425,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
             branch,
             upstreamRef,
             upstreamBranch,
+            configuredPrBaseBranch,
             hasWorkingTreeChanges,
             workingTree: moveAwareWorkingTree,
             hasUpstream: upstreamRef !== null,
@@ -1472,6 +1487,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           branch,
           upstreamRef,
           upstreamBranch,
+          configuredPrBaseBranch,
           hasWorkingTreeChanges,
           workingTree: {
             files,
@@ -2612,8 +2628,10 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         return { verified: true, reason: null };
       });
 
-    const createDetachedWorktree: GitCoreShape["createDetachedWorktree"] = (input) =>
+    const createDetachedWorktree: GitCoreShape["createDetachedWorktree"] = (input, options) =>
       Effect.gen(function* () {
+        const onPhase = options?.onPhase ?? (() => Effect.void);
+        const newBranch = input.newBranch ?? null;
         const refResult = yield* executeGit(
           "GitCore.createDetachedWorktree.resolveRef",
           input.cwd,
@@ -2651,16 +2669,39 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
 
         // Branch-backed managed worktrees still pin to the resolved commit, so
         // ownership proofs and pruning behave exactly like the detached form.
-        const newBranch = input.newBranch ?? null;
-        yield* executeGit(
+        // The branch is created before the (slow) checkout so progress phases
+        // reflect the real boundary between the two.
+        if (newBranch) {
+          yield* onPhase("branch");
+          yield* executeGit("GitCore.createDetachedWorktree.createBranch", input.cwd, [
+            "branch",
+            newBranch,
+            resolvedRef,
+          ]);
+        }
+        yield* onPhase("worktree");
+        const addWorktree = executeGit(
           "GitCore.createDetachedWorktree",
           input.cwd,
           newBranch
-            ? ["worktree", "add", "-b", newBranch, worktreePath, resolvedRef]
+            ? ["worktree", "add", worktreePath, newBranch]
             : ["worktree", "add", "--detach", worktreePath, resolvedRef],
         );
+        yield* newBranch
+          ? addWorktree.pipe(
+              Effect.onError(() =>
+                executeGit(
+                  "GitCore.createDetachedWorktree.rollbackBranch",
+                  input.cwd,
+                  ["branch", "-D", newBranch],
+                  { allowNonZeroExit: true },
+                ).pipe(Effect.ignore),
+              ),
+            )
+          : addWorktree;
 
         if (input.copyChangesFrom) {
+          yield* onPhase("copy-changes");
           yield* copyCheckoutChanges(input.copyChangesFrom, worktreePath).pipe(
             Effect.onError(() =>
               executeGit(

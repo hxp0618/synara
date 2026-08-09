@@ -275,6 +275,7 @@
             "config.warning",
             "deprecation.notice",
             "files.persisted",
+            "vcs.state.changed",
             "runtime.warning",
             "runtime.error"
           ]

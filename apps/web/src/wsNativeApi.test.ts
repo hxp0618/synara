@@ -133,7 +133,18 @@ beforeEach(() => {
   channelListeners.clear();
   latestPushByChannel.clear();
   nextPushSequence = 1;
-  Reflect.deleteProperty(getWindowForTest(), "desktopBridge");
+  const testWindow = getWindowForTest();
+  Reflect.deleteProperty(testWindow, "desktopBridge");
+  Object.defineProperty(testWindow, "location", {
+    configurable: true,
+    writable: true,
+    value: {
+      hash: "",
+      href: "http://localhost/",
+      origin: "http://localhost",
+      search: "",
+    },
+  });
 });
 
 afterEach(() => {
@@ -348,12 +359,14 @@ describe("wsNativeApi", () => {
     const onTerminalEvent = vi.fn();
     const onDomainEvent = vi.fn();
     const onActionProgress = vi.fn();
+    const onWorktreeSetupProgress = vi.fn();
 
     api.terminal.onEvent(onTerminalEvent);
     expect(channelListeners.has(ORCHESTRATION_WS_CHANNELS.domainEvent)).toBe(false);
     const unsubscribeDomainEvent = api.orchestration.onDomainEvent(onDomainEvent);
     expect(channelListeners.get(ORCHESTRATION_WS_CHANNELS.domainEvent)?.size).toBe(1);
     api.git.onActionProgress(onActionProgress);
+    api.git.onWorktreeSetupProgress(onWorktreeSetupProgress);
 
     const terminalEvent = {
       threadId: "thread-1",
@@ -395,6 +408,11 @@ describe("wsNativeApi", () => {
       phase: "commit",
       label: "Committing...",
     });
+    emitPush(WS_CHANNELS.gitWorktreeSetupProgress, {
+      progressId: "progress-1",
+      kind: "phase_started",
+      phase: "worktree",
+    });
 
     expect(onTerminalEvent).toHaveBeenCalledTimes(1);
     expect(onTerminalEvent).toHaveBeenCalledWith(terminalEvent);
@@ -410,6 +428,12 @@ describe("wsNativeApi", () => {
       kind: "phase_started",
       phase: "commit",
       label: "Committing...",
+    });
+    expect(onWorktreeSetupProgress).toHaveBeenCalledTimes(1);
+    expect(onWorktreeSetupProgress).toHaveBeenCalledWith({
+      progressId: "progress-1",
+      kind: "phase_started",
+      phase: "worktree",
     });
   });
 
@@ -1082,16 +1106,6 @@ describe("wsNativeApi", () => {
   });
 
   it("uses the bounded HTTP upload instead of WebSocket RPC for browser voice", async () => {
-    Object.defineProperty(getWindowForTest(), "location", {
-      configurable: true,
-      writable: true,
-      value: {
-        hash: "",
-        href: "http://localhost/",
-        origin: "http://localhost",
-        search: "",
-      },
-    });
     Object.defineProperty(getWindowForTest(), "desktopBridge", {
       configurable: true,
       writable: true,

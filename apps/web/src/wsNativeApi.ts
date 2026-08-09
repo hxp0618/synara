@@ -17,13 +17,12 @@ import {
   type AuthSessionState,
   type AuthWebSocketTokenResult,
   type ExternalMcpCreateIntegrationInput,
-  type ExternalMcpCreateIntegrationResult,
-  type ExternalMcpIntegration,
   type ExternalMcpRefreshPairingInput,
   type ExternalMcpRevokeIntegrationInput,
   type ThreadId,
   type ThreadBrowserState,
   type GitActionProgressEvent,
+  type GitWorktreeSetupProgressEvent,
   type GitHubProjectProvisionProgressEvent,
   type OrchestrationEvent,
   type OrchestrationShellStreamItem,
@@ -129,6 +128,7 @@ const serverProviderStatusesUpdatedListeners =
 const serverMaintenanceUpdatedListeners = createListenerRegistry<ServerLifecycleStreamEvent>();
 const serverSettingsUpdatedListeners = createListenerRegistry<ServerSettingsUpdatedPayload>();
 const gitActionProgressListeners = createListenerRegistry<GitActionProgressEvent>();
+const gitWorktreeSetupProgressListeners = createListenerRegistry<GitWorktreeSetupProgressEvent>();
 const projectProvisionProgressListeners =
   createListenerRegistry<GitHubProjectProvisionProgressEvent>();
 
@@ -165,6 +165,7 @@ function clearWsNativeApiListeners(): void {
   serverMaintenanceUpdatedListeners.clear();
   serverSettingsUpdatedListeners.clear();
   gitActionProgressListeners.clear();
+  gitWorktreeSetupProgressListeners.clear();
   projectProvisionProgressListeners.clear();
   terminalEventListeners.clear();
   projectDevServerEventListeners.clear();
@@ -447,6 +448,9 @@ export function createWsNativeApi(): NativeApi {
   transport.subscribe(WS_CHANNELS.gitActionProgress, (message) => {
     gitActionProgressListeners.emit(message.data);
   });
+  transport.subscribe(WS_CHANNELS.gitWorktreeSetupProgress, (message) => {
+    gitWorktreeSetupProgressListeners.emit(message.data);
+  });
   transport.subscribe(WS_CHANNELS.projectProvisionProgress, (message) => {
     projectProvisionProgressListeners.emit(message.data);
   });
@@ -573,8 +577,12 @@ export function createWsNativeApi(): NativeApi {
         }),
       listBranches: (input) => transport.request(WS_METHODS.gitListBranches, input),
       createWorktree: (input) => transport.request(WS_METHODS.gitCreateWorktree, input),
+      // Worktree materialization scales with checkout size; progress events
+      // keep the UI honest while the stream runs, so no fixed timeout.
       createDetachedWorktree: (input) =>
-        transport.request(WS_METHODS.gitCreateDetachedWorktree, input),
+        transport.request(WS_METHODS.gitCreateDetachedWorktree, input, {
+          timeoutMs: null,
+        }),
       removeWorktree: (input) => transport.request(WS_METHODS.gitRemoveWorktree, input),
       createBranch: (input) => transport.request(WS_METHODS.gitCreateBranch, input),
       checkout: (input) => transport.request(WS_METHODS.gitCheckout, input),
@@ -591,6 +599,7 @@ export function createWsNativeApi(): NativeApi {
       preparePullRequestThread: (input) =>
         transport.request(WS_METHODS.gitPreparePullRequestThread, input),
       onActionProgress: gitActionProgressListeners.subscribe,
+      onWorktreeSetupProgress: gitWorktreeSetupProgressListeners.subscribe,
     },
     pullRequests: {
       list: (input) => transport.request(WS_METHODS.pullRequestsList, input),

@@ -17,6 +17,7 @@ import {
   PullRequestsUnavailableError,
   type GitActionProgressEvent,
   type GitHubProjectProvisionProgressEvent,
+  type GitWorktreeSetupProgressEvent,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type ProjectDevServerEvent,
@@ -658,6 +659,13 @@ const makeWsRpcHandlersLayer = () =>
           Effect.tap(() =>
             gitStatusBroadcaster.refreshStatus(cwd).pipe(Effect.catchCause(() => Effect.void)),
           ),
+        );
+
+      const refreshGitStatusInBackground = (cwd: string) =>
+        gitStatusBroadcaster.refreshStatus(cwd).pipe(
+          Effect.catchCause(() => Effect.void),
+          Effect.forkDetach,
+          Effect.asVoid,
         );
 
       const pruneManagedWorktrees = pruneProjectedArchivedManagedWorktrees({
@@ -1316,20 +1324,21 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.gitRunStackedAction]: (input) =>
           bufferLiveUiStream(
             Stream.callback<GitActionProgressEvent, WsRpcError>((queue) =>
-              refreshGitStatusAfter(
-                input.cwd,
-                gitManager.runStackedAction(input, {
+              gitManager
+                .runStackedAction(input, {
                   actionId: input.actionId,
                   progressReporter: {
                     publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
                   },
-                }),
-              ).pipe(
-                Effect.matchCauseEffect({
-                  onFailure: (cause) => Queue.fail(queue, toWsRpcError(cause, "Git action failed")),
-                  onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
-                }),
-              ),
+                })
+                .pipe(
+                  Effect.tap(() => refreshGitStatusInBackground(input.cwd)),
+                  Effect.matchCauseEffect({
+                    onFailure: (cause) =>
+                      Queue.fail(queue, toWsRpcError(cause, "Git action failed")),
+                    onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
+                  }),
+                ),
             ),
             { label: "git.stacked-action" },
           ),
@@ -1373,12 +1382,33 @@ const makeWsRpcHandlersLayer = () =>
             "Failed to create worktree",
           ),
         [WS_METHODS.gitCreateDetachedWorktree]: (input) =>
-          rpcEffect(
-            refreshGitStatusAfter(
-              input.cwd,
-              git.withMutation(input.cwd, git.createDetachedWorktree(input)),
-            ),
-            "Failed to create detached worktree",
+          bufferLiveUiStream(
+            Stream.callback<GitWorktreeSetupProgressEvent, WsRpcError>((queue) => {
+              const progressId = input.progressId ?? null;
+              return refreshGitStatusAfter(
+                input.cwd,
+                git.withMutation(
+                  input.cwd,
+                  git.createDetachedWorktree(input, {
+                    onPhase: (phase) =>
+                      Queue.offer(queue, { kind: "phase_started", progressId, phase }).pipe(
+                        Effect.asVoid,
+                      ),
+                  }),
+                ),
+              ).pipe(
+                Effect.matchCauseEffect({
+                  onFailure: (cause) =>
+                    Queue.fail(queue, toWsRpcError(cause, "Failed to create detached worktree")),
+                  onSuccess: (result) =>
+                    Queue.offer(queue, { kind: "completed", progressId, result }).pipe(
+                      Effect.andThen(Queue.end(queue)),
+                      Effect.asVoid,
+                    ),
+                }),
+              );
+            }),
+            { label: "git.create-detached-worktree" },
           ),
         [WS_METHODS.gitRemoveWorktree]: (input) =>
           rpcEffect(
@@ -1706,7 +1736,7 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpsertKeybinding]: (input) =>
           rpcEffect(
             keybindings
-              .upsertKeybindingRule(input)
+              .upsertKeybindingRule(input.rule, input.replacing)
               .pipe(
                 Effect.map((keybindingsConfig) => ({ keybindings: keybindingsConfig, issues: [] })),
               ),
