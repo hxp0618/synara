@@ -1,7 +1,7 @@
 # Synara × T3 Cloud Agent 插件化集成设计
 
 - 设计状态：TARGET FROZEN（目标架构、authority 和主路径已确认；变更需新增 ADR）
-- 实施状态：IN PROGRESS（Phase 0–3 source implementation in progress；M1 验收门禁尚未完成）
+- 实施状态：IN PROGRESS（M0 open；M1 Phase 1–3 source implementation in progress；M1 验收门禁尚未完成）
 - 发布状态：NOT PUBLISHED / NOT DEPLOYED
 - 日期：2026-08-08
 - 确认日期：2026-08-08
@@ -13,11 +13,13 @@
 - T3 Code 本地跟踪目录：`/Users/huang/devel/project/huang/business/t3code`
 - Synara 实施 worktree：`/Users/huang/devel/project/huang/business/synara-t3-cloud-agent`
 - T3 Code 实施 worktree：`/Users/huang/devel/project/huang/business/t3code-cloud-agent`
+- 当前合并目标：Synara `codex/saas-tenancy-user` @ `785318f1a50df9d030ab9dd926d8f5ee07712b88`；
+  T3 Code `codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1`
 
 > 本文同时记录目标设计和当前隔离 worktree 的 source implementation 与 local validation evidence。
 > `TARGET FROZEN` 表示不再改变公共
 > Runtime、双宿主 authority 和 `T3EnvironmentLease` 的方向；`IN PROGRESS` 只表示源码骨架、定向测试和
-> 本地构建达到附录 A 记录的边界，不表示 Phase 0–3/M1 已验收，也不表示已提交、发布、部署、完成真实
+> 本地构建达到附录 A 记录的边界，不表示 M0/M1 已验收，也不表示已发布、部署、完成真实
 > Provider 付费 Turn，或达到 public beta/GA。每次推进 T3 Code commit 仍必须复核 Provider SPI。
 
 ## 0. 结论先行
@@ -570,6 +572,11 @@ type CloudAgentTextGenerationResult =
   | { task: "pr-content"; title: string; body: string };
 ```
 
+Protocol 2.3 的冻结 request 没有 T3 `policy` 字段。M1 的兼容语义固定为：默认/空 policy 可以执行；宿主收到
+当前 wire 无法表达的非默认 policy 时必须返回稳定 unsupported/validation error，不能静默丢弃。若产品要求
+Provider 执行自定义 policy，先用 ADR 批准 additive Protocol minor/字段和兼容规则，再修改上述请求类型；
+该扩展不是 M1 的前置条件。
+
 所有文本字段必须有单项与总 payload 上限，patch 超限时由 T3 先按现有 policy 截断；Runtime 返回值再
 做 task-specific schema 校验。Runtime 未声明相应 task 时，bridge 返回稳定
 `TextGenerationError`，不能创建空 service 或偷偷切到另一个内置 Provider。
@@ -802,7 +809,9 @@ rollback、fork、Artifact 和 usage，是这个包的传输基础。但当前 S
 import "@synara/cloud-agent-runtime/stdio";
 ```
 
-兼容壳继续提供 `provider-host` bin，现有 `agentd`、镜像构建和运维脚本不需要同时切换。
+兼容壳继续提供 `provider-host` bin，因此 `agentd` 命令名和运维调用面不需要同时切换；但镜像构建 context
+必须同步复制新增 Runtime/Protocol/Provider API 的 workspace manifest 与源码。当前 Dockerfile 尚未完成该
+同步，具体失败见 A.5，不能把“bin 名兼容”外推成“镜像构建脚本无需修改”。
 
 ## 6. 插件 Manifest 与加载策略
 
@@ -978,12 +987,18 @@ sequenceDiagram
 - Provider Host v2.2 handler 只有一个 `sessionInput` 和一个 `activeOperation`，所以第一版必须每个 T3
   thread 一个 Runtime child；不能在一个 child 内无协议依据地 multiplex 多个 thread；
 - `GenerateText` 使用独立短生命周期 child 或有界专用池，不复用正在执行 Turn 的 child，也不写入
-  thread binding/checkpoint；
+  thread binding/checkpoint；Provider 层必须硬性禁用工具与 Workspace 写入，不能只靠 prompt 声明；该
+  operation 必须进入 active-operation/quiesce 跟踪，Stop、timeout 和 force-kill 对它同样生效；
+- branch/title/commit/PR 四类 `GenerateText` 必须保持 T3 policy 语义：Protocol 2.3 下默认/空 policy 可
+  执行，非默认 policy 返回稳定 unsupported/validation error；不能静默丢弃 policy 或只把它拼进不可验证的
+  提示词。若要完整传递自定义 policy，必须先按第 22 节新增 ADR 并升级 additive Protocol minor；
 - Portable Runtime 的 rollback 边界只允许恢复 Provider conversation，Workspace rollback 仍由 T3
   执行；当前 Provider Host v2.2 虽声明 `RollbackSession`/`ForkSession` 命令，但实现刻意交给
   Control Plane emulation，T3 首版需用 authoritative history 的 stop/restart 重建来补齐，不能把
   当前命令声明误报成已原生支持；
 - Driver `Scope` 关闭时，必须先 StopSession，再关闭 stdin/FD，最后 bounded kill；
+- 未知 session 的 Stop 必须幂等 no-op；已知 session 的 timeout、强杀或未 quiesce 必须记录真实
+  non-graceful 终态，不能一律报告 graceful；
 - 一个 Instance 的 child/process/pubsub 不得泄漏到另一个 Instance。
 
 ### 7.3 T3 Environment Lease Adapter（推荐云形态）
@@ -1122,6 +1137,8 @@ T3 的 `resumeCursor` 是 unknown，可保存不含凭证的版本化值：
 
 - 不放 API key、token、绝对 credential path；
 - 反序列化先校验版本和大小；
+- 非空但无法解码、版本未知或字段非法的结构化 cursor 必须返回稳定 resume error；只有明确缺少 cursor
+  才能按新 Session 路径处理，不能把无效 cursor 降级成空历史；
 - generation 不匹配时不能直接复用 child process；
 - Provider cursor 失效时按能力声明选择 authoritative-history reconstruction；
 - 未声明该能力时返回稳定 `session_resume_expired`，不静默创建空历史。
@@ -1258,7 +1275,13 @@ gate 仍是独立边界，见 [`external-sdk-developer-platform.md`](external-sd
 8. 返回宿主
 ```
 
-不能先调用 `SendTurn`，再异步 fork stream consumer。
+不能先调用 `SendTurn`，再异步 fork stream consumer。Runtime frame 被接收时必须立即绑定不可变的
+`commandId`/`turnId`，不能在异步投影时读取可变的 active Turn。terminal receipt 只有在同 command 的
+事件 drain receipt 提交后才能完成宿主调用。
+
+调用方取消单个 command 时，transport 必须保留有界 terminal tombstone，直到收到 terminal、child 退出或
+超时回收；属于该 tombstone 的正常迟到帧只能被吸收，不能按 unknown command 杀死共享 Runtime。真正未知、
+关联字段不匹配或 terminal 后重复的帧仍然 fail closed。
 
 ## 11. Workspace、Checkpoint 与 Artifact
 
@@ -1517,6 +1540,12 @@ Node 插件与 T3/Synara server 同进程时拥有宿主进程权限，manifest 
 - 生产 Worker 继续由 release manifest 固定 Runtime 和 Provider CLI 版本；
 - 高风险 Provider 仍必须在外层 gVisor/Cocoon 等宿主隔离中运行。
 
+`SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE` 这类普通环境字符串只能表达启动声明，不能单独称为
+attestation。`t3-embedded` 的本地单用户模式必须以显式、用户可见的 trusted-local policy 启动，不能冒充
+managed isolation；`t3-environment-lease` 则必须使用 Supervisor 签发并绑定 lease、generation、Runtime
+digest 和进程身份的不可伪造证明。若该证明需要改变 stdio/HostServices ABI，必须先新增 ADR，再继续使用
+`TARGET FROZEN`。
+
 ## 14. 失败、恢复与幂等
 
 ### 14.1 稳定错误分类
@@ -1580,6 +1609,11 @@ Execution Target。宿主分别决定：
 - T3：关闭当前 live session，保留 thread/checkpoint；
 - Synara：根据 lifecycle policy suspend/release execution；
 - 显式 archive/delete 必须是另一条用户可见命令。
+
+Stop 的 terminal 必须区分 `quiesced`、`timed-out`、`forced` 和 `failed`；宿主等待可以短于 Runtime
+quiesce 上限，但超时后必须 bounded kill 并报告 non-graceful。所有主操作（包括 `GenerateText`、review、
+compact）都必须注册到同一 quiesce 机制；stdio client 在协议失败后仍必须执行 exit wait 与 SIGKILL
+升级，不能因为逻辑状态已 closed 就跳过进程回收。
 
 ## 15. 版本与兼容策略
 
@@ -1672,19 +1706,23 @@ event 或 text-generation operation 时都视为 live；只有 Runtime 明确 qu
 阶段编号描述工程依赖，不代表已经完成；当前只是 M1 source implementation in progress。发布工程是每个
 里程碑自己的退出门禁，上游化和 suspend/resume 不在主路径中。
 
-| 工程阶段    | 所属里程碑/轨道    | 当前判定 | 进入下一步前仍缺少的决定性证据                                      |
-| ----------- | ------------------ | -------- | ------------------------------------------------------------------- |
-| Phase 0     | M0                 | 未完成   | 真实 Codex/Claude happy/failure characterization                    |
-| Phase 1     | M1                 | 部分完成 | schema → TS/runtime decoder 单一来源与完整 golden compatibility     |
-| Phase 2     | M1                 | 部分完成 | Provider 物理拆包、Distribution registry bin、Synara 镜像兼容       |
-| Phase 3     | M1                 | 部分完成 | 双宿主进程级 suite、event drain barrier、restart/rollback E2E       |
-| Phase 4     | M2                 | 未开始   | M1 exit gate 与不可变内部 Distribution candidate                    |
-| Release M1  | M1 gate            | 未关闭   | exact semver、schema、digest/provenance/SBOM、外部 install/rollback |
-| Release M2  | M2 gate            | 未开始   | Lease 制品 manifest、外部环境 install/rollback、固定 commit matrix  |
-| Deferred D1 | Suspend/Resume     | 延后     | quiesce、原子快照、new-generation resume                            |
-| Deferred D2 | Generic/upstream   | 延后     | composition seam、descriptor、generic UX；不阻塞 M1/M2              |
-| Deferred D3 | Polaris delegated  | 延后     | control-only 产品需求与完整 capability 降级；不阻塞 M1/M2           |
-| Deferred D4 | Provider ecosystem | 延后     | 其他 Provider、动态目录/市场和公共 SDK；不阻塞 M1/M2                |
+| 工程阶段    | 所属里程碑/轨道    | 当前判定 | 阶段关闭所需 Gate                                | 进入下一步前仍缺少的决定性证据                                      |
+| ----------- | ------------------ | -------- | ------------------------------------------------ | ------------------------------------------------------------------- |
+| Phase 0     | M0                 | 未完成   | `G-BASELINE`                                     | 真实 Codex/Claude happy/failure characterization                    |
+| Phase 1     | M1                 | 部分完成 | `G-SCHEMA`                                       | schema → TS/runtime decoder 单一来源与完整 golden compatibility     |
+| Phase 2     | M1                 | 部分完成 | `G-PKG`、`G-REGISTRY`                            | Provider 物理拆包、Distribution registry bin、Synara 镜像兼容       |
+| Phase 3     | M1                 | 部分完成 | `G-ARCH`、`G-CONFORMANCE`、`G-T3-DRAIN`、`G-E2E` | 跨 Phase 2–3 architecture、双宿主 suite、event drain、restart E2E   |
+| Phase 4     | M2                 | 未开始   | `G-LEASE`                                        | M1 exit gate 与不可变内部 Distribution candidate                    |
+| Release M1  | M1 gate            | 未关闭   | `G-RELEASE-M1`                                   | exact semver、schema、digest/provenance/SBOM、外部 install/rollback |
+| Release M2  | M2 gate            | 未开始   | `G-RELEASE-M2`                                   | Lease 制品 manifest、外部环境 install/rollback、固定 commit matrix  |
+| Deferred D1 | Suspend/Resume     | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | quiesce、原子快照、new-generation resume                            |
+| Deferred D2 | Generic/upstream   | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | composition seam、descriptor、generic UX；不阻塞 M1/M2              |
+| Deferred D3 | Polaris delegated  | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | control-only 产品需求与完整 capability 降级；不阻塞 M1/M2           |
+| Deferred D4 | Provider ecosystem | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | 其他 Provider、动态目录/市场和公共 SDK；不阻塞 M1/M2                |
+
+阶段只有在“交付项已实现”且本表列出的 Gate 全部关闭时才能标记 `complete`；源码落盘、focused test 或
+局部 build 只能把阶段标记为 `部分完成`。M1/M2 RC 仍按第 19 节汇总全部里程碑 Gate，不因单个 Phase
+关闭自动形成。
 
 ### Phase 0 / M0：基线和 characterization（不改行为）
 
@@ -1697,7 +1735,7 @@ event 或 text-generation operation 时都视为 live；只有 Runtime 明确 qu
 - 给现有 `apps/provider-host` 补充黑盒 CLI 测试；
 - 记录 Codex/Claude 两条真实 happy path 和失败路径。
 
-完成条件：重构前后可以用同一组 frames 和行为测试比较。
+完成条件：重构前后可以用同一组 frames 和行为测试比较，并关闭 `G-BASELINE`。
 
 ### Phase 1 / M1：抽取 Protocol 包
 
@@ -1722,7 +1760,8 @@ Synara 兼容改动：
 - capability catalog 只保留一个可编辑来源；
 - Protocol v2.2 既有命令 golden frame 保持兼容；v2.3 只增加可选 `GenerateText` 与 descriptor 字段。
 
-完成条件：无迁移、无 API 路由变化、无破坏性 Worker wire 变化；Protocol v2.2 reader/golden 兼容门禁通过。
+完成条件：无迁移、无 API 路由变化、无破坏性 Worker wire 变化；schema、TypeScript 与 runtime decoder
+来自一个可审计来源；Protocol v2.2 reader/golden 与 additive v2.3 兼容门禁通过，并关闭 `G-SCHEMA`。
 
 ### Phase 2 / M1：抽取 Runtime 与 Provider 包
 
@@ -1739,7 +1778,10 @@ Synara 兼容改动：
 `apps/provider-host` 只保留 CLI 兼容壳和 Synara build metadata。
 
 完成条件：现有 `agentd` focused test、Provider Host test、Worker image build 全绿；生成二进制的
-Describe、命令和事件与旧版兼容。
+Describe、命令和事件与旧版兼容；Codex/Claude 已物理拆包并可独立安装，Distribution 实际 bin 从显式
+registry 启动，关闭 `G-PKG` 与 `G-REGISTRY`。本阶段生成公共依赖与 ABI 的 G-ARCH 静态证据；由于
+Host Adapter、Provider Instance 与运行时 authority/隔离要到 Phase 3 才可验证，G-ARCH 作为跨 Phase 2–3
+Gate 只在 Phase 3 关闭。
 
 ### Phase 3 / M1：T3 Embedded Bridge
 
@@ -1763,8 +1805,10 @@ T3 核心改动保持显式、薄且 upstream-friendly。第一阶段复用现�
 server-advertised descriptor 替换静态条目。
 
 完成条件：同一 T3 workspace 中完成 Start、Turn、approval、interrupt、diff、checkpoint、rollback、
-server restart resume，并对 branch/title/commit/PR 四类 text generation 逐类执行；其他内置 Provider
-行为不变。T3 focused tests 固定在明确 commit 上通过，且公共 Synara 包不 import `@t3tools/*`。
+server/browser restart resume，并在默认/空 policy 下对 branch/title/commit/PR 四类 text generation 逐类
+执行、对非默认 policy 逐类稳定拒绝；两个宿主共同消费进程级 conformance，terminal/event ACK-drain 与双
+Provider 并发 soak 通过；其他内置 Provider 行为不变。T3 focused tests 固定在明确 commit 上通过，公共
+Synara 包不 import `@t3tools/*`，并关闭 `G-ARCH`、`G-CONFORMANCE`、`G-T3-DRAIN` 与 `G-E2E`。
 
 ### Phase 4 / M2：T3 Environment Lease MVP
 
@@ -1845,67 +1889,108 @@ generation 能力均被 fencing。
 `WorkspaceExecutionProfile` RFC 和跨 filesystem/VCS/checkpoint/terminal/preview 的禁用测试，再实现
 `cloud-agent-backend-polaris`、SSE receipt 和 capability 降级。它不是 Environment Lease 的前置条件。
 
+完成条件：产品 charter 与 RFC 已批准；control-only profile 下所有 Workspace/VCS/Checkpoint/Terminal/
+preview 写操作均 fail closed，SSE receipt/reconnect、credential revoke、无本地同名目录访问和 capability
+降级测试通过；形成固定 commit/toolchain 的 D3 evidence record。未满足时保持 disabled，不得只凭 backend
+可启动标记完成。
+
 ### Deferred D4：Provider 生态扩展
 
 Codex/Claude 之外的 Provider、动态目录/市场、第三方签名策略和公共 Provider SDK 只有在 M1/M2 主路径
 稳定后才单独立项；它们不得改变现有 owner、放宽编译期 allowlist，或成为任何当前 Gate 的替代证据。
 
+完成条件：每个获批生态子项目都有独立 ADR/威胁模型、具名 owner、签名/allowlist、外部 install、版本
+probe、进程级 conformance、升级/回滚和撤销证据；公共 SDK 还必须冻结兼容范围并通过第三方 fixture。
+D4 只按已批准子项目逐项关闭，不存在用一个市场/Provider smoke 宣称整个生态完成的总开关。
+
 ## 18. 验证矩阵
 
-本节严格按 Gate 拆分测试维度；一个小节只关闭标题中的 Gate，不会把其他里程碑条件反向带入。Gate 的
-owner、状态和退出证据以第 19 节的唯一表格为准。
+本节严格按 Gate 拆分验证输入、输出和证据位置；一个小节只关闭标题中的 Gate，不会把其他里程碑条件
+反向带入。Gate 的 owner、状态和退出证据以第 19 节的唯一表格为准。每次执行必须固定 Synara/T3 commit、
+toolchain 和 Distribution/Provider 版本，并把命令、CI job、日志与制品 digest 写入该 Gate 的 closure record。
 
 ### 18.1 G-BASELINE：重构前 characterization
 
 - 固定 Synara/T3 commit、Provider 工具版本和 capability matrix；
 - 保存 Provider Host Protocol v2.2 golden frames；
 - 对真实 Codex/Claude 分别记录 happy path、认证失败、限流/不可用和 resume failure；
-- 重构后使用同一输入和断言复跑，不用新实现结果倒推旧基线。
+- 重构后使用同一输入和断言复跑，不用新实现结果倒推旧基线；
+- 输出：版本化 golden/characterization artifact、脱敏日志与前后差异报告，登记到 G-BASELINE closure record。
 
-### 18.2 G-SCHEMA：协议与生成一致性
+### 18.2 G-ARCH：公共边界与单一 authority
+
+- 公共 ABI 与依赖图不包含 Effect、T3 branded ID、Synara ProviderKind 闭集或宿主数据库类型；
+- Runtime、Host Adapter、Workspace/Checkpoint/Turn owner 与 Provider Instance 状态边界可由依赖检查和
+  运行时 identity/correlation 证据验证；
+- Provider Host v2 没有破坏性 wire 变化，未授权 Provider/能力和不可信 sandbox profile fail closed；
+- local trusted-user declaration 与 managed generation-bound attestation 使用不同信任语义；需要新增或修改
+  公共 ABI 时先关联已批准 ADR；
+- 输出：公共 API/依赖扫描、authority 负向用例、Instance 隔离测试和 ADR 列表，登记到 G-ARCH closure
+  record。
+
+### 18.3 G-SCHEMA：协议与生成一致性
 
 - major/minor/event range 不兼容 fail closed；
 - Protocol v2.2 handler golden 与 additive v2.3 reader 兼容；
 - schema、TypeScript vocabulary 和 runtime decoder discriminator/required fields 一致；
-- command/message size 按 UTF-8 实际字节限制。
+- command/message size 按 UTF-8 实际字节限制；
+- 输出：schema generation/check job、v2.2/v2.3 golden artifact 与 decoder compatibility report，登记到
+  G-SCHEMA closure record。
 
-### 18.3 G-REGISTRY：Distribution 启动与 allowlist
+### 18.4 G-REGISTRY：Distribution 启动与 allowlist
 
 - `Describe` 无凭证成功；
 - Distribution stdio 从显式默认 Plugin registry 启动，不进入 legacy handler；
 - manifest、实际 registry、Describe 与禁用行为使用同一 allowlist；
-- stdout 只有协议帧，诊断只进 stderr；未知/禁用 Provider fail closed。
+- stdout 只有协议帧，诊断只进 stderr；未知/禁用 Provider fail closed；
+- 输出：实际 packed bin 的 process transcript、registry/manifest diff 与未知 Provider 负向日志，登记到
+  G-REGISTRY closure record。
 
-### 18.4 G-PKG：Provider 物理拆包
+### 18.5 G-PKG：Provider 物理拆包
 
 Codex/Claude 两包分别覆盖：
 
 - install/import/version probe；
 - 只拉入自己的 upstream CLI/SDK 依赖；
 - 可独立发布、升级、回滚和安全修复；
-- Provider 实现不再通过 Runtime legacy facade 间接执行。
+- Provider 实现不再通过 Runtime legacy facade 间接执行；
+- 输出：每包依赖树、packed manifest、外部临时项目 ESM/CJS import 与独立升级/回滚记录，登记到 G-PKG
+  closure record。
 
-### 18.5 G-CONFORMANCE：双宿主进程级公共行为
+### 18.6 G-CONFORMANCE：双宿主进程级公共行为
 
 - command duplicate 返回同一 terminal result，terminal 后输出被拒绝，event/command 相关 ID 一致；
-- bounded queue/backpressure、取消、late frame、process crash 和 resume；
+- bounded queue/backpressure、取消、terminal tombstone、正常 late frame、真正未知 frame、process crash 和
+  resume；
 - Start/Resume/Send/Interrupt、approval/user-input；
 - model switch、plan、review、compact、rollback、fork 按能力矩阵验证；
-- CLI/SDK crash、credential invalid/expired、native cursor invalid → history reconstruction；
+- CLI/SDK crash、credential invalid/expired、native cursor invalid → stable resume error 或已声明的
+  authoritative-history reconstruction；
 - diff、terminal log、generated file ArtifactCandidate；
 - Provider raw payload/secret redaction、Artifact path escape 和 symlink 负向测试；
-- Synara wrapper 与 T3 bridge 共同消费同一 testkit process suite。
+- `GenerateText` 的 hard no-tool/read-only、默认 policy 执行、非默认 policy 稳定拒绝、Stop/quiesce/timeout
+  与 Workspace 无副作用；
+- Stop 的 unknown-session 幂等 no-op，以及 `quiesced`/`timed-out`/`forced`/`failed` 与宿主
+  graceful/non-graceful 投影一致；
+- Synara wrapper 与 T3 bridge 共同消费同一 testkit process suite；
+- 输出：双宿主同版本 process-suite report、失败 transcript 和 secret/path scan，登记到 G-CONFORMANCE
+  closure record。
 
-### 18.6 G-T3-DRAIN：T3 终态与重启
+### 18.7 G-T3-DRAIN：T3 终态与重启
 
+- Runtime frame 接收时冻结 command/turn identity，不在异步投影时读取可变 active Turn；
 - terminal/event pump 有显式 ACK/drain barrier；
 - assistant buffered/streaming 全部投影后才允许 `turn.completed`；
 - T3 server/Runtime restart 后恢复 durable history，不重复消息、不丢终态；
 - browser reconnect 不改变 command receipt、event ID 或 generation；
-- interrupt/stop 与 fatal transport 并发时全部 pending 都得到稳定终态。
+- interrupt/stop 与 fatal transport 并发时全部 pending 都得到稳定终态；
+- 输出：竞态/重启压力测试、receipt/event trace 与 browser reconnect 录像或等价自动证据，登记到
+  G-T3-DRAIN closure record。
 
-### 18.7 G-E2E：M1 双宿主验收
+### 18.8 G-E2E：M1 双宿主验收
 
+- 输入必须是 G-RELEASE-M1 执行过程中生成、已通过外部 install/import/bin smoke 的不可变 M1 candidate
+  digest；E2E 不得改用源码 checkout、临时 bundle 或重新打包的不同 bits；
 - Web、Desktop、Mobile 共同 contract，以及本地、direct remote、relay/tunnel connection；
 - 多 Provider Instance、driver config 热重载、scope teardown 和 unavailable config round-trip；
 - Bridge 构造真实 snapshot/adapter/text-generation service，Registry Hydration 与构建 composition 一致；
@@ -1917,9 +2002,11 @@ Codex/Claude 两包分别覆盖：
 - Synara local/SSH/Docker/Kubernetes、warm prestart、Worker replacement/Generation fencing、gVisor/Cocoon、
   credential FD/Grant revoke、Artifact Secret Guard、Control Plane restart/event replay 全回归；
 - Synara-native 既有 suspend/resume/migration 回归；现有 Provider Host v2 行为和 capability projection
-  与 manifest 一致。
+  与 manifest 一致；
+- 输出：固定 commit/toolchain/**candidate digest** 的双 Provider E2E matrix、真实文件/checkpoint/rollback
+  evidence 与兼容回归 job 链接，登记到 G-E2E closure record。
 
-### 18.8 G-LEASE：M2 Environment Lease
+### 18.9 G-LEASE：M2 Environment Lease
 
 - `create → ready → terminate`，T3 server/Runtime/Terminal/文件 API 使用同一 Workspace；
 - 一次性 pairing → DPoP exchange → 短期 session → WebSocket ticket，覆盖 direct ingress 与 relay；
@@ -1927,12 +2014,55 @@ Codex/Claude 两包分别覆盖：
 - pairing/client credential/ingress/broker grant 按 tenant/project/subject/lease/generation revoke；
 - T3 state/workspace volume、`environmentId` 和 generation fencing 规则；
 - credential broker 的进程/lease/provider scope，且审计与计量不记录 secret/pairing token；
-- Synara 不创建第二套 Thread/Turn/Checkpoint 权威。
+- Synara 不创建第二套 Thread/Turn/Checkpoint 权威；
+- 输出：固定 M1 Distribution digest 的 Lease 状态机、安全负向矩阵、revoke/fencing trace 与审计/计量
+  evidence，登记到 G-LEASE closure record。
 
-### 18.9 Deferred 验证（不计入当前 Gate closure）
+### 18.10 G-RELEASE-M1：Portable Runtime 制品
 
-1. Deferred D1 Lease suspend/resume：相同 `environmentId`、连接恢复、旧 generation 被 fencing；
-2. Deferred D3 control-only：所有 Workspace/VCS/Terminal/preview 操作明确 disabled，不触及本地同名目录。
+- 在 G-BASELINE/G-ARCH/G-PKG/G-REGISTRY/G-SCHEMA/G-CONFORMANCE/G-T3-DRAIN 已关闭的固定
+  commit/toolchain 上构建不可变 candidate；packed manifest 不含 `workspace:*`、catalog protocol 或私有
+  不可解析依赖；
+- 七包在全新外部临时项目完成 install、ESM/CJS import、schema/manifest export 与真实 registry bin smoke；
+- Distribution release manifest 固定包版本、T3 commit、schema、binary digest、provenance 和 SBOM；
+- 把该 candidate digest 交给 G-E2E 实跑；G-RELEASE-M1 只有在引用同一 digest 的 G-E2E closure record
+  已关闭且重算 digest 未变化后才能关闭。若测试后修改任何 bit，旧 G-E2E 立即失效并重跑；
+- upgrade、rollback、uninstall 与不兼容版本 fail-closed 验证通过；
+- 输出：不可变 M1 candidate digest、packed artifacts、外部消费者日志和 release checklist，登记到
+  G-RELEASE-M1 closure record。
+
+### 18.11 G-RELEASE-M2：Environment Lease 制品
+
+- 只消费已关闭 G-LEASE 且固定 M1 Distribution digest 的源码与制品；
+- M2 manifest、schema、digest、provenance、SBOM 与 secret scan 覆盖 Lease/Supervisor/Broker surface；
+- 在全新外部环境完成 install、create/ready/terminate、upgrade 和 rollback，并固定 Synara/T3 commit matrix；
+- 输出：不可变 M2 candidate digest、部署清单、外部环境日志和 release checklist，登记到 G-RELEASE-M2
+  closure record。
+
+### 18.12 G-EXPOSURE：每个 RC 的独立开放批准
+
+- 输入必须是已经关闭对应 G-RELEASE-M1 或 G-RELEASE-M2 的不可变 RC，不能用源码分支或 dry-run 替代；
+- 产品、Release 与运维分别批准用户范围、支持等级、channel、升级/回滚和事故响应；
+- 只有选择公开 npm channel 时才执行 OIDC trusted publishing 与公开 Registry 验证；内部 channel 不反向
+  阻塞工程 RC；
+- 输出：逐 RC、逐 channel 的 exposure decision、批准人、开放/回滚时间和支持 runbook，登记到该 RC 的
+  G-EXPOSURE closure record；M1 与 M2 不共享一条笼统的关闭记录。
+
+### 18.13 Deferred 验证（不计入当前 Gate closure）
+
+Deferred 轨道使用与 19.1 相同的 evidence record 字段和保存规则，但状态独立于 M1/M2 Gate。DRI 分别为
+D1 Lease Lifecycle DRI、D2 T3 Upstream DRI、D3 Polaris Backend DRI、D4 Provider Ecosystem DRI；每次关闭
+仍必须落实具名 handle、固定 commit/toolchain、evidence ID、独立复核人与关闭日期，并保存以下输出：
+
+1. Deferred D1 Lease suspend/resume：相同 `environmentId`、连接恢复、旧 generation 被 fencing；输出一致性
+   快照、故障注入与 fencing report；
+2. Deferred D2 Generic UX/upstream：最小 composition seam、server-advertised descriptor、generic UX 与
+   upstream drift test，不把 T3 内部 SPI 提升为公共 SDK；输出 RFC/PR、UX matrix 与 drift report；
+3. Deferred D3 control-only：所有 Workspace/VCS/Terminal/preview 操作明确 disabled，不触及本地同名目录；
+   输出 capability/revoke/SSE reconnect 负向报告；
+4. Deferred D4 Provider 生态：新 Provider/市场/签名/公共 SDK 的 install、隔离和兼容验证，不改变 owner、
+   放宽 allowlist 或替代现有 Provider Gate；输出逐子项目 ADR、签名/allowlist、conformance 与 rollback
+   artifact。
 
 这些场景只有对应 Deferred 轨道获批启动后才成为其自身退出条件，不阻塞 M1/M2。
 
@@ -1941,20 +2071,20 @@ Codex/Claude 两包分别覆盖：
 下表是 M1/M2 的**唯一权威完成口径**。`open` 表示已有部分源码或本地验证证据但退出条件尚未全部满足；
 `not started` 表示对应产品面尚未实施。focused test、build、pack dry-run 或一次握手都不能单独改变状态。
 
-| Gate          | Owner                       | 阻塞里程碑 | 当前状态    | 必须同时满足的退出证据                                                                                                                                                                     |
-| ------------- | --------------------------- | ---------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| G-BASELINE    | Synara + T3                 | M0、M1     | open        | 固定 commit 上保存 v2.2 golden frames，并完成真实 Codex/Claude happy/failure characterization，使重构前后可用同一行为集比较                                                                |
-| G-ARCH        | Synara + T3                 | M1         | open        | 公共 ABI/依赖保持 app-neutral；Runtime、Host Adapter 与 Workspace/Checkpoint authority 单一；Provider Host v2 无破坏；Instance 状态隔离                                                    |
-| G-PKG         | Synara Runtime/Provider     | M1         | open        | Codex/Claude 实现、probe 与 upstream 依赖物理迁入各自 Provider 包；两包可独立安装、发布和回滚，且不会互相拉入另一 Provider 的 SDK                                                          |
-| G-REGISTRY    | Synara Runtime/Distribution | M1         | open        | Distribution stdio 从显式默认 Plugin registry 启动；实际 bin 的 allowlist、Describe 与禁用行为由同一 registry 控制，不再进入 legacy handler                                                |
-| G-SCHEMA      | Synara Protocol             | M1         | open        | Protocol schema、TypeScript 与 runtime decoder 由一个可审计来源生成/校验；真实 v2.2 handler golden 与 additive v2.3 兼容门禁通过                                                           |
-| G-CONFORMANCE | Synara + T3                 | M1         | open        | 两个宿主共同消费 testkit 的进程级 suite，覆盖 correlation、取消、背压、crash/resume、secret、path/symlink 和 capability 行为一致性                                                         |
-| G-T3-DRAIN    | T3                          | M1         | open        | terminal/event pump 有显式 ACK/drain barrier；server/process restart 后 durable history 可恢复，`turn.completed` 不早于全部事件投影                                                        |
-| G-RELEASE-M1  | Synara Release              | M1         | open        | packed dependency 已从 `workspace:*` 改写为精确 semver；Distribution 暴露 manifest/schema；外部临时项目 install/import/bin smoke、不可变 digest、provenance、SBOM、upgrade/rollback 全通过 |
-| G-E2E         | Synara + T3                 | M1         | open        | 固定 commit matrix 上完成真实 Codex/Claude upstream Turn、文件修改/checkpoint/rollback、双 Provider 并发 soak、Synara 兼容回归与 T3 crash/reconnect E2E                                    |
-| G-LEASE       | Synara + T3                 | M2         | not started | M1 immutable Distribution candidate 已固定；Lease create/ready/terminate、pairing/DPoP、broker/generation、RBAC、计量、审计和 revoke/fencing 负向测试通过                                  |
-| G-RELEASE-M2  | Synara Release              | M2         | not started | 基于已关闭 G-LEASE 的制品生成 M2 manifest/digest/provenance/SBOM，并完成外部环境 install、upgrade、rollback 与固定 commit matrix                                                           |
-| G-EXPOSURE    | Product + Release           | 对外发布   | not started | 批准目标用户范围、支持等级、Registry/channel、升级/回滚与事故响应；没有该批准不得标 public beta/GA，也不得公开发布                                                                         |
+| Gate          | DRI（责任角色）              | 阻塞里程碑 | 当前状态    | 必须同时满足的退出证据                                                                                                                                                            |
+| ------------- | ---------------------------- | ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G-BASELINE    | Cloud Agent Integration DRI  | M0、M1     | open        | 固定 commit 上保存 v2.2 golden frames，并完成真实 Codex/Claude happy/failure characterization，使重构前后可用同一行为集比较                                                       |
+| G-ARCH        | Cloud Agent Architecture DRI | M1         | open        | 公共 ABI/依赖保持 app-neutral；Runtime、Host Adapter 与 Workspace/Checkpoint authority 单一；Provider Host v2 无破坏；Instance 状态隔离                                           |
+| G-PKG         | Provider Packaging DRI       | M1         | open        | Codex/Claude 实现、probe 与 upstream 依赖物理迁入各自 Provider 包；两包可独立安装、发布和回滚，且不会互相拉入另一 Provider 的 SDK                                                 |
+| G-REGISTRY    | Distribution DRI             | M1         | open        | Distribution stdio 从显式默认 Plugin registry 启动；实际 bin 的 allowlist、Describe 与禁用行为由同一 registry 控制，不再进入 legacy handler                                       |
+| G-SCHEMA      | Protocol DRI                 | M1         | open        | Protocol schema、TypeScript 与 runtime decoder 由一个可审计来源生成/校验；真实 v2.2 handler golden 与 additive v2.3 兼容门禁通过                                                  |
+| G-CONFORMANCE | Conformance DRI              | M1         | open        | 两宿主共同消费进程级 suite，覆盖 correlation、取消/迟到帧、背压、crash/resume、Stop outcome、GenerateText、secret、path/symlink 与 capability 一致性                              |
+| G-T3-DRAIN    | T3 Bridge DRI                | M1         | open        | terminal/event pump 有显式 ACK/drain barrier；server/process restart 后 durable history 可恢复，`turn.completed` 不早于全部事件投影                                               |
+| G-RELEASE-M1  | Release Engineering DRI      | M1         | open        | packed dependency 已改写为精确 semver；Distribution 暴露 manifest/schema；外部 install/import/bin smoke、digest/provenance/SBOM、upgrade/rollback 通过；同 digest 的 G-E2E 已关闭 |
+| G-E2E         | Integration Acceptance DRI   | M1         | open        | 对 G-RELEASE-M1 生成的同一不可变 candidate digest 完成真实 Codex/Claude Turn、文件/checkpoint/rollback、双 Provider soak、Synara 回归与 T3 crash/reconnect E2E                    |
+| G-LEASE       | Lease Platform DRI           | M2         | not started | M1 immutable Distribution candidate 已固定；Lease create/ready/terminate、pairing/DPoP、broker/generation、RBAC、计量、审计和 revoke/fencing 负向测试通过                         |
+| G-RELEASE-M2  | Release Engineering DRI      | M2         | not started | 基于已关闭 G-LEASE 的制品生成 M2 manifest/digest/provenance/SBOM，并完成外部环境 install、upgrade、rollback 与固定 commit matrix                                                  |
+| G-EXPOSURE    | Product Release DRI          | 对外发布   | not started | 批准目标用户范围、支持等级、Registry/channel、升级/回滚与事故响应；没有该批准不得标 public beta/GA，也不得公开发布                                                                |
 
 G-BASELINE 关闭是进入 M1 验收的前置条件；G-ARCH、G-PKG、G-REGISTRY、G-SCHEMA、G-CONFORMANCE、
 G-T3-DRAIN、G-RELEASE-M1 与 G-E2E 也全部关闭后，M1 工程里程碑才完成并形成 RC。G-LEASE 与
@@ -1962,10 +2092,33 @@ G-RELEASE-M2 全部关闭后，M2 工程里程碑才完成并形成 RC。任何 
 G-EXPOSURE；公开 Registry 不属于工程完成的自动结果。Deferred D1 suspend/resume 不阻塞 M2 的
 `create → ready → terminate`，也不能在 G-LEASE 关闭前被用来提升 M2 状态。
 
+M1 的 same-bits 顺序固定为：关闭 pre-RC Gate → 在仍为 open 的 G-RELEASE-M1 中生成并外部 smoke
+不可变 candidate → G-E2E 对该 digest 实跑 → 复核 digest 未变化后关闭 G-RELEASE-M1 → 形成 RC。测试后
+任何重新打包或内容变化都会让对应 G-E2E/G-RELEASE-M1 closure record 失效，必须从 candidate smoke 重跑。
+
+### 19.1 Gate closure record 与复核责任
+
+表中的 DRI 是必须承担关闭责任的角色域；每次 Gate 执行前必须在 closure record 中把它落实为具名负责人或
+稳定 team handle，不能只写“Synara/T3”。每个 record 使用稳定 evidence ID，例如
+`CAG-G-T3-DRAIN-20260809-R1`，并保存到
+`docs/reports/cloud-agent-gates/<gate>/<evidence-id>.md` 或由该文件链接到不可变 CI/artifact store。
+
+任何 Gate 从 `open`/`not started` 改成 `closed` 前，closure record 必须同时记录：
+
+- Gate ID、evidence ID、具名 DRI、独立复核人和 UTC/CST 关闭日期；Release、Exposure 与安全 Gate 的
+  复核人不得与 DRI 是同一个人；
+- Synara commit、T3 commit、dirty state、Node/Bun/pnpm 版本，以及 Provider CLI/SDK 和 Distribution
+  digest；需要真实 Provider 或 sandbox 的 Gate 还要记录脱敏 credential profile 前提与 local trust policy/
+  managed attestation identity；
+- 原样命令或 CI workflow/job ID、输入 fixture、输出摘要、完整脱敏日志与制品保存位置；
+- 每条第 18/19 节退出条件的 pass/fail 映射，以及失败重跑或 waiver 的原因；
+- 影响 `TARGET FROZEN` surface 的 ADR 编号、批准人和批准日期；没有 ADR 时明确记为 `none`；
+- DRI 与复核人的签署结论。缺少任一字段，Gate 维持原状态，Phase 和 RC 状态也不得提升。
+
 以下每个 bullet 都以唯一 Gate ID 开头，只阻塞该 ID；一条同时影响两个 Gate 时会显式写两个 ID，不按
 章节标题推导交叉依赖。
 
-### 19.1 架构验收维度
+### 19.2 架构验收维度
 
 - `G-ARCH`：公共包不 import `apps/server`、Go Control Plane 或任何 UI 文件；
 - `G-ARCH`：公共 ABI 不出现 Effect、T3 branded ID、Synara `ProviderKind` 闭集；
@@ -1975,10 +2128,12 @@ G-EXPOSURE；公开 Registry 不属于工程完成的自动结果。Deferred D1 
 - `G-LEASE`：Environment Lease 与 Agent orchestration authority 分离，Synara 与 T3 不写同一 Turn 或
   Checkpoint 终态。
 
-### 19.2 功能验收维度
+### 19.3 功能验收维度
 
 - `G-CONFORMANCE`：Synara 原有 Runtime 路径行为等价，Start/Resume/Send/Interrupt/Approval/UserInput/
   Stop 全部可重放；
+- `G-CONFORMANCE`：未知 session Stop 幂等 no-op；quiesced/timed-out/forced/failed 与宿主 graceful/
+  non-graceful 投影一致，任何 deadline 都有 bounded reap；
 - `G-E2E`：T3 embedded 同时支持 Codex、Claude，且 T3 内置 Provider 行为不变；
 - `G-T3-DRAIN`：server/runtime/browser restart 后不重复消息、不丢终态；
 - `G-E2E`：rollback 由 Runtime 恢复 Provider history、由宿主恢复 Workspace checkpoint，bridge 只协调
@@ -1987,7 +2142,7 @@ G-EXPOSURE；公开 Registry 不属于工程完成的自动结果。Deferred D1 
 - `G-LEASE`：managed direct-ingress 与 relay 不广告或自动降级到普通 Bearer；只有部署级显式
   `internal-self-hosted` profile 可以启用 Bearer。
 
-### 19.3 安全验收维度
+### 19.4 安全验收维度
 
 - `G-CONFORMANCE`：Provider secret 不出现在 argv、普通 env、日志、事件或 resume cursor；
 - `G-CONFORMANCE`：Artifact path escape/symlink 测试全绿；
@@ -2002,9 +2157,10 @@ G-EXPOSURE；公开 Registry 不属于工程完成的自动结果。Deferred D1 
   generation 和已撤权 subject 均 fail closed；
 - `G-RELEASE-M2`：M2 制品重新生成并验证包含 Lease surface 的 digest/provenance/SBOM 和 secret scan。
 
-### 19.4 Release 与 Exposure 验收维度
+### 19.5 Release 与 Exposure 验收维度
 
-- `G-RELEASE-M1`：双宿主兼容矩阵固定实测 commit，npm tarball 内容符合 allowlist；
+- `G-RELEASE-M1`、`G-E2E`：双宿主兼容矩阵固定实测 commit 与不可变 candidate digest；最终 RC 与
+  G-E2E 使用的 tarball 必须逐 bit 相同，内容符合 allowlist；
 - `G-RELEASE-M1`：install、upgrade、rollback、uninstall 文档完整，示例不包含真实凭证；
 - `G-RELEASE-M2`：Lease 制品的外部环境 install/upgrade/rollback、固定 commit matrix 与运行清单通过；
 - `G-RELEASE-M2`：M2 示例、manifest 和审计 evidence 不包含真实 credential/pairing token；
@@ -2015,22 +2171,22 @@ G-EXPOSURE；公开 Registry 不属于工程完成的自动结果。Deferred D1 
 
 ## 20. 风险与缓解
 
-| 风险                          | 影响                                | 缓解                                                                   |
-| ----------------------------- | ----------------------------------- | ---------------------------------------------------------------------- |
-| T3 SPI 持续变化               | Bridge 频繁破坏                     | app-neutral ABI + T3-owned bridge + commit matrix + focused drift gate |
-| 低估 Driver 构造要求          | title/commit/status 等功能半残      | conformance 强制 snapshot、adapter、四类 text generation 全部有实现    |
-| Effect 版本冲突               | 类型/运行时异常                     | 公共 ABI 禁止 Effect；宿主内转换                                       |
-| 两套 Runtime Event 漂移       | 丢事件/错误投影                     | 单一 schema 来源 + golden frames + mapper exhaustiveness               |
-| 本地/远端 Workspace 混淆      | 数据错误、误回滚                    | 正式云形态移动完整 T3 server；control-only 默认关闭                    |
-| 双 Turn/Checkpoint 权威       | revert/fork/终态不一致              | T3 Lease 不复用 Synara Session 状态机；T3 独占 Turn checkpoint         |
-| T3 stateDir 未持久化          | environment identity 与 thread 丢失 | 独立 state volume；suspend/resume identity 测试                        |
-| 未 quiesce 即做环境快照       | SQLite/Workspace/receipt 不一致     | Phase 4 不开放 suspend；Deferred D1 admission fence + stop + 原子快照  |
-| 长期 API key 进入 Sandbox     | 横向访问                            | generation-fenced local broker + 匿名 FD/单次 grant                    |
-| Pairing endpoint 生命周期漂移 | 已回收环境仍可访问                  | 先 revoke ingress/auth，再 drain，再卸载和回收                         |
-| 动态插件任意代码执行          | 宿主失陷                            | 第一阶段只编译期 allowlist，Runtime 默认进程隔离                       |
-| Provider 能力被 UI 过度承诺   | 用户遇到假按钮                      | Describe + capability map，缺失默认 unsupported                        |
-| 事件重放产生重复消息          | timeline 污染                       | 稳定 event ID + receipt + sequence gap gate                            |
-| 包抽取拖慢冷启动              | 破坏秒级体验                        | Describe cache、预启动、性能预算和 before/after SLO                    |
+| 风险                          | 影响                                | 缓解                                                                        |
+| ----------------------------- | ----------------------------------- | --------------------------------------------------------------------------- |
+| T3 SPI 持续变化               | Bridge 频繁破坏                     | app-neutral ABI + T3-owned bridge + commit matrix + focused drift gate      |
+| 低估 Driver 构造要求          | title/commit/status 等功能半残      | conformance 强制 snapshot、adapter、四类 text generation 全部有实现         |
+| Effect 版本冲突               | 类型/运行时异常                     | 公共 ABI 禁止 Effect；宿主内转换                                            |
+| 两套 Runtime Event 漂移       | 丢事件/错误投影                     | 单一 schema 来源 + golden frames + mapper exhaustiveness                    |
+| 本地/远端 Workspace 混淆      | 数据错误、误回滚                    | 正式云形态移动完整 T3 server；control-only 默认关闭                         |
+| 双 Turn/Checkpoint 权威       | revert/fork/终态不一致              | T3 Lease 不复用 Synara Session 状态机；T3 独占 Turn checkpoint              |
+| T3 stateDir 未持久化          | environment identity 与 thread 丢失 | 独立 state volume；suspend/resume identity 测试                             |
+| 未 quiesce 即做环境快照       | SQLite/Workspace/receipt 不一致     | Phase 4 不开放 suspend；Deferred D1 admission fence + stop + 原子快照       |
+| 长期 API key 进入 Sandbox     | 横向访问                            | generation-fenced local broker + 匿名 FD/单次 grant                         |
+| Pairing endpoint 生命周期漂移 | 已回收环境仍可访问                  | 先 revoke ingress/auth，再 drain，再卸载和回收                              |
+| 动态插件任意代码执行          | 宿主失陷                            | 编译期 allowlist + out-of-process；local 显式信任，managed 外层 attestation |
+| Provider 能力被 UI 过度承诺   | 用户遇到假按钮                      | Describe + capability map，缺失默认 unsupported                             |
+| 事件重放产生重复消息          | timeline 污染                       | 稳定 event ID + receipt + sequence gap gate                                 |
+| 包抽取拖慢冷启动              | 破坏秒级体验                        | Describe cache、预启动、性能预算和 before/after SLO                         |
 
 ## 21. 备选方案与否决理由
 
@@ -2090,6 +2246,13 @@ Provider Runtime，可移植化会破坏现有权威和验证资产。
 保持独立。若要改变任一 owner、公开阶段或 first-provider 范围，必须新增 ADR/变更记录，而不是在实现中
 隐式偏离。
 
+`TARGET FROZEN` 的受控 surface 包括：七包职责与公共 ABI、Protocol/Event 兼容规则、Workspace/Turn/
+Checkpoint/Credential authority、M1/M2 主路径、Codex/Claude 首批范围，以及 local trusted-user 与 managed
+attestation 的信任边界。任何实现若要改变其中一项，必须在代码修改前新增
+`docs/adr/NNNN-cloud-agent-<slug>.md`，记录问题、选择、备选方案、兼容/迁移、安全影响、owner、批准人与
+生效日期，并在 G-ARCH closure record 中引用。普通实现缺陷修复或不改变上述 surface 的约束澄清可以直接
+更新本文，但不能用“实现已经如此”反向修改 authority；无法确定是否改变 ABI 时按需要 ADR 处理。
+
 ## 23. M1 当前唯一近程交付
 
 M1 的近程交付固定为**七个发布包加一个 T3 integration slice**：
@@ -2142,22 +2305,25 @@ process crash/restart E2E 或 Phase 4 同样未完成；准确边界见附录 A�
 
 ### 25.1 当前基线
 
-| 字段                   | 当前值                                                         |
-| ---------------------- | -------------------------------------------------------------- |
-| 本地目录               | `/Users/huang/devel/project/huang/business/t3code`             |
-| `origin`               | `git@github.com:hxp0618/t3code.git`                            |
-| 官方 upstream          | `https://github.com/pingdotgg/t3code.git`                      |
-| 本地 remote 状态       | 已配置 `origin` 与官方 `upstream`                              |
-| 主 clone 分支          | 本地 `main` tracking `origin/main`                             |
-| 初次调研 commit        | upstream `a20923ce463335e89e92f5983d98a180536e8e7d`            |
-| 实施固定 commit        | upstream `a6c9b41f902fba2a4137806c09e829935e91baac`            |
-| 本地/fork `main`       | `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6`                     |
-| 实施 worktree describe | `v0.0.33-nightly.20260808.1033-10-ga6c9b41f9`                  |
-| fork/upstream          | fork `main` 保持旧点；实施 worktree 直接固定 upstream commit   |
-| 基线复核时间           | 2026-08-09 CST                                                 |
-| 主 clone 状态          | 完整 clone、非 shallow、clean                                  |
-| 集成 worktree          | `/Users/huang/devel/project/huang/business/t3code-cloud-agent` |
-| 集成分支               | `codex/cloud-agent-runtime-integration`（已创建，未提交）      |
+| 字段                   | 当前值                                                                        |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| 本地目录               | `/Users/huang/devel/project/huang/business/t3code`                            |
+| `origin`               | `git@github.com:hxp0618/t3code.git`                                           |
+| 官方 upstream          | `https://github.com/pingdotgg/t3code.git`                                     |
+| 本地 remote 状态       | 已配置 `origin` 与官方 `upstream`                                             |
+| 主 clone 分支          | 本地 `main` tracking `origin/main`                                            |
+| 初次调研 commit        | upstream `a20923ce463335e89e92f5983d98a180536e8e7d`                           |
+| 实施固定 commit        | upstream `a6c9b41f902fba2a4137806c09e829935e91baac`                           |
+| 当前 upstream `main`   | `ba9c9ae81dce4e554b4dd52abfd28d0c01b5c651`                                    |
+| 本地/fork `main`       | `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6`                                    |
+| 实施 worktree describe | `v0.0.33-nightly.20260808.1033-10-ga6c9b41f9`                                 |
+| 集成源码 commit        | `98da34152ef79865db614aec20e406a311985f87`                                    |
+| 当前合并目标           | `origin/codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1` |
+| fork/upstream          | 合并目标已含集成源码；`ba9c9ae...` 后续 upstream 漂移仍待单独同步             |
+| 基线复核时间           | 2026-08-09 CST                                                                |
+| 主 clone 状态          | 完整 clone、非 shallow、clean                                                 |
+| 集成 worktree          | `/Users/huang/devel/project/huang/business/t3code-cloud-agent`                |
+| 集成分支               | `codex/cloud-agent-runtime-integration` @ `98da34152...`（已提交）            |
 
 从初次调研点 `a20923...` 到实施固定点 `a6c9b41...`，watched surface 出现三组上游变更：Claude resume
 握手修复、Codex queued follow-up stop 修复、ProviderService 的图片附件支持。它们修改了
@@ -2165,8 +2331,9 @@ process crash/restart E2E 或 Phase 4 同样未完成；准确边界见附录 A�
 重设计：完整 T3 server/Workspace 权威、ProviderDriver SPI、connection/auth 与 checkpoint owner 没有
 改变。Bridge 因此显式拒绝当前 Protocol 2.3 尚不能投影的附件，防止静默丢文件；其余命令映射继续适用。
 
-主 clone 继续保持只读跟踪，不和 Synara dirty checkout 混写；实现只在独立 worktree。官方 remote 已
-配置，以下命令只用于新 clone 的一次性初始化：
+主 clone 继续保持只读跟踪，不和 Synara dirty checkout 混写；实现源码来自独立 worktree，并已通过
+`7abe2bee...` 合入、推送到 fork 的 `codex/saas-tenancy-user`，没有直接写入 `main`。官方 remote 已配置，
+以下命令只用于新 clone 的一次性初始化：
 
 ```bash
 git -C /Users/huang/devel/project/huang/business/t3code remote add upstream https://github.com/pingdotgg/t3code.git
@@ -2252,27 +2419,29 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
 
 ### A.1 实施位置与变更边界
 
-本批只写入两个隔离 worktree：
+源码最初只写入两个隔离 worktree；2026-08-09 复核时已经形成并推送以下合并目标：
 
-| 宿主   | worktree                                                          | 分支                                      | 固定基线     |
-| ------ | ----------------------------------------------------------------- | ----------------------------------------- | ------------ |
-| Synara | `/Users/huang/devel/project/huang/business/synara-t3-cloud-agent` | `codex/synara-t3-cloud-agent-integration` | `fc9f63a...` |
-| T3     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent`    | `codex/cloud-agent-runtime-integration`   | `a6c9b41...` |
+| 宿主   | source worktree                                                   | feature commit | 固定基线       | 当前合并目标                                                                  |
+| ------ | ----------------------------------------------------------------- | -------------- | -------------- | ----------------------------------------------------------------------------- |
+| Synara | `/Users/huang/devel/project/huang/business/synara-t3-cloud-agent` | `8e96a5747...` | `fc9f63ac7...` | `codex/saas-tenancy-user` @ `785318f1a50df9d030ab9dd926d8f5ee07712b88`        |
+| T3     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent`    | `98da34152...` | `a6c9b41f9...` | `origin/codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1` |
 
-原 Synara dirty checkout 与 T3 主 clone 在本附录首次取证时没有接收运行时代码改动，两个集成分支当时也
-尚未提交或推送。后续 source-control merge 状态必须以当前 Git refs 为准；代码进入远端分支不改变本附录
-的验证边界，也不等同于 npm 发布、部署、public beta 或 GA。
+原 Synara dirty checkout 与 T3 主 clone 在首次取证时没有接收运行时代码改动；当前两条合并目标包含对应
+feature tree，结构合并也已通过独立审计。代码进入远端分支只证明 source-control 状态，不改变本附录的
+验证边界，也不等同于 npm 发布、部署、public beta 或 GA。
 
 ### A.2 Synara 已实现
 
 - 新增 `cloud-agent-protocol`、`cloud-agent-provider-api`、`cloud-agent-runtime`、通用 Codex/Claude
   Provider、`cloud-agent-testkit` 与 `cloud-agent-distribution` 七个包；
-- Provider Plugin ABI v1 与默认 Runtime 根入口只使用 Promise、AsyncIterable、AbortSignal 和普通 JSON
-  类型，不导出 Effect、T3 ID 或 Synara ProviderKind 闭集；旧 Provider Host 类型只在明确标记的
-  `legacy-provider-host` 迁移子入口，但 package 内部仍有 Synara legacy 依赖；
-- Protocol 当前为 additive 2.3，保留既有 v2.2 命令语义，加入四类隔离 `GenerateText`；Runtime Event
-  保持 v2；能力目录只有一个可编辑来源；JSON Schema 现在按 discriminator 验证 Result/Error/Event 和
-  关键 command payload，并以 Ajv 门禁 vocabulary 一致性；
+- Provider Plugin ABI v1 与默认 Runtime 的 TypeScript/API 声明表面只使用 Promise、AsyncIterable、
+  AbortSignal 和普通 JSON 类型，不导出 Effect、T3 ID 或 Synara ProviderKind 闭集；旧 Provider Host
+  类型只在明确标记的 `legacy-provider-host` 迁移子入口，但 package 内部及当前 CJS build 仍有 Synara
+  legacy 依赖；
+- Protocol 当前为 additive 2.3，保留既有 v2.2 命令语义，加入四类 task 的 `GenerateText` command；
+  Runtime Event 保持 v2；能力目录只有一个可编辑来源；JSON Schema 现在按 discriminator 验证
+  Result/Error/Event 和关键 command payload，并以 Ajv 门禁 vocabulary 一致性。这里的“四类”只表示
+  command/task shape 已实现，不表示当前 Provider 已硬性 no-tool/read-only；该缺口见 A.5；
 - `createCodexProvider()` 与 `createClaudeProvider()` 是普通 Plugin ABI factory，宿主/Distribution 显式
   注册，不使用 `@synara/cloud-agent-runtime/providers/*` 私有路径或目录扫描；当前 factory 仍代理 legacy
   实现，尚不能视为独立 Provider implementation；
@@ -2281,14 +2450,18 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
   一致；`CLOUD_AGENT_DISTRIBUTION_MANIFEST` JavaScript export 已深冻结，但直接导入的 `manifest.json`
   不具备运行时冻结语义。源码 `releaseDigest` 故意为空，最终 digest 必须由 release pipeline 生成；
 - stdio client 实现 command/message 上限、写入背压、并发 command correlation、AbortSignal、匿名 fd 3
-  自动注入和 scoped process teardown；单命令取消使用 terminal tombstone，不再杀死共享 Runtime；
+  自动注入和正常 close 路径的 scoped process teardown；单命令取消使用 terminal tombstone，不再杀死共享
+  Runtime。协议失败后的 child 强制回收仍有 A.5 所列缺口；
 - stdio server 通过最多 64 帧的串行 NDJSON writer 执行真实 UTF-8 message 上限与 `drain` backpressure，
   返回前 flush；handler 不再为长 Turn 累积全部中间事件；
-- 当前 legacy stdio handler 的 StopSession 使用 session epoch fencing，先阻断旧事件/状态提交，再等待活动
-  operation quiesce；另一个 JS Plugin facade path 的 close 共享 promise，释放 credential 前等待 command/
-  control/artifact task，并验证 Host generation、Workspace、model 与 Artifact 相对路径/digest；
+- 当前 legacy stdio handler 的 StopSession 使用 session epoch fencing，先阻断旧事件/状态提交，再等待已登记
+  active operation quiesce；`GenerateText` 尚未登记到该字段，因此不能外推为“所有操作已 quiesce”。另一个
+  JS Plugin facade path 的 close 共享 promise，释放 credential 前等待 command/control/artifact task，并
+  验证 Host generation、Workspace、model 与 Artifact 相对路径/digest；
 - 上述 Plugin HostServices authority、credential、Artifact 与 close guard 目前只在 JS facade path 生效；
   Distribution 的 active stdio bin 仍进入 legacy handler，跨仓握手尚未获得这些 Plugin path 保证；
+- Runtime 当前只检查 `SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE` 的允许字符串；它是可由启动者设置的信任
+  声明，没有绑定 lease、generation、Runtime digest 或进程身份，不能作为 managed sandbox attestation；
 - testkit 已提供 descriptor 值域和 transcript 级 correlation/event/late-frame 断言，但完整进程级黑盒矩阵
   仍列为未完成。
 
@@ -2299,20 +2472,23 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
 - Driver 在广告 ready 前执行真实 `Describe`，验证 Provider kind、Protocol、核心 capability、Runtime Event
   v2、四类 text-generation task、Provider 可用性/兼容范围和显式 enablement；配置
   `runtimeBinarySha256` 时要求绝对 binary path 并校验该文件。Codex/Claude 各提供一个默认模型；
-- 每个 T3 thread 使用独立、scoped Runtime process。消息必须匹配 Protocol 2.3、request、execution、
+- 每个 T3 thread 使用独立、scoped Runtime process，但当前是直接 child spawn，没有 gVisor/Cocoon wrapper
+  或 managed attestation。消息必须匹配 Protocol 2.3、request、execution、
   generation 与 command；stdout 在 JSON.parse 前按原始字节分帧并限制大小，decode/correlation/unknown
   command/exit/write 任一 fatal 都原子关闭、失败全部 pending，并拒绝后续 execute；
-- 映射 Start/Resume/Send/Steer/Interrupt/Approval/UserInput/Stop、Runtime Event v2、resume cursor 与
-  rollback history reconstruction。Approval/UserInput 使用 Runtime 要求的 `resolution` envelope；新进程
-  generation 递增并随 T3 已持久化 resume cursor 保存；
+- 映射 Start/Resume/Send/Steer/Interrupt/Approval/UserInput/Stop、Runtime Event v2、有效结构化 resume
+  cursor 与 rollback history reconstruction。Approval/UserInput 使用 Runtime 要求的 `resolution`
+  envelope；新进程 generation 递增并随 T3 已持久化 resume cursor 保存；无效 cursor 的 fail-open 与取消后
+  迟到 terminal 的缺口见 A.5；
 - Adapter 的父 Scope 关闭会 stopAll 并 shutdown event queue；start/send/stop/rollback 用短临界区和 CAS，
   不持锁等待 Runtime 长操作；StopSession 有 2 秒 deadline，失败/中断仍清理 active state、event fiber、
-  child scope 和 session map；
+  child scope 和 session map；当前 timeout 结果仍被投影为 graceful，见 A.5；
 - `plan`、per-turn model mismatch、`auto`/`auto-accept-edits`、`acceptForSession`/`cancel` 等当前 wire 无法
   精确表达的语义会明确返回 validation error，不再静默降级；Artifact/Checkpoint 未接入 T3 authority 时
   产生 bounded warning，不伪装为已消费；
-- 四类 T3 text-generation 操作都调用 Protocol 2.3 `GenerateText`，每次使用隔离 Runtime session，失败
-  不回退到 T3 内置 Provider，并用 finalizer 保证失败路径也发送 StopSession；
+- 四类 T3 text-generation 操作都调用 Protocol 2.3 `GenerateText`，每次使用独立 Runtime session，失败
+  不回退到 T3 内置 Provider；scope finalizer 会发送 StopSession，但当前没有 deadline，且 commit/PR policy
+  与 hard no-tool/read-only 尚未闭合，见 A.5；
 - 当前 wire 没有附件投影，因此图片/文件输入返回稳定 validation error，不静默丢弃。`turn.diff.updated`
   继续只触发 T3 本地 CheckpointReactor，Provider diff 不成为 Workspace 权威；
 - `credentialProfile` 在 embedded source slice 中只保留未来配置槽；非空时 fail closed。当前 embedded
@@ -2325,7 +2501,7 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
 | 依赖面                | Synara                             | T3 Code                                                    |
 | --------------------- | ---------------------------------- | ---------------------------------------------------------- |
 | `packageManager` 声明 | Bun `1.3.12`                       | pnpm `11.10.0`                                             |
-| 本机最终复核执行器    | Bun `1.3.14`                       | Node `26.7.0` + pnpm `8.11.0`，有 engine mismatch warning  |
+| 本机最终复核执行器    | Bun `1.3.14`                       | Node `24.18.0` + pnpm `11.10.0`                            |
 | Effect                | `effect-smol` Git commit `8881a9b` | `4.0.0-beta.103`，仓内 patch                               |
 | Claude Agent SDK      | manifest 精确 `0.3.207`            | manifest `^0.3.170`，lock 为 `0.3.170`                     |
 | Codex CLI             | 受控 Worker release `0.145.0`      | 使用环境中的 `codex` binary，由 health/version probe 识别  |
@@ -2335,12 +2511,14 @@ T3 列中的 Claude SDK/Codex CLI 属于 T3 **内置 Provider driver**。新增�
 或复用这些实现，而是通过 out-of-process Distribution 使用当前 Runtime 携带的 Claude SDK `0.3.207` 与
 Codex compatibility policy；两组版本可以独立升级，但每次都必须重跑对应 compatibility matrix。
 
-- Synara 新包 build/typecheck/focused tests、Provider Host wrapper build，以及 npm pack dry-run；
+- Synara 新包 build/typecheck/focused tests、Provider Host wrapper 的本地 checkout build，以及 npm pack
+  dry-run；该证据不覆盖 Docker provider-host-build stage；
 - T3 contracts、settings UI、Driver probe/digest、process correlation、adapter、approval、structured user
   input、interrupt、resume generation、rollback focused tests；text-generation 代码实现四类任务，但当前
   focused test 只执行 thread-title 路径；
-- 使用实际 `@synara/cloud-agent-distribution` stdio entrypoint，从 T3 完成 Claude
-  `Describe → ready → StartSession → StopSession` 跨仓握手；
+- 使用实际 `@synara/cloud-agent-distribution` stdio entrypoint 和受支持 T3 toolchain，从 T3 实跑 1/1
+  integration test，完成 Claude `Describe → ready → StartSession → StopSession` 跨仓握手；该测试不发送
+  `SendTurn`，不覆盖 Codex、Artifact、事件 drain 或真实 Workspace 修改；
 - 公共默认 Runtime declaration 不引用 Effect、`@t3tools/*` 或 Synara host contract；T3 bridge 代码留在
   T3 仓内。
 
@@ -2349,11 +2527,14 @@ Codex compatibility policy；两组版本可以独立升级，但每次都必须
 - Synara：七个新包合计 21 个 test files / 215 tests 通过，contracts 18 files / 209 tests 通过；
   Provider Host wrapper 和七个新包 build/typecheck 通过；`bun fmt` 检查 2944 个文件，`bun lint` exit 0
   （仓内既有 warnings 仍存在），`bun typecheck` 20/20 packages 通过；
-- T3：contracts 33 tests、Web settings 11 tests、server focused suite 5 files / 29 tests 通过；无 Runtime
-  环境变量时 cross-repository test 另有 1 file / 1 test 明确 skipped。contracts/Web/server 三个定向
-  typecheck、21 个范围内文件 format check 与 lint 均通过且无输出告警；
+- T3：contracts 33 tests、Web settings 11 tests、server focused suite 5 files / 29 tests 通过；在显式设置
+  `SYNARA_CLOUD_AGENT_TEST_RUNTIME` 后，cross-repository integration 1 file / 1 test 实跑通过。contracts 与
+  Web 定向 typecheck 通过；server typecheck 失败于新增 `CloudAgentProcess.ts` 的三个 Effect 规则诊断：
+  line 199/279 的 TS377026（直接 JSON parse/stringify）和 line 251 的 TS377042（对 Schema error 使用
+  `instanceof`）。server bundle、Web production build、范围内 TS/TSX lint 和 focused test 均通过；
 - 跨仓：最终 Distribution stdio entrypoint 的 Claude Driver
-  `Describe → ready → StartSession → StopSession` 通过；
+  `Describe → ready → StartSession → StopSession` 为 1/1 通过；覆盖边界止于握手和关闭，不是 Provider Turn
+  或完整 E2E；
 - 发布预检：七个包 `npm pack --dry-run` 全部成功，tarball allowlist 中 test source 数量为 0；源码
   manifest 保持 `releaseDigest: null`，没有伪造 managed release evidence。
 
@@ -2366,18 +2547,58 @@ Codex compatibility policy；两组版本可以独立升级，但每次都必须
   facade，Distribution stdio 仍走 legacy handler，尚未由 default Provider registry 启动。Provider 真拆包、
   独立依赖/发布/回滚、allowlist 对实际 bin 的约束，以及让 active stdio path 获得 Plugin HostServices
   authority/credential/Artifact/close guard，都是 M1 硬门禁；
+- Provider Host Docker 构建 context 尚未同步新增 workspace：`provider-host-build` 只复制旧 manifest 与
+  contracts/shared 源码，实跑在 `bun install --filter @synara/provider-host` 阶段因找不到
+  `@synara/cloud-agent-protocol`/`@synara/cloud-agent-runtime` 而失败。必须同步 Dockerfile 输入并通过 Worker/
+  Provider Host image gate；本地 checkout build 不能替代该证据；
+- packed package 目前不能作为外部消费者制品：不只 Distribution 的五个依赖，所有带内部依赖的新增公共包
+  仍可见 `workspace:*`，Runtime 还含 `catalog:*` 和不可从公共 Registry 解析的私有
+  `@synara/contracts`/`@synara/shared` 依赖；在全新 npm 临时项目安装 tarball 已复现
+  `EUNSUPPORTEDPROTOCOL workspace:*`；
+- build 成功也不等于公共入口可加载：外部 Node 24 实测 Runtime ESM root 可 import，但 CJS root 会
+  eager-load legacy chunk 并命中私有 Synara export；Codex/Claude Provider 的 ESM/CJS 均受 legacy/private
+  export 阻断，Distribution 的 ESM/CJS 又被该 Provider 链阻断。Distribution 也尚未暴露自己的 schema
+  子路径。G-PKG/G-RELEASE-M1 必须以 packed artifact 的外部 install + ESM/CJS import + bin/schema smoke
+  为证据，不能只使用 `npm pack --dry-run`；
 - 公共 TypeScript command 仍以通用 payload 表达，legacy Start/Resume wire 内仍携带 RunnerInput；虽然 JSON
   Schema 已加强且 Host authority 在兼容层 fail closed，schema → TS/runtime decoder 的单一代码生成仍未完成；
 - testkit 尚未成为两个宿主共同消费的进程级黑盒 suite；缺少 crash/resume、approval/user-input、
-  backpressure、secret redaction、path escape/symlink 等完整公共矩阵。T3 的跨仓测试在无 Runtime 环境变量
-  时会显式 skip，只有专门 compatibility job 的实跑才构成证据；
-- T3 的 terminal 与 event pump 尚无显式 ACK/drain barrier；transport 保证 publish 顺序和 late-frame
-  fail closed，但“所有 Runtime Event 已投影后再产生 `turn.completed`”仍需进程级测试和 barrier；
-- 当前 `runtimeBinarySha256` 只验证单文件，不是 Distribution release digest；Distribution 的五个内部
-  依赖仍是 `workspace:*`，自身也没有 schema export。`npm pack --dry-run` 不能代替 packed `package.json`
-  精确 semver 检查、manifest/schema exposure 或外部临时项目 install/import/bin smoke；
-- 本机最终 T3 focused test 虽通过，但 Node `26.7.0` + pnpm `8.11.0` 不满足仓库声明的 Node `^24.13.1` +
-  pnpm `11.10.0`，命令明确产生 engine mismatch warning；G-RELEASE-M1 必须在固定受支持 toolchain 重跑；
+  backpressure、secret redaction、path escape/symlink、no-tool GenerateText 和 tombstone 等完整公共矩阵。
+  跨仓测试没有 Runtime 环境变量时会显式 skip；本次虽已在固定 toolchain 下实际执行 1/1，但只覆盖 Claude
+  `Describe → StartSession → StopSession`，不能代替 compatibility job 的完整矩阵；
+- 已使用声明范围内的 Node `24.18.0` + pnpm `11.10.0` 复核 T3。contracts/Web typecheck 通过，server
+  typecheck 仍因合并新增 `CloudAgentProcess.ts` 的 TS377026（line 199/279）和 TS377042（line 251）三个
+  Effect 规则错误失败；focused tests、bundle、Web build 或 lint 通过都不能把该 typecheck 反写成通过；
+- T3 embedded 当前只直接 spawn Runtime child，没有可信 outer sandbox 或 managed attestation，也没有默认
+  提供 Runtime 要求的 `SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE`。因此 `Describe/StartSession/StopSession`
+  握手可以通过，但默认首个真实 `SendTurn` 会在 Provider 执行边界 fail closed；人工设置允许字符串最多是
+  local trusted-user 声明，不是绑定 lease/generation/digest/process 的隔离证明；
+- `GenerateText` 当前复用真实 Workspace/session input，Provider 只收到提示词级“不要调用工具”：Codex 路径
+  使用 `approvalPolicy: never`/`danger-full-access`，Claude 非交互路径可进入 `bypassPermissions`。它没有
+  hard no-tool/read-only enforcement，处理不可信 diff/patch 时可能产生 Workspace 副作用；
+- legacy Runtime 没有把 `GenerateText` 登记为 `activeOperation`，所以 Stop 可以先报告 quiesced 而生成或工具
+  仍在运行；T3 `SynaraCloudAgentTextGeneration` 的 Stop finalizer 也没有 timeout，Runtime 存活但不返回
+  Stop terminal 时，已完成或失败的 text-generation 调用会永久卡在 scope 收尾；
+- T3 commit/PR text-generation payload 当前丢弃 T3 `policy`，与内置 Provider 的 instruction 语义不一致；
+  四类 command shape 已接线不能外推为四类 policy fidelity、无副作用或生命周期均已验收；
+- 无效结构化 resume cursor（例如未知 `schemaVersion`）当前会被解码为 absent，随后静默创建 generation 1 的
+  空 Session；这直接违背正文 fail-closed 要求。修复后必须返回稳定 resume error，只有真正缺少 cursor 才能
+  走 StartSession；
+- T3 Runtime Event 在异步 event fiber 消费时读取可变 `activeTurnId`，而 transport terminal 会先 resolve
+  command，Adapter 随后写 `turn.completed` 并清空 active Turn。event fiber 落后时，早先事件可能丢
+  `turnId`，`turn.completed` 也可能早于事件投影；Stop 关闭 scope 时同样没有显式 drain receipt；
+- T3 transport 在 execute 被取消时立即移除 pending command，未保留有界 terminal tombstone；同一真实
+  command 的正常迟到 terminal 随后会被判为 unknown command，并 fail-close 整个共享 Runtime。现有测试分别
+  覆盖 interruption 与 late frame，没有覆盖二者组合；
+- T3 Adapter 对未知 session 的 Stop 仍通过 `requireSession` 返回 error，不是正文要求的幂等 no-op；普通
+  Adapter Stop 的 2 秒 deadline 已有测试，但当前实现忽略 timeout/failed 的结果并始终投影
+  `exitKind: "graceful"`，尚不能区分 timed-out/forced/failed；该 deadline 也不能外推到上述
+  TextGeneration finalizer；
+- Synara stdio client 在协议 fatal 后会先锁存 `closed`；若恶意或挂死 child 忽略 SIGTERM，后续 `close()`
+  可因已 closed 提前返回而跳过 exit timeout/SIGKILL。对抗性复核已观察 child 仍存活，必须补幂等且无条件的
+  bounded reap；
+- 当前 `runtimeBinarySha256` 只验证单文件，不是 Distribution release digest；manifest/schema exposure、
+  packed exact semver、外部安装与完整 provenance/SBOM 仍由 G-RELEASE-M1 关闭；
 - 未执行真实 Codex/Claude Provider Turn。当前机器 Codex 为 `0.147.0`，超出已声明的
   `>=0.145.0 <0.146.0` 范围，正确结果应是 unavailable；Claude 只验证了 SDK-backed session handshake，
   没有产生上游调用费用；
@@ -2387,5 +2608,6 @@ Codex compatibility policy；两组版本可以独立升级，但每次都必须
   test；
 - Phase 4 `T3EnvironmentLease`、pairing/DPoP、Lease Supervisor、credential broker、ingress、RBAC、计量与
   审计均未实施；Deferred D1 suspend/resume 更未开始；
-- 因此本批只能标记 **source implementation in progress**，不能标记 Phase 0–3 complete、deployed、
+- 因此本批只能标记 **M0 open；M1 Phase 1–3 source implementation in progress**，不能标记任何 M1 Phase
+  complete、M1 RC、deployed、
   public beta 或 GA。
