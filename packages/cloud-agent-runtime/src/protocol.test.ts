@@ -19,7 +19,7 @@ import {
   runProviderHostProtocolV2,
   type CodexVersionProbeResult,
 } from "./protocol";
-import type { ProviderRunController, RunnerMessage } from "./providerHost";
+import type { ProviderRunController, RunnerInput, RunnerMessage } from "./providerHost";
 import { ProviderInterruptedError } from "./providerRunErrors";
 
 function command(
@@ -49,7 +49,7 @@ describe("Provider Host Protocol v2", () => {
       );
 
       expect(catalogEntry).toBeDefined();
-      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
+      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 3 });
       expect(descriptor.capabilityDescriptor).toMatchObject({
         provider,
         supportTier: catalogEntry?.supportTier,
@@ -165,6 +165,28 @@ describe("Provider Host Protocol v2", () => {
     expect(first.at(-1)?.messageType).toBe("Result");
     expect(second).toEqual([first.at(-1)]);
     expect(emitted).toHaveLength(2);
+  });
+
+  it("allows StartSession to bind a workspace before the first Turn has input", async () => {
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => undefined,
+      descriptorForProvider: enabledDescriptorForProvider,
+    });
+    const runnerInput = remoteRunnerInput();
+    const messages = await handle(
+      command("StartSession", {
+        runnerInput: {
+          ...runnerInput,
+          workload: { ...runnerInput.workload, inputText: "" },
+        },
+      }),
+    );
+
+    expect(messages.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { provider: "codex", resumed: false },
+    });
   });
 
   it("rejects a Local-only Provider before execution", async () => {
@@ -459,6 +481,72 @@ describe("Provider Host Protocol v2", () => {
     });
   });
 
+  it("quiesces an old Turn before allowing a replacement Session", async () => {
+    let completeOldRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    const runInputs: RunnerInput[] = [];
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => undefined,
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: (runnerInput) => {
+        runInputs.push(runnerInput);
+        if (runInputs.length === 1) {
+          return {
+            result: new Promise((resolve) => {
+              completeOldRun = resolve;
+            }),
+            interrupt: () => undefined,
+          } satisfies ProviderRunController;
+        }
+        return {
+          result: Promise.resolve({ type: "result", output: { text: "new answer" } }),
+          interrupt: () => undefined,
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-old"));
+    const oldTurn = handle(command("SendTurn", { inputText: "old question" }, "turn-old"));
+
+    const stop = handle(command("StopSession", {}, "stop-old"));
+    let stopResolved = false;
+    void stop.then(() => {
+      stopResolved = true;
+    });
+    await Promise.resolve();
+    expect(stopResolved).toBe(false);
+
+    const overlappingStart = await handle(
+      command("StartSession", { runnerInput: remoteRunnerInput() }, "session-too-early"),
+    );
+    expect(overlappingStart.at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "protocol_violation" },
+    });
+
+    completeOldRun?.({ type: "result", output: { text: "old answer" } });
+    await oldTurn;
+    expect(await stop).toEqual([
+      expect.objectContaining({
+        messageType: "Result",
+        payload: { stopped: true, quiesced: true },
+      }),
+    ]);
+
+    const replacementInput = {
+      ...remoteRunnerInput(),
+      workload: {
+        ...remoteRunnerInput().workload,
+        conversationHistory: [{ role: "user" as const, text: "replacement history" }],
+      },
+    };
+    await handle(command("StartSession", { runnerInput: replacementInput }, "session-replacement"));
+    await handle(command("SendTurn", { inputText: "new question" }, "turn-new"));
+
+    expect(runInputs[1]?.workload.conversationHistory).toEqual([
+      { role: "user", text: "replacement history" },
+    ]);
+  });
+
   it("does not resolve SuspendTurn before the active SendTurn reaches an interrupted terminal", async () => {
     let rejectRun: ((error: Error) => void) | undefined;
     const handle = createProviderHostProtocolHandler({
@@ -691,6 +779,56 @@ describe("Provider Host Protocol v2", () => {
     ]);
   });
 
+  it("runs Protocol 2.3 GenerateText in an isolated Provider execution", async () => {
+    let observedInput: unknown;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: (input) => {
+        observedInput = input;
+        return {
+          result: Promise.resolve({
+            type: "result",
+            output: { text: '{"task":"thread-title","title":"Portable agents"}' },
+          }),
+          interrupt: () => {},
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(
+      command("ResumeSession", { runnerInput: remoteRunnerInput(true) }, "session-generate-text"),
+    );
+
+    const result = await handle(
+      command(
+        "GenerateText",
+        {
+          task: "thread-title",
+          model: "gpt-test",
+          input: { message: "Design portable Cloud Agents" },
+        },
+        "generate-title",
+      ),
+    );
+
+    expect(observedInput).toMatchObject({
+      execution: { id: "execution-1:text:generate-title" },
+      workload: {
+        model: "gpt-test",
+        conversationHistory: [],
+        resumeSnapshot: null,
+      },
+    });
+    expect(observedInput).not.toHaveProperty("providerResumeCursor");
+    expect(result.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: {
+        result: { task: "thread-title", title: "Portable agents" },
+      },
+    });
+  });
+
   it("targets InterruptTurn at an active primary operation", async () => {
     let rejectRun: ((error: Error) => void) | undefined;
     const handle = createProviderHostProtocolHandler({
@@ -829,6 +967,38 @@ describe("Provider Host Protocol v2", () => {
         },
       }),
     );
+  });
+
+  it("streams intermediate Turn events without retaining them in the handler result", async () => {
+    const emitted: ProviderHostMessageEnvelope[] = [];
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: (_input, _credential, emit) => {
+        for (let index = 0; index < 200; index += 1) {
+          emit({
+            type: "event",
+            eventType: "runtime.output.delta",
+            payload: { text: `chunk-${index}` },
+          });
+        }
+        return {
+          result: Promise.resolve({ type: "result", output: { text: "done" } }),
+          interrupt: () => {},
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(
+      command("StartSession", { runnerInput: remoteRunnerInput() }, "session-streaming"),
+    );
+    emitted.length = 0;
+
+    const result = await handle(command("SendTurn", { inputText: "stream" }, "send-streaming"));
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ commandId: "send-streaming", messageType: "Result" });
+    expect(emitted).toHaveLength(201);
   });
 
   it("maps Runner Artifacts to Provider Host ArtifactCandidate messages", async () => {
@@ -1035,6 +1205,28 @@ describe("Provider Host Protocol v2", () => {
         }),
       ]),
     );
+  });
+
+  it("flushes the output sink before the protocol run resolves", async () => {
+    const source = new PassThrough();
+    const emitted: ProviderHostMessageEnvelope[] = [];
+    let flushedMessageCount = -1;
+    const protocol = runProviderHostProtocolV2({
+      source,
+      credential: null,
+      emit: (message) => emitted.push(message),
+      flush: async () => {
+        await Promise.resolve();
+        flushedMessageCount = emitted.length;
+      },
+      descriptorForProvider: enabledDescriptorForProvider,
+    });
+
+    source.end(`${JSON.stringify(command("Describe", { provider: "codex" }, "describe-flush"))}\n`);
+    await protocol;
+
+    expect(flushedMessageCount).toBe(1);
+    expect(emitted[0]).toMatchObject({ commandId: "describe-flush", messageType: "Result" });
   });
 });
 

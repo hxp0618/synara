@@ -1,5 +1,9 @@
 import { Option, Schema } from "effect";
 import {
+  CLOUD_AGENT_RUNTIME_EVENT_TYPES,
+  CLOUD_AGENT_RUNTIME_EVENT_VERSION,
+} from "@synara/cloud-agent-protocol";
+import {
   EventId,
   IsoDateTime,
   NonNegativeInt,
@@ -153,59 +157,9 @@ export const CanonicalRequestType = Schema.Literals([
 ]);
 export type CanonicalRequestType = typeof CanonicalRequestType.Type;
 
-export const PROVIDER_RUNTIME_EVENT_VERSION = 2 as const;
+export const PROVIDER_RUNTIME_EVENT_VERSION = CLOUD_AGENT_RUNTIME_EVENT_VERSION;
 
-export const PROVIDER_RUNTIME_EVENT_TYPES = [
-  "session.started",
-  "session.configured",
-  "session.state.changed",
-  "session.exited",
-  "thread.started",
-  "thread.state.changed",
-  "thread.metadata.updated",
-  "thread.token-usage.updated",
-  "thread.realtime.started",
-  "thread.realtime.item-added",
-  "thread.realtime.audio.delta",
-  "thread.realtime.error",
-  "thread.realtime.closed",
-  "turn.started",
-  "turn.completed",
-  "turn.aborted",
-  "turn.tasks.updated",
-  "turn.proposed.delta",
-  "turn.proposed.completed",
-  "turn.diff.updated",
-  "turn.steered",
-  "item.started",
-  "item.updated",
-  "item.completed",
-  "content.delta",
-  "request.opened",
-  "request.resolved",
-  "user-input.requested",
-  "user-input.resolved",
-  "task.started",
-  "task.progress",
-  "task.updated",
-  "task.completed",
-  "hook.started",
-  "hook.progress",
-  "hook.completed",
-  "tool.progress",
-  "tool.summary",
-  "auth.status",
-  "account.updated",
-  "account.rate-limits.updated",
-  "mcp.status.updated",
-  "mcp.oauth.completed",
-  "model.rerouted",
-  "config.warning",
-  "deprecation.notice",
-  "files.persisted",
-  "runtime.warning",
-  "runtime.error",
-] as const;
+export const PROVIDER_RUNTIME_EVENT_TYPES = CLOUD_AGENT_RUNTIME_EVENT_TYPES;
 
 export const ProviderRuntimeEventType = Schema.Literals(PROVIDER_RUNTIME_EVENT_TYPES);
 export type ProviderRuntimeEventType = typeof ProviderRuntimeEventType.Type;

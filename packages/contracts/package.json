@@ -29,6 +29,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@synara/cloud-agent-protocol": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

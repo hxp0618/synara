@@ -1,0 +1,76 @@
+{
+  "name": "@synara/cloud-agent-runtime",
+  "version": "0.2.0",
+  "description": "Portable Cloud Agent runtime and Provider Host Protocol v2 implementation",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hxp0618/synara.git",
+    "directory": "packages/cloud-agent-runtime"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.spec.ts",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./node": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./legacy-provider-host": {
+      "types": "./src/legacyProviderHost.ts",
+      "bun": "./src/legacyProviderHost.ts",
+      "development": "./src/legacyProviderHost.ts",
+      "import": "./dist/legacyProviderHost.mjs",
+      "require": "./dist/legacyProviderHost.cjs"
+    },
+    "./stdio": {
+      "bun": "./src/stdio.ts",
+      "development": "./src/stdio.ts",
+      "import": "./dist/stdio.mjs"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts src/legacyProviderHost.ts --format esm,cjs --dts --clean && bun build src/stdio.ts --target=node --outfile=dist/stdio.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.207",
+    "@synara/cloud-agent-protocol": "workspace:*",
+    "@synara/cloud-agent-provider-api": "workspace:*",
+    "@synara/contracts": "workspace:*",
+    "@synara/shared": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.13.1 <25"
+  }
+}
