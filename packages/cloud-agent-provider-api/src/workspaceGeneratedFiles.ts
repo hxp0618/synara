@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import type { RunnerMessage } from "./providerHost";
+import type { RunnerMessage } from "./internalExecution";
 
 const GENERATED_FILE_CONTENT_TYPE = "application/octet-stream";
 const MAX_GENERATED_FILE_PATH_BYTES = 4 * 1024;

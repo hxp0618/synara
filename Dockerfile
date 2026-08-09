@@ -109,11 +109,19 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
 COPY package.json bun.lock bunfig.toml turbo.json tsconfig.base.json ./
 COPY apps/admin/package.json ./apps/admin/package.json
 COPY apps/desktop/package.json ./apps/desktop/package.json
+COPY apps/developer-docs/package.json ./apps/developer-docs/package.json
 COPY apps/marketing/package.json ./apps/marketing/package.json
 COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
+COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
+COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
+COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
+COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
+COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
+COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
@@ -187,6 +195,13 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
+COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
+COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
+COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
+COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
+COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
+COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
 COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
@@ -268,21 +283,35 @@ WORKDIR /src
 COPY package.json bun.lock bunfig.toml ./
 COPY apps/admin/package.json ./apps/admin/package.json
 COPY apps/desktop/package.json ./apps/desktop/package.json
+COPY apps/developer-docs/package.json ./apps/developer-docs/package.json
 COPY apps/marketing/package.json ./apps/marketing/package.json
 COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/cloud-agent-distribution/package.json ./packages/cloud-agent-distribution/package.json
+COPY packages/cloud-agent-protocol/package.json ./packages/cloud-agent-protocol/package.json
+COPY packages/cloud-agent-provider-api/package.json ./packages/cloud-agent-provider-api/package.json
+COPY packages/cloud-agent-provider-claude/package.json ./packages/cloud-agent-provider-claude/package.json
+COPY packages/cloud-agent-provider-codex/package.json ./packages/cloud-agent-provider-codex/package.json
+COPY packages/cloud-agent-runtime/package.json ./packages/cloud-agent-runtime/package.json
+COPY packages/cloud-agent-testkit/package.json ./packages/cloud-agent-testkit/package.json
 COPY packages/control-plane-client/package.json ./packages/control-plane-client/package.json
 COPY packages/enterprise-ui/package.json ./packages/enterprise-ui/package.json
+COPY packages/polaris-sdk/package.json ./packages/polaris-sdk/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
 RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile --filter @synara/provider-host
 COPY apps/provider-host/src ./apps/provider-host/src
-COPY packages/contracts/src ./packages/contracts/src
-COPY packages/shared/src ./packages/shared/src
+COPY packages/cloud-agent-distribution ./packages/cloud-agent-distribution
+COPY packages/cloud-agent-protocol ./packages/cloud-agent-protocol
+COPY packages/cloud-agent-provider-api ./packages/cloud-agent-provider-api
+COPY packages/cloud-agent-provider-claude ./packages/cloud-agent-provider-claude
+COPY packages/cloud-agent-provider-codex ./packages/cloud-agent-provider-codex
+COPY packages/cloud-agent-runtime ./packages/cloud-agent-runtime
+COPY packages/cloud-agent-testkit ./packages/cloud-agent-testkit
 RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs \
   && touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs
 

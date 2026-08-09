@@ -54,6 +54,7 @@
     "stage7:docs:build": "bun run --cwd apps/developer-docs build",
     "stage7:examples:check": "bash -n examples/polaris/curl/quickstart.sh && bun run --cwd packages/polaris-sdk tsc -- -p ../../examples/polaris/typescript/tsconfig.json",
     "stage7:sdk-release:check": "bun run --cwd scripts test lib/polaris-sdk-release.test.ts && PYTHONPATH=scripts python3 -m unittest scripts/test_verify_polaris_sdk_artifacts.py",
+    "cloud-agent:release:smoke": "node scripts/cloud-agent-release-smoke.ts",
     "stage7:developer:check": "bun run stage7:api:lint && bun run stage7:sdk:check && bun run stage7:python-sdk:check && bun run stage7:examples:check && bun run stage7:sdk-release:check && bun run --cwd apps/developer-docs typecheck && bun run --cwd apps/developer-docs test && bun run stage7:docs:build",
     "examples:ci-fix": "bun examples/polaris/typescript/ci-fix-bot.ts",
     "examples:pr-review": "bun examples/polaris/typescript/pr-review-bot.ts",

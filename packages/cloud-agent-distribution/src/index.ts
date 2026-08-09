@@ -7,9 +7,11 @@ import manifest from "../manifest.json";
 export { createCloudAgentStdioClient };
 export const CLOUD_AGENT_DISTRIBUTION_MANIFEST = deepFreeze(manifest);
 
-export function createDefaultCloudAgentRuntime() {
+export function createDefaultCloudAgentRuntime(
+  options: { readonly toolPolicyHookCommand?: string } = {},
+) {
   return createCloudAgentRuntime({
-    providers: [createCodexProvider(), createClaudeProvider()],
+    providers: [createCodexProvider(options), createClaudeProvider()],
   });
 }
 

@@ -1,20 +1,20 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 
-import { codexDeveloperInstructionsForMode } from "@synara/shared/codexCollaborationMode";
+import { codexDeveloperInstructionsForMode } from "./codexCollaborationMode";
 import {
   codexAppServerArgumentsWithToolPolicyHook,
   codexExecutableConfigIsolationArguments,
   CODEX_TOOL_POLICY_THREAD_CONFIG,
   isCodexRuntimeIsolationConfigAttested,
   isCodexToolPolicyHookAttested,
-} from "@synara/shared/codexRuntimeIsolation";
+} from "./codexRuntimeIsolation";
 import {
   classifySensitiveAction,
   mergeSensitiveActionAssessments,
   readCodexFileChangePaths,
   type SensitiveActionAssessment,
-} from "@synara/shared/sensitiveActionPolicy";
+} from "./sensitiveActionPolicy";
 
 import {
   hasAuthoritativeResumeData,
@@ -23,23 +23,19 @@ import {
   type ProviderRunController,
   type RunnerInput,
   type RunnerMessage,
-} from "./providerHost";
-import { providerInteractionRequestId } from "./interactionRequestId";
-import { ProviderInterruptedError } from "./providerRunErrors";
-import {
+  providerInteractionRequestId,
+  ProviderInterruptedError,
   classifyProviderResumeFailure,
   providerResumeFallbackWarning,
-} from "./providerResumeFallback";
-import {
   createTerminalOutputStream,
   terminalCommandSummary,
   terminalCwdLabel,
   terminalResultText,
   type TerminalOutputStream,
   type TerminalRedactor,
-} from "./terminalEvents";
-import { TurnDiffCollector } from "./turnDiffs";
-import { WorkspaceGeneratedFileCollector } from "./workspaceGeneratedFiles";
+  TurnDiffCollector,
+  WorkspaceGeneratedFileCollector,
+} from "@synara/cloud-agent-provider-api/internal";
 
 type JsonRpcId = string | number;
 
@@ -118,7 +114,15 @@ export function isManagedCodexToolPolicyHookAttested(
 export function codexThreadOpenPermissions(
   runtimeMode: RunnerInput["workload"]["runtimeMode"],
   interactive: boolean,
+  textGeneration = false,
 ) {
+  if (textGeneration) {
+    return {
+      approvalPolicy: "never" as const,
+      approvalsReviewer: "user" as const,
+      sandbox: "read-only" as const,
+    };
+  }
   const approvalRequired = interactive && runtimeMode === "approval-required";
   return {
     approvalPolicy: approvalRequired ? ("untrusted" as const) : ("never" as const),
@@ -198,6 +202,7 @@ class CodexAppServerRuntime {
     return {
       result: this.run(),
       interrupt: () => this.interrupt(),
+      forceStop: () => this.forceStop(),
       getResumeCursor: () => this.threadId,
       steer: (payload) => this.steer(payload),
       resolveApproval: (payload) => this.resolveApproval(payload),
@@ -360,6 +365,7 @@ class CodexAppServerRuntime {
     const permissions = codexThreadOpenPermissions(
       this.options.input.workload.runtimeMode,
       this.options.interactive,
+      this.options.operation?.commandType === "GenerateText",
     );
     const common = {
       ...(trimmedString(this.options.input.workload.model)
@@ -527,6 +533,14 @@ class CodexAppServerRuntime {
 
   private handleServerRequest(request: JsonRpcRequest): void {
     if (this.turnSettled || this.completedTurnPendingTerminalDrain) return;
+    if (this.options.operation?.commandType === "GenerateText") {
+      this.writeMessage({
+        id: request.id,
+        error: { code: -32_603, message: "GenerateText does not permit Provider tools." },
+      });
+      this.failRuntime(new Error("Codex attempted to invoke a tool during GenerateText."));
+      return;
+    }
     const params = asRecord(request.params) ?? {};
     const requestId = interactionRequestId(request.id, this.options.input.execution.generation);
     if (
@@ -634,6 +648,14 @@ class CodexAppServerRuntime {
         const item = asRecord(params.item);
         const itemType = readString(item, "type");
         if (!itemType || itemType === "agentMessage" || itemType === "userMessage") return;
+        if (
+          notification.method === "item/started" &&
+          this.options.operation?.commandType === "GenerateText" &&
+          isCodexToolItem(itemType)
+        ) {
+          this.failRuntime(new Error("Codex attempted to invoke a tool during GenerateText."));
+          return;
+        }
         const itemId = readString(item, "id");
         if (itemType === "fileChange" && itemId && item) {
           if (notification.method === "item/started") {
@@ -783,7 +805,7 @@ class CodexAppServerRuntime {
         this.options.emit({
           type: "event",
           eventType: "runtime.usage",
-          payload: { provider: "codex", ...numericFields(usage) },
+          payload: { provider: "codex", compactsAutomatically: true, ...numericFields(usage) },
         });
         return;
       }
@@ -992,6 +1014,12 @@ class CodexAppServerRuntime {
     } else {
       this.failRuntime(new ProviderInterruptedError());
     }
+  }
+
+  private forceStop(): void {
+    if (this.processExited) return;
+    this.interruptRequested = true;
+    this.child.kill("SIGKILL");
   }
 
   private requestNativeInterrupt(): void {
@@ -1336,6 +1364,18 @@ function numericFields(value: Record<string, unknown>): Record<string, number> {
 function isCommandExecutionItem(itemType: string): boolean {
   const normalized = itemType.replaceAll(/[^a-z0-9]/giu, "").toLowerCase();
   return normalized.includes("command") || normalized === "bash" || normalized === "shell";
+}
+
+function isCodexToolItem(itemType: string): boolean {
+  const normalized = itemType.replaceAll(/[^a-z0-9]/giu, "").toLowerCase();
+  return ![
+    "agentmessage",
+    "usermessage",
+    "reasoning",
+    "contextcompaction",
+    "enteredreviewmode",
+    "exitedreviewmode",
+  ].includes(normalized);
 }
 
 function codexTerminalOutput(item: Record<string, unknown> | undefined): string {

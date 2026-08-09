@@ -1,10 +1,7 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 
-import { startClaudeAgentSdkRun, type ClaudeQueryFactory } from "./claudeAgentSdkRuntime";
-import { startCodexAppServerRun } from "./codexAppServerRuntime";
-import { requireProviderOuterSandboxProfile } from "./providerOuterSandbox";
 import type { TerminalRedactor } from "./terminalEvents";
 
 export type RunnerInput = {
@@ -115,6 +112,8 @@ export type RunnerMessage =
 export type ProviderRunController = {
   result: Promise<Extract<RunnerMessage, { type: "result" }>>;
   interrupt: () => void;
+  /** Immediately tears down the provider runtime after graceful interruption times out. */
+  forceStop?: () => void;
   getResumeCursor?: () => string | undefined;
   steer?: (payload: Record<string, unknown>) => void | Promise<void>;
   resolveApproval?: (payload: Record<string, unknown>) => void | Promise<void>;
@@ -123,12 +122,16 @@ export type ProviderRunController = {
 
 export type ProviderRunOptions = {
   interactive?: boolean;
-  claudeQueryFactory?: ClaudeQueryFactory;
   environment?: NodeJS.ProcessEnv;
   operation?: ProviderPrimaryOperation;
-  /** Exact immutable Host command used by the controlled Codex tool-policy hook. */
-  codexToolPolicyHookCommand?: string;
 };
+
+export type ProviderRunExecutor = (
+  input: RunnerInput,
+  credential: RunnerCredential | null,
+  emit: (message: RunnerMessage) => void,
+  options?: ProviderRunOptions,
+) => ProviderRunController;
 
 export type ProviderReviewTarget =
   | { type: "uncommittedChanges" }
@@ -136,6 +139,7 @@ export type ProviderReviewTarget =
 
 export type ProviderPrimaryOperation =
   | { commandType: "CompactSession"; payload: Record<string, unknown> }
+  | { commandType: "GenerateText"; payload: Record<string, unknown> }
   | {
       commandType: "StartReview";
       payload: Record<string, unknown> & { target: ProviderReviewTarget };
@@ -235,14 +239,15 @@ export function readRunnerCredential(environment: NodeJS.ProcessEnv): RunnerCred
 
 export function providerEnvironment(
   source: NodeJS.ProcessEnv,
-  provider: string,
   credential: RunnerCredential | null,
+  applyCredential?: (environment: NodeJS.ProcessEnv, payload: Record<string, unknown>) => void,
 ): { environment: NodeJS.ProcessEnv; redact: TerminalRedactor } {
   const environment = selectProviderProcessEnvironment(source);
 
   const secrets = credential ? collectSecretStrings(credential.payload) : [];
   if (credential) {
-    applyCredentialEnvironment(environment, provider, credential.payload);
+    if (!applyCredential) throw new Error("Provider Credential injection is not configured.");
+    applyCredential(environment, credential.payload);
     if (providerCredentialUsesLoopbackBroker(credential.payload)) {
       environment.NO_PROXY = mergeNoProxyLoopback(environment.NO_PROXY);
     }
@@ -306,7 +311,7 @@ function selectProviderProcessEnvironment(source: NodeJS.ProcessEnv): NodeJS.Pro
   for (const config of CONTROLLED_PROVIDER_PACKAGE_ENVIRONMENT) {
     const value = values.get(config.source);
     if (value === undefined) continue;
-    if (/[\r\n\0]/u.test(value) || !isAbsolute(value)) {
+    if (containsLineControl(value) || !isAbsolute(value)) {
       throw new Error(`${config.source} is invalid`);
     }
     environment[config.target] = value;
@@ -322,7 +327,7 @@ function normalizeProviderProxy(
   const normalized = value.trim();
   if (!normalized) return "";
   if (
-    /[\r\n\t\0]/u.test(value) ||
+    containsLineControl(value, true) ||
     !/^[a-z][a-z\d+.-]*:\/\//iu.test(normalized) ||
     normalized.includes("?") ||
     normalized.includes("#")
@@ -359,8 +364,25 @@ function normalizeProviderProxy(
   return normalized;
 }
 
+function containsLineControl(value: string, includeTab = false): boolean {
+  return (
+    value.includes("\r") ||
+    value.includes("\n") ||
+    value.includes("\u0000") ||
+    (includeTab && value.includes("\t"))
+  );
+}
+
 function validProviderProxyHostname(value: string): boolean {
-  if (!value || value.length > 253 || /[\s\p{Cc}/\\@?#\[\]]/u.test(value)) return false;
+  if (
+    !value ||
+    value.length > 253 ||
+    Array.from(value).some(
+      (character) => /[\s\p{Cc}]/u.test(character) || "/\\@?#[]".includes(character),
+    )
+  ) {
+    return false;
+  }
   if (isIP(value) !== 0) return true;
   for (const label of value.toLowerCase().split(".")) {
     if (!/^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/u.test(label)) return false;
@@ -375,7 +397,7 @@ function normalizeProviderNoProxy(value: string, name: string): string {
   if (
     entries.length > 64 ||
     entries.some(
-      (entry) => !entry || entry === "*" || entry.length > 253 || /[\r\n\t\0]/u.test(entry),
+      (entry) => !entry || entry === "*" || entry.length > 253 || containsLineControl(entry, true),
     )
   ) {
     throw new Error(`${name} contains an invalid entry`);
@@ -383,41 +405,8 @@ function normalizeProviderNoProxy(value: string, name: string): string {
   return entries.join(",");
 }
 
-function applyCredentialEnvironment(
-  environment: NodeJS.ProcessEnv,
-  provider: string,
-  payload: Record<string, unknown>,
-): void {
-  const normalized = provider.trim().toLowerCase();
-  if (normalized === "codex") {
-    assertOnlyKeys(payload, ["apiKey", "baseUrl", "organization"]);
-    environment.OPENAI_API_KEY = requiredString(payload.apiKey, "Codex Credential apiKey");
-    assignOptional(environment, "OPENAI_BASE_URL", payload.baseUrl, "Codex Credential baseUrl");
-    assignOptional(
-      environment,
-      "OPENAI_ORGANIZATION",
-      payload.organization,
-      "Codex Credential organization",
-    );
-    return;
-  }
-  if (normalized === "claude" || normalized === "claudeagent") {
-    assertOnlyKeys(payload, ["apiKey", "authToken", "baseUrl"]);
-    const apiKey = optionalString(payload.apiKey, "Claude Credential apiKey");
-    const authToken = optionalString(payload.authToken, "Claude Credential authToken");
-    if ((apiKey ? 1 : 0) + (authToken ? 1 : 0) !== 1) {
-      throw new Error("Claude Credential requires exactly one of apiKey or authToken");
-    }
-    if (apiKey) environment.ANTHROPIC_API_KEY = apiKey;
-    if (authToken) environment.ANTHROPIC_AUTH_TOKEN = authToken;
-    assignOptional(environment, "ANTHROPIC_BASE_URL", payload.baseUrl, "Claude Credential baseUrl");
-    return;
-  }
-  throw new Error(`Provider Credential injection is not supported for provider ${provider}`);
-}
-
 export function createRedactor(secrets: ReadonlyArray<string>): TerminalRedactor {
-  const values = [...new Set(secrets.filter((value) => value.length >= 4))].sort(
+  const values = [...new Set(secrets.filter((value) => value.length >= 4))].toSorted(
     (left, right) => right.length - left.length,
   );
   const redact: TerminalRedactor = (value) => {
@@ -427,143 +416,6 @@ export function createRedactor(secrets: ReadonlyArray<string>): TerminalRedactor
   };
   Object.defineProperty(redact, "secretValues", { value: values });
   return redact;
-}
-
-export async function runProviderHost(
-  input: RunnerInput,
-  credential: RunnerCredential | null,
-  emit: (message: RunnerMessage) => void,
-  options: ProviderRunOptions = {},
-): Promise<void> {
-  const run = startProviderHostRun(input, credential, emit, {
-    ...options,
-    interactive: false,
-  });
-  emit(await run.result);
-}
-
-export function startProviderHostRun(
-  input: RunnerInput,
-  credential: RunnerCredential | null,
-  emit: (message: RunnerMessage) => void,
-  options: ProviderRunOptions = {},
-): ProviderRunController {
-  validateRunnerInput(input, { allowEmptyInputText: options.operation !== undefined });
-  requireProviderOuterSandboxProfile(options.environment ?? process.env);
-  const normalizedProvider = input.workload.provider.trim().toLowerCase();
-  const { environment, redact } = providerEnvironment(
-    options.environment ?? process.env,
-    normalizedProvider,
-    credential,
-  );
-  if (normalizedProvider === "codex" && credential) {
-    const runtimeOutputDirectory = optionalString(
-      input.runtimeOutputDirectory,
-      "Codex Credential runtimeOutputDirectory",
-    );
-    const providerStateDirectory =
-      optionalString(input.providerStateDirectory, "Codex Credential providerStateDirectory") ??
-      runtimeOutputDirectory;
-    if (!providerStateDirectory) {
-      throw new Error(
-        "Codex Credential requires an agentd-owned providerStateDirectory or runtimeOutputDirectory for isolated CODEX_HOME.",
-      );
-    }
-    environment.CODEX_HOME = writeControlledCodexConfig(providerStateDirectory, environment);
-    if (!options.codexToolPolicyHookCommand) {
-      throw new Error(
-        "Codex Credential requires the immutable Provider Host tool-policy hook command.",
-      );
-    }
-  }
-  const hasDurableHistory = hasAuthoritativeResumeData(input.workload, input.memoryDocuments);
-  const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
-  const nativeResumePrompt = nativeResumeContinuationPrompt(input) ?? input.workload.inputText;
-  const interactive = options.interactive ?? true;
-  if (normalizedProvider === "codex") {
-    return startCodexAppServerRun({
-      input,
-      environment,
-      redact,
-      emit,
-      authoritativePrompt: prompt,
-      nativeResumePrompt,
-      interactive,
-      ...(options.codexToolPolicyHookCommand
-        ? {
-            toolPolicyHookCommand: options.codexToolPolicyHookCommand,
-          }
-        : {}),
-      ...(options.operation ? { operation: options.operation } : {}),
-    });
-  }
-  if (normalizedProvider === "claude" || normalizedProvider === "claudeagent") {
-    return startClaudeAgentSdkRun({
-      input,
-      environment,
-      usesAmbientAuthentication: credential === null,
-      redact,
-      emit,
-      authoritativePrompt: prompt,
-      nativeResumePrompt,
-      interactive,
-      ...(options.operation ? { operation: options.operation } : {}),
-      ...(options.claudeQueryFactory ? { queryFactory: options.claudeQueryFactory } : {}),
-    });
-  }
-  throw new Error(`Unsupported provider ${input.workload.provider}`);
-}
-
-function writeControlledCodexConfig(
-  runtimeOutputDirectory: string,
-  environment: NodeJS.ProcessEnv,
-): string {
-  const apiKey = requiredString(environment.OPENAI_API_KEY, "Codex Credential apiKey");
-  const baseUrl = controlledCodexBaseUrl(environment.OPENAI_BASE_URL);
-  const codexHome = join(runtimeOutputDirectory, "codex-home");
-  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-  chmodSync(codexHome, 0o700);
-  const config = [
-    'model_provider = "synara_controlled"',
-    "",
-    "[model_providers.synara_controlled]",
-    'name = "Synara controlled Credential"',
-    `base_url = ${JSON.stringify(baseUrl)}`,
-    'env_key = "OPENAI_API_KEY"',
-    'wire_api = "responses"',
-    "requires_openai_auth = false",
-    "",
-  ].join("\n");
-  const temporaryPath = join(codexHome, "config.toml.tmp");
-  const configPath = join(codexHome, "config.toml");
-  writeFileSync(temporaryPath, config, { encoding: "utf8", mode: 0o600 });
-  chmodSync(temporaryPath, 0o600);
-  renameSync(temporaryPath, configPath);
-  chmodSync(configPath, 0o600);
-  environment.OPENAI_API_KEY = apiKey;
-  return codexHome;
-}
-
-function controlledCodexBaseUrl(value: string | undefined): string {
-  const candidate = value?.trim() || "https://api.openai.com/v1";
-  if (candidate.length > 2_048 || /[\r\n\0]/u.test(candidate)) {
-    throw new Error("Codex Credential baseUrl is invalid");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    throw new Error("Codex Credential baseUrl must be an absolute HTTP(S) URL");
-  }
-  if (
-    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
-    parsed.username ||
-    parsed.password ||
-    parsed.hash
-  ) {
-    throw new Error("Codex Credential baseUrl must use HTTP(S) without userinfo or a fragment");
-  }
-  return candidate.replace(/\/+$/u, "");
 }
 
 export function hasAuthoritativeResumeData(
@@ -793,7 +645,7 @@ export function validateRunnerInput(
     input.runtimeOutputDirectory !== undefined &&
     (typeof input.runtimeOutputDirectory !== "string" ||
       input.runtimeOutputDirectory.trim() === "" ||
-      /[\r\n\0]/u.test(input.runtimeOutputDirectory) ||
+      containsLineControl(input.runtimeOutputDirectory) ||
       !isAbsolute(input.runtimeOutputDirectory))
   ) {
     throw new Error("runtimeOutputDirectory must be an absolute path without control characters");
@@ -802,7 +654,7 @@ export function validateRunnerInput(
     input.providerStateDirectory !== undefined &&
     (typeof input.providerStateDirectory !== "string" ||
       input.providerStateDirectory.trim() === "" ||
-      /[\r\n\0]/u.test(input.providerStateDirectory) ||
+      containsLineControl(input.providerStateDirectory) ||
       !isAbsolute(input.providerStateDirectory))
   ) {
     throw new Error("providerStateDirectory must be an absolute path without control characters");
@@ -889,40 +741,6 @@ function validateMemoryDocuments(documents: RunnerInput["memoryDocuments"]): voi
     totalBytes += bytes;
     if (totalBytes > 1024 * 1024) throw new Error("memoryDocuments exceed the total size limit");
   }
-}
-
-function assertOnlyKeys(payload: Record<string, unknown>, allowed: ReadonlyArray<string>): void {
-  const allowedSet = new Set(allowed);
-  const unsupported = Object.keys(payload).filter((key) => !allowedSet.has(key));
-  if (unsupported.length > 0) {
-    throw new Error(
-      `Provider Credential contains unsupported fields: ${unsupported.sort().join(", ")}`,
-    );
-  }
-}
-
-function requiredString(value: unknown, label: string): string {
-  const normalized = optionalString(value, label);
-  if (!normalized) throw new Error(`${label} is required`);
-  return normalized;
-}
-
-function optionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || value.trim() === "" || /[\r\n\0]/u.test(value)) {
-    throw new Error(`${label} is invalid`);
-  }
-  return value.trim();
-}
-
-function assignOptional(
-  environment: NodeJS.ProcessEnv,
-  name: string,
-  value: unknown,
-  label: string,
-): void {
-  const normalized = optionalString(value, label);
-  if (normalized) environment[name] = normalized;
 }
 
 function collectSecretStrings(value: unknown): string[] {

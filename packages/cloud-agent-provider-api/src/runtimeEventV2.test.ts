@@ -1,4 +1,4 @@
-import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
+import { CLOUD_AGENT_RUNTIME_EVENT_VERSION } from "@synara/cloud-agent-protocol";
 import { describe, expect, it } from "vitest";
 
 import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
@@ -12,7 +12,7 @@ describe("Runtime Event v2 normalization", () => {
         payload: { text: "hello" },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "content.delta",
       payload: { streamKind: "assistant_text", delta: "hello" },
     });
@@ -32,7 +32,7 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "item.completed",
       payload: {
         itemType: "command_execution",
@@ -67,7 +67,7 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "item.completed",
       payload: {
         itemType: "command_execution",
@@ -107,7 +107,7 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "content.delta",
       payload: {
         streamKind: "command_output",
@@ -133,7 +133,7 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "thread.token-usage.updated",
       payload: {
         usage: {
@@ -169,7 +169,7 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "item.completed",
       payload: {
         itemType,
@@ -196,7 +196,7 @@ describe("Runtime Event v2 normalization", () => {
         payload: {
           provider: "codex",
           message:
-            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+            "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
           kind: "session_resume",
           attemptedStrategy: "native-cursor",
           selectedStrategy: "authoritative-history",
@@ -210,11 +210,11 @@ describe("Runtime Event v2 normalization", () => {
         },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "runtime.warning",
       payload: {
         message:
-          "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+          "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
         detail: {
           provider: "codex",
           kind: "session_resume",
@@ -237,7 +237,7 @@ describe("Runtime Event v2 normalization", () => {
         payload: { message: "already canonical" },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "runtime.warning",
       payload: { message: "already canonical" },
     });
@@ -249,7 +249,7 @@ describe("Runtime Event v2 normalization", () => {
         payload: { token: "must-not-cross-the-wire" },
       }),
     ).toEqual({
-      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
       eventType: "runtime.warning",
       payload: {
         message: "Provider Host ignored an unsupported internal runtime event.",

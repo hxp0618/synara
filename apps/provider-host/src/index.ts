@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-import "@synara/cloud-agent-runtime/stdio";
+import "@synara/cloud-agent-distribution/stdio";

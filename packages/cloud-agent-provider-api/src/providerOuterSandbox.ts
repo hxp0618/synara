@@ -17,6 +17,6 @@ export function requireProviderOuterSandboxProfile(
     return value as ProviderOuterSandboxProfile;
   }
   throw new Error(
-    "Provider execution refused: agentd did not attest an allowed outer sandbox profile.",
+    "Provider execution refused: the host did not supply an allowed outer sandbox or explicit local trust profile.",
   );
 }

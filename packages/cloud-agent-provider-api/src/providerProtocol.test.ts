@@ -1,13 +1,11 @@
-import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
 import {
-  PROVIDER_CAPABILITY_CATALOG,
-  PROVIDER_CAPABILITY_IDS,
-  PROVIDER_HOST_PROTOCOL_VERSION,
-  PROVIDER_HOST_PROVIDER_KINDS,
-  type ProviderHostCommandEnvelope,
-  type ProviderHostMessageEnvelope,
-  type ProviderHostProviderKind,
-} from "@synara/contracts/provider-host";
+  CLOUD_AGENT_RUNTIME_EVENT_VERSION,
+  CLOUD_AGENT_PROVIDER_CAPABILITY_CATALOG as PROVIDER_CAPABILITY_CATALOG,
+  CLOUD_AGENT_CAPABILITY_IDS as PROVIDER_CAPABILITY_IDS,
+  CLOUD_AGENT_PROTOCOL_VERSION as PROVIDER_HOST_PROTOCOL_VERSION,
+  type CloudAgentCommandEnvelope as ProviderHostCommandEnvelope,
+  type CloudAgentMessageEnvelope as ProviderHostMessageEnvelope,
+} from "@synara/cloud-agent-protocol";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
@@ -17,10 +15,15 @@ import {
   createProviderHostProtocolHandler,
   providerHostDescriptor,
   runProviderHostProtocolV2,
-  type CodexVersionProbeResult,
-} from "./protocol";
-import type { ProviderRunController, RunnerInput, RunnerMessage } from "./providerHost";
+  type ProviderVersionProbeResult,
+} from "./providerProtocol";
+import type { ProviderRunController, RunnerInput, RunnerMessage } from "./internalExecution";
 import { ProviderInterruptedError } from "./providerRunErrors";
+
+type ProviderHostProviderKind = string;
+const PROVIDER_HOST_PROVIDER_KINDS = PROVIDER_CAPABILITY_CATALOG.providers.map(
+  (entry) => entry.provider,
+);
 
 function command(
   commandType: ProviderHostCommandEnvelope["commandType"],
@@ -75,17 +78,17 @@ describe("Provider Host Protocol v2", () => {
   it("keeps Experimental Providers disabled by default and separates Local-only policy", () => {
     const codexDisabled = providerHostDescriptor("codex", {
       environment: {},
-      codexVersionProbe: compatibleCodexProbe,
+      runtimeVersionProbe: compatibleCodexProbe,
     });
     const claudeDisabled = providerHostDescriptor("claudeAgent", { environment: {} });
     const codexEnabled = providerHostDescriptor("codex", {
       environment: {
         SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: " codex, claudeAgent ",
       },
-      codexVersionProbe: compatibleCodexProbe,
+      runtimeVersionProbe: compatibleCodexProbe,
     });
     const claudeEnabled = providerHostDescriptor("claudeAgent", {
-      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "claude" },
+      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "claudeAgent" },
     });
     const cursor = providerHostDescriptor("cursor", {
       environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "cursor" },
@@ -108,7 +111,8 @@ describe("Provider Host Protocol v2", () => {
     const codex = enabledDescriptorForProvider("codex");
     const claude = providerHostDescriptor("claudeAgent", {
       environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "claudeAgent" },
-      codexVersionProbe: () => {
+      runtimeVersion: "0.3.207",
+      runtimeVersionProbe: () => {
         throw new Error("Claude descriptor must not execute the Codex or Claude CLI probe.");
       },
     });
@@ -136,8 +140,8 @@ describe("Provider Host Protocol v2", () => {
       compatible: true,
     });
     expect(codex.runtimeEventVersions).toEqual({
-      minimum: PROVIDER_RUNTIME_EVENT_VERSION,
-      maximum: PROVIDER_RUNTIME_EVENT_VERSION,
+      minimum: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
+      maximum: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
     });
   });
 
@@ -197,7 +201,7 @@ describe("Provider Host Protocol v2", () => {
       descriptorForProvider: (provider) =>
         providerHostDescriptor(provider, {
           environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "cursor" },
-          codexVersionProbe: compatibleCodexProbe,
+          runtimeVersionProbe: compatibleCodexProbe,
         }),
     });
     const result = await handle(
@@ -217,7 +221,7 @@ describe("Provider Host Protocol v2", () => {
     }
   });
 
-  it("normalizes the legacy Gemini Provider name to Antigravity before rejection", async () => {
+  it("preserves an open Provider slug before generic descriptor rejection", async () => {
     let describedProvider: ProviderHostProviderKind | null = null;
     const handle = createProviderHostProtocolHandler({
       credential: null,
@@ -238,8 +242,8 @@ describe("Provider Host Protocol v2", () => {
       }),
     );
 
-    expect(describedProvider).toBe("antigravity");
-    expect(errorCode(result)).toBe("capability_unsupported");
+    expect(describedProvider).toBe("gemini");
+    expect(errorCode(result)).toBe("provider_unavailable");
   });
 
   it.each(["StartSession", "ResumeSession"] as const)(
@@ -251,7 +255,7 @@ describe("Provider Host Protocol v2", () => {
         descriptorForProvider: (provider) =>
           providerHostDescriptor(provider, {
             environment: {},
-            codexVersionProbe: compatibleCodexProbe,
+            runtimeVersionProbe: compatibleCodexProbe,
           }),
       });
       const result = await handle(
@@ -271,6 +275,13 @@ describe("Provider Host Protocol v2", () => {
       credential: null,
       emit: () => {},
       descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () => ({
+        result: Promise.resolve({
+          type: "result",
+          output: { provider: "claudeAgent", text: "ok" },
+        }),
+        interrupt: () => undefined,
+      }),
     });
 
     const result = await handle(
@@ -528,7 +539,12 @@ describe("Provider Host Protocol v2", () => {
     expect(await stop).toEqual([
       expect.objectContaining({
         messageType: "Result",
-        payload: { stopped: true, quiesced: true },
+        payload: expect.objectContaining({
+          stopped: true,
+          outcome: "quiesced",
+          quiesced: true,
+          graceful: true,
+        }),
       }),
     ]);
 
@@ -781,12 +797,14 @@ describe("Provider Host Protocol v2", () => {
 
   it("runs Protocol 2.3 GenerateText in an isolated Provider execution", async () => {
     let observedInput: unknown;
+    let observedOptions: unknown;
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: () => {},
       descriptorForProvider: enabledDescriptorForProvider,
-      startRun: (input) => {
+      startRun: (input, _credential, _emit, options) => {
         observedInput = input;
+        observedOptions = options;
         return {
           result: Promise.resolve({
             type: "result",
@@ -821,11 +839,130 @@ describe("Provider Host Protocol v2", () => {
       },
     });
     expect(observedInput).not.toHaveProperty("providerResumeCursor");
+    expect(observedOptions).toEqual({
+      interactive: false,
+      operation: {
+        commandType: "GenerateText",
+        payload: {
+          task: "thread-title",
+          model: "gpt-test",
+          input: { message: "Design portable Cloud Agents" },
+        },
+      },
+    });
     expect(result.at(-1)).toMatchObject({
       messageType: "Result",
       payload: {
         result: { task: "thread-title", title: "Portable agents" },
       },
+    });
+  });
+
+  it("tracks GenerateText as an active operation and StopSession interrupts it before quiescing", async () => {
+    let rejectGeneration: ((error: Error) => void) | undefined;
+    let interrupts = 0;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () => ({
+        result: new Promise((_, reject) => {
+          rejectGeneration = reject;
+        }),
+        interrupt: () => {
+          interrupts += 1;
+          rejectGeneration?.(new ProviderInterruptedError());
+        },
+      }),
+    });
+    await handle(
+      command("StartSession", { runnerInput: remoteRunnerInput() }, "session-generate-stop"),
+    );
+    const generation = handle(
+      command(
+        "GenerateText",
+        { task: "branch-name", input: { message: "Long metadata generation" } },
+        "generate-stop",
+      ),
+    );
+
+    const stop = await handle(command("StopSession", {}, "stop-generation"));
+
+    expect(interrupts).toBe(1);
+    expect((await generation).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "interrupted" },
+    });
+    expect(stop.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { outcome: "quiesced", quiesced: true, graceful: true },
+    });
+  });
+
+  it.each([
+    {
+      name: "timed-out",
+      forceStop: undefined,
+      expected: "timed-out",
+    },
+    {
+      name: "failed",
+      forceStop: () => {
+        throw new Error("forced teardown failed");
+      },
+      expected: "failed",
+    },
+  ])("reports a stable $name StopSession outcome", async ({ forceStop, expected }) => {
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      stopQuiesceTimeoutMs: 1,
+      stopForceTimeoutMs: 1,
+      startRun: () => ({
+        result: new Promise(() => {}),
+        interrupt: () => {},
+        ...(forceStop ? { forceStop } : {}),
+      }),
+    });
+    await handle(
+      command("StartSession", { runnerInput: remoteRunnerInput() }, `session-${expected}`),
+    );
+    void handle(command("SendTurn", { inputText: "hang" }, `turn-${expected}`));
+
+    const stop = await handle(command("StopSession", {}, `stop-${expected}`));
+
+    expect(stop.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { outcome: expected, quiesced: false, graceful: false },
+    });
+  });
+
+  it("reports forced only after forced teardown reaches the operation terminal", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      stopQuiesceTimeoutMs: 1,
+      stopForceTimeoutMs: 25,
+      startRun: () => ({
+        result: new Promise((_, reject) => {
+          rejectRun = reject;
+        }),
+        interrupt: () => {},
+        forceStop: () => rejectRun?.(new ProviderInterruptedError()),
+      }),
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-forced"));
+    const turn = handle(command("SendTurn", { inputText: "hang" }, "turn-forced"));
+
+    const stop = await handle(command("StopSession", {}, "stop-forced"));
+
+    await turn;
+    expect(stop.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { outcome: "forced", quiesced: false, graceful: false },
     });
   });
 
@@ -912,6 +1049,13 @@ describe("Provider Host Protocol v2", () => {
       credential: null,
       emit: () => {},
       descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () => ({
+        result: Promise.resolve({
+          type: "result",
+          output: { provider: "claudeAgent", text: "ok" },
+        }),
+        interrupt: () => undefined,
+      }),
     });
     const claudeInput = {
       ...remoteRunnerInput(),
@@ -961,7 +1105,7 @@ describe("Provider Host Protocol v2", () => {
         commandId: "send-events",
         messageType: "Event",
         payload: {
-          eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+          eventVersion: CLOUD_AGENT_RUNTIME_EVENT_VERSION,
           eventType: "content.delta",
           payload: { streamKind: "assistant_text", delta: "canonical" },
         },
@@ -1230,7 +1374,7 @@ describe("Provider Host Protocol v2", () => {
   });
 });
 
-function compatibleCodexProbe(): CodexVersionProbeResult {
+function compatibleCodexProbe(): ProviderVersionProbeResult {
   return { available: true, output: "codex-cli 0.145.0" };
 }
 
@@ -1239,15 +1383,16 @@ function enabledDescriptorForProvider(provider: ProviderHostProviderKind) {
     environment: {
       SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "codex,claudeAgent",
     },
-    codexVersionProbe: compatibleCodexProbe,
+    runtimeVersionProbe: compatibleCodexProbe,
+    runtimeVersion: "0.3.207",
   });
 }
 
-function codexDescriptorFactory(probe: CodexVersionProbeResult) {
+function codexDescriptorFactory(probe: ProviderVersionProbeResult) {
   return (provider: ProviderHostProviderKind) =>
     providerHostDescriptor(provider, {
       environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "codex" },
-      codexVersionProbe: () => probe,
+      runtimeVersionProbe: () => probe,
     });
 }
 

@@ -33,18 +33,6 @@
       "development": "./src/index.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
-    },
-    "./legacy-provider-host": {
-      "types": "./src/legacyProviderHost.ts",
-      "bun": "./src/legacyProviderHost.ts",
-      "development": "./src/legacyProviderHost.ts",
-      "import": "./dist/legacyProviderHost.mjs",
-      "require": "./dist/legacyProviderHost.cjs"
-    },
-    "./stdio": {
-      "bun": "./src/stdio.ts",
-      "development": "./src/stdio.ts",
-      "import": "./dist/stdio.mjs"
     }
   },
   "publishConfig": {
@@ -52,23 +40,19 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/legacyProviderHost.ts --format esm,cjs --dts --clean && bun build src/stdio.ts --target=node --outfile=dist/stdio.mjs",
+    "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.207",
-    "@synara/cloud-agent-protocol": "workspace:*",
-    "@synara/cloud-agent-provider-api": "workspace:*",
-    "@synara/contracts": "workspace:*",
-    "@synara/shared": "workspace:*",
-    "effect": "catalog:"
+    "@synara/cloud-agent-protocol": "0.1.0",
+    "@synara/cloud-agent-provider-api": "0.1.0"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "tsdown": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "catalog:"
+    "@types/node": "^24.10.13",
+    "tsdown": "^0.20.3",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=24.13.1 <25"

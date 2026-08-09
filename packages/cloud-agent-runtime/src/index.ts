@@ -4,3 +4,4 @@ export {
   type CloudAgentStdioClient,
   type CloudAgentStdioClientOptions,
 } from "./stdioClient";
+export { runCloudAgentRuntimeStdio, type CloudAgentRuntimeStdioOptions } from "./runtimeStdio";

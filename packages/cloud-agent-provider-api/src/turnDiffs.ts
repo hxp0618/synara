@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { RunnerMessage } from "./providerHost";
+import type { RunnerMessage } from "./internalExecution";
 
 const DIFF_CONTENT_TYPE = "text/x-diff; charset=utf-8";
 const INLINE_DIFF_MAX_BYTES = 48 * 1024;

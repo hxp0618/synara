@@ -13,8 +13,13 @@ import type {
   CloudAgentHostServices,
 } from "@synara/cloud-agent-provider-api";
 
-import { createLegacyProviderPlugin, type LegacyProviderPluginOptions } from "./providerPlugin";
-import type { ProviderRunController, RunnerInput, RunnerMessage } from "./providerHost";
+import { createProviderPlugin, type ProviderPluginOptions } from "./providerPlugin";
+import type {
+  ProviderRunController,
+  ProviderRunExecutor,
+  RunnerInput,
+  RunnerMessage,
+} from "./internalExecution";
 
 const host: CloudAgentHostServices = {
   workspace: {
@@ -32,9 +37,13 @@ const host: CloudAgentHostServices = {
   },
 };
 
-describe("createLegacyProviderPlugin", () => {
+describe("createProviderPlugin", () => {
   it("adapts Describe through the app-neutral Provider Plugin ABI", async () => {
-    const plugin = createLegacyProviderPlugin({ providerKind: "codex", displayName: "Codex" });
+    const plugin = createProviderPlugin({
+      providerKind: "codex",
+      displayName: "Codex",
+      startRun: unavailableExecutor,
+    });
     const session = await createSession(plugin, host);
     const terminal = await session.execute(command("Describe", { provider: "codex" }));
 
@@ -48,7 +57,11 @@ describe("createLegacyProviderPlugin", () => {
   });
 
   it("does not let one provider package execute another provider kind", async () => {
-    const plugin = createLegacyProviderPlugin({ providerKind: "codex", displayName: "Codex" });
+    const plugin = createProviderPlugin({
+      providerKind: "codex",
+      displayName: "Codex",
+      startRun: unavailableExecutor,
+    });
     const session = await createSession(plugin, host);
     await expect(
       session.execute(command("Describe", { provider: "claudeAgent" }, "command-other")),
@@ -67,7 +80,11 @@ describe("createLegacyProviderPlugin", () => {
         disposals += 1;
       },
     };
-    const plugin = createLegacyProviderPlugin({ providerKind: "codex", displayName: "Codex" });
+    const plugin = createProviderPlugin({
+      providerKind: "codex",
+      displayName: "Codex",
+      startRun: unavailableExecutor,
+    });
 
     await expect(
       createSession(plugin, {
@@ -241,6 +258,93 @@ describe("createLegacyProviderPlugin", () => {
     await expect(iterator.next()).resolves.toEqual({ value: undefined, done: true });
   });
 
+  it("bounds close when an interrupted Provider command never settles", async () => {
+    const warnings: string[] = [];
+    const plugin = testPlugin({
+      startRun: () => ({
+        result: new Promise(() => undefined),
+        interrupt: () => undefined,
+      }),
+      stopQuiesceTimeoutMs: 5,
+      stopForceTimeoutMs: 5,
+      closeTaskTimeoutMs: 5,
+    });
+    const session = await createSession(plugin, {
+      ...host,
+      log: { ...host.log, warn: (message) => warnings.push(message) },
+    });
+    await session.execute(command("StartSession", { runnerInput: runnerInput() }, "start-hung"));
+    const execution = session.execute(
+      command("SendTurn", { inputText: "never settles" }, "send-hung"),
+    );
+    void execution.catch(() => undefined);
+
+    const firstClose = session.close("bounded");
+    expect(session.close("shared")).toBe(firstClose);
+    await firstClose;
+
+    expect(warnings).toContain(
+      "Cloud Agent Provider close timed out waiting for background tasks; late output was suppressed.",
+    );
+  });
+
+  it("aborts and bounds a hung Artifact acceptance before releasing the credential lease", async () => {
+    const credential = testCredentialLease();
+    const warnings: string[] = [];
+    let artifactAborted = false;
+    let disposals = 0;
+    const plugin = testPlugin({
+      startRun: (_input, _credential, emit) => {
+        emit({
+          type: "artifact",
+          artifact: {
+            path: "hung.txt",
+            kind: "generated-file",
+            contentType: "text/plain",
+            sourceRoot: "workspace",
+          },
+        });
+        return completedRun("artifact emitted");
+      },
+      closeTaskTimeoutMs: 5,
+    });
+    try {
+      const session = await createSession(plugin, {
+        ...host,
+        credential: {
+          acquire: async () => ({
+            ...credential.lease,
+            async [Symbol.asyncDispose]() {
+              disposals += 1;
+            },
+          }),
+        },
+        log: { ...host.log, warn: (message) => warnings.push(message) },
+        acceptArtifact: async (_artifact, signal) => {
+          signal?.addEventListener("abort", () => {
+            artifactAborted = true;
+          });
+          return await new Promise<void>(() => undefined);
+        },
+      });
+      await session.execute(
+        command("StartSession", { runnerInput: runnerInput() }, "start-hung-artifact"),
+      );
+      await session.execute(
+        command("SendTurn", { inputText: "emit artifact" }, "send-hung-artifact"),
+      );
+
+      await session.close();
+      expect(artifactAborted).toBe(true);
+      expect(disposals).toBe(1);
+      expect(warnings).toContain(
+        "Cloud Agent Provider close timed out waiting for background tasks; late output was suppressed.",
+      );
+    } finally {
+      credential.cleanup();
+    }
+  });
+
   it("preserves the terminal receipt when progress exceeds the bounded event queue", async () => {
     const warnings: string[] = [];
     const plugin = testPlugin({
@@ -365,20 +469,32 @@ describe("createLegacyProviderPlugin", () => {
   });
 });
 
-function testPlugin(overrides: Pick<LegacyProviderPluginOptions, "startRun"> = {}) {
-  return createLegacyProviderPlugin({
+type TestPluginOverrides = Pick<ProviderPluginOptions, "startRun"> &
+  Partial<
+    Pick<
+      ProviderPluginOptions,
+      "stopQuiesceTimeoutMs" | "stopForceTimeoutMs" | "closeTaskTimeoutMs"
+    >
+  >;
+
+function testPlugin(overrides: TestPluginOverrides = { startRun: unavailableExecutor }) {
+  return createProviderPlugin({
     providerKind: "codex",
     displayName: "Codex",
     descriptor: {
       environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "codex" },
-      codexVersionProbe: () => ({ available: true, output: "codex-cli 0.145.0" }),
+      runtimeVersionProbe: () => ({ available: true, output: "codex-cli 0.145.0" }),
     },
     ...overrides,
   });
 }
 
+const unavailableExecutor: ProviderRunExecutor = () => {
+  throw new Error("Test Provider executor is unavailable.");
+};
+
 function createSession(
-  plugin: ReturnType<typeof createLegacyProviderPlugin>,
+  plugin: ReturnType<typeof createProviderPlugin>,
   services: CloudAgentHostServices,
   configuration: Readonly<Record<string, unknown>> = {},
 ) {
