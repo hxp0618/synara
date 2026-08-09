@@ -3,6 +3,16 @@
 // Layer: Shared contracts
 
 import { Schema } from "effect";
+import {
+  CLOUD_AGENT_CAPABILITY_IDS,
+  CLOUD_AGENT_COMMAND_TYPES,
+  CLOUD_AGENT_ERROR_CODES,
+  CLOUD_AGENT_MAX_COMMAND_BYTES,
+  CLOUD_AGENT_MAX_MESSAGE_BYTES,
+  CLOUD_AGENT_PROTOCOL_VERSION,
+  CLOUD_AGENT_TEXT_GENERATION_TASKS,
+  CLOUD_AGENT_PROVIDER_CAPABILITY_CATALOG,
+} from "@synara/cloud-agent-protocol";
 
 import {
   CommandId,
@@ -11,13 +21,12 @@ import {
   PositiveInt,
   TrimmedNonEmptyString,
 } from "./baseSchemas";
-import providerCapabilityCatalog from "./providerCapabilityCatalog.json";
 import { ProviderKind } from "./orchestration";
 import { PROVIDER_RUNTIME_EVENT_VERSION, ProviderRuntimeEventType } from "./providerRuntime";
 
-export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 2 } as const;
-export const PROVIDER_HOST_MAX_COMMAND_BYTES = 2 * 1024 * 1024;
-export const PROVIDER_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
+export const PROVIDER_HOST_PROTOCOL_VERSION = CLOUD_AGENT_PROTOCOL_VERSION;
+export const PROVIDER_HOST_MAX_COMMAND_BYTES = CLOUD_AGENT_MAX_COMMAND_BYTES;
+export const PROVIDER_HOST_MAX_MESSAGE_BYTES = CLOUD_AGENT_MAX_MESSAGE_BYTES;
 
 export const PROVIDER_HOST_PROVIDER_KINDS = [
   "codex",
@@ -33,37 +42,7 @@ export const PROVIDER_HOST_PROVIDER_KINDS = [
 export const ProviderHostProviderKind = Schema.Literals(PROVIDER_HOST_PROVIDER_KINDS);
 export type ProviderHostProviderKind = typeof ProviderHostProviderKind.Type;
 
-export const PROVIDER_CAPABILITY_IDS = [
-  "discovery",
-  "start-session",
-  "resume-session",
-  "send-turn",
-  "steer-turn",
-  "interrupt-turn",
-  "suspend-active-turn",
-  "approval",
-  "structured-user-input",
-  "plan-mode",
-  "review",
-  "compact",
-  "rollback",
-  "fork",
-  "read-history",
-  "model-list",
-  "model-switch",
-  "skill-discovery",
-  "skill-mentions",
-  "plugin-discovery",
-  "plugin-mentions",
-  "native-commands",
-  "tool-events",
-  "diff-events",
-  "usage-events",
-  "checkpoint",
-  "credential-injection",
-  "authoritative-history-reconstruction",
-  "worker-migration",
-] as const;
+export const PROVIDER_CAPABILITY_IDS = CLOUD_AGENT_CAPABILITY_IDS;
 
 export const ProviderCapabilityId = Schema.Literals(PROVIDER_CAPABILITY_IDS);
 export type ProviderCapabilityId = typeof ProviderCapabilityId.Type;
@@ -205,13 +184,17 @@ export type ProviderCapabilityCatalog = {
   readonly providers: ReadonlyArray<ProviderCapabilityCatalogEntry>;
 };
 
-export const PROVIDER_CAPABILITY_CATALOG = providerCapabilityCatalog as ProviderCapabilityCatalog;
+export const PROVIDER_CAPABILITY_CATALOG =
+  CLOUD_AGENT_PROVIDER_CAPABILITY_CATALOG as ProviderCapabilityCatalog;
 
 export const ProviderCredentialDeliveryMode = Schema.Literals(["anonymous-fd"]);
 export type ProviderCredentialDeliveryMode = typeof ProviderCredentialDeliveryMode.Type;
 
 export const ProviderResumeStrategy = Schema.Literals(["native-cursor", "authoritative-history"]);
 export type ProviderResumeStrategy = typeof ProviderResumeStrategy.Type;
+
+export const ProviderHostTextGenerationTask = Schema.Literals(CLOUD_AGENT_TEXT_GENERATION_TASKS);
+export type ProviderHostTextGenerationTask = typeof ProviderHostTextGenerationTask.Type;
 
 export const ProviderHostDescriptor = Schema.Struct({
   protocolVersion: ProviderHostProtocolVersion,
@@ -225,25 +208,11 @@ export const ProviderHostDescriptor = Schema.Struct({
   }),
   credentialDeliveryModes: Schema.Array(ProviderCredentialDeliveryMode),
   resumeStrategies: Schema.Array(ProviderResumeStrategy),
+  textGenerationTasks: Schema.optional(Schema.Array(ProviderHostTextGenerationTask)),
 });
 export type ProviderHostDescriptor = typeof ProviderHostDescriptor.Type;
 
-export const PROVIDER_HOST_COMMAND_TYPES = [
-  "Describe",
-  "StartSession",
-  "ResumeSession",
-  "SendTurn",
-  "SteerTurn",
-  "InterruptTurn",
-  "SuspendTurn",
-  "ResolveApproval",
-  "ResolveUserInput",
-  "CompactSession",
-  "RollbackSession",
-  "ForkSession",
-  "StartReview",
-  "StopSession",
-] as const;
+export const PROVIDER_HOST_COMMAND_TYPES = CLOUD_AGENT_COMMAND_TYPES;
 
 export const ProviderHostCommandType = Schema.Literals(PROVIDER_HOST_COMMAND_TYPES);
 export type ProviderHostCommandType = typeof ProviderHostCommandType.Type;
@@ -263,23 +232,7 @@ export const ProviderHostCommandEnvelope = Schema.Struct({
 });
 export type ProviderHostCommandEnvelope = typeof ProviderHostCommandEnvelope.Type;
 
-export const PROVIDER_HOST_ERROR_CODES = [
-  "provider_not_installed",
-  "provider_version_incompatible",
-  "capability_unsupported",
-  "credential_missing",
-  "credential_invalid",
-  "authentication_required",
-  "session_resume_invalid",
-  "session_resume_expired",
-  "provider_rate_limited",
-  "provider_unavailable",
-  "workspace_invalid",
-  "protocol_violation",
-  "cancelled",
-  "interrupted",
-  "internal_error",
-] as const;
+export const PROVIDER_HOST_ERROR_CODES = CLOUD_AGENT_ERROR_CODES;
 
 export const ProviderHostErrorCode = Schema.Literals(PROVIDER_HOST_ERROR_CODES);
 export type ProviderHostErrorCode = typeof ProviderHostErrorCode.Type;

@@ -1,0 +1,65 @@
+{
+  "name": "@synara/cloud-agent-distribution",
+  "version": "0.1.0",
+  "description": "Pinned Cloud Agent runtime distribution for Synara and T3 Code hosts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hxp0618/synara.git",
+    "directory": "packages/cloud-agent-distribution"
+  },
+  "bin": {
+    "cloud-agent-runtime": "./dist/stdio.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.spec.ts",
+    "manifest.json",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./manifest.json": "./manifest.json",
+    "./stdio": {
+      "bun": "./src/stdio.ts",
+      "development": "./src/stdio.ts",
+      "import": "./dist/stdio.mjs"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts --format esm,cjs --dts --clean && bun build src/stdio.ts --target=node --outfile=dist/stdio.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@synara/cloud-agent-protocol": "workspace:*",
+    "@synara/cloud-agent-provider-api": "workspace:*",
+    "@synara/cloud-agent-provider-claude": "workspace:*",
+    "@synara/cloud-agent-provider-codex": "workspace:*",
+    "@synara/cloud-agent-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.13.1 <25"
+  }
+}

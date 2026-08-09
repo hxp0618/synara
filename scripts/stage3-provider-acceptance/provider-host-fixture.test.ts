@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 
 import {
   PROVIDER_CAPABILITY_CATALOG,
+  PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_MAX_MESSAGE_BYTES,
   PROVIDER_HOST_PROTOCOL_VERSION,
   PROVIDER_HOST_PROVIDER_KINDS,
@@ -46,8 +47,16 @@ afterEach(() => {
 });
 
 describe("Stage 3 Provider Host acceptance fixture", () => {
-  it("describes the current Protocol 2.2 ordered 8 Provider by 28 Capability catalog", () => {
+  it("describes the current additive Protocol 2.3 ordered 8 Provider by 29 Capability catalog", () => {
     const enabled = new Set(["codex", "claudeAgent"] as const);
+
+    expect(PROVIDER_HOST_PROTOCOL_VERSION).toEqual({ major: 2, minor: 3 });
+    expect(PROVIDER_HOST_PROVIDER_KINDS).toHaveLength(8);
+    expect(PROVIDER_CAPABILITY_IDS).toHaveLength(29);
+    expect(PROVIDER_CAPABILITY_CATALOG.capabilityIds).toEqual(PROVIDER_CAPABILITY_IDS);
+    expect(PROVIDER_CAPABILITY_CATALOG.providers.map(({ provider }) => provider)).toEqual(
+      PROVIDER_HOST_PROVIDER_KINDS,
+    );
 
     for (const provider of PROVIDER_HOST_PROVIDER_KINDS) {
       const descriptor = decodeDescriptor(fixtureDescriptor(provider, enabled));
@@ -55,16 +64,43 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
         (entry) => entry.provider === provider,
       );
 
-      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
+      expect(descriptor.protocolVersion).toEqual(PROVIDER_HOST_PROTOCOL_VERSION);
       expect(descriptor.capabilityDescriptor.provider).toBe(provider);
       expect(descriptor.capabilityDescriptor.supportTier).toBe(catalog?.supportTier);
       expect(descriptor.capabilityDescriptor.capabilities).toEqual(catalog?.capabilities);
+      expect(Object.keys(descriptor.capabilityDescriptor.capabilities)).toEqual(
+        PROVIDER_CAPABILITY_IDS,
+      );
       expect(descriptor.capabilityDescriptor.releasePolicy.enabled).toBe(true);
       expect(descriptor.capabilityDescriptor.runtime.compatible).toBe(true);
       expect(descriptor.credentialDeliveryModes).toEqual(
         provider === "codex" || provider === "claudeAgent" ? ["anonymous-fd"] : [],
       );
     }
+  });
+
+  it("accepts a Protocol 2.2 Describe command and advertises the additive 2.3 descriptor", () => {
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    const describeV22: ProviderHostCommandEnvelope = {
+      ...command("Describe", "describe-v2-2", { provider: "codex" }),
+      protocolVersion: { major: 2, minor: 2 },
+    };
+
+    host.handleCommand(describeV22);
+
+    expect(messagesFor(output, "describe-v2-2")).toMatchObject([
+      {
+        messageType: "Result",
+        protocolVersion: { major: 2, minor: 3 },
+        payload: {
+          descriptor: {
+            protocolVersion: { major: 2, minor: 3 },
+            capabilityDescriptor: { provider: "codex" },
+          },
+        },
+      },
+    ]);
   });
 
   it("emits deterministic text, tool, usage, and materialized artifact messages before one Result", () => {

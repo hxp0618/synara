@@ -1,6 +1,6 @@
-# Provider Host Protocol v2.2
+# Provider Host Protocol v2.3
 
-Provider Host Protocol v2.2 is the versioned JSONL boundary between `synara-agentd` and a Provider Host. It is
+Provider Host Protocol v2.3 is the versioned JSONL boundary between `synara-agentd`, T3 Code and a Provider Host. It is
 independent from Worker Protocol and Runtime Event versions.
 
 The schema source of truth is `packages/contracts/src/providerHost.ts`.
@@ -8,7 +8,7 @@ The schema source of truth is `packages/contracts/src/providerHost.ts`.
 ## Version
 
 ```json
-{ "major": 2, "minor": 2 }
+{ "major": 2, "minor": 3 }
 ```
 
 - Major mismatch is incompatible and makes the Host/Provider combination non-schedulable.
@@ -155,6 +155,14 @@ the persisted Steer intent as a marked user message and clears the composer only
 Queue delivery during an active remote Turn remains explicitly unsupported rather than being converted into
 Steer or a new Turn.
 
+`GenerateText` is the additive protocol 2.3 command for thread title, branch name, commit message and change
+request content generation. It requires a bound Session only to inherit Provider configuration and Workspace;
+the Host removes the Session resume cursor and authoritative history, starts an isolated Provider execution, does
+not emit its activity into the interactive Turn stream, and validates a task-specific JSON result. Each input
+field is limited to 256 KiB, the total request to 512 KiB and output to 64 KiB. `Describe.textGenerationTasks`
+advertises the supported task allowlist. A 2.2 Host rejects the command as unsupported, and T3 must surface a
+stable `TextGenerationError` rather than silently falling back to another Provider instance.
+
 `SuspendTurn` is the protocol 2.2 active-idle checkpoint command. It targets the one active `SendTurn`, invokes the
 Provider-native interrupt, and does not acknowledge until that Send reaches an interrupted terminal. Success requires
 `quiesced=true`, the exact active command ID, `checkpointProtocol=provider-host-suspend-terminal-v1`, and a non-empty
@@ -202,17 +210,17 @@ semantic slot, so replay does not append duplicate audit evidence. The warning p
 ## Describe
 
 `Describe` returns the Host build, complete Capability Descriptor, command/message limits, Runtime Event version
-range, credential delivery modes and Resume strategies. Protocol 2.2 keeps the normalized Runtime descriptor and
+range, credential delivery modes, Resume strategies and optional text-generation task allowlist. Protocol 2.3 keeps the normalized Runtime descriptor and
 Release Policy inside `capabilityDescriptor`: Runtime identifies the CLI, SDK package or local build, its observed
 version source and compatible range; Release Policy states whether explicit enablement is required and whether the
-Host actually enabled the Provider. Managed v2.2 Hosts currently advertise Runtime Event
+Host actually enabled the Provider. Managed v2.3 Hosts currently advertise Runtime Event
 `{ minimum: 2, maximum: 2 }`; every Event payload carries that negotiated version and a canonical event type from
 [Runtime Event v2](./runtime-event-v2.md). Static capability claims must be verified by the shared Provider
 Acceptance Suite.
 
 ## agentd negotiation and v1 boundary
 
-Managed Local, SSH, Docker and Kubernetes Workers use v2.2. Agentd appends `--protocol-v2`, performs
+Managed Local, SSH, Docker and Kubernetes Workers use the v2 major and negotiate the additive v2.3 surface. Agentd appends `--protocol-v2`, performs
 side-effect-free `Describe` probes before Worker registration, and publishes the returned Codex and Claude
 plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs
 another Describe in the actual Host process before Start/Resume and rejects incompatible Major versions,

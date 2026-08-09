@@ -85,10 +85,7 @@
         "provider-host": "./dist/index.mjs",
       },
       "dependencies": {
-        "@anthropic-ai/claude-agent-sdk": "0.3.207",
-        "@synara/contracts": "workspace:*",
-        "@synara/shared": "workspace:*",
-        "effect": "catalog:",
+        "@synara/cloud-agent-runtime": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -208,10 +205,111 @@
         "vitest-browser-react": "^2.0.5",
       },
     },
+    "packages/cloud-agent-distribution": {
+      "name": "@synara/cloud-agent-distribution",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/cloud-agent-protocol": "workspace:*",
+        "@synara/cloud-agent-provider-api": "workspace:*",
+        "@synara/cloud-agent-provider-claude": "workspace:*",
+        "@synara/cloud-agent-provider-codex": "workspace:*",
+        "@synara/cloud-agent-runtime": "workspace:*",
+      },
+      "devDependencies": {
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-protocol": {
+      "name": "@synara/cloud-agent-protocol",
+      "version": "0.1.0",
+      "devDependencies": {
+        "ajv": "8.20.0",
+        "ajv-formats": "3.0.1",
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-provider-api": {
+      "name": "@synara/cloud-agent-provider-api",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/cloud-agent-protocol": "workspace:*",
+      },
+      "devDependencies": {
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-provider-claude": {
+      "name": "@synara/cloud-agent-provider-claude",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/cloud-agent-provider-api": "workspace:*",
+        "@synara/cloud-agent-runtime": "workspace:*",
+      },
+      "devDependencies": {
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-provider-codex": {
+      "name": "@synara/cloud-agent-provider-codex",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/cloud-agent-provider-api": "workspace:*",
+        "@synara/cloud-agent-runtime": "workspace:*",
+      },
+      "devDependencies": {
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-runtime": {
+      "name": "@synara/cloud-agent-runtime",
+      "version": "0.2.0",
+      "bin": {
+        "cloud-agent-runtime": "./dist/stdio.mjs",
+      },
+      "dependencies": {
+        "@anthropic-ai/claude-agent-sdk": "0.3.207",
+        "@synara/cloud-agent-protocol": "workspace:*",
+        "@synara/cloud-agent-provider-api": "workspace:*",
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
+    "packages/cloud-agent-testkit": {
+      "name": "@synara/cloud-agent-testkit",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/cloud-agent-protocol": "workspace:*",
+        "@synara/cloud-agent-provider-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@synara/cloud-agent-provider-codex": "workspace:*",
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/contracts": {
       "name": "@synara/contracts",
       "version": "0.7.0",
       "dependencies": {
+        "@synara/cloud-agent-protocol": "workspace:*",
         "effect": "catalog:",
       },
       "devDependencies": {
@@ -1070,6 +1168,20 @@
     "@synara/admin": ["@synara/admin@workspace:apps/admin"],
 
     "@synara/cli": ["@synara/cli@workspace:apps/server"],
+
+    "@synara/cloud-agent-distribution": ["@synara/cloud-agent-distribution@workspace:packages/cloud-agent-distribution"],
+
+    "@synara/cloud-agent-protocol": ["@synara/cloud-agent-protocol@workspace:packages/cloud-agent-protocol"],
+
+    "@synara/cloud-agent-provider-api": ["@synara/cloud-agent-provider-api@workspace:packages/cloud-agent-provider-api"],
+
+    "@synara/cloud-agent-provider-claude": ["@synara/cloud-agent-provider-claude@workspace:packages/cloud-agent-provider-claude"],
+
+    "@synara/cloud-agent-provider-codex": ["@synara/cloud-agent-provider-codex@workspace:packages/cloud-agent-provider-codex"],
+
+    "@synara/cloud-agent-runtime": ["@synara/cloud-agent-runtime@workspace:packages/cloud-agent-runtime"],
+
+    "@synara/cloud-agent-testkit": ["@synara/cloud-agent-testkit@workspace:packages/cloud-agent-testkit"],
 
     "@synara/contracts": ["@synara/contracts@workspace:packages/contracts"],
 

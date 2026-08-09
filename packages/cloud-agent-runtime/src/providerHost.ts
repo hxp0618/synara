@@ -95,6 +95,7 @@ export type RunnerMessage =
         terminalId?: string;
         encoding?: "utf-8" | "binary";
         reportedSize?: number;
+        sha256?: string;
         fileCount?: number;
         additions?: number;
         deletions?: number;
@@ -447,7 +448,7 @@ export function startProviderHostRun(
   emit: (message: RunnerMessage) => void,
   options: ProviderRunOptions = {},
 ): ProviderRunController {
-  validateRunnerInput(input);
+  validateRunnerInput(input, { allowEmptyInputText: options.operation !== undefined });
   requireProviderOuterSandboxProfile(options.environment ?? process.env);
   const normalizedProvider = input.workload.provider.trim().toLowerCase();
   const { environment, redact } = providerEnvironment(
@@ -766,7 +767,10 @@ function inputForSupplementalDetection(workload: RunnerInput["workload"]): Runne
   };
 }
 
-export function validateRunnerInput(input: RunnerInput): void {
+export function validateRunnerInput(
+  input: RunnerInput,
+  options: { readonly allowEmptyInputText?: boolean } = {},
+): void {
   if (!isRecord(input) || !isRecord(input.execution) || !isRecord(input.workload)) {
     throw new Error("Runner input is invalid");
   }
@@ -781,7 +785,7 @@ export function validateRunnerInput(input: RunnerInput): void {
   const hasPrimaryOperation = isRecord(input.workload.primaryOperation);
   if (
     typeof input.workload.inputText !== "string" ||
-    (!input.workload.inputText.trim() && !hasPrimaryOperation)
+    (!input.workload.inputText.trim() && !hasPrimaryOperation && !options.allowEmptyInputText)
   ) {
     throw new Error("workload.inputText is required");
   }

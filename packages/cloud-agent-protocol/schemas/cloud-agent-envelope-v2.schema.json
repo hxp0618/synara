@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synara.dev/cloud-agent/envelope-v2.schema.json",
+  "title": "Cloud Agent Protocol v2 envelope",
+  "oneOf": [{ "$ref": "#/$defs/command" }, { "$ref": "#/$defs/message" }],
+  "$defs": {
+    "version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "additionalProperties": false,
+      "properties": {
+        "major": { "const": 2 },
+        "minor": { "type": "integer", "minimum": 3 }
+      }
+    },
+    "base": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "protocolVersion",
+        "executionId",
+        "generation",
+        "commandId",
+        "occurredAt"
+      ],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "protocolVersion": { "$ref": "#/$defs/version" },
+        "executionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "commandId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "occurredAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "objectPayload": { "type": "object" },
+    "command": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "Describe" },
+                "payload": {
+                  "type": "object",
+                  "required": ["provider"],
+                  "properties": { "provider": { "type": "string", "minLength": 1 } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "enum": ["StartSession", "ResumeSession"] },
+                "payload": {
+                  "type": "object",
+                  "required": ["runnerInput"],
+                  "properties": { "runnerInput": { "type": "object" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "SendTurn" },
+                "payload": {
+                  "type": "object",
+                  "required": ["inputText"],
+                  "properties": { "inputText": { "type": "string", "minLength": 1 } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "SteerTurn" },
+                "payload": {
+                  "type": "object",
+                  "required": ["inputText"],
+                  "properties": {
+                    "inputText": { "type": "string", "minLength": 1 },
+                    "targetCommandId": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "enum": ["InterruptTurn", "SuspendTurn"] },
+                "payload": {
+                  "type": "object",
+                  "properties": { "targetCommandId": { "type": "string", "minLength": 1 } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "ResolveApproval" },
+                "payload": {
+                  "type": "object",
+                  "required": ["requestId", "resolution"],
+                  "properties": {
+                    "requestId": { "type": "string", "minLength": 1 },
+                    "resolution": {
+                      "type": "object",
+                      "required": ["decision"],
+                      "additionalProperties": false,
+                      "properties": { "decision": { "enum": ["accept", "decline"] } }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "ResolveUserInput" },
+                "payload": {
+                  "type": "object",
+                  "required": ["requestId", "resolution"],
+                  "properties": {
+                    "requestId": { "type": "string", "minLength": 1 },
+                    "resolution": {
+                      "type": "object",
+                      "required": ["answers"],
+                      "additionalProperties": false,
+                      "properties": { "answers": { "type": "object" } }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": { "const": "GenerateText" },
+                "payload": {
+                  "type": "object",
+                  "required": ["task", "input"],
+                  "properties": {
+                    "task": {
+                      "enum": ["thread-title", "branch-name", "commit-message", "pr-content"]
+                    },
+                    "input": { "type": "object" },
+                    "model": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["commandType", "payload"],
+              "properties": {
+                "commandType": {
+                  "enum": [
+                    "CompactSession",
+                    "RollbackSession",
+                    "ForkSession",
+                    "StartReview",
+                    "StopSession"
+                  ]
+                },
+                "payload": { "$ref": "#/$defs/objectPayload" }
+              }
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "requiresNewExecution",
+        "requiresUserAction",
+        "canReconstructFromHistory",
+        "canMoveWorker"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "provider_not_installed",
+            "provider_version_incompatible",
+            "capability_unsupported",
+            "credential_missing",
+            "credential_invalid",
+            "authentication_required",
+            "session_resume_invalid",
+            "session_resume_expired",
+            "provider_rate_limited",
+            "provider_unavailable",
+            "workspace_invalid",
+            "protocol_violation",
+            "cancelled",
+            "interrupted",
+            "internal_error"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "requiresNewExecution": { "type": "boolean" },
+        "requiresUserAction": { "type": "boolean" },
+        "canReconstructFromHistory": { "type": "boolean" },
+        "canMoveWorker": { "type": "boolean" }
+      }
+    },
+    "eventPayload": {
+      "type": "object",
+      "required": ["eventVersion", "eventType", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "eventVersion": { "const": 2 },
+        "eventType": {
+          "enum": [
+            "session.started",
+            "session.configured",
+            "session.state.changed",
+            "session.exited",
+            "thread.started",
+            "thread.state.changed",
+            "thread.metadata.updated",
+            "thread.token-usage.updated",
+            "thread.realtime.started",
+            "thread.realtime.item-added",
+            "thread.realtime.audio.delta",
+            "thread.realtime.error",
+            "thread.realtime.closed",
+            "turn.started",
+            "turn.completed",
+            "turn.aborted",
+            "turn.tasks.updated",
+            "turn.proposed.delta",
+            "turn.proposed.completed",
+            "turn.diff.updated",
+            "turn.steered",
+            "item.started",
+            "item.updated",
+            "item.completed",
+            "content.delta",
+            "request.opened",
+            "request.resolved",
+            "user-input.requested",
+            "user-input.resolved",
+            "task.started",
+            "task.progress",
+            "task.updated",
+            "task.completed",
+            "hook.started",
+            "hook.progress",
+            "hook.completed",
+            "tool.progress",
+            "tool.summary",
+            "auth.status",
+            "account.updated",
+            "account.rate-limits.updated",
+            "mcp.status.updated",
+            "mcp.oauth.completed",
+            "model.rerouted",
+            "config.warning",
+            "deprecation.notice",
+            "files.persisted",
+            "runtime.warning",
+            "runtime.error"
+          ]
+        },
+        "payload": { "type": "object" }
+      }
+    },
+    "message": {
+      "oneOf": [
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/base" },
+            {
+              "type": "object",
+              "required": ["messageType", "payload"],
+              "properties": {
+                "messageType": { "const": "Event" },
+                "payload": { "$ref": "#/$defs/eventPayload" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/base" },
+            {
+              "type": "object",
+              "required": ["messageType", "payload"],
+              "properties": {
+                "messageType": {
+                  "enum": [
+                    "InteractionRequest",
+                    "ArtifactCandidate",
+                    "Checkpoint",
+                    "Progress",
+                    "Result"
+                  ]
+                },
+                "payload": { "$ref": "#/$defs/objectPayload" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/base" },
+            {
+              "type": "object",
+              "required": ["messageType", "error"],
+              "properties": {
+                "messageType": { "const": "Error" },
+                "error": { "$ref": "#/$defs/error" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    }
+  }
+}

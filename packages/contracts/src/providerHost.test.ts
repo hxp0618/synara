@@ -123,7 +123,7 @@ describe("Provider Host v2 contracts", () => {
     });
 
     expect(descriptor.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
-    expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
+    expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 3 });
     expect(descriptor.capabilityDescriptor.runtime.versionSource).toBe("probe");
   });
 
