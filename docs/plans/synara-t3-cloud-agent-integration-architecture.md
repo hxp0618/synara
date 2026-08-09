@@ -1,7 +1,7 @@
 # Synara × T3 Cloud Agent 插件化集成设计
 
 - 设计状态：TARGET FROZEN（目标架构、authority 和主路径已确认；变更需新增 ADR）
-- 实施状态：IN PROGRESS（M0 open；M1 Phase 1–3 source implementation in progress；M1 验收门禁尚未完成）
+- 实施状态：IN PROGRESS（M0 open；M1 Phase 1–3 hardened source 已合入；发布、真实 Provider Turn 与长稳验收门禁尚未完成）
 - 发布状态：NOT PUBLISHED / NOT DEPLOYED
 - 日期：2026-08-08
 - 确认日期：2026-08-08
@@ -9,12 +9,13 @@
 - 目标宿主：Synara、[T3 Code](https://github.com/pingdotgg/t3code)
 - Synara 基线：`codex/saas-tenancy-user` @ `fc9f63ac74eeb04cf201506972878ac15307a0e4`
 - T3 Code 初次调研基线：upstream `main` @ [`a20923ce463335e89e92f5983d98a180536e8e7d`](https://github.com/pingdotgg/t3code/tree/a20923ce463335e89e92f5983d98a180536e8e7d)
-- T3 Code 实施基线：upstream `main` @ [`a6c9b41f902fba2a4137806c09e829935e91baac`](https://github.com/pingdotgg/t3code/tree/a6c9b41f902fba2a4137806c09e829935e91baac)
+- T3 Code hardening 基线：upstream `main` @ [`1a003e383ac6b10258b8100c2617d938c4f06c69`](https://github.com/pingdotgg/t3code/tree/1a003e383ac6b10258b8100c2617d938c4f06c69)
 - T3 Code 本地跟踪目录：`/Users/huang/devel/project/huang/business/t3code`
-- Synara 实施 worktree：`/Users/huang/devel/project/huang/business/synara-t3-cloud-agent`
-- T3 Code 实施 worktree：`/Users/huang/devel/project/huang/business/t3code-cloud-agent`
-- 当前合并目标：Synara `codex/saas-tenancy-user` @ `785318f1a50df9d030ab9dd926d8f5ee07712b88`；
-  T3 Code `codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1`
+- Synara hardening worktree：`/Users/huang/devel/project/huang/business/synara-cloud-agent-hardening`
+- T3 Code hardening worktree：`/Users/huang/devel/project/huang/business/t3code-cloud-agent-hardening`
+- hardening source commit：Synara `f9fb3d695c3188a1878475986133ffee64d8befc`；T3 Code `e449555de9a31b1988e8c05c2f577eeb88518c30`
+- 当前合并目标：Synara `codex/saas-tenancy-user` @ `8df69a72e8708d9a725af6743bc76f94ab7defc6`；
+  T3 Code `origin/codex/saas-tenancy-user` @ `6b5b4a501a084efb2b7e3b5a110e2196238336a6`
 
 > 本文同时记录目标设计和当前隔离 worktree 的 source implementation 与 local validation evidence。
 > `TARGET FROZEN` 表示不再改变公共
@@ -583,25 +584,23 @@ Provider 执行自定义 policy，先用 ADR 批准 additive Protocol minor/字�
 
 ### 5.2 `@synara/cloud-agent-runtime`
 
-职责：当前 `apps/provider-host` 的可复用实现、显式 Provider registry 和会话内核。Runtime 包保留 stdio
-兼容子入口，但 `cloud-agent-runtime` executable 只由 Distribution 发布。
+职责：app-neutral Provider registry、会话内核、通用 stdio server 与 Node stdio client。
+`cloud-agent-runtime` executable 只由 Distribution 发布，Runtime 包本身不内置 Codex/Claude 实现或 legacy Host facade。
 
 建议入口：
 
 ```text
 @synara/cloud-agent-runtime
 @synara/cloud-agent-runtime/node
-@synara/cloud-agent-runtime/stdio
 ```
 
 Runtime 只负责装载、会话生命周期、命令路由和事件校验，不以内置子路径绑定 Codex/Claude。Provider
 实现通过 `@synara/cloud-agent-provider-api` 显式注册；这使同一份 Codex/Claude 插件可以被 Synara 和
 T3 Code 使用，而不是复制为两个宿主私有实现。
 
-> 当前过渡实现尚未达到这一目标边界：默认 JS registry 已是 app-neutral，但历史 Provider Host、Codex
-> App Server、Claude SDK 实现及其依赖仍位于 Runtime 包；Distribution 的 stdio bin 也仍进入 legacy
-> Protocol handler。必须完成附录 A.5 的物理迁移与真实 registry 启动后，才能声明“Runtime 不内置
-> Provider”。
+hardening 已将 Provider Host 内部协议/会话辅助移入 `@synara/cloud-agent-provider-api/internal`，
+Codex App Server 与 Claude Agent SDK 实现分别归属各自 Provider 包。Runtime 的 packed dependency
+闭包现在只有 Protocol 与 Provider API，Distribution-owned stdio 从显式 registry 启动。
 
 对外 JavaScript ABI：
 
@@ -648,8 +647,9 @@ export interface CloudAgentHostServices {
 ```
 
 这里的 `CloudAgentCredentialSource` 只允许一次性读取或匿名 FD，不接受“把 key 填进命令参数”的
-实现。`acceptArtifact` 只接收候选和受控流，最终存储权仍在宿主。上述签名是已确认 ABI；legacy
-Start/Resume command payload 仍携带 `RunnerInput` 属于 M1 待移除的内部迁移债务，不得提升为公共 ABI。
+实现。`acceptArtifact` 只接收候选和受控流，最终存储权仍在宿主。上述签名是已确认 ABI；
+Start/Resume wire 中的执行 binding 只在 Provider API internal 实现内解码，不成为 Runtime
+根入口或宿主私有类型。
 
 ### 5.3 通用 Provider Plugin 包
 
@@ -691,10 +691,9 @@ Provider 包绕过 Runtime 直接写宿主数据库。第一批可执行 Provide
 Antigravity、Grok、Kilo、OpenCode、Pi 先只保留扩展节奏和 capability mapping，待各自具备远程 Runtime
 路径与 conformance 后逐个发布，不能因为已经进入 Host catalog 就标记为可移植 Provider。
 
-当前 `createCodexProvider()` / `createClaudeProvider()` 只是把 legacy Provider Host 包装成 Plugin ABI 的
-兼容 facade，不等于 Provider 实现已经独立。它们允许两个宿主先验证 ABI 和装载路径，但发布前仍须把
-Codex/Claude 执行实现、probe 和 upstream 依赖分别迁入各自包，并证明安装 Codex 包不会间接拉入 Claude
-SDK。
+hardening 已完成物理拆包：Codex 包自有 App Server runtime、tool-policy hook、probe 与
+Codex-only 辅助；Claude 包自有 Agent SDK runtime、`0.3.207` SDK 依赖和 Claude-only 信任策略。
+两包都只依赖 Provider API，Codex 包不再间接拉入 Claude SDK，Runtime 也不再反向依赖任一 Provider。
 
 ### 5.4 `@synara/cloud-agent-distribution`
 
@@ -708,9 +707,11 @@ SDK。
 - 不 import `@t3tools/*`、T3 内部源码或 Synara Control Plane 客户端；
 - 不通过 `postinstall` 修改 T3 仓库。
 
-当前包仍使用 `workspace:*` 依赖，且 Distribution 自身尚未导出 schemas 子路径；因此“精确 pin + schema
-exposure”仍是 M1 制品门禁。`npm pack --dry-run` 只能证明文件可打包，不能证明依赖已改写、外部项目可
-安装，或 bin/manifest/schema 能被真实消费者解析。
+Distribution 现在精确 pin 五个内部依赖，暴露 root、manifest、stdio bin、`./schemas` 与
+`./schemas/cloud-agent-envelope-v2`。source candidate smoke 必须从源码重建七包，检查 packed manifest/
+物理边界，在七个全新 Node 24 临时项目按最小依赖闭包安装真实 tarball，再完成
+ESM/CJS stable import、registry bin/Describe 和 schema smoke。这是 source candidate 证据，不是 Registry 发布或
+provenance/SBOM 证据。
 
 原先计划的 `@synara/cloud-agent-plugin-t3code` 名称可以保留为营销/分发别名，但在 T3 发布公共
 Provider SDK 前，它不能承诺直接导出一个跨 T3 版本稳定的 `ProviderDriver`。
@@ -806,12 +807,12 @@ rollback、fork、Artifact 和 usage，是这个包的传输基础。但当前 S
 
 ```ts
 #!/usr/bin/env node
-import "@synara/cloud-agent-runtime/stdio";
+import "@synara/cloud-agent-distribution/stdio";
 ```
 
-兼容壳继续提供 `provider-host` bin，因此 `agentd` 命令名和运维调用面不需要同时切换；但镜像构建 context
-必须同步复制新增 Runtime/Protocol/Provider API 的 workspace manifest 与源码。当前 Dockerfile 尚未完成该
-同步，具体失败见 A.5，不能把“bin 名兼容”外推成“镜像构建脚本无需修改”。
+兼容壳继续提供 `provider-host` bin，因此 `agentd` 命令名和运维调用面无需切换。
+Docker build 与 provider-host-build context 已同步复制七个新包的 manifest/源码，镜像内仍只产出一个
+`/opt/synara/provider-host/index.mjs` 及既有 wrapper。
 
 ## 6. 插件 Manifest 与加载策略
 
@@ -1388,7 +1389,7 @@ Phase 4 Lease credential broker，不能假装已经挂载凭证。配置 `runti
     "revision": "main"
   },
   "release": {
-    "t3CodeCommit": "a6c9b41f902fba2a4137806c09e829935e91baac",
+    "t3CodeCommit": "6b5b4a501a084efb2b7e3b5a110e2196238336a6",
     "cloudAgentDistributionReleaseDigest": "sha256:..."
   },
   "providerBindings": [
@@ -1651,13 +1652,13 @@ Distribution digest 是受控环境的部署身份；npm semver 不能替代 dig
 每次生成 Distribution candidate 至少测试以下目标；具体一次性命令、版本和测试数量只记录在附录 A，
 不能写入长期兼容承诺：
 
-| 目标                         | 固定身份                                  | M1 当前判定                                  |
-| ---------------------------- | ----------------------------------------- | -------------------------------------------- |
-| Synara Provider Host wrapper | Synara commit + wrapper version           | 本地定向验证；镜像/真实 Provider 待补        |
-| Provider Host Protocol       | Protocol 2.2 reader + additive 2.3        | handler 接受 major 2；2.2 golden gate 未完成 |
-| T3 Code bridge               | T3 commit + bridge patch digest           | 本地定向验证；restart/drain E2E 待补         |
-| Distribution candidate       | manifest + tarball/bin/schema/SBOM digest | 尚未生成不可变 candidate                     |
-| 外部消费环境                 | Node/Bun/pnpm 与宿主 commit               | 尚未完成临时项目 install/import/bin smoke    |
+| 目标                         | 固定身份                                  | M1 当前判定                                                                       |
+| ---------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
+| Synara Provider Host wrapper | Synara commit + wrapper version           | source/镜像构建通过；真实 Provider Turn 待补                                      |
+| Provider Host Protocol       | Protocol 2.2 reader + additive 2.3        | handler 接受 major 2；2.2 golden gate 未完成                                      |
+| T3 Code bridge               | T3 commit + bridge patch digest           | direct/legacy descriptor 兼容及真实握手通过；restart/Turn E2E 待补                |
+| Distribution candidate       | manifest + tarball/bin/schema/SBOM digest | source candidate/same-bits 通过；受控不可变 candidate 与 SBOM 待补                |
+| 外部消费环境                 | Node/Bun/pnpm 与宿主 commit               | Node 24 严格 closure install/import/bin/schema 通过；发布后 upgrade/rollback 待补 |
 
 ### 15.4 两个宿主独立升级策略
 
@@ -1666,9 +1667,10 @@ Distribution digest 是受控环境的部署身份；npm semver 不能替代 dig
 不会跨同一个 Plugin ABI 混用对象或类型。
 
 这些宿主版本可以独立升级，因为公共边界不传递 Effect 对象，且通过普通 JS/stdio、JSON Schema 和版本协商
-隔离。独立版本不应演变成维护两份 Codex/Claude 实现；目标态中两个 Provider 包分别是唯一发布源。当前
-尚未达到目标态：两个包仍代理 Runtime 的 legacy facade，真实 Codex/Claude 实现和 Claude SDK 依赖仍在
-Runtime 中，因此独立 Provider 发布/回滚尚未得到证明。
+隔离。独立版本不应演变成维护两份 Codex/Claude 实现。当前源码已完成物理拆包：Codex/Claude 实现、probe
+与各自依赖由对应 Provider 包承载，Runtime 只依赖 Protocol 与 Provider API；七包内部 DAG 均使用精确
+semver，其中 Protocol、Provider API、两个 Provider、testkit 与 Distribution 为 `0.1.0`，Runtime 为
+`0.2.0`。尚未证明的是 Registry 公开发布后的独立升级、回滚与卸载，而不是源码所有权边界。
 
 受控 Synara-native 与 `T3EnvironmentLease` 默认使用同一 Distribution release；若本地/自管 T3 暂时固定
 另一个 Provider/Runtime minor，必须满足兼容矩阵、记录精确 semver 和 digest，并只在承诺的一个 minor
@@ -1706,19 +1708,19 @@ event 或 text-generation operation 时都视为 live；只有 Runtime 明确 qu
 阶段编号描述工程依赖，不代表已经完成；当前只是 M1 source implementation in progress。发布工程是每个
 里程碑自己的退出门禁，上游化和 suspend/resume 不在主路径中。
 
-| 工程阶段    | 所属里程碑/轨道    | 当前判定 | 阶段关闭所需 Gate                                | 进入下一步前仍缺少的决定性证据                                      |
-| ----------- | ------------------ | -------- | ------------------------------------------------ | ------------------------------------------------------------------- |
-| Phase 0     | M0                 | 未完成   | `G-BASELINE`                                     | 真实 Codex/Claude happy/failure characterization                    |
-| Phase 1     | M1                 | 部分完成 | `G-SCHEMA`                                       | schema → TS/runtime decoder 单一来源与完整 golden compatibility     |
-| Phase 2     | M1                 | 部分完成 | `G-PKG`、`G-REGISTRY`                            | Provider 物理拆包、Distribution registry bin、Synara 镜像兼容       |
-| Phase 3     | M1                 | 部分完成 | `G-ARCH`、`G-CONFORMANCE`、`G-T3-DRAIN`、`G-E2E` | 跨 Phase 2–3 architecture、双宿主 suite、event drain、restart E2E   |
-| Phase 4     | M2                 | 未开始   | `G-LEASE`                                        | M1 exit gate 与不可变内部 Distribution candidate                    |
-| Release M1  | M1 gate            | 未关闭   | `G-RELEASE-M1`                                   | exact semver、schema、digest/provenance/SBOM、外部 install/rollback |
-| Release M2  | M2 gate            | 未开始   | `G-RELEASE-M2`                                   | Lease 制品 manifest、外部环境 install/rollback、固定 commit matrix  |
-| Deferred D1 | Suspend/Resume     | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | quiesce、原子快照、new-generation resume                            |
-| Deferred D2 | Generic/upstream   | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | composition seam、descriptor、generic UX；不阻塞 M1/M2              |
-| Deferred D3 | Polaris delegated  | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | control-only 产品需求与完整 capability 降级；不阻塞 M1/M2           |
-| Deferred D4 | Provider ecosystem | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | 其他 Provider、动态目录/市场和公共 SDK；不阻塞 M1/M2                |
+| 工程阶段    | 所属里程碑/轨道    | 当前判定 | 阶段关闭所需 Gate                                | 进入下一步前仍缺少的决定性证据                                                 |
+| ----------- | ------------------ | -------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| Phase 0     | M0                 | 未完成   | `G-BASELINE`                                     | 真实 Codex/Claude happy/failure characterization                               |
+| Phase 1     | M1                 | 部分完成 | `G-SCHEMA`                                       | schema → TS/runtime decoder 单一来源与完整 golden compatibility                |
+| Phase 2     | M1                 | 部分完成 | `G-PKG`、`G-REGISTRY`                            | 公开发布后的独立升级/回滚、固定 clean ref 的 RC same-bits 复跑                 |
+| Phase 3     | M1                 | 部分完成 | `G-ARCH`、`G-CONFORMANCE`、`G-T3-DRAIN`、`G-E2E` | 同制品双宿主 suite、真实 Provider Turn、process restart/soak E2E               |
+| Phase 4     | M2                 | 未开始   | `G-LEASE`                                        | M1 exit gate 与不可变内部 Distribution candidate                               |
+| Release M1  | M1 gate            | 未关闭   | `G-RELEASE-M1`                                   | 受控 immutable digest/provenance/SBOM、发布后 upgrade/rollback 与同 digest E2E |
+| Release M2  | M2 gate            | 未开始   | `G-RELEASE-M2`                                   | Lease 制品 manifest、外部环境 install/rollback、固定 commit matrix             |
+| Deferred D1 | Suspend/Resume     | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | quiesce、原子快照、new-generation resume                                       |
+| Deferred D2 | Generic/upstream   | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | composition seam、descriptor、generic UX；不阻塞 M1/M2                         |
+| Deferred D3 | Polaris delegated  | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | control-only 产品需求与完整 capability 降级；不阻塞 M1/M2                      |
+| Deferred D4 | Provider ecosystem | 延后     | 自身 Deferred 验证；不计入 M1/M2                 | 其他 Provider、动态目录/市场和公共 SDK；不阻塞 M1/M2                           |
 
 阶段只有在“交付项已实现”且本表列出的 Gate 全部关闭时才能标记 `complete`；源码落盘、focused test 或
 局部 build 只能把阶段标记为 `部分完成`。M1/M2 RC 仍按第 19 节汇总全部里程碑 Gate，不因单个 Phase
@@ -2233,7 +2235,7 @@ Provider Runtime，可移植化会破坏现有权威和验证资产。
    不能把“进入 catalog”误报成“已支持远端执行”；
 5. T3 Code 使用 fork `git@github.com:hxp0618/t3code.git`：`main` 只与
    `https://github.com/pingdotgg/t3code.git` fast-forward 同步，集成工作进入独立
-   `codex/cloud-agent-runtime-integration` 分支或对应 worktree；
+   `codex/*` integration/hardening 分支或对应独立 worktree；
 6. `@synara/provider-host` 兼容包保留一个 minor release，并在移除前提供迁移告警和双宿主矩阵；
 7. Lease Credential Broker/Grant 属于 Stage 7 public beta 扩展，但必须先完成 Phase 4 所列 RBAC、
    managed DPoP、revoke/fencing、secret containment、独立计量和审计门禁；未通过时只允许
@@ -2279,10 +2281,11 @@ M1 的近程交付固定为**七个发布包加一个 T3 integration slice**：
 后评估。这样先证明“Cloud Agent Runtime 确实成为可插拔内核”，再增加环境供给，不同时引入远端
 Workspace 投影。
 
-截至 2026-08-09，上述范围已有 **source implementation in progress**，但不能整体标记“已实现”：Protocol、
-Provider API、Runtime registry、T3 Bridge 和 Distribution 已有首批源码；Codex/Claude 仍是 legacy
-facade，testkit 仍缺完整双宿主黑盒 suite。npm 发布、真实 Codex/Claude 付费 Turn、T3 完整 server
-process crash/restart E2E 或 Phase 4 同样未完成；准确边界见附录 A，不得由 focused test 外推。
+截至 2026-08-09，上述范围仍是 **source implementation in progress**，不能整体标记“已实现”。七包物理
+拆分、Distribution-owned stdio/registry/schema、Synara lifecycle hardening 与 T3 receipt/tombstone/trust/
+cursor/rollback hardening 已落盘，direct ABI v1/legacy descriptor probe 与真实握手复测通过。npm 发布、
+真实 Codex/Claude 付费 Turn、同制品双宿主完整 E2E、长稳 soak、M2 attestation 与
+Phase 4 也未完成；准确边界见附录 A，不得由 source smoke 或 focused test 外推。
 
 ## 24. 与现有 Synara 方向的关系
 
@@ -2305,34 +2308,30 @@ process crash/restart E2E 或 Phase 4 同样未完成；准确边界见附录 A�
 
 ### 25.1 当前基线
 
-| 字段                   | 当前值                                                                        |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| 本地目录               | `/Users/huang/devel/project/huang/business/t3code`                            |
-| `origin`               | `git@github.com:hxp0618/t3code.git`                                           |
-| 官方 upstream          | `https://github.com/pingdotgg/t3code.git`                                     |
-| 本地 remote 状态       | 已配置 `origin` 与官方 `upstream`                                             |
-| 主 clone 分支          | 本地 `main` tracking `origin/main`                                            |
-| 初次调研 commit        | upstream `a20923ce463335e89e92f5983d98a180536e8e7d`                           |
-| 实施固定 commit        | upstream `a6c9b41f902fba2a4137806c09e829935e91baac`                           |
-| 当前 upstream `main`   | `ba9c9ae81dce4e554b4dd52abfd28d0c01b5c651`                                    |
-| 本地/fork `main`       | `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6`                                    |
-| 实施 worktree describe | `v0.0.33-nightly.20260808.1033-10-ga6c9b41f9`                                 |
-| 集成源码 commit        | `98da34152ef79865db614aec20e406a311985f87`                                    |
-| 当前合并目标           | `origin/codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1` |
-| fork/upstream          | 合并目标已含集成源码；`ba9c9ae...` 后续 upstream 漂移仍待单独同步             |
-| 基线复核时间           | 2026-08-09 CST                                                                |
-| 主 clone 状态          | 完整 clone、非 shallow、clean                                                 |
-| 集成 worktree          | `/Users/huang/devel/project/huang/business/t3code-cloud-agent`                |
-| 集成分支               | `codex/cloud-agent-runtime-integration` @ `98da34152...`（已提交）            |
+| 字段                  | 当前值                                                                        |
+| --------------------- | ----------------------------------------------------------------------------- |
+| 本地目录              | `/Users/huang/devel/project/huang/business/t3code`                            |
+| `origin`              | `git@github.com:hxp0618/t3code.git`                                           |
+| 官方 upstream         | `https://github.com/pingdotgg/t3code.git`                                     |
+| 本地 remote 状态      | 已配置 `origin` 与官方 `upstream`                                             |
+| 主 clone 分支         | 本地 `main` tracking `origin/main`                                            |
+| 初次调研 commit       | upstream `a20923ce463335e89e92f5983d98a180536e8e7d`                           |
+| 实施固定 commit       | upstream `1a003e383ac6b10258b8100c2617d938c4f06c69`                           |
+| hardening 源码 commit | `e449555de9a31b1988e8c05c2f577eeb88518c30`                                    |
+| 当前合并目标          | `origin/codex/saas-tenancy-user` @ `6b5b4a501a084efb2b7e3b5a110e2196238336a6` |
+| fork/upstream         | 合并目标已含 hardening 与 portable descriptor 兼容修复；后续漂移仍须单独复核  |
+| 基线复核时间          | 2026-08-09 CST                                                                |
+| hardening worktree    | `/Users/huang/devel/project/huang/business/t3code-cloud-agent-hardening`      |
+| 目标验证 worktree     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent-target`         |
 
-从初次调研点 `a20923...` 到实施固定点 `a6c9b41...`，watched surface 出现三组上游变更：Claude resume
-握手修复、Codex queued follow-up stop 修复、ProviderService 的图片附件支持。它们修改了
-`ProviderRuntimeIngestion`、Claude/Codex session runtime 与 `ProviderService`，属于 P1 复核而非 P0
-重设计：完整 T3 server/Workspace 权威、ProviderDriver SPI、connection/auth 与 checkpoint owner 没有
-改变。Bridge 因此显式拒绝当前 Protocol 2.3 尚不能投影的附件，防止静默丢文件；其余命令映射继续适用。
+从初次调研点 `a20923...` 到当前实施固定点 `1a003e383...` 的 watched surface 已经纳入 hardening
+复核；完整 T3 server/Workspace 权威、ProviderDriver SPI、connection/auth 与 checkpoint owner 没有改变。
+Bridge 继续显式拒绝当前 Protocol 2.3 尚不能投影的附件，防止静默丢文件。`6b5b4a501...` 的 probe 同时
+支持 direct Plugin ABI v1 与 legacy Protocol 2.3 descriptor，并对 ABI、Provider、八项 capability、四类
+text task 与 Runtime compatibility fail closed。
 
 主 clone 继续保持只读跟踪，不和 Synara dirty checkout 混写；实现源码来自独立 worktree，并已通过
-`7abe2bee...` 合入、推送到 fork 的 `codex/saas-tenancy-user`，没有直接写入 `main`。官方 remote 已配置，
+`6b5b4a501...` 合入、推送到 fork 的 `codex/saas-tenancy-user`，没有直接写入 `main`。官方 remote 已配置，
 以下命令只用于新 clone 的一次性初始化：
 
 ```bash
@@ -2340,7 +2339,7 @@ git -C /Users/huang/devel/project/huang/business/t3code remote add upstream http
 ```
 
 仅在确认 `upstream` 尚不存在时执行。主 clone 的 `main` 不自动 merge/rebase；所有集成改动进入
-`codex/cloud-agent-runtime-integration` 独立 worktree，不直接提交到 `main`。何时 fast-forward 并推送
+独立 `codex/*` integration/hardening worktree，不直接提交到 `main`。何时 fast-forward 并推送
 fork `origin/main` 属于单独发布动作，不由本地 source implementation 自动触发。
 
 ### 25.2 必须跟踪的 T3 surface
@@ -2385,14 +2384,14 @@ git -C /Users/huang/devel/project/huang/business/t3code status --short --branch
 git -C /Users/huang/devel/project/huang/business/t3code fetch origin main
 git -C /Users/huang/devel/project/huang/business/t3code fetch upstream main
 git -C /Users/huang/devel/project/huang/business/t3code rev-parse origin/main upstream/main
-git -C /Users/huang/devel/project/huang/business/t3code log --date=short --pretty=format:'%h %ad %s' a6c9b41f902fba2a4137806c09e829935e91baac..upstream/main -- apps/server/src/provider packages/contracts/src/providerInstance.ts apps/server/src/orchestration/Layers/CheckpointReactor.ts packages/client-runtime/src/connection
-git -C /Users/huang/devel/project/huang/business/t3code diff --name-status a6c9b41f902fba2a4137806c09e829935e91baac..upstream/main -- apps/server/src/provider packages/contracts/src/providerInstance.ts apps/server/src/orchestration packages/client-runtime/src/connection docs/internals/remote.md
+git -C /Users/huang/devel/project/huang/business/t3code log --date=short --pretty=format:'%h %ad %s' 1a003e383ac6b10258b8100c2617d938c4f06c69..upstream/main -- apps/server/src/provider packages/contracts/src/providerInstance.ts apps/server/src/orchestration/Layers/CheckpointReactor.ts packages/client-runtime/src/connection
+git -C /Users/huang/devel/project/huang/business/t3code diff --name-status 1a003e383ac6b10258b8100c2617d938c4f06c69..upstream/main -- apps/server/src/provider packages/contracts/src/providerInstance.ts apps/server/src/orchestration packages/client-runtime/src/connection docs/internals/remote.md
 ```
 
 `fetch` 后不自动 merge/rebase。先输出影响报告，再由实现分支选择新的固定 commit。每份报告至少记录：
 
 ```yaml
-previousCommit: a6c9b41f902fba2a4137806c09e829935e91baac
+previousCommit: 1a003e383ac6b10258b8100c2617d938c4f06c69
 candidateCommit: <upstream/main sha>
 providerSpiImpact: none | compatible | bridge-change | redesign
 checkpointImpact: none | compatible | behavior-change | redesign
@@ -2419,195 +2418,119 @@ architecture 相关 PR 合入后。这里只定义跟踪机制；除非另行授
 
 ### A.1 实施位置与变更边界
 
-源码最初只写入两个隔离 worktree；2026-08-09 复核时已经形成并推送以下合并目标：
+源码先在隔离 worktree harden，再进入以下合并目标；表中不预写本文自己的最终提交哈希：
 
-| 宿主   | source worktree                                                   | feature commit | 固定基线       | 当前合并目标                                                                  |
-| ------ | ----------------------------------------------------------------- | -------------- | -------------- | ----------------------------------------------------------------------------- |
-| Synara | `/Users/huang/devel/project/huang/business/synara-t3-cloud-agent` | `8e96a5747...` | `fc9f63ac7...` | `codex/saas-tenancy-user` @ `785318f1a50df9d030ab9dd926d8f5ee07712b88`        |
-| T3     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent`    | `98da34152...` | `a6c9b41f9...` | `origin/codex/saas-tenancy-user` @ `7abe2beeab6913d1790e47f75cf36243346408b1` |
+| 宿主   | hardening worktree                                                       | hardening commit                           | 固定基线                                            | 当前合并目标                                                                  |
+| ------ | ------------------------------------------------------------------------ | ------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Synara | `/Users/huang/devel/project/huang/business/synara-cloud-agent-hardening` | `f9fb3d695c3188a1878475986133ffee64d8befc` | 原集成树（由 hardening commit 记录 parent）         | `codex/saas-tenancy-user` @ `8df69a72e8708d9a725af6743bc76f94ab7defc6`        |
+| T3     | `/Users/huang/devel/project/huang/business/t3code-cloud-agent-hardening` | `e449555de9a31b1988e8c05c2f577eeb88518c30` | upstream `1a003e383ac6b10258b8100c2617d938c4f06c69` | `origin/codex/saas-tenancy-user` @ `6b5b4a501a084efb2b7e3b5a110e2196238336a6` |
 
-原 Synara dirty checkout 与 T3 主 clone 在首次取证时没有接收运行时代码改动；当前两条合并目标包含对应
-feature tree，结构合并也已通过独立审计。代码进入远端分支只证明 source-control 状态，不改变本附录的
-验证边界，也不等同于 npm 发布、部署、public beta 或 GA。
+Synara `f9fb3d695...` 与合并目标 `8df69a72e...` 的 tree 一致；T3 hardening 与 descriptor 兼容修复已合入
+`6b5b4a501...`。
+这些 ref 与 clean source evidence 证明 source-control/本地构建状态，不等同于 npm 发布、部署、
+public beta 或 GA。
 
 ### A.2 Synara 已实现
 
-- 新增 `cloud-agent-protocol`、`cloud-agent-provider-api`、`cloud-agent-runtime`、通用 Codex/Claude
-  Provider、`cloud-agent-testkit` 与 `cloud-agent-distribution` 七个包；
-- Provider Plugin ABI v1 与默认 Runtime 的 TypeScript/API 声明表面只使用 Promise、AsyncIterable、
-  AbortSignal 和普通 JSON 类型，不导出 Effect、T3 ID 或 Synara ProviderKind 闭集；旧 Provider Host
-  类型只在明确标记的 `legacy-provider-host` 迁移子入口，但 package 内部及当前 CJS build 仍有 Synara
-  legacy 依赖；
-- Protocol 当前为 additive 2.3，保留既有 v2.2 命令语义，加入四类 task 的 `GenerateText` command；
-  Runtime Event 保持 v2；能力目录只有一个可编辑来源；JSON Schema 现在按 discriminator 验证
-  Result/Error/Event 和关键 command payload，并以 Ajv 门禁 vocabulary 一致性。这里的“四类”只表示
-  command/task shape 已实现，不表示当前 Provider 已硬性 no-tool/read-only；该缺口见 A.5；
-- `createCodexProvider()` 与 `createClaudeProvider()` 是普通 Plugin ABI factory，宿主/Distribution 显式
-  注册，不使用 `@synara/cloud-agent-runtime/providers/*` 私有路径或目录扫描；当前 factory 仍代理 legacy
-  实现，尚不能视为独立 Provider implementation；
-- `@synara/provider-host` 缩为只依赖 Runtime 的兼容 bin wrapper；只有 Distribution 发布
-  `cloud-agent-runtime` bin，Runtime 包不再争用同名 bin。Distribution manifest 与各 package version
-  一致；`CLOUD_AGENT_DISTRIBUTION_MANIFEST` JavaScript export 已深冻结，但直接导入的 `manifest.json`
-  不具备运行时冻结语义。源码 `releaseDigest` 故意为空，最终 digest 必须由 release pipeline 生成；
-- stdio client 实现 command/message 上限、写入背压、并发 command correlation、AbortSignal、匿名 fd 3
-  自动注入和正常 close 路径的 scoped process teardown；单命令取消使用 terminal tombstone，不再杀死共享
-  Runtime。协议失败后的 child 强制回收仍有 A.5 所列缺口；
-- stdio server 通过最多 64 帧的串行 NDJSON writer 执行真实 UTF-8 message 上限与 `drain` backpressure，
-  返回前 flush；handler 不再为长 Turn 累积全部中间事件；
-- 当前 legacy stdio handler 的 StopSession 使用 session epoch fencing，先阻断旧事件/状态提交，再等待已登记
-  active operation quiesce；`GenerateText` 尚未登记到该字段，因此不能外推为“所有操作已 quiesce”。另一个
-  JS Plugin facade path 的 close 共享 promise，释放 credential 前等待 command/control/artifact task，并
-  验证 Host generation、Workspace、model 与 Artifact 相对路径/digest；
-- 上述 Plugin HostServices authority、credential、Artifact 与 close guard 目前只在 JS facade path 生效；
-  Distribution 的 active stdio bin 仍进入 legacy handler，跨仓握手尚未获得这些 Plugin path 保证；
-- Runtime 当前只检查 `SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE` 的允许字符串；它是可由启动者设置的信任
-  声明，没有绑定 lease、generation、Runtime digest 或进程身份，不能作为 managed sandbox attestation；
-- testkit 已提供 descriptor 值域和 transcript 级 correlation/event/late-frame 断言，但完整进程级黑盒矩阵
-  仍列为未完成。
+- 七个公共包已完成物理拆分。`cloud-agent-protocol` 不依赖其他内部包；Provider API 只依赖 Protocol；
+  Runtime 只依赖 Protocol/Provider API；Codex、Claude 与 testkit 只拉入各自所需的精确 `0.1.0` 内部依赖；
+  Distribution 精确依赖 Protocol、Provider API、两 Provider 与 Runtime。Runtime 不再发布
+  `legacy-provider-host` 或 Provider 私有实现入口。
+- Codex 包物理承载 App Server/runtime/hook/probe；Claude 包物理承载 Agent SDK runtime，并精确依赖
+  Claude Agent SDK `0.3.207`。`createCodexProvider()`/`createClaudeProvider()` 作为 direct Plugin ABI v1
+  factory 由显式 registry 注册，不通过 Runtime legacy facade 或目录扫描。
+- Distribution 单独拥有 `cloud-agent-runtime` executable、`stdio`/`runStdio`、默认 Provider registry、
+  manifest 与 schema exports。启动时断言 registry provider kinds 与 manifest allowlist 完全一致；
+  `@synara/provider-host` Docker wrapper 只导入 `@synara/cloud-agent-distribution/stdio`。
+- Protocol 2.3/Runtime Event v2、四类 `GenerateText`、schema discriminator 与 direct ABI registry 已落盘。
+  `GenerateText` 会登记 active operation；Stop 等待 quiesce 并区分 quiesced/timed-out/forced/failed。
+  Claude 同时使用空 tools/allowedTools、disallowedTools 与双重 deny hook，Codex 使用 no-tool marker、全拒绝
+  hook 和 App Server tool RPC/event guard，形成 hard no-tool/read-only policy。
+- stdio client 的正常关闭和所有 fatal path 共享幂等 `reapProcess()`：SIGTERM 后 bounded wait，再 SIGKILL 和
+  第二次 bounded wait；取消命令保留 30 秒有界 tombstone，UTF-8 decode/correlation/协议异常均 fail closed。
+  stdio server 使用有界串行 NDJSON writer、字节上限、drain backpressure 与 flush。
+- Docker main/provider-host-build stages 已同步七包 manifest/source；Provider Host bundle 由 Distribution
+  stdio 入口构建。源码 manifest 保持 `releaseDigest: null`，本地 candidate digest 不能冒充 managed
+  release record。
+- outer sandbox 当前仍只接受启动者显式选择的 local trust profile。这个字符串不是绑定 lease、generation、
+  Distribution digest 或进程身份的证明，因此不构成 M2 managed sandbox attestation。
 
 ### A.3 T3 Code 已实现
 
-- `contributedDrivers.ts` 提供编译期显式 composition seam；新增 `synaraCloudAgent` driver、settings schema、
-  设置页 metadata/select 控件和 unavailable round-trip，不扫描插件目录；
-- Driver 在广告 ready 前执行真实 `Describe`，验证 Provider kind、Protocol、核心 capability、Runtime Event
-  v2、四类 text-generation task、Provider 可用性/兼容范围和显式 enablement；配置
-  `runtimeBinarySha256` 时要求绝对 binary path 并校验该文件。Codex/Claude 各提供一个默认模型；
-- 每个 T3 thread 使用独立、scoped Runtime process，但当前是直接 child spawn，没有 gVisor/Cocoon wrapper
-  或 managed attestation。消息必须匹配 Protocol 2.3、request、execution、
-  generation 与 command；stdout 在 JSON.parse 前按原始字节分帧并限制大小，decode/correlation/unknown
-  command/exit/write 任一 fatal 都原子关闭、失败全部 pending，并拒绝后续 execute；
-- 映射 Start/Resume/Send/Steer/Interrupt/Approval/UserInput/Stop、Runtime Event v2、有效结构化 resume
-  cursor 与 rollback history reconstruction。Approval/UserInput 使用 Runtime 要求的 `resolution`
-  envelope；新进程 generation 递增并随 T3 已持久化 resume cursor 保存；无效 cursor 的 fail-open 与取消后
-  迟到 terminal 的缺口见 A.5；
-- Adapter 的父 Scope 关闭会 stopAll 并 shutdown event queue；start/send/stop/rollback 用短临界区和 CAS，
-  不持锁等待 Runtime 长操作；StopSession 有 2 秒 deadline，失败/中断仍清理 active state、event fiber、
-  child scope 和 session map；当前 timeout 结果仍被投影为 graceful，见 A.5；
-- `plan`、per-turn model mismatch、`auto`/`auto-accept-edits`、`acceptForSession`/`cancel` 等当前 wire 无法
-  精确表达的语义会明确返回 validation error，不再静默降级；Artifact/Checkpoint 未接入 T3 authority 时
-  产生 bounded warning，不伪装为已消费；
-- 四类 T3 text-generation 操作都调用 Protocol 2.3 `GenerateText`，每次使用独立 Runtime session，失败
-  不回退到 T3 内置 Provider；scope finalizer 会发送 StopSession，但当前没有 deadline，且 commit/PR policy
-  与 hard no-tool/read-only 尚未闭合，见 A.5；
-- 当前 wire 没有附件投影，因此图片/文件输入返回稳定 validation error，不静默丢弃。`turn.diff.updated`
-  继续只触发 T3 本地 CheckpointReactor，Provider diff 不成为 Workspace 权威；
-- `credentialProfile` 在 embedded source slice 中只保留未来配置槽；非空时 fail closed。当前 embedded
-  模式使用 Provider 本机认证，Phase 4 才接 generation-fenced credential broker。
+- `contributedDrivers.ts` 保持编译期显式 composition seam；`synaraCloudAgent` driver、settings schema、UI
+  metadata/select 与 unavailable round-trip 不扫描插件目录。Driver 在广告 ready 前执行真实 `Describe`，
+  由 transport 校验 Protocol envelope，并按 direct/legacy descriptor 形态校验能力，同时校验配置的 Runtime
+  binary digest。
+- `CloudAgentProcess` 使用 Effect Schema 解码消息，严格校验 request/execution/generation/command；发布事件会
+  生成 receipt，Adapter 在 command terminal 后等待 receipt drain。取消命令由有界 pending/completed/
+  tombstone 状态吸收迟到 terminal，未知帧仍 fatal；child scope 最终以 5 秒 force-kill deadline 回收。
+- Adapter 使用每命令不可变 Turn 绑定，避免异步 event fiber 读取被清空的可变 `activeTurnId`；无效或未知
+  resume cursor fail closed。Stop 对未知 session 幂等 no-op，并保留 quiesced/timed-out/forced/failed
+  outcome；rollback 从 T3 持久化 projection 重建新 generation，成功后才原子替换 active session。
+- 四类 text generation 使用独立 process/session；finalizer 的 Stop 有 2 秒 deadline。默认 policy 进入
+  Runtime hard no-tool/read-only 路径，当前无法等价表达的非默认 policy 返回稳定错误，不静默降级。
+- outer sandbox 不再从 ambient env 自动继承；只有显式选择 `trusted-local` profile 才注入
+  `single-tenant-trusted-v1`，默认执行 fail closed。该 profile 明确只是本地信任声明，不是 managed
+  attestation。
+- `6b5b4a501...` 的 probe 同时接受 direct Plugin ABI v1 与 legacy Protocol 2.3 descriptor。transport
+  envelope 先校验 Protocol；direct descriptor 对 ABI、Provider、八项 capability、四类 text task 与 Runtime
+  compatibility fail closed；legacy descriptor 额外校验 Runtime Event 与 release policy。不扫描或猜测
+  未声明能力。
 
 ### A.4 已观察的本地证据
 
-本设计基线的依赖快照如下；它只描述当前来源，不构成未来兼容承诺：
+本设计基线的依赖与执行器快照如下；它只描述当前来源，不构成未来兼容承诺：
 
-| 依赖面                | Synara                             | T3 Code                                                    |
-| --------------------- | ---------------------------------- | ---------------------------------------------------------- |
-| `packageManager` 声明 | Bun `1.3.12`                       | pnpm `11.10.0`                                             |
-| 本机最终复核执行器    | Bun `1.3.14`                       | Node `24.18.0` + pnpm `11.10.0`                            |
-| Effect                | `effect-smol` Git commit `8881a9b` | `4.0.0-beta.103`，仓内 patch                               |
-| Claude Agent SDK      | manifest 精确 `0.3.207`            | manifest `^0.3.170`，lock 为 `0.3.170`                     |
-| Codex CLI             | 受控 Worker release `0.145.0`      | 使用环境中的 `codex` binary，由 health/version probe 识别  |
-| Claude Code CLI       | 受控 Worker release `2.1.197`      | 使用环境中的 `claude` binary，由 health/version probe 识别 |
+| 依赖面             | Synara                                      | T3 Code                                              |
+| ------------------ | ------------------------------------------- | ---------------------------------------------------- |
+| clean source ref   | `8df69a72e8708d9a725af6743bc76f94ab7defc6`  | `6b5b4a501a084efb2b7e3b5a110e2196238336a6`           |
+| 最终复核执行器     | Node `24.18.0`、npm `11.16.0`、Bun `1.3.14` | Node 24 / pnpm 11 支持范围                           |
+| Claude Agent SDK   | Provider manifest 精确 `0.3.207`            | 内置 Provider 有独立版本轴                           |
+| Distribution state | source candidate，`releaseDigest: null`     | 通过 out-of-process stdio 消费，同一发布制品尚未验收 |
 
-T3 列中的 Claude SDK/Codex CLI 属于 T3 **内置 Provider driver**。新增的 `synaraCloudAgent` driver 不链接
-或复用这些实现，而是通过 out-of-process Distribution 使用当前 Runtime 携带的 Claude SDK `0.3.207` 与
-Codex compatibility policy；两组版本可以独立升级，但每次都必须重跑对应 compatibility matrix。
+T3 内置 Provider driver 与 `synaraCloudAgent` 是独立版本轴；后者不链接或复用 T3 内置实现，而是通过
+out-of-process Distribution 使用 Synara Provider 包。每次任一侧升级仍必须重跑 compatibility matrix。
 
-- Synara 新包 build/typecheck/focused tests、Provider Host wrapper 的本地 checkout build，以及 npm pack
-  dry-run；该证据不覆盖 Docker provider-host-build stage；
-- T3 contracts、settings UI、Driver probe/digest、process correlation、adapter、approval、structured user
-  input、interrupt、resume generation、rollback focused tests；text-generation 代码实现四类任务，但当前
-  focused test 只执行 thread-title 路径；
-- 使用实际 `@synara/cloud-agent-distribution` stdio entrypoint 和受支持 T3 toolchain，从 T3 实跑 1/1
-  integration test，完成 Claude `Describe → ready → StartSession → StopSession` 跨仓握手；该测试不发送
-  `SendTurn`，不覆盖 Codex、Artifact、事件 drain 或真实 Workspace 修改；
-- 公共默认 Runtime declaration 不引用 Effect、`@t3tools/*` 或 Synara host contract；T3 bridge 代码留在
-  T3 仓内。
+- Synara clean target `8df69a72e...` 使用 Node `24.18.0`、npm `11.16.0`、Bun `1.3.14` 完成七包
+  source build → `npm pack` → 每包严格 dependency closure 的隔离安装 → ESM/CJS/schema/bin smoke，并验证
+  same bits；记录 `sourceDirty=false`。七包 tests 为 22 files / 202 tests，contracts 为 18 files / 209
+  tests，release helper 为 1 file / 14 tests；七包与 Provider Host wrapper typecheck 通过，全仓
+  fmt/lint/typecheck 通过。
+- 本次 source candidate digest 为
+  `sha256:6796789594dc4c0ca83164c24f044840e4062c15959d2bac8c30261b6f8d0bdc`。它来自 clean source smoke；
+  本地临时 manifest 不是持久 Gate evidence，也不是已签名/已发布的 managed release digest。
+- Docker `provider-host-build` 产出 40 modules / 1.29 MB bundle；image digest 为
+  `sha256:ab2d72160b24fd1b513717e5ce1165204ba93b00f889244865a157040a6bf96e`，bundle SHA-256 为
+  `83eed5ec9e9f3ba27637e56c8f87c72bd91dc095d3ef3d2b2009b2fa32383e48`。容器 Describe 观察到：
+  Codex 为 Result/runtime unavailable（镜像无 CLI），Claude 为 Result/SDK `0.3.207`，Cursor 为
+  `provider_not_installed`；这些是预期的显式可用性结果，不是 Provider Turn。
+- T3 hardening 的 receipt/drain、bounded tombstone、child reap、Stop outcome、cursor/rollback、outer trust 与
+  text-generation lifecycle/fail-closed policy 已有 focused source/test evidence。`6b5b4a501...` 的 Driver
+  suite 12/12 通过；独立复跑 Driver + 真实跨仓共 13/13，通过 direct ABI v1 的 Claude
+  `Describe → ready → StartSession → StopSession` 1/1 握手。该流程没有 `SendTurn`，不是 Provider Turn、
+  Workspace 修改或完整 E2E 证据。
 
-最终本地结果：
-
-- Synara：七个新包合计 21 个 test files / 215 tests 通过，contracts 18 files / 209 tests 通过；
-  Provider Host wrapper 和七个新包 build/typecheck 通过；`bun fmt` 检查 2944 个文件，`bun lint` exit 0
-  （仓内既有 warnings 仍存在），`bun typecheck` 20/20 packages 通过；
-- T3：contracts 33 tests、Web settings 11 tests、server focused suite 5 files / 29 tests 通过；在显式设置
-  `SYNARA_CLOUD_AGENT_TEST_RUNTIME` 后，cross-repository integration 1 file / 1 test 实跑通过。contracts 与
-  Web 定向 typecheck 通过；server typecheck 失败于新增 `CloudAgentProcess.ts` 的三个 Effect 规则诊断：
-  line 199/279 的 TS377026（直接 JSON parse/stringify）和 line 251 的 TS377042（对 Schema error 使用
-  `instanceof`）。server bundle、Web production build、范围内 TS/TSX lint 和 focused test 均通过；
-- 跨仓：最终 Distribution stdio entrypoint 的 Claude Driver
-  `Describe → ready → StartSession → StopSession` 为 1/1 通过；覆盖边界止于握手和关闭，不是 Provider Turn
-  或完整 E2E；
-- 发布预检：七个包 `npm pack --dry-run` 全部成功，tarball allowlist 中 test source 数量为 0；源码
-  manifest 保持 `releaseDigest: null`，没有伪造 managed release evidence。
-
-这些都只是 local validation evidence。
+以上都只是 local/source validation evidence。
 
 ### A.5 明确未完成/不能外推
 
-- 未发布 npm 包、未生成最终 release digest/provenance/SBOM，未安装到生产 Synara/T3；
-- Runtime 仍直接承载 Codex App Server、Claude SDK 和 Synara legacy contract；两个 Provider 包仍是兼容
-  facade，Distribution stdio 仍走 legacy handler，尚未由 default Provider registry 启动。Provider 真拆包、
-  独立依赖/发布/回滚、allowlist 对实际 bin 的约束，以及让 active stdio path 获得 Plugin HostServices
-  authority/credential/Artifact/close guard，都是 M1 硬门禁；
-- Provider Host Docker 构建 context 尚未同步新增 workspace：`provider-host-build` 只复制旧 manifest 与
-  contracts/shared 源码，实跑在 `bun install --filter @synara/provider-host` 阶段因找不到
-  `@synara/cloud-agent-protocol`/`@synara/cloud-agent-runtime` 而失败。必须同步 Dockerfile 输入并通过 Worker/
-  Provider Host image gate；本地 checkout build 不能替代该证据；
-- packed package 目前不能作为外部消费者制品：不只 Distribution 的五个依赖，所有带内部依赖的新增公共包
-  仍可见 `workspace:*`，Runtime 还含 `catalog:*` 和不可从公共 Registry 解析的私有
-  `@synara/contracts`/`@synara/shared` 依赖；在全新 npm 临时项目安装 tarball 已复现
-  `EUNSUPPORTEDPROTOCOL workspace:*`；
-- build 成功也不等于公共入口可加载：外部 Node 24 实测 Runtime ESM root 可 import，但 CJS root 会
-  eager-load legacy chunk 并命中私有 Synara export；Codex/Claude Provider 的 ESM/CJS 均受 legacy/private
-  export 阻断，Distribution 的 ESM/CJS 又被该 Provider 链阻断。Distribution 也尚未暴露自己的 schema
-  子路径。G-PKG/G-RELEASE-M1 必须以 packed artifact 的外部 install + ESM/CJS import + bin/schema smoke
-  为证据，不能只使用 `npm pack --dry-run`；
-- 公共 TypeScript command 仍以通用 payload 表达，legacy Start/Resume wire 内仍携带 RunnerInput；虽然 JSON
-  Schema 已加强且 Host authority 在兼容层 fail closed，schema → TS/runtime decoder 的单一代码生成仍未完成；
-- testkit 尚未成为两个宿主共同消费的进程级黑盒 suite；缺少 crash/resume、approval/user-input、
-  backpressure、secret redaction、path escape/symlink、no-tool GenerateText 和 tombstone 等完整公共矩阵。
-  跨仓测试没有 Runtime 环境变量时会显式 skip；本次虽已在固定 toolchain 下实际执行 1/1，但只覆盖 Claude
-  `Describe → StartSession → StopSession`，不能代替 compatibility job 的完整矩阵；
-- 已使用声明范围内的 Node `24.18.0` + pnpm `11.10.0` 复核 T3。contracts/Web typecheck 通过，server
-  typecheck 仍因合并新增 `CloudAgentProcess.ts` 的 TS377026（line 199/279）和 TS377042（line 251）三个
-  Effect 规则错误失败；focused tests、bundle、Web build 或 lint 通过都不能把该 typecheck 反写成通过；
-- T3 embedded 当前只直接 spawn Runtime child，没有可信 outer sandbox 或 managed attestation，也没有默认
-  提供 Runtime 要求的 `SYNARA_PROVIDER_OUTER_SANDBOX_PROFILE`。因此 `Describe/StartSession/StopSession`
-  握手可以通过，但默认首个真实 `SendTurn` 会在 Provider 执行边界 fail closed；人工设置允许字符串最多是
-  local trusted-user 声明，不是绑定 lease/generation/digest/process 的隔离证明；
-- `GenerateText` 当前复用真实 Workspace/session input，Provider 只收到提示词级“不要调用工具”：Codex 路径
-  使用 `approvalPolicy: never`/`danger-full-access`，Claude 非交互路径可进入 `bypassPermissions`。它没有
-  hard no-tool/read-only enforcement，处理不可信 diff/patch 时可能产生 Workspace 副作用；
-- legacy Runtime 没有把 `GenerateText` 登记为 `activeOperation`，所以 Stop 可以先报告 quiesced 而生成或工具
-  仍在运行；T3 `SynaraCloudAgentTextGeneration` 的 Stop finalizer 也没有 timeout，Runtime 存活但不返回
-  Stop terminal 时，已完成或失败的 text-generation 调用会永久卡在 scope 收尾；
-- T3 commit/PR text-generation payload 当前丢弃 T3 `policy`，与内置 Provider 的 instruction 语义不一致；
-  四类 command shape 已接线不能外推为四类 policy fidelity、无副作用或生命周期均已验收；
-- 无效结构化 resume cursor（例如未知 `schemaVersion`）当前会被解码为 absent，随后静默创建 generation 1 的
-  空 Session；这直接违背正文 fail-closed 要求。修复后必须返回稳定 resume error，只有真正缺少 cursor 才能
-  走 StartSession；
-- T3 Runtime Event 在异步 event fiber 消费时读取可变 `activeTurnId`，而 transport terminal 会先 resolve
-  command，Adapter 随后写 `turn.completed` 并清空 active Turn。event fiber 落后时，早先事件可能丢
-  `turnId`，`turn.completed` 也可能早于事件投影；Stop 关闭 scope 时同样没有显式 drain receipt；
-- T3 transport 在 execute 被取消时立即移除 pending command，未保留有界 terminal tombstone；同一真实
-  command 的正常迟到 terminal 随后会被判为 unknown command，并 fail-close 整个共享 Runtime。现有测试分别
-  覆盖 interruption 与 late frame，没有覆盖二者组合；
-- T3 Adapter 对未知 session 的 Stop 仍通过 `requireSession` 返回 error，不是正文要求的幂等 no-op；普通
-  Adapter Stop 的 2 秒 deadline 已有测试，但当前实现忽略 timeout/failed 的结果并始终投影
-  `exitKind: "graceful"`，尚不能区分 timed-out/forced/failed；该 deadline 也不能外推到上述
-  TextGeneration finalizer；
-- Synara stdio client 在协议 fatal 后会先锁存 `closed`；若恶意或挂死 child 忽略 SIGTERM，后续 `close()`
-  可因已 closed 提前返回而跳过 exit timeout/SIGKILL。对抗性复核已观察 child 仍存活，必须补幂等且无条件的
-  bounded reap；
-- 当前 `runtimeBinarySha256` 只验证单文件，不是 Distribution release digest；manifest/schema exposure、
-  packed exact semver、外部安装与完整 provenance/SBOM 仍由 G-RELEASE-M1 关闭；
-- 未执行真实 Codex/Claude Provider Turn。当前机器 Codex 为 `0.147.0`，超出已声明的
-  `>=0.145.0 <0.146.0` 范围，正确结果应是 unavailable；Claude 只验证了 SDK-backed session handshake，
-  没有产生上游调用费用；
+- 七包尚未发布到 Registry，也未部署到生产 Synara/T3。当前 source candidate 与
+  `runtimeBinarySha256` 都不是最终 Distribution release record；签名/不可变 digest、provenance、SBOM、
+  发布后 install/upgrade/rollback/uninstall 和同 digest E2E 仍由 `G-RELEASE-M1` 关闭。exact semver、schema、
+  严格 closure install 与 ESM/CJS/bin smoke 已有本地证据，但必须从固定 clean ref 对最终 RC same-bits 复跑；
+- 公共 TypeScript command 仍允许通用 payload，Start/Resume compatibility wire 仍包含 `RunnerInput`；schema
+  与 runtime decoder 已加强，但 schema → TS/runtime decoder 的单一 codegen source 尚未完成；
+- testkit 已覆盖关键 transcript/lifecycle 断言，但还不是两个宿主共同消费的完整 process-level blackbox；
+  crash/resume、approval/user-input、backpressure、secret redaction、path escape/symlink、no-tool 与并发 soak
+  仍须在同一候选制品矩阵中验收；
+- 未执行真实 Codex/Claude Provider Turn；Claude 只完成 SDK-backed Describe/session start/stop 握手，
+  没有发送 Turn、产生 Workspace 修改或上游调用费用；
 - 尚未完成完整 T3 server process crash/restart E2E、浏览器重连、真实文件修改/checkpoint/rollback E2E
-  和两个 Provider 实例并发 soak；rollback history 仍只覆盖当前 adapter 进程内记录，恢复后旧 Turn 的
-  authoritative history 接入尚未完成；目前只有 Bridge resume/generation、T3 既有持久化链路与 focused
-  test；
+  和两个 Provider 实例并发 soak；authoritative rollback reconstruction 已有 source/focused evidence，但
+  还没有在真实 restart 与持久化历史恢复路径中形成端到端验收；
 - Phase 4 `T3EnvironmentLease`、pairing/DPoP、Lease Supervisor、credential broker、ingress、RBAC、计量与
-  审计均未实施；Deferred D1 suspend/resume 更未开始；
+  审计均未实施；当前 `trusted-local` outer sandbox profile 不是绑定 lease/generation/digest/process 的
+  managed generation-bound attestation。Deferred D1 suspend/resume 更未开始；
 - 因此本批只能标记 **M0 open；M1 Phase 1–3 source implementation in progress**，不能标记任何 M1 Phase
   complete、M1 RC、deployed、
   public beta 或 GA。
