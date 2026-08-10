@@ -2560,3 +2560,16 @@ projection 交叉绑定；普通离线 Docker 构建不隐式联网，匿名远�
 打包门，因此可标记 RC consumer verified。完整 Worker image 仍在公共 Runtime 接入之前的 Alpine lock
 步骤因 `openjdk21 21.0.11` 仓库漂移而阻断；这属于宿主供应链 refresh gate。真实外部凭据 Turn 仍是独立
 open gate，不能由 Describe、静态打包或本地测试代替。
+
+最终 consumer refs 固定为：Synara clean consumer 以 `95cd068a9f3b1ec3a80b50e4551eae1957aa26ea`
+为基线、验证提交为 `2f15f7437ef193057d73ac00c588a5019ab286fe`；T3 clean consumer 以
+`8101cd044911c7dc2a2adf7c7a9ba7962abf57b6` 为基线、验证提交为
+`9584a266e91fa94354e8c07f79af3a5e01755d16`；Synara native/full path 以
+`b86d30b1aa6f383cf3a8453e6944abeaefe2db65` 为基线、外置与 candidate 绑定提交为
+`10fd9754b65ef720a78e233c0861d681d7895acb`。三个分支均只推送为待审分支，没有合入宿主 `main`。
+
+按第 18、19 节原始 Gate 定义，当前只可关闭 `G-ARCH`、`G-SCHEMA` 与 `G-PKG`：`G-BASELINE`
+仍缺真实 Provider 重构前后 characterization，`G-CONFORMANCE` 仍缺真实 Provider late-terminal、secret/path
+与持续背压，`G-T3-DRAIN` 仍缺 server/runtime restart 与 durable-history 恢复，`G-E2E` 仍缺同 digest 的真实
+Turn、workspace/checkpoint/revert、重连与 soak。因此 `G-RELEASE-M1` 继续 blocked，Release 名称中的
+`m1-rc.1` 不能被解释为 M1 closure、npm publication、部署、Public Beta 或 GA。
