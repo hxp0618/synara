@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,7 @@ import {
   assertCloudAgentDependencyUrls,
   assertCloudAgentPublicSchema,
   assertCloudAgentRuntimeAsset,
+  cloudAgentCandidateSha256,
   readCloudAgentCandidateLock,
 } from "./cloudAgentRuntimeAsset.ts";
 
@@ -40,47 +41,16 @@ describe("Cloud Agent Runtime package asset", () => {
 
   it("requires a complete seven-package immutable Release lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "synara-cloud-agent-lock-"));
-    const baseUrl = "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1";
-    const packageVersions = {
-      "@synara/cloud-agent-distribution": "0.1.0-rc.1",
-      "@synara/cloud-agent-protocol": "0.1.0-rc.1",
-      "@synara/cloud-agent-provider-api": "0.1.0-rc.1",
-      "@synara/cloud-agent-provider-claude": "0.1.0-rc.1",
-      "@synara/cloud-agent-provider-codex": "0.1.0-rc.1",
-      "@synara/cloud-agent-runtime": "0.2.0-rc.1",
-      "@synara/cloud-agent-testkit": "0.1.0-rc.1",
-    } as const;
-    const packages = Object.entries(packageVersions).map(([name, version], index) => {
-      const filename = `${name.slice(1).replace("/", "-")}-${version}.tgz`;
-      return {
-        name,
-        version,
-        filename,
-        url: `${baseUrl}/${filename}`,
-        sha256: `sha256:${String(index).padStart(64, "0")}`,
-      };
-    });
+    const repoRoot = join(import.meta.dirname, "../../..");
+    const canonical = JSON.parse(
+      await readFile(join(repoRoot, "cloud-agent-candidate.lock.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const lockPath = join(directory, "cloud-agent-candidate.lock.json");
     try {
-      await writeFile(
-        join(directory, "cloud-agent-candidate.lock.json"),
-        JSON.stringify({
-          schemaVersion: 1,
-          kind: "synara-cloud-agent-release-candidate-lock",
-          source: {
-            repository: "https://github.com/hxp0618/cloud-agents",
-            commit: "a".repeat(40),
-          },
-          release: { tag: "cloud-agent-m1-rc.1", baseUrl },
-          candidateSha256: `sha256:${"a".repeat(64)}`,
-          standaloneRuntime: {
-            filename: "cloud-agent-runtime-standalone.mjs",
-            url: `${baseUrl}/cloud-agent-runtime-standalone.mjs`,
-            sha256: `sha256:${"b".repeat(64)}`,
-          },
-          packages,
-        }),
-      );
+      await writeFile(lockPath, JSON.stringify(canonical));
       const lock = readCloudAgentCandidateLock(directory, { required: true })!;
+      expect(cloudAgentCandidateSha256(lock.packages)).toBe(lock.candidateSha256);
+      expect(cloudAgentCandidateSha256(lock.packages.toReversed())).toBe(lock.candidateSha256);
       const dependencies = Object.fromEntries(
         lock.packages
           .filter((artifact) => artifact.name !== "@synara/cloud-agent-testkit")
@@ -93,6 +63,36 @@ describe("Cloud Agent Runtime package asset", () => {
           lock,
         ),
       ).toThrow("does not match");
+
+      const tamperedPackage = structuredClone(canonical) as {
+        packages: Array<{ sha256: string }>;
+      };
+      tamperedPackage.packages[0]!.sha256 = `sha256:${"0".repeat(64)}`;
+      await writeFile(lockPath, JSON.stringify(tamperedPackage));
+      expect(() => readCloudAgentCandidateLock(directory, { required: true })).toThrow(
+        "digest does not match",
+      );
+
+      const wrongSource = structuredClone(canonical) as { source: { commit: string } };
+      wrongSource.source.commit = "0".repeat(40);
+      await writeFile(lockPath, JSON.stringify(wrongSource));
+      expect(() => readCloudAgentCandidateLock(directory, { required: true })).toThrow(
+        "source or Release identity",
+      );
+
+      const wrongStandalone = structuredClone(canonical) as {
+        standaloneRuntime: { sha256: string };
+      };
+      wrongStandalone.standaloneRuntime.sha256 = `sha256:${"0".repeat(64)}`;
+      await writeFile(lockPath, JSON.stringify(wrongStandalone));
+      expect(() => readCloudAgentCandidateLock(directory, { required: true })).toThrow(
+        "standalone Runtime",
+      );
+
+      await writeFile(lockPath, JSON.stringify({ ...canonical, unexpected: true }));
+      expect(() => readCloudAgentCandidateLock(directory, { required: true })).toThrow(
+        "unexpected or missing fields",
+      );
     } finally {
       await rm(directory, { recursive: true });
     }

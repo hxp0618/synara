@@ -40,6 +40,7 @@ import {
   approvalResolution,
   assertCloudAgentCodexDescriptor,
   assertCloudAgentResult,
+  assertCloudAgentStopQuiesced,
   cloudAgentRunnerInput,
   decodeCloudAgentCursor,
   encodeCloudAgentCursor,
@@ -76,19 +77,6 @@ interface ActiveCloudAgentSession {
   closed: boolean;
 }
 
-async function executeCloudAgentCommand(
-  session: ActiveCloudAgentSession,
-  command: ReturnType<typeof makeCloudAgentCommand>,
-  context: CommandContext = {},
-) {
-  session.commandContexts.set(command.commandId, context);
-  try {
-    return await session.client.execute(command);
-  } finally {
-    session.commandContexts.delete(command.commandId);
-  }
-}
-
 export interface CloudAgentCodexAdapterLiveOptions {
   readonly clientFactory?: CloudAgentProcessClientFactory;
   readonly config?: CloudAgentBackendConfig;
@@ -110,12 +98,18 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
         options.clientFactory ??
         makeCloudAgentProcessClientFactory({
           config,
-          bundledRuntimePath: options.bundledRuntimePath ?? resolveDefaultCloudAgentRuntimePath(),
+          ...(config.runtimePath
+            ? {}
+            : {
+                bundledRuntimePath:
+                  options.bundledRuntimePath ?? resolveDefaultCloudAgentRuntimePath(),
+              }),
         });
       const eventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
         PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
       );
       const sessions = new Map<ThreadId, ActiveCloudAgentSession>();
+      const fencedThreads = new Set<ThreadId>();
       let generationSequence = 0;
 
       const sessionSnapshot = (session: ActiveCloudAgentSession): ProviderSession => ({
@@ -142,6 +136,47 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
           throw new ProviderAdapterSessionClosedError({ provider: PROVIDER, threadId });
         }
         return session;
+      };
+
+      const assertThreadNotFenced = (threadId: ThreadId): void => {
+        if (fencedThreads.has(threadId)) {
+          throw validation(
+            "startSession",
+            `thread '${threadId}' is fenced after an unclean Cloud Agent shutdown; restart the server or perform manual recovery before starting it again.`,
+          );
+        }
+      };
+
+      const retireSession = async (
+        session: ActiveCloudAgentSession,
+        options: { readonly fence: boolean },
+      ): Promise<void> => {
+        const isCurrent = sessions.get(session.threadId) === session;
+        if (options.fence && isCurrent) fencedThreads.add(session.threadId);
+        if (isCurrent) sessions.delete(session.threadId);
+        if (session.closed) return;
+        session.closed = true;
+        session.activeCommandId = undefined;
+        session.activeTurnId = undefined;
+        session.updatedAt = new Date().toISOString();
+        session.unsubscribe();
+        await session.client.close().catch(() => undefined);
+      };
+
+      const executeCloudAgentCommand = async (
+        session: ActiveCloudAgentSession,
+        command: ReturnType<typeof makeCloudAgentCommand>,
+        context: CommandContext = {},
+      ) => {
+        session.commandContexts.set(command.commandId, context);
+        try {
+          return await session.client.execute(command);
+        } catch (cause) {
+          await retireSession(session, { fence: true });
+          throw cause;
+        } finally {
+          session.commandContexts.delete(command.commandId);
+        }
       };
 
       const receiveMessage = async (
@@ -179,9 +214,6 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
       const closeSession = async (threadId: ThreadId): Promise<void> => {
         const session = sessions.get(threadId);
         if (!session) return;
-        sessions.delete(threadId);
-        session.closed = true;
-        session.updatedAt = new Date().toISOString();
         try {
           const command = makeCloudAgentCommand({
             executionId: session.executionId,
@@ -189,17 +221,20 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
             commandType: "StopSession",
           });
           const terminal = await executeCloudAgentCommand(session, command);
-          assertCloudAgentResult("StopSession", terminal);
-        } finally {
-          session.unsubscribe();
-          await session.client.close();
+          assertCloudAgentStopQuiesced(terminal);
+        } catch (cause) {
+          await retireSession(session, { fence: true });
+          throw cause;
         }
+        await retireSession(session, { fence: false });
       };
 
       const startSession = (input: ProviderSessionStartInput) =>
         Effect.tryPromise({
           try: async () => {
+            assertThreadNotFenced(input.threadId);
             await closeSession(input.threadId);
+            assertThreadNotFenced(input.threadId);
             const cwd = input.cwd ?? process.cwd();
             const client = await clientFactory({ cwd });
             const now = new Date().toISOString();
@@ -226,6 +261,9 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
             };
             session.unsubscribe = client.subscribe((message) => receiveMessage(session, message));
             sessions.set(input.threadId, session);
+            void client.exit.then(() => {
+              if (!session.closed) void retireSession(session, { fence: true });
+            });
             try {
               const describe = makeCloudAgentCommand({
                 executionId: session.executionId,
@@ -257,10 +295,7 @@ export function makeCloudAgentCodexAdapterLive(options: CloudAgentCodexAdapterLi
               session.updatedAt = new Date().toISOString();
               return sessionSnapshot(session);
             } catch (cause) {
-              sessions.delete(input.threadId);
-              session.closed = true;
-              session.unsubscribe();
-              await client.close().catch(() => undefined);
+              await retireSession(session, { fence: false });
               throw cause;
             }
           },

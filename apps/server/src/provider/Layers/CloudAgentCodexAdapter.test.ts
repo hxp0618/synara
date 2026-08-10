@@ -22,12 +22,34 @@ const approvalRequestId = "approval-1" as ApprovalRequestId;
 
 class FakeCloudAgentClient implements CloudAgentProcessClient {
   readonly pid = 42;
+  readonly exit: Promise<
+    | {
+        readonly kind: "exit";
+        readonly code: number | null;
+        readonly signal: NodeJS.Signals | null;
+      }
+    | { readonly kind: "error"; readonly error: Error }
+  >;
   readonly commands: CloudAgentCommandEnvelope[] = [];
   closed = false;
   blockSend = false;
   sendBlocked = false;
+  stopOutcome: "quiesced" | "forced" | "timed-out" | "failed" = "quiesced";
   private listener: ((message: CloudAgentMessageEnvelope) => unknown) | undefined;
   private settleSend: (() => void) | undefined;
+  private failSend: ((error: Error) => void) | undefined;
+  private settleExit!: (termination: {
+    readonly kind: "exit";
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }) => void;
+  private exited = false;
+
+  constructor() {
+    this.exit = new Promise((resolve) => {
+      this.settleExit = resolve;
+    });
+  }
 
   subscribe(listener: (message: CloudAgentMessageEnvelope) => unknown): () => void {
     this.listener = listener;
@@ -66,8 +88,9 @@ class FakeCloudAgentClient implements CloudAgentProcessClient {
         },
       });
       if (this.blockSend) {
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
           this.settleSend = resolve;
+          this.failSend = reject;
           this.sendBlocked = true;
         });
       }
@@ -80,13 +103,30 @@ class FakeCloudAgentClient implements CloudAgentProcessClient {
       });
       this.settleSend?.();
       this.settleSend = undefined;
+      this.failSend = undefined;
       return terminal;
+    }
+    if (command.commandType === "StopSession") {
+      return this.emitResult(command, {
+        stopped: true,
+        outcome: this.stopOutcome,
+        quiesced: this.stopOutcome === "quiesced",
+        graceful: this.stopOutcome === "quiesced",
+      });
     }
     return this.emitResult(command, {});
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    this.settleTermination(0, null);
+  }
+
+  crash(code = 1, signal: NodeJS.Signals | null = null): void {
+    this.failSend?.(new Error(`Cloud Agent Runtime exited (code=${code}).`));
+    this.failSend = undefined;
+    this.settleSend = undefined;
+    this.settleTermination(code, signal);
   }
 
   private async emitResult(
@@ -115,15 +155,21 @@ class FakeCloudAgentClient implements CloudAgentProcessClient {
     await this.listener?.(message);
     return message;
   }
+
+  private settleTermination(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.exited) return;
+    this.exited = true;
+    this.settleExit({ kind: "exit", code, signal });
+  }
 }
 
-function withAdapter(
-  client: FakeCloudAgentClient,
+function withAdapterFactory(
+  clientFactory: () => Promise<CloudAgentProcessClient>,
   use: (adapter: CodexAdapterShape) => Effect.Effect<void, unknown>,
 ) {
   const layer = makeCloudAgentCodexAdapterLive({
     config: { backend: "cloud-agent" },
-    clientFactory: async () => client,
+    clientFactory,
   });
   return Effect.scoped(
     Effect.gen(function* () {
@@ -131,6 +177,21 @@ function withAdapter(
       yield* use(adapter);
     }).pipe(Effect.provide(layer)),
   );
+}
+
+function withAdapter(
+  client: FakeCloudAgentClient,
+  use: (adapter: CodexAdapterShape) => Effect.Effect<void, unknown>,
+) {
+  return withAdapterFactory(async () => client, use);
+}
+
+async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("Timed out waiting for Cloud Agent adapter state.");
 }
 
 describe("CloudAgentCodexAdapter", () => {
@@ -209,6 +270,157 @@ describe("CloudAgentCodexAdapter", () => {
           },
           catch: (cause) => cause,
         }),
+      ),
+    );
+  });
+
+  it("retires and fences an idle session when its child exits", async () => {
+    const client = new FakeCloudAgentClient();
+    await Effect.runPromise(
+      withAdapter(client, (adapter) =>
+        Effect.tryPromise({
+          try: async () => {
+            await Effect.runPromise(
+              adapter.startSession({
+                threadId,
+                provider: "codex",
+                runtimeMode: "full-access",
+                cwd: process.cwd(),
+              }),
+            );
+            client.crash(23);
+            await waitUntil(() => Effect.runPromise(adapter.hasSession(threadId)).then((v) => !v));
+            expect(await Effect.runPromise(adapter.listSessions())).toEqual([]);
+            await expect(
+              Effect.runPromise(
+                adapter.startSession({
+                  threadId,
+                  provider: "codex",
+                  runtimeMode: "full-access",
+                  cwd: process.cwd(),
+                }),
+              ),
+            ).rejects.toThrow("is fenced after an unclean Cloud Agent shutdown");
+          },
+          catch: (cause) => cause,
+        }),
+      ),
+    );
+  });
+
+  it("retires and fences an active session on transport failure", async () => {
+    const client = new FakeCloudAgentClient();
+    client.blockSend = true;
+    await Effect.runPromise(
+      withAdapter(client, (adapter) =>
+        Effect.tryPromise({
+          try: async () => {
+            await Effect.runPromise(
+              adapter.startSession({
+                threadId,
+                provider: "codex",
+                runtimeMode: "full-access",
+                cwd: process.cwd(),
+              }),
+            );
+            const sending = Effect.runPromise(
+              adapter.sendTurn({ threadId, input: "crash during turn" }),
+            );
+            await waitUntil(async () => client.sendBlocked);
+            client.crash(24);
+            await expect(sending).rejects.toThrow("exited (code=24)");
+            await waitUntil(() => Effect.runPromise(adapter.hasSession(threadId)).then((v) => !v));
+            await expect(
+              Effect.runPromise(
+                adapter.startSession({
+                  threadId,
+                  provider: "codex",
+                  runtimeMode: "full-access",
+                  cwd: process.cwd(),
+                }),
+              ),
+            ).rejects.toThrow("is fenced after an unclean Cloud Agent shutdown");
+          },
+          catch: (cause) => cause,
+        }),
+      ),
+    );
+  });
+
+  it.each(["quiesced", "forced", "timed-out", "failed"] as const)(
+    "validates the %s StopSession outcome before allowing replacement",
+    async (outcome) => {
+      const first = new FakeCloudAgentClient();
+      first.stopOutcome = outcome;
+      const second = new FakeCloudAgentClient();
+      let created = 0;
+      await Effect.runPromise(
+        withAdapterFactory(
+          async () => [first, second][created++]!,
+          (adapter) =>
+            Effect.tryPromise({
+              try: async () => {
+                const start = () =>
+                  Effect.runPromise(
+                    adapter.startSession({
+                      threadId,
+                      provider: "codex",
+                      runtimeMode: "full-access",
+                      cwd: process.cwd(),
+                    }),
+                  );
+                await start();
+                if (outcome === "quiesced") {
+                  await Effect.runPromise(adapter.stopSession(threadId));
+                  await start();
+                  expect(created).toBe(2);
+                  expect(await Effect.runPromise(adapter.hasSession(threadId))).toBe(true);
+                } else {
+                  await expect(Effect.runPromise(adapter.stopSession(threadId))).rejects.toThrow(
+                    `outcome=${outcome}`,
+                  );
+                  await expect(start()).rejects.toThrow(
+                    "is fenced after an unclean Cloud Agent shutdown",
+                  );
+                  expect(created).toBe(1);
+                }
+              },
+              catch: (cause) => cause,
+            }),
+        ),
+      );
+    },
+  );
+
+  it("does not spawn a replacement after an unquiesced replacement stop", async () => {
+    const first = new FakeCloudAgentClient();
+    first.stopOutcome = "forced";
+    const second = new FakeCloudAgentClient();
+    let created = 0;
+    await Effect.runPromise(
+      withAdapterFactory(
+        async () => [first, second][created++]!,
+        (adapter) =>
+          Effect.tryPromise({
+            try: async () => {
+              const start = () =>
+                Effect.runPromise(
+                  adapter.startSession({
+                    threadId,
+                    provider: "codex",
+                    runtimeMode: "full-access",
+                    cwd: process.cwd(),
+                  }),
+                );
+              await start();
+              await expect(start()).rejects.toThrow("outcome=forced");
+              await expect(start()).rejects.toThrow(
+                "is fenced after an unclean Cloud Agent shutdown",
+              );
+              expect(created).toBe(1);
+            },
+            catch: (cause) => cause,
+          }),
       ),
     );
   });

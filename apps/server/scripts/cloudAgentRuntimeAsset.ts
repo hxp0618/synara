@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { resolveCloudAgentRuntimeExecutable } from "@synara/cloud-agent-distribution";
 import { CLOUD_AGENT_ENVELOPE_V2_SCHEMA } from "@synara/cloud-agent-distribution/schemas";
 
+import {
+  BUNDLED_CLOUD_AGENT_RUNTIME_SHA256,
+  CLOUD_AGENT_CANDIDATE_SHA256,
+  CLOUD_AGENT_CANDIDATE_SOURCE_COMMIT,
+} from "../../../scripts/lib/cloudAgentCandidate.ts";
+
 export const CLOUD_AGENT_RUNTIME_ASSET_NAME = "cloudAgentRuntimeChild.mjs";
 export const CLOUD_AGENT_CANDIDATE_LOCK_NAME = "cloud-agent-candidate.lock.json";
 
@@ -65,29 +71,38 @@ export function readCloudAgentCandidateLock(
   ) {
     throw new Error("Cloud Agent candidate lock header is invalid.");
   }
+  assertExactKeys(value, [
+    "schemaVersion",
+    "kind",
+    "source",
+    "release",
+    "candidateSha256",
+    "standaloneRuntime",
+    "packages",
+  ]);
   const source = isRecord(value.source) ? value.source : undefined;
   const release = isRecord(value.release) ? value.release : undefined;
   if (
     !source ||
+    !hasExactKeys(source, ["repository", "commit"]) ||
     source.repository !== "https://github.com/hxp0618/cloud-agents" ||
-    typeof source.commit !== "string" ||
-    !/^[0-9a-f]{40}$/u.test(source.commit) ||
+    source.commit !== CLOUD_AGENT_CANDIDATE_SOURCE_COMMIT ||
     !release ||
+    !hasExactKeys(release, ["tag", "baseUrl"]) ||
     release.tag !== "cloud-agent-m1-rc.1" ||
     release.baseUrl !==
       "https://github.com/hxp0618/cloud-agents/releases/download/cloud-agent-m1-rc.1" ||
-    typeof value.candidateSha256 !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/u.test(value.candidateSha256)
+    value.candidateSha256 !== CLOUD_AGENT_CANDIDATE_SHA256
   ) {
     throw new Error("Cloud Agent candidate lock source or Release identity is invalid.");
   }
   const standalone = isRecord(value.standaloneRuntime) ? value.standaloneRuntime : undefined;
   if (
     !standalone ||
+    !hasExactKeys(standalone, ["filename", "url", "sha256"]) ||
     standalone.filename !== "cloud-agent-runtime-standalone.mjs" ||
     standalone.url !== `${release.baseUrl}/cloud-agent-runtime-standalone.mjs` ||
-    typeof standalone.sha256 !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/u.test(standalone.sha256)
+    standalone.sha256 !== `sha256:${BUNDLED_CLOUD_AGENT_RUNTIME_SHA256}`
   ) {
     throw new Error("Cloud Agent candidate lock standalone Runtime is invalid.");
   }
@@ -99,7 +114,12 @@ export function readCloudAgentCandidateLock(
   }
   const packages = new Map<string, Record<string, unknown>>();
   for (const item of value.packages) {
-    if (!isRecord(item) || typeof item.name !== "string" || packages.has(item.name)) {
+    if (
+      !isRecord(item) ||
+      !hasExactKeys(item, ["name", "version", "filename", "url", "sha256"]) ||
+      typeof item.name !== "string" ||
+      packages.has(item.name)
+    ) {
       throw new Error("Cloud Agent candidate lock package entries are invalid or duplicated.");
     }
     packages.set(item.name, item);
@@ -119,7 +139,22 @@ export function readCloudAgentCandidateLock(
       throw new Error(`Cloud Agent candidate lock package ${name} is invalid.`);
     }
   }
+  if (
+    cloudAgentCandidateSha256(value.packages as CandidateLock["packages"]) !== value.candidateSha256
+  ) {
+    throw new Error(
+      "Cloud Agent candidate lock digest does not match its seven package artifacts.",
+    );
+  }
   return value as unknown as CandidateLock;
+}
+
+export function cloudAgentCandidateSha256(packages: CandidateLock["packages"]): string {
+  const identity = packages
+    .map(({ name, version, sha256 }) => `${name}@${version} ${sha256}`)
+    .toSorted()
+    .join("\n");
+  return `sha256:${createHash("sha256").update(`${identity}\n`).digest("hex")}`;
 }
 
 export function assertCloudAgentDependencyUrls(
@@ -184,4 +219,19 @@ export function assertCloudAgentPublicSchema(): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).toSorted();
+  const sortedExpected = expected.toSorted();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  if (!hasExactKeys(value, expected)) {
+    throw new Error("Cloud Agent candidate lock contains unexpected or missing fields.");
+  }
 }

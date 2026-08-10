@@ -46,6 +46,7 @@ const client = createCloudAgentStdioClient({
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     TMPDIR: process.env.TMPDIR,
+    ...(process.env.ELECTRON_RUN_AS_NODE === "1" ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
   },
   extendEnvironment: false,
 });

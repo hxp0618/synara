@@ -44,6 +44,9 @@ export function readCloudAgentBackendConfig(
   if (configuredPath && !isAbsolute(configuredPath)) {
     throw new Error("SYNARA_CLOUD_AGENT_RUNTIME_PATH must be absolute.");
   }
+  if (configuredPath && !configuredDigest) {
+    throw new Error("SYNARA_CLOUD_AGENT_RUNTIME_PATH requires SYNARA_CLOUD_AGENT_RUNTIME_SHA256.");
+  }
   if (configuredDigest && !configuredPath) {
     throw new Error("SYNARA_CLOUD_AGENT_RUNTIME_SHA256 requires SYNARA_CLOUD_AGENT_RUNTIME_PATH.");
   }

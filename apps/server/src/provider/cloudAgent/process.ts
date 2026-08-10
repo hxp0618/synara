@@ -1,18 +1,29 @@
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 
-import {
-  createCloudAgentStdioClient,
-  resolveCloudAgentRuntimeExecutable,
-} from "@synara/cloud-agent-distribution";
+import { createCloudAgentStdioClient } from "@synara/cloud-agent-distribution";
 
 import { buildProviderChildEnvironment } from "../../providerChildEnvironment.ts";
+import { BUNDLED_CLOUD_AGENT_RUNTIME_SHA256 } from "../../../../../scripts/lib/cloudAgentCandidate.ts";
 import type { CloudAgentBackendConfig } from "./config.ts";
 
-export type CloudAgentProcessClient = ReturnType<typeof createCloudAgentStdioClient>;
+type PublicCloudAgentProcessClient = ReturnType<typeof createCloudAgentStdioClient>;
+
+export type CloudAgentProcessTermination =
+  | {
+      readonly kind: "exit";
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }
+  | { readonly kind: "error"; readonly error: Error };
+
+export interface CloudAgentProcessClient extends PublicCloudAgentProcessClient {
+  readonly exit: Promise<CloudAgentProcessTermination>;
+}
+
 export type CloudAgentProcessClientFactory = (input: {
   readonly cwd: string;
 }) => Promise<CloudAgentProcessClient>;
@@ -34,43 +45,82 @@ export function resolveDefaultCloudAgentRuntimePath(entrypoint = process.argv[1]
   const moduleDirectory = entrypoint ? dirname(resolve(entrypoint)) : process.cwd();
   const bundledRuntime = resolve(moduleDirectory, "cloudAgentRuntimeChild.mjs");
   if (existsSync(bundledRuntime)) return bundledRuntime;
-  const manifestPath = createRequire(resolve(moduleDirectory, "package.json")).resolve(
-    "@synara/cloud-agent-distribution/manifest.json",
+  throw new Error(
+    `Bundled Cloud Agent Runtime is missing beside the server entrypoint: ${bundledRuntime}.`,
   );
-  return resolveCloudAgentRuntimeExecutable(dirname(manifestPath));
 }
 
 export function makeCloudAgentProcessClientFactory(input: {
   readonly config: CloudAgentBackendConfig;
-  readonly bundledRuntimePath: string;
+  readonly bundledRuntimePath?: string;
   readonly baseEnvironment?: NodeJS.ProcessEnv;
+  readonly spawnProcess?: typeof spawn;
 }): CloudAgentProcessClientFactory {
+  const customRuntime = input.config.runtimePath !== undefined;
   const runtimePath = input.config.runtimePath ?? input.bundledRuntimePath;
-  let verified: Promise<void> | undefined;
-  const verify = () =>
-    (verified ??= verifyRuntimeDigest(runtimePath, input.config.runtimeSha256).catch((cause) => {
-      verified = undefined;
-      throw cause;
-    }));
+  if (!runtimePath) {
+    throw new Error("Bundled Cloud Agent Runtime path is required.");
+  }
+  const runtimeSha256 = customRuntime
+    ? input.config.runtimeSha256
+    : BUNDLED_CLOUD_AGENT_RUNTIME_SHA256;
+  if (!runtimeSha256) {
+    throw new Error("A custom Cloud Agent Runtime requires an explicit SHA-256 digest.");
+  }
 
   return async ({ cwd }) => {
-    await verify();
+    // Keep verification immediately adjacent to the public client's synchronous
+    // spawn. This deliberately re-reads the bytes for every per-thread child.
+    await verifyRuntimeDigest(runtimePath, runtimeSha256);
     const environment = buildCloudAgentProcessEnvironment(input.baseEnvironment);
-    return createCloudAgentStdioClient({
+    let resolveExit!: (termination: CloudAgentProcessTermination) => void;
+    let settled = false;
+    const exit = new Promise<CloudAgentProcessTermination>((resolve) => {
+      resolveExit = resolve;
+    });
+    const observe = (termination: CloudAgentProcessTermination) => {
+      if (settled) return;
+      settled = true;
+      resolveExit(termination);
+    };
+    const spawnProcess = ((
+      command: string,
+      args?: readonly string[],
+      options?: SpawnOptions,
+    ): ChildProcess => {
+      const child = Reflect.apply(input.spawnProcess ?? spawn, undefined, [
+        command,
+        args,
+        options,
+      ]) as ChildProcess;
+      child.once("exit", (code, signal) => observe({ kind: "exit", code, signal }));
+      child.once("error", (error) => observe({ kind: "error", error }));
+      return child;
+    }) as typeof spawn;
+    const client = createCloudAgentStdioClient({
       command: process.execPath,
       args: [runtimePath],
       cwd,
       environment,
       extendEnvironment: false,
+      spawnProcess,
+    });
+    return Object.freeze({
+      get pid() {
+        return client.pid;
+      },
+      execute: client.execute,
+      subscribe: client.subscribe,
+      close: client.close,
+      exit,
     });
   };
 }
 
 export async function verifyRuntimeDigest(
   runtimePath: string,
-  expectedSha256: string | undefined,
+  expectedSha256: string,
 ): Promise<void> {
-  if (!expectedSha256) return;
   const actual = createHash("sha256")
     .update(await readFile(runtimePath))
     .digest("hex");

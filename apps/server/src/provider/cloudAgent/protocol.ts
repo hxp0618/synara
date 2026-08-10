@@ -202,6 +202,28 @@ export function assertCloudAgentResult(
   });
 }
 
+const STOP_OUTCOMES = new Set(["quiesced", "forced", "timed-out", "failed"]);
+
+export function assertCloudAgentStopQuiesced(message: CloudAgentMessageEnvelope): void {
+  assertCloudAgentResult("StopSession", message);
+  const payload = message.messageType === "Result" ? message.payload : {};
+  const outcome = payload.outcome;
+  const quiesced = payload.quiesced;
+  if (outcome === "quiesced" && quiesced === true) return;
+  if (typeof outcome === "string" && STOP_OUTCOMES.has(outcome) && quiesced === false) {
+    throw new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "StopSession",
+      detail: `Cloud Agent StopSession did not quiesce the provider (outcome=${outcome}).`,
+    });
+  }
+  throw new ProviderAdapterRequestError({
+    provider: PROVIDER,
+    method: "StopSession",
+    detail: "Cloud Agent StopSession returned an invalid outcome/quiesced payload.",
+  });
+}
+
 export function approvalResolution(
   requestId: string,
   decision: ProviderApprovalDecision,

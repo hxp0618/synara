@@ -20,6 +20,9 @@ describe("readCloudAgentBackendConfig", () => {
     expect(() =>
       readCloudAgentBackendConfig({ SYNARA_CLOUD_AGENT_RUNTIME_SHA256: "a".repeat(64) }),
     ).toThrow("requires SYNARA_CLOUD_AGENT_RUNTIME_PATH");
+    expect(() =>
+      readCloudAgentBackendConfig({ SYNARA_CLOUD_AGENT_RUNTIME_PATH: "/tmp/runtime.mjs" }),
+    ).toThrow("requires SYNARA_CLOUD_AGENT_RUNTIME_SHA256");
   });
 
   it("requires the public runtime's Node range only after Cloud Agent is selected", () => {
